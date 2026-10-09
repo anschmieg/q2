@@ -59,6 +59,7 @@ ts-packages/*/dist-bundle/
 !ts-packages/quarto-engine-host-deno/dist/
 ts-packages/quarto-engine-host-deno/dist/*
 !ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js
+!ts-packages/quarto-engine-host-deno/dist/engine-host-node.mjs
 ts-packages/*/*.tsbuildinfo
 q2-demos/*/dist/
 crates/wasm-quarto-hub-client/pkg/

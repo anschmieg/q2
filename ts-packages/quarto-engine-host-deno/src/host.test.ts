@@ -374,6 +374,22 @@ describe("T3 — handler dispatch and id correlation", () => {
     expect(loaded?.id).toBe(10);
   });
 
+  it("rewrites 'Deno is not defined' at load time into an actionable error", async () => {
+    const { responses } = await runWithFrames(
+      [{ id: 11, msg: { type: "loadEngine", enginePath: "/engines/old.js" } }],
+      {
+        loadEngineModule: () =>
+          Promise.reject(new ReferenceError("Deno is not defined")),
+      },
+    );
+    const error = responses.find((r) => r.id === 11)?.msg;
+    expect(error?.type).toBe("error");
+    const message = (error as { message: string }).message;
+    expect(message).toContain("engine extension /engines/old.js");
+    expect(message).toContain("node:");
+    expect(message).toContain("docs/guides/extensions/ts-engines-node.qmd");
+  });
+
   it("dispatches launchEngine → launched response with matching id", async () => {
     const engine = makeFakeEngine("myEngine");
     const loader = engine.makeLoader();

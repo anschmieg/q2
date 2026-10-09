@@ -1,7 +1,8 @@
 /**
- * Bundle the @quarto/engine-host-deno Deno entry into a single ESM file:
+ * Bundle the @quarto/engine-host-deno entry points into single ESM files:
  *
  *   dist/
+ *     engine-host-node.mjs  — the Node harness (esbuild, ESM, node24)
  *     engine-host-deno.js   — the bundled harness (esbuild, ESM, Deno-ready)
  *     build-info.json       — git commit / dirty flag stamp (NOT in the bundle)
  *
@@ -53,6 +54,34 @@ const outDir = join(pkgRoot, 'dist');
 // Clean out dist/ before rebuilding so stale artifacts don't survive.
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
+
+// --- Node bundle (the host q2 will spawn after the Deno-to-Node flip) -------
+//
+// `dist/engine-host-node.mjs` is built from `src/node-main.ts` for Node >= 24.
+// `.mjs` so a project-local `"type": "commonjs"` package.json cannot change
+// how Node parses it. `platform: 'node'` resolves npm deps the Node way (so
+// `blueimp-md5` needs no `mainFields` workaround) and the banner restores
+// `require` for bundled CommonJS code (esbuild's `__require` shim otherwise
+// throws in ESM output).
+await esbuild.build({
+  entryPoints: [join(pkgRoot, 'src/node-main.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node24',
+  outfile: join(outDir, 'engine-host-node.mjs'),
+  conditions: ['source', 'import'],
+  external: ['node:*'],
+  minify: true,
+  keepNames: true,
+  legalComments: 'eof',
+  banner: {
+    js:
+      '// GENERATED — do not edit. Rebuild: cargo xtask build-engine-host-bundle\n' +
+      'import{createRequire as __cr}from"node:module";const require=__cr(import.meta.url);',
+  },
+  logLevel: 'info',
+});
 
 await esbuild.build({
   entryPoints: [join(pkgRoot, 'src/main.ts')],

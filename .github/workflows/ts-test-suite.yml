@@ -249,7 +249,7 @@ jobs:
         shell: bash
         run: |
           npm run bundle -w @quarto/engine-host-deno
-          git diff --exit-code -- ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js
+          git diff --exit-code -- ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js ts-packages/quarto-engine-host-deno/dist/engine-host-node.mjs
 
       # preview-renderer's integration tier imports wasm-quarto-hub-client
       # (aliased in vitest.integration.config.ts:53-55 to the committed

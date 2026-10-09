@@ -50,6 +50,7 @@ import { rehydrateMappedString, serializeMappedString } from "./mapped-source.js
 import { applyExecuteDefaults, metadataAsFormat } from "./metadata-as-format.js";
 import { buildQuartoAPI } from "./quarto-api.js";
 import { loadEngineModule as defaultLoadEngineModule } from "./engine-loader.js";
+import { rewriteDenoError } from "./deno-diagnostic.js";
 
 // ==================== RunHostDeps ====================
 
@@ -934,6 +935,15 @@ export async function runHost(
     // We do NOT await the handler here — this is what enables multiplexing.
     // Errors are caught and written as `error` responses under the same id.
     const task = dispatch(id, msg).catch((err: unknown) => {
+      // An extension that still uses `Deno.*` fails with a bare ReferenceError;
+      // name the extension and the fix instead.
+      const rewritten = rewriteDenoError(
+        err,
+        msg.type === "loadEngine" ? msg.enginePath : undefined,
+      );
+      if (rewritten) {
+        return writeError(writer, id, rewritten.message, rewritten.stack);
+      }
       const e = err as { message?: string; stack?: string } | null | undefined;
       return writeError(
         writer,
