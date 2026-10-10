@@ -732,7 +732,9 @@ Content here.
 
         let diag = DiagnosticMessageBuilder::warning("Google font not available to Typst")
             .with_code("Q-21-4")
-            .problem("Could not fetch the Google Fonts description for 'Fira Code': no route to host")
+            .problem(
+                "Could not fetch the Google Fonts description for 'Fira Code': no route to host",
+            )
             .add_hint("Typst will use a fallback font")
             .build();
 
@@ -740,7 +742,10 @@ Content here.
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].level, LogLevel::Warn);
         let text = &messages[0].message;
-        assert!(text.contains("Google font not available to Typst"), "{text}");
+        assert!(
+            text.contains("Google font not available to Typst"),
+            "{text}"
+        );
         assert!(text.contains("no route to host"), "{text}");
         assert!(text.contains("fallback font"), "{text}");
         assert!(!text.contains('\x1b'), "no escape sequences: {text:?}");
@@ -762,7 +767,12 @@ Content here.
             .messages
             .iter()
             .find(|m| m.level == LogLevel::Warn && m.message.contains("Unknown shortcode"))
-            .unwrap_or_else(|| panic!("expected an Unknown shortcode warning: {:?}", output.messages));
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected an Unknown shortcode warning: {:?}",
+                    output.messages
+                )
+            });
         // The title alone is one line; the rendered diagnostic carries the
         // problem text, which names the shortcode.
         assert!(
