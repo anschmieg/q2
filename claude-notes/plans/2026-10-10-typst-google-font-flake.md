@@ -2,22 +2,23 @@
 title: 'Typst Google-font download is a network flake in smoke-all: retry fetches and keep the diagnostic detail (bd-qvl8t3hy)'
 date: 2026-10-10
 description: 'A transient fonts.googleapis.com failure fails the whole smoke_all test and the harness drops the detail that would say why; make the fetch robust and keep the problem text.'
-status: draft  # Investigation — pending design alignment with user; do not implement before the go-ahead
+status: approved  # Design questions answered 2026-10-10; ready to implement
 braid:
   strand: bd-qvl8t3hy
 ---
 
 **Branch:** `braid/bd-qvl8t3hy-typst-google-font-flake` in the main checkout (based on `main` @ `cbb088618`). No worktree, per the user's request.
-**Do not start implementation until the user gives the go-ahead.**
+**Design settled 2026-10-10.** The six questions in the original skeleton are
+answered in § Decisions below; the phases are concrete.
 
 ## Triage verdict
 
-**Ready to design.** The strand was filed today with code pointers that all
+**Ready to implement.** The strand was filed today with code pointers that all
 check out at HEAD; the investigation confirms the analysis and adds three
 findings that change the shape of the fix (HTTP status is never checked, the
 fetch closure's `String` error cannot drive a retry policy, and the CSS is
-refetched on every render regardless of cache state). The design questions
-below are about policy, not about understanding.
+refetched on every render regardless of cache state). The policy questions
+those raised were answered the same day; see § Decisions.
 
 ## Issue context
 
@@ -132,69 +133,97 @@ artifact was captured.
    and has none of it. Both the timeout value and the status-handling comment
    are worth borrowing.
 
-## Proposed phases (draft)
+## Decisions (2026-10-10)
 
-Skeleton only — actual phase contents wait on the design discussion.
+Answers to the skeleton's six design questions, recorded here so the phases
+below need no further alignment.
 
-- **Phase 0 — Test plan.** Counting-closure test in `typst_google_fonts.rs`
-  that fails N times then succeeds, asserting the retry count and that no
-  Q-21-4 is emitted; a companion that fails every attempt and asserts exactly
-  one Q-21-4 whose text includes the last error. A `quarto-test` unit test
-  that a diagnostic with a `problem` produces a `LogMessage` containing both
-  title and problem. If the status check lands in `native.rs`, a test against
-  a local `std::net::TcpListener` serving a 503.
-- **Phase 1 — Keep the problem text.** Both `runner.rs` sites emit
-  `"{title}: {problem}"` (one line) when `problem` is `Some`. Factor the
-  duplicated level mapping into the existing `diagnostics_to_messages` so the
-  single-document path reuses it.
-- **Phase 2 — Make the fetch robust.** Status check and timeout in the native
-  `fetch_url` (or a narrower variant, per Q2/Q3); bounded retry with backoff
-  around the CSS fetch and each `download` in `stage_google_font`.
-- **Phase 3 — Fixture policy.** Apply the decision from Q4; if the fixtures
-  stay under the default assertion, add nothing. If not, add the tolerance
-  with a comment explaining the network dependence.
-- **Phase 4 — Docs.** Note the retry/timeout behaviour in the Q-21-4 catalog
-  entry if one exists in `crates/quarto-error-catalog`, and in the
-  `typst_google_fonts.rs` module doc.
+1. **Retry policy: uniform, one file.** Bounded retry on every fetch `Err`
+   inside `typst_google_fonts.rs`, 3 attempts with roughly 250 ms then 1 s
+   backoff. The closure keeps its `Fn(&str) -> Result<Vec<u8>, String>`
+   signature. The offline-latency cost from finding 2 is accepted for now; a
+   classified error type can come later if it bites.
+2. **HTTP status: fix it for every caller.** The native `fetch_url` treats a
+   non-2xx response as an error. Lua filters that relied on receiving a 404
+   body as success will need to adjust; that is acceptable.
+3. **Timeout: 30 s on the native `fetch_url`, all callers.** Matches the
+   `quarto-source-fetch` default. Adjust later if a caller needs more.
+4. **Fixture policy: keep the default.** The five network-dependent fixtures
+   stay under the implicit `noErrorsOrWarnings`, so a real regression in the
+   Google-font feature still reddens CI. No fixture edits.
+5. **Message shape: the full diagnostic rendering.** The harness's
+   `LogMessage.message` becomes `diag.to_text(None)` rendered with
+   `TextRenderOptions::plain()` (no ANSI, no OSC 8), so the CI log shows the
+   title, the problem, and the hints exactly as a user would see them.
+   Scope note: `LogMessage` is private to `quarto-test`, and the harness calls
+   `render_to_file` directly rather than the CLI. The CLI's `--json-errors`
+   and `--strict` paths in `crates/quarto/src/commands/render.rs` consume the
+   `DiagnosticMessage` itself and are untouched by this change, so JSON output
+   stays pure JSON and strict promotion keeps working without additional work.
+6. **CSS caching: separate strand.** Filed as bd-f48l642w.
 
-## Open design questions for the user
+## Phases
 
-1. **Retry policy.** Uniform bounded retry (e.g. 3 attempts, ~250 ms then ~1 s
-   backoff) on every fetch `Err`, accepting the offline-latency cost from
-   finding 2? Or widen the closure's error type so DNS/connection-refused
-   fail fast and only timeouts, resets, and 5xx retry? The first is a
-   one-file change; the second touches the `pandoc_write.rs` closure and the
-   `RuntimeError` mapping.
-2. **HTTP status handling.** Make the native `fetch_url` treat non-2xx as an
-   error for every caller (Lua mediabag, user filters, listing substitution,
-   the Typst font path)? That is the correct behaviour and matches the
-   `quarto-source-fetch` precedent, but it changes what Lua filters see on a
-   404. The alternative is a status check only in the Google-font path, which
-   needs a richer return type from the closure.
-3. **Timeout.** Put a 30 s request timeout on the native `fetch_url` (matching
-   `quarto-source-fetch`), applying to all callers? Or keep `fetch_url`
-   unchanged and only time out the font fetch? A reqwest `blocking::Client`
-   with `.timeout()` replaces the bare `blocking::get` either way.
-4. **Fixture policy.** With retry plus timeout plus status check in place, keep
-   the five fixtures under the default `noErrorsOrWarnings` so a real
-   regression in the Google-font feature still reddens CI? (Recommended.) Or
-   make the network dependence explicit per fixture, accepting that a broken
-   CSS parser would then pass silently?
-5. **Message shape.** `"{title}: {problem}"` on one line (recommended: greppable
-   in CI logs, friendly to `printsMessage` regexes), or the full
-   `DiagnosticMessage::to_text` rendering with hints on multiple lines?
-6. **CSS caching (finding 3).** Settled 2026-10-10: out of scope here. Filed
-   as bd-f48l642w (discovered-from this strand) for a standalone fix.
+- **Phase 0 — Tests first.**
+  - `typst_google_fonts.rs`: a counting closure that fails twice then
+    succeeds, asserting three calls and no Q-21-4; a closure that always
+    fails, asserting exactly one Q-21-4 per family whose text includes the
+    final error and the attempt count. Backoff must be injectable or
+    short-circuited under test so the suite does not sleep.
+  - `quarto-test`: a unit test that a warning with a `problem` and a hint
+    yields a `LogMessage` whose text contains all three and no escape
+    sequences. Cover both the project path (`diagnostics_to_messages`) and
+    the single-document path.
+  - `native.rs`: a loopback `std::net::TcpListener` that answers `503` and
+    one that never writes, asserting `fetch_url` returns `Err` for the first
+    and `Err` within the timeout for the second (use a short timeout via a
+    test-only constructor or a `Duration` parameter, not the 30 s default).
+- **Phase 1 — Keep the diagnostic detail (`crates/quarto-test/src/runner.rs`).**
+  Replace `diag.title.clone()` at both sites with the plain-text rendering.
+  Fold the single-document path's duplicated level mapping into
+  `diagnostics_to_messages` so there is one place that builds a `LogMessage`
+  from a diagnostic. Re-run `cargo nextest run -p quarto-test` and the
+  smoke-all suite: `printsMessage` is an unanchored regex so nothing should
+  change, but the multi-line message now contains the `Warning:` prefix and
+  hint bullets, so confirm no fixture regex accidentally matches hint text.
+- **Phase 2 — Native `fetch_url` (`crates/quarto-system-runtime/src/native.rs`).**
+  Replace `reqwest::blocking::get` with a `blocking::Client` built once with
+  `.timeout(Duration::from_secs(30))`. Call `error_for_status()` so 4xx/5xx
+  become `Err`, with the status code in the message. Map network failures to
+  `RuntimeError::Network` rather than the current `NotSupported`, which was
+  never the right variant. Borrow the `quarto-source-fetch` comment on why a
+  404 body must not be treated as the answer. Audit the other callers
+  (`pampa` mediabag, `user_filters`, listing `substitute`, `render.rs`): the
+  mediabag already maps `Err` to a logged nil, so Lua sees nil instead of an
+  HTML body; confirm the others propagate `Err` sensibly.
+- **Phase 3 — Retry in `stage_google_font` (`crates/quarto-core/src/typst_google_fonts.rs`).**
+  A small `fetch_with_retry(fetch, url, policy)` helper used for the CSS fetch
+  and inside `download`. Policy: 3 attempts, sleeps of 250 ms and 1 s between
+  them, sleep provided through the policy so tests can zero it. The Q-21-4
+  problem text reports the final error and that N attempts were made. Update
+  the module doc to say the fetch retries and that the native runtime times
+  out at 30 s.
+- **Phase 4 — Verification.**
+  - `cargo nextest run -p quarto-core typst_google_fonts`
+  - `cargo nextest run -p quarto-system-runtime`
+  - `cargo nextest run -p quarto-test`
+  - `cargo nextest run -p quarto --test integration smoke_all` with the
+    network up, confirming the five Google-font fixtures still pass and the
+    orange-book / font-paths `printsMessage` fixtures are unaffected.
+  - `cargo xtask verify --skip-hub-build` before the PR.
+- **Phase 5 — Docs.** If `crates/quarto-error-catalog` has a Q-21-4 entry,
+  mention retry and timeout there. Note the Lua-visible change (non-2xx now
+  fails `mediabag.fetch`) in the PR description.
 
-## Risks / tradeoffs (draft)
+## Risks / tradeoffs
 
-- Changing `fetch_url` globally (Q2, Q3) is the right fix but widens the blast
+- Changing `fetch_url` globally (decisions 2 and 3) is the right fix but widens the blast
   radius to Lua filters and listing substitution. Those callers currently
   receive HTML error pages as success; a filter that happened to tolerate that
   would start seeing an error instead. Grep found no test relying on it.
 - Retry adds latency to failure paths only, but failure paths include "user is
   on a plane". Four families times three attempts times backoff is noticeable.
-  Q1 decides whether that is acceptable.
+  Decision 1 accepts that for now.
 - None of this removes the network dependency from CI; it narrows the window
   in which a blip fails the run. If Google is down for a minute, smoke-all
   still fails, now with a message that says so.
