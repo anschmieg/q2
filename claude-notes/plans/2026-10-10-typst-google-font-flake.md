@@ -123,7 +123,8 @@ artifact was captured.
    costs one CSS request per family. So even a developer with a populated
    `.quarto/typst/fonts/` has an irreducible network dependency per render.
    This does not affect CI (always cold) but it is the reason the feature
-   cannot be made offline-safe by caching alone. Probably a separate strand.
+   cannot be made offline-safe by caching alone. Filed separately as
+   bd-f48l642w.
 4. **Precedent in the tree.** `crates/quarto-source-fetch/src/fetch.rs` uses
    `ureq` with `timeout_global(limits.request_timeout)` (30 s default in
    `limits.rs`), explicit 2xx handling, and a comment explaining why a 404 body
@@ -182,8 +183,8 @@ Skeleton only — actual phase contents wait on the design discussion.
 5. **Message shape.** `"{title}: {problem}"` on one line (recommended: greppable
    in CI logs, friendly to `printsMessage` regexes), or the full
    `DiagnosticMessage::to_text` rendering with hints on multiple lines?
-6. **CSS caching (finding 3).** File a separate strand for caching the CSS
-   response so warm renders are offline-safe, and keep it out of this one?
+6. **CSS caching (finding 3).** Settled 2026-10-10: out of scope here. Filed
+   as bd-f48l642w (discovered-from this strand) for a standalone fix.
 
 ## Risks / tradeoffs (draft)
 
