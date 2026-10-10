@@ -183,25 +183,38 @@ leaves the tree green. Checkboxes are updated as work lands.
       (`LogMessage::indented`), so a rendered diagnostic stays attached to
       its `[LEVEL]` prefix.
 - [x] `cargo nextest run -p quarto-test` green.
-- [ ] Smoke-all `printsMessage` fixtures (`typst/orange-book*`,
-      `typst/font-paths/*`) still pass; no regex accidentally matches hint text.
+- [x] Smoke-all `printsMessage` fixtures (`typst/orange-book*`,
+      `typst/font-paths/*`) and the Google-font fixtures still pass under the
+      harness change (run with `SMOKE_FILTER`, network up).
 
 ### Phase 2 — Native `fetch_url` (`crates/quarto-system-runtime/src/native.rs`)
 
-- [ ] Test: loopback `TcpListener` answering `503` makes `fetch_url` return
-      `Err` naming the status.
-- [ ] Test: loopback listener that accepts and never writes makes `fetch_url`
-      return `Err` within a short, injected timeout.
-- [ ] Build a `reqwest::blocking::Client` with `.timeout(...)` (30 s default,
-      injectable for tests) instead of the bare `blocking::get`.
-- [ ] `error_for_status()` so 4xx/5xx become `Err` with the code in the message.
-- [ ] Map failures to `RuntimeError::Network`, not `NotSupported`.
-- [ ] Comment (borrowed from `quarto-source-fetch`) on why a non-2xx body is
+- [x] Test: loopback `TcpListener` answering `503` makes `fetch_url` return
+      `Err` naming the status and the URL.
+- [x] Test: loopback listener that accepts and never writes makes the fetch
+      return `Err` within a short, injected timeout (200 ms against a 1.5 s
+      stall).
+- [x] Test: 200 response round-trips body and `content-type`.
+- [x] One shared `reqwest::blocking::Client` (`OnceLock`) built with the 30 s
+      `FETCH_URL_TIMEOUT`; `fetch_blocking(url, timeout)` applies a
+      per-request timeout on top, which is what the tests inject.
+- [x] Non-2xx is `Err` (explicit `status.is_success()` check rather than
+      `error_for_status()`, so the message reads `HTTP 503 Service
+      Unavailable for <url>`).
+- [x] Failures map to `RuntimeError::Network`, not `NotSupported`.
+- [x] Comment (borrowed from `quarto-source-fetch`) on why a non-2xx body is
       not the answer.
-- [ ] Audit callers: `pampa` mediabag, `user_filters`, listing `substitute`,
-      `render.rs`, `pandoc_svg_rasterize` test wrapper. Confirm each
-      propagates `Err` sensibly.
-- [ ] `cargo nextest run -p quarto-system-runtime` green.
+- [x] Bonus, same class of bug: the native `fetch_url_hardened` now honors its
+      `FetchPolicy::timeout_ms` (15 s default). The trait default delegated to
+      `fetch_url`, so the policy's timeout was never enforced natively; the
+      remote-image prefetch stage is the caller.
+- [x] Audit callers: `pampa` mediabag maps `Err` to a logged nil (Lua now
+      sees nil instead of an HTML body on 404); `user_filters`, listing
+      `substitute`, `render.rs`, and the `pandoc_svg_rasterize` test wrapper
+      delegate unchanged; `prefetch_remote_images` already accepts both
+      `Network` and `NotSupported`.
+- [x] `cargo nextest run -p quarto-system-runtime` green (136 tests); the
+      fetch-related quarto-core and pampa tests pass (77).
 
 ### Phase 3 — Retry in `stage_google_font` (`crates/quarto-core/src/typst_google_fonts.rs`)
 
