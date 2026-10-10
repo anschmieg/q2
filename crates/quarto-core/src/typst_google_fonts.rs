@@ -23,6 +23,18 @@
 //! would land in the "no usable format" diagnostic below rather than
 //! break silently.
 //!
+//! **Fetches are retried.** Both the CSS request and each file download
+//! go through [`fetch_with_retry`]: a failed attempt is retried after each
+//! delay in the [`RetrySchedule`] (by default 250 ms, then 1 s, so three
+//! attempts in all) before the font is given up on with a `Q-21-4`. A
+//! single transient failure on a CI runner used to fail the whole render's
+//! `noErrorsOrWarnings` check. The native runtime's `fetch_url` also times
+//! out after 30 s, so a stalled connection cannot hang the render. The
+//! retry cannot tell a dead DNS lookup from a reset connection (the fetch
+//! closure's error is a `String`), so an offline render pays the full
+//! schedule once per family; bd-f48l642w tracks caching the CSS so warm
+//! renders need no network at all.
+//!
 //! The CSS is read with `cssparser` (the tokenizer browsers' CSS stack
 //! is built on) rather than Q1's line-oriented `^ *src: (.*); *$`
 //! regex, which silently misses a declaration that is wrapped, minified
@@ -31,6 +43,7 @@
 //! [`SystemRuntime::fetch_url`]: quarto_system_runtime::SystemRuntime::fetch_url
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use cssparser::{Delimiter, ParseError, Parser, ParserInput, Token};
 use quarto_brand::{BrandFont, BrandFontGoogle, ResolvedBrand};
@@ -232,6 +245,72 @@ fn remote_fonts(brand: &ResolvedBrand) -> Vec<(String, &BrandFont)> {
         .collect()
 }
 
+/// How a failed fetch of one URL is retried: one attempt, then one more
+/// after each delay in `delays`, waiting through `sleep`.
+///
+/// `sleep` is a parameter so tests can run the schedule without waiting
+/// and so this module, which also compiles for wasm32, never names a
+/// blocking sleep itself; see [`RetrySchedule::blocking`].
+pub struct RetrySchedule<'a> {
+    /// Waits between consecutive attempts. `attempts == delays.len() + 1`.
+    pub delays: &'a [Duration],
+    /// How to wait out a delay.
+    pub sleep: &'a dyn Fn(Duration),
+}
+
+impl RetrySchedule<'_> {
+    /// The default waits: 250 ms, then 1 s (three attempts in all). Short
+    /// enough that an offline render is not held up for long per family,
+    /// long enough to ride out a reset connection or a momentary 5xx.
+    pub const DEFAULT_DELAYS: [Duration; 2] =
+        [Duration::from_millis(250), Duration::from_millis(1000)];
+
+    /// A schedule that never waits and never retries: one attempt.
+    pub const NONE: RetrySchedule<'static> = RetrySchedule {
+        delays: &[],
+        sleep: &|_| {},
+    };
+
+    /// How many fetches this schedule allows for one URL.
+    pub fn attempts(&self) -> usize {
+        self.delays.len() + 1
+    }
+
+    /// The default delays, waited out on the current thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn blocking() -> RetrySchedule<'static> {
+        RetrySchedule {
+            delays: &Self::DEFAULT_DELAYS,
+            sleep: &std::thread::sleep,
+        }
+    }
+}
+
+/// `fetch(url)`, retried per `retry`. The error of the last attempt is
+/// returned, annotated with the attempt count when more than one was made,
+/// so the diagnostic that carries it says the failure was not a one-off.
+fn fetch_with_retry(
+    fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+    url: &str,
+    retry: &RetrySchedule<'_>,
+) -> Result<Vec<u8>, String> {
+    let mut last_err = match fetch(url) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+    for delay in retry.delays {
+        (retry.sleep)(*delay);
+        match fetch(url) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => last_err = e,
+        }
+    }
+    match retry.attempts() {
+        1 => Err(last_err),
+        n => Err(format!("{last_err} (after {n} attempts)")),
+    }
+}
+
 fn unavailable(title: &str, problem: String) -> DiagnosticMessage {
     DiagnosticMessageBuilder::warning(title)
         .with_code("Q-21-4")
@@ -244,13 +323,15 @@ fn unavailable(title: &str, problem: String) -> DiagnosticMessage {
 
 /// Download the brand's `source: google` fonts into `cache_dir`.
 ///
-/// `fetch` returns a URL's body. Never fails the render: each problem
-/// becomes a `Q-21-4` warning and that font is skipped (Typst then falls
-/// back, as it would have before this existed).
+/// `fetch` returns a URL's body; a failed fetch is retried per `retry`.
+/// Never fails the render: each problem becomes a `Q-21-4` warning and that
+/// font is skipped (Typst then falls back, as it would have before this
+/// existed).
 pub fn stage_brand_fonts(
     brand: &ResolvedBrand,
     cache_dir: &Path,
     fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+    retry: &RetrySchedule<'_>,
 ) -> Vec<DiagnosticMessage> {
     let mut diagnostics = Vec::new();
     for (font_path, font) in remote_fonts(brand) {
@@ -263,7 +344,7 @@ pub fn stage_brand_fonts(
                 ),
             )),
             BrandFont::Google(g) => {
-                stage_google_font(g, &font_path, cache_dir, fetch, &mut diagnostics)
+                stage_google_font(g, &font_path, cache_dir, fetch, retry, &mut diagnostics)
             }
             _ => {}
         }
@@ -276,6 +357,7 @@ fn stage_google_font(
     font_path: &str,
     cache_dir: &Path,
     fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+    retry: &RetrySchedule<'_>,
     diagnostics: &mut Vec<DiagnosticMessage>,
 ) {
     let title = "Google font not available to Typst";
@@ -287,7 +369,7 @@ fn stage_google_font(
         // pipeline; don't report it twice.
         Err(_) => return,
     };
-    let css = match fetch(&css_url) {
+    let css = match fetch_with_retry(fetch, &css_url, retry) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => {
             diagnostics.push(unavailable(
@@ -325,7 +407,7 @@ fn stage_google_font(
         if dest.exists() {
             continue;
         }
-        if let Err(e) = download(fetch, url, &dest) {
+        if let Err(e) = download(fetch, url, &dest, retry) {
             diagnostics.push(unavailable(
                 title,
                 format!("Could not download a file for '{family}' from {url}: {e}"),
@@ -340,8 +422,9 @@ fn download(
     fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>,
     url: &str,
     dest: &Path,
+    retry: &RetrySchedule<'_>,
 ) -> Result<(), String> {
-    let bytes = fetch(url)?;
+    let bytes = fetch_with_retry(fetch, url, retry)?;
     if bytes.is_empty() {
         return Err("empty response".into());
     }
@@ -478,7 +561,7 @@ mod tests {
             }
         };
 
-        let diags = stage_brand_fonts(&brand, dir.path(), &fetch);
+        let diags = stage_brand_fonts(&brand, dir.path(), &fetch, &RetrySchedule::NONE);
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
             dir.path()
@@ -493,7 +576,7 @@ mod tests {
         assert_eq!(calls.borrow().len(), 3, "1 css + 2 files");
 
         calls.borrow_mut().clear();
-        assert!(stage_brand_fonts(&brand, dir.path(), &fetch).is_empty());
+        assert!(stage_brand_fonts(&brand, dir.path(), &fetch, &RetrySchedule::NONE).is_empty());
         assert_eq!(
             calls.borrow().len(),
             1,
@@ -507,7 +590,12 @@ mod tests {
             "typography:\n  fonts:\n    - family: Fira Code\n      source: google\n",
         );
         let dir = tempfile::tempdir().unwrap();
-        let diags = stage_brand_fonts(&brand, dir.path(), &|_| Err("no route to host".into()));
+        let diags = stage_brand_fonts(
+            &brand,
+            dir.path(),
+            &|_| Err("no route to host".into()),
+            &RetrySchedule::NONE,
+        );
         assert_eq!(diags.len(), 1);
         let text = format!("{:?}", diags[0]);
         assert!(text.contains("Q-21-4") && text.contains("Fira Code") && text.contains("no route"));
@@ -520,7 +608,12 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let css = "@font-face{font-family:'Fira Code';src:url(https://h/a.woff2) format('woff2')}";
-        let diags = stage_brand_fonts(&brand, dir.path(), &|_| Ok(css.as_bytes().to_vec()));
+        let diags = stage_brand_fonts(
+            &brand,
+            dir.path(),
+            &|_| Ok(css.as_bytes().to_vec()),
+            &RetrySchedule::NONE,
+        );
         assert_eq!(diags.len(), 1);
         assert!(format!("{:?}", diags[0]).contains("woff2"));
     }
@@ -530,7 +623,127 @@ mod tests {
         let brand =
             brand_with_fonts("typography:\n  fonts:\n    - family: Inter\n      source: bunny\n");
         let dir = tempfile::tempdir().unwrap();
-        let diags = stage_brand_fonts(&brand, dir.path(), &|_| panic!("no fetch for bunny"));
+        let diags = stage_brand_fonts(
+            &brand,
+            dir.path(),
+            &|_| panic!("no fetch for bunny"),
+            &RetrySchedule::NONE,
+        );
         assert_eq!(diags.len(), 1);
+    }
+
+    /// A `sleep` that records each delay in `slept` instead of waiting.
+    fn recording(slept: &std::cell::RefCell<Vec<Duration>>) -> impl Fn(Duration) + '_ {
+        move |d| slept.borrow_mut().push(d)
+    }
+
+    #[test]
+    fn transient_fetch_failures_are_retried_and_do_not_warn() {
+        let brand = brand_with_fonts(
+            "typography:\n  fonts:\n    - family: Fira Code\n      source: google\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let calls = std::cell::RefCell::new(0usize);
+        // The CSS request fails twice, then everything succeeds.
+        let fetch = |url: &str| -> Result<Vec<u8>, String> {
+            *calls.borrow_mut() += 1;
+            if url.contains("fonts.googleapis.com") {
+                if *calls.borrow() <= 2 {
+                    return Err("connection reset by peer".into());
+                }
+                Ok(GOOGLE_TTF_CSS.as_bytes().to_vec())
+            } else {
+                Ok(b"FONTBYTES".to_vec())
+            }
+        };
+        let slept = std::cell::RefCell::new(Vec::new());
+
+        let sleep = recording(&slept);
+        let retry = RetrySchedule {
+            delays: &RetrySchedule::DEFAULT_DELAYS,
+            sleep: &sleep,
+        };
+        let diags = stage_brand_fonts(&brand, dir.path(), &fetch, &retry);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(*calls.borrow(), 5, "3 css attempts + 2 files");
+        assert_eq!(
+            *slept.borrow(),
+            RetrySchedule::DEFAULT_DELAYS.to_vec(),
+            "one wait before each retry"
+        );
+        assert!(
+            dir.path()
+                .join("fonts.gstatic.com/s/firacode/v27/regular.ttf")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn a_file_download_is_retried_too() {
+        let brand = brand_with_fonts(
+            "typography:\n  fonts:\n    - family: Fira Code\n      source: google\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let failed_once = std::cell::Cell::new(false);
+        let fetch = |url: &str| -> Result<Vec<u8>, String> {
+            if url.contains("fonts.googleapis.com") {
+                Ok(GOOGLE_TTF_CSS.as_bytes().to_vec())
+            } else if url.ends_with("bold.ttf") && !failed_once.replace(true) {
+                Err("timed out".into())
+            } else {
+                Ok(b"FONTBYTES".to_vec())
+            }
+        };
+        let slept = std::cell::RefCell::new(Vec::new());
+        let sleep = recording(&slept);
+        let retry = RetrySchedule {
+            delays: &RetrySchedule::DEFAULT_DELAYS,
+            sleep: &sleep,
+        };
+        let diags = stage_brand_fonts(&brand, dir.path(), &fetch, &retry);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(slept.borrow().len(), 1);
+        assert!(
+            dir.path()
+                .join("fonts.gstatic.com/s/firacode/v27/bold.ttf")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn persistent_failure_warns_once_per_family_and_names_the_attempts() {
+        let brand = brand_with_fonts(
+            "typography:\n  fonts:\n    - family: Fira Code\n      source: google\n    - family: Inter\n      source: google\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let calls = std::cell::RefCell::new(0usize);
+        let fetch = |_: &str| -> Result<Vec<u8>, String> {
+            *calls.borrow_mut() += 1;
+            Err("no route to host".into())
+        };
+        let slept = std::cell::RefCell::new(Vec::new());
+
+        let sleep = recording(&slept);
+        let retry = RetrySchedule {
+            delays: &RetrySchedule::DEFAULT_DELAYS,
+            sleep: &sleep,
+        };
+        let diags = stage_brand_fonts(&brand, dir.path(), &fetch, &retry);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(*calls.borrow(), 6, "3 attempts for each of 2 families");
+        assert_eq!(slept.borrow().len(), 4);
+        for diag in &diags {
+            let text = format!("{diag:?}");
+            assert!(text.contains("Q-21-4"), "{text}");
+            assert!(text.contains("no route to host"), "{text}");
+            assert!(text.contains("after 3 attempts"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_single_attempt_schedule_reports_the_error_unannotated() {
+        let err = fetch_with_retry(&|_| Err("boom".into()), "https://h/x", &RetrySchedule::NONE)
+            .unwrap_err();
+        assert_eq!(err, "boom");
     }
 }

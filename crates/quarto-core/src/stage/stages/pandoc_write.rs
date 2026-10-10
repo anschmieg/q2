@@ -346,6 +346,7 @@ fn stage_typst_brand_fonts(brand: Option<&quarto_brand::ResolvedBrand>, ctx: &mu
         brand,
         &crate::typst_google_fonts::font_cache_dir(&ctx.project.dir),
         &fetch,
+        &crate::typst_google_fonts::RetrySchedule::blocking(),
     );
     ctx.add_diagnostics(diagnostics);
 }

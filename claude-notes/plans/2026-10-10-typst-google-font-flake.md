@@ -218,18 +218,26 @@ leaves the tree green. Checkboxes are updated as work lands.
 
 ### Phase 3 — Retry in `stage_google_font` (`crates/quarto-core/src/typst_google_fonts.rs`)
 
-- [ ] Test: closure fails twice then succeeds: three calls, no Q-21-4, file
-      cached.
-- [ ] Test: closure always fails: exactly one Q-21-4 per family, text names
-      the final error and the attempt count.
-- [ ] Test: existing `stage_downloads_once_and_reuses_cache` still asserts
-      3 calls on the success path (no retries fired).
-- [ ] `fetch_with_retry` helper with an injectable sleep; 3 attempts, 250 ms
-      then 1 s between them.
-- [ ] Use it for the CSS fetch and inside `download`.
-- [ ] Q-21-4 problem text reports the final error and attempt count.
-- [ ] Module doc: fetch retries; native runtime times out at 30 s.
-- [ ] `cargo nextest run -p quarto-core typst_google_fonts` green.
+- [x] Test: CSS fetch fails twice then succeeds: five calls (3 CSS + 2 files),
+      no Q-21-4, file cached, sleeps recorded as exactly the default delays.
+- [x] Test: a file download that fails once is retried and lands in the cache.
+- [x] Test: closure always fails: exactly one Q-21-4 per family (two families,
+      six calls, four sleeps), text names the final error and `after 3
+      attempts`.
+- [x] Test: a one-attempt schedule reports the error unannotated.
+- [x] Existing `stage_downloads_once_and_reuses_cache` still asserts 3 calls
+      on the success path (no retries fired).
+- [x] `RetrySchedule { delays, sleep }` with `DEFAULT_DELAYS` = 250 ms, 1 s;
+      `RetrySchedule::NONE` for tests; `RetrySchedule::blocking()` (native
+      only, `std::thread::sleep`) for the real caller. The module compiles on
+      wasm32, so the blocking sleep is cfg-gated and passed in by
+      `pandoc_write.rs`.
+- [x] `fetch_with_retry` wraps the CSS fetch and the fetch inside `download`.
+- [x] Q-21-4 problem text carries the final error plus `(after N attempts)`.
+- [x] Module doc: fetch retries, 30 s native timeout, why the retry is
+      uniform, pointer to bd-f48l642w.
+- [x] `cargo nextest run -p quarto-core typst_google_fonts` green (15 tests);
+      clippy clean.
 
 ### Phase 4 — Verification
 
