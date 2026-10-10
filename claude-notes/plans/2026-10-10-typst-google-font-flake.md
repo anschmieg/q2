@@ -247,8 +247,9 @@ leaves the tree green. Checkboxes are updated as work lands.
 
 ### Phase 5 — Docs
 
-- [ ] Q-21-4 entry in `crates/quarto-error-catalog`, if one exists: mention
-      retry and timeout.
+- [x] Q-21-4 entry in `crates/quarto-error-catalog/error_catalog.json`:
+      mentions the three attempts, the 30 s timeout, the error-status case,
+      and that the warning names the URL and last error.
 - [ ] PR description notes the Lua-visible change (non-2xx now fails
       `mediabag.fetch`).
 
