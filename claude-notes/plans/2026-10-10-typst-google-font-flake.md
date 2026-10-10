@@ -2,7 +2,7 @@
 title: 'Typst Google-font download is a network flake in smoke-all: retry fetches and keep the diagnostic detail (bd-qvl8t3hy)'
 date: 2026-10-10
 description: 'A transient fonts.googleapis.com failure fails the whole smoke_all test and the harness drops the detail that would say why; make the fetch robust and keep the problem text.'
-status: approved  # Design questions answered 2026-10-10; ready to implement
+status: in-progress  # Implemented 2026-10-10 on the topic branch; PR pending
 braid:
   strand: bd-qvl8t3hy
 ---
@@ -241,9 +241,13 @@ leaves the tree green. Checkboxes are updated as work lands.
 
 ### Phase 4 — Verification
 
-- [ ] `cargo nextest run -p quarto --test integration smoke_all` with the
-      network up: the five Google-font fixtures pass.
-- [ ] `cargo xtask verify --skip-hub-build` green.
+- [x] `cargo xtask verify --skip-hub-build` green at `8f25d1331` (14 steps,
+      16102 tests). The workspace nextest run includes `smoke_all`, so the
+      five Google-font fixtures passed with the network up, plus the
+      `printsMessage` fixtures under `typst/`.
+- [x] WASM build (`npm run build:wasm` in `hub-client/`, Homebrew LLVM)
+      compiles `quarto-core` with the new `RetrySchedule` for
+      wasm32-unknown-unknown; no warnings from `typst_google_fonts.rs`.
 
 ### Phase 5 — Docs
 
