@@ -164,56 +164,72 @@ below need no further alignment.
 
 ## Phases
 
-- **Phase 0 — Tests first.**
-  - `typst_google_fonts.rs`: a counting closure that fails twice then
-    succeeds, asserting three calls and no Q-21-4; a closure that always
-    fails, asserting exactly one Q-21-4 per family whose text includes the
-    final error and the attempt count. Backoff must be injectable or
-    short-circuited under test so the suite does not sleep.
-  - `quarto-test`: a unit test that a warning with a `problem` and a hint
-    yields a `LogMessage` whose text contains all three and no escape
-    sequences. Cover both the project path (`diagnostics_to_messages`) and
-    the single-document path.
-  - `native.rs`: a loopback `std::net::TcpListener` that answers `503` and
-    one that never writes, asserting `fetch_url` returns `Err` for the first
-    and `Err` within the timeout for the second (use a short timeout via a
-    test-only constructor or a `Duration` parameter, not the 30 s default).
-- **Phase 1 — Keep the diagnostic detail (`crates/quarto-test/src/runner.rs`).**
-  Replace `diag.title.clone()` at both sites with the plain-text rendering.
-  Fold the single-document path's duplicated level mapping into
-  `diagnostics_to_messages` so there is one place that builds a `LogMessage`
-  from a diagnostic. Re-run `cargo nextest run -p quarto-test` and the
-  smoke-all suite: `printsMessage` is an unanchored regex so nothing should
-  change, but the multi-line message now contains the `Warning:` prefix and
-  hint bullets, so confirm no fixture regex accidentally matches hint text.
-- **Phase 2 — Native `fetch_url` (`crates/quarto-system-runtime/src/native.rs`).**
-  Replace `reqwest::blocking::get` with a `blocking::Client` built once with
-  `.timeout(Duration::from_secs(30))`. Call `error_for_status()` so 4xx/5xx
-  become `Err`, with the status code in the message. Map network failures to
-  `RuntimeError::Network` rather than the current `NotSupported`, which was
-  never the right variant. Borrow the `quarto-source-fetch` comment on why a
-  404 body must not be treated as the answer. Audit the other callers
-  (`pampa` mediabag, `user_filters`, listing `substitute`, `render.rs`): the
-  mediabag already maps `Err` to a logged nil, so Lua sees nil instead of an
-  HTML body; confirm the others propagate `Err` sensibly.
-- **Phase 3 — Retry in `stage_google_font` (`crates/quarto-core/src/typst_google_fonts.rs`).**
-  A small `fetch_with_retry(fetch, url, policy)` helper used for the CSS fetch
-  and inside `download`. Policy: 3 attempts, sleeps of 250 ms and 1 s between
-  them, sleep provided through the policy so tests can zero it. The Q-21-4
-  problem text reports the final error and that N attempts were made. Update
-  the module doc to say the fetch retries and that the native runtime times
-  out at 30 s.
-- **Phase 4 — Verification.**
-  - `cargo nextest run -p quarto-core typst_google_fonts`
-  - `cargo nextest run -p quarto-system-runtime`
-  - `cargo nextest run -p quarto-test`
-  - `cargo nextest run -p quarto --test integration smoke_all` with the
-    network up, confirming the five Google-font fixtures still pass and the
-    orange-book / font-paths `printsMessage` fixtures are unaffected.
-  - `cargo xtask verify --skip-hub-build` before the PR.
-- **Phase 5 — Docs.** If `crates/quarto-error-catalog` has a Q-21-4 entry,
-  mention retry and timeout there. Note the Lua-visible change (non-2xx now
-  fails `mediabag.fetch`) in the PR description.
+Work proceeds test-first within each area (harness, native fetch, retry)
+rather than writing every test before any implementation, so each phase
+leaves the tree green. Checkboxes are updated as work lands.
+
+### Phase 1 — Harness keeps the diagnostic detail (`crates/quarto-test`)
+
+- [x] Test: a warning with a `problem` and a hint yields a `LogMessage` whose
+      text contains title, problem, and hint, with no escape sequences, via
+      `diagnostics_to_messages`.
+- [x] Test: the single-document render path produces the same shape.
+- [x] Replace `diag.title.clone()` at both `runner.rs` sites with
+      `diag.to_text_with_options(None, &TextRenderOptions::plain())`.
+- [x] Fold the single-document path's duplicated level mapping into
+      `diagnostics_to_messages` (one place builds a `LogMessage`).
+- [x] Continuation lines of multi-line messages are indented in the
+      `noErrors` / `noErrorsOrWarnings` / `printsMessage` failure output
+      (`LogMessage::indented`), so a rendered diagnostic stays attached to
+      its `[LEVEL]` prefix.
+- [x] `cargo nextest run -p quarto-test` green.
+- [ ] Smoke-all `printsMessage` fixtures (`typst/orange-book*`,
+      `typst/font-paths/*`) still pass; no regex accidentally matches hint text.
+
+### Phase 2 — Native `fetch_url` (`crates/quarto-system-runtime/src/native.rs`)
+
+- [ ] Test: loopback `TcpListener` answering `503` makes `fetch_url` return
+      `Err` naming the status.
+- [ ] Test: loopback listener that accepts and never writes makes `fetch_url`
+      return `Err` within a short, injected timeout.
+- [ ] Build a `reqwest::blocking::Client` with `.timeout(...)` (30 s default,
+      injectable for tests) instead of the bare `blocking::get`.
+- [ ] `error_for_status()` so 4xx/5xx become `Err` with the code in the message.
+- [ ] Map failures to `RuntimeError::Network`, not `NotSupported`.
+- [ ] Comment (borrowed from `quarto-source-fetch`) on why a non-2xx body is
+      not the answer.
+- [ ] Audit callers: `pampa` mediabag, `user_filters`, listing `substitute`,
+      `render.rs`, `pandoc_svg_rasterize` test wrapper. Confirm each
+      propagates `Err` sensibly.
+- [ ] `cargo nextest run -p quarto-system-runtime` green.
+
+### Phase 3 — Retry in `stage_google_font` (`crates/quarto-core/src/typst_google_fonts.rs`)
+
+- [ ] Test: closure fails twice then succeeds: three calls, no Q-21-4, file
+      cached.
+- [ ] Test: closure always fails: exactly one Q-21-4 per family, text names
+      the final error and the attempt count.
+- [ ] Test: existing `stage_downloads_once_and_reuses_cache` still asserts
+      3 calls on the success path (no retries fired).
+- [ ] `fetch_with_retry` helper with an injectable sleep; 3 attempts, 250 ms
+      then 1 s between them.
+- [ ] Use it for the CSS fetch and inside `download`.
+- [ ] Q-21-4 problem text reports the final error and attempt count.
+- [ ] Module doc: fetch retries; native runtime times out at 30 s.
+- [ ] `cargo nextest run -p quarto-core typst_google_fonts` green.
+
+### Phase 4 — Verification
+
+- [ ] `cargo nextest run -p quarto --test integration smoke_all` with the
+      network up: the five Google-font fixtures pass.
+- [ ] `cargo xtask verify --skip-hub-build` green.
+
+### Phase 5 — Docs
+
+- [ ] Q-21-4 entry in `crates/quarto-error-catalog`, if one exists: mention
+      retry and timeout.
+- [ ] PR description notes the Lua-visible change (non-2xx now fails
+      `mediabag.fetch`).
 
 ## Risks / tradeoffs
 
