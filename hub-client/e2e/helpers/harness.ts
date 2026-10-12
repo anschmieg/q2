@@ -222,6 +222,43 @@ export async function expectNoHorizontalScroll(
 }
 
 /**
+ * Open the projects-home "＋ New" menu and wait for its real items.
+ *
+ * ProjectsHome renders the menu from `projectChoices`, which starts
+ * empty (the menu shows a single placeholder "Default" leaf that opens
+ * the dialog) and is replaced once the WASM registry answers
+ * `getProjectChoices()`. The real tree's first item is the "Templates"
+ * group, whose click only opens a submenu. A spec that clicks "the first
+ * item" therefore gets a dialog or a submenu depending on which side of
+ * that swap it lands on (bd-nuybnb7k, bd-c72wsugj). Wait for the group
+ * before interacting, and never assume an item seen before the swap
+ * still exists.
+ *
+ * Returns the menu; the "Default" template leaf is reachable with
+ * {@link openDefaultTemplate}.
+ */
+export async function openNewProjectMenu(page: Page): Promise<Locator> {
+  await page.getByRole('button', { name: '＋ New ▾' }).click();
+  const menu = page.getByRole('menu', { name: 'New project' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /^Templates/ })).toBeVisible();
+  return menu;
+}
+
+/**
+ * From an open, settled New menu (see {@link openNewProjectMenu}), open
+ * the "Templates" group with the pointer and click its "Default" leaf,
+ * which opens the New project dialog. Returns the dialog once visible.
+ */
+export async function openDefaultTemplate(page: Page, menu: Locator): Promise<Locator> {
+  await menu.getByRole('menuitem', { name: /^Templates/ }).click();
+  await menu.getByRole('menuitem', { name: /^Default/ }).click();
+  const dialog = page.locator('[role="dialog"]');
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+/**
  * Assert a locator's rendered box stays fully inside the viewport — the
  * "no clipped controls" half of the narrow-viewport contract. A 1px
  * tolerance absorbs sub-pixel rounding.

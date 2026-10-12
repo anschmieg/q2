@@ -108,8 +108,10 @@ connecting.
   debounce timer (bd-c72wsugj).
 - **Menus can change under focus.** The ＋ New menu lists a placeholder
   until the WASM registry answers. Wait for the real items before
-  pressing keys, and never assume the item focused a moment ago still
-  exists.
+  pressing keys or clicking, and never assume the item focused a moment
+  ago still exists. In harness specs use `openNewProjectMenu` (and
+  `openDefaultTemplate` to reach the dialog) from `e2e/helpers/harness.ts`
+  rather than clicking "the first item" (bd-c72wsugj, bd-nuybnb7k).
 
 ## Sync tests: presence is not delivery
 
