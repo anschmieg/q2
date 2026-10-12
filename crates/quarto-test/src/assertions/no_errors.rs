@@ -42,11 +42,11 @@ impl Assertion for NoErrors {
         }
 
         // Check for ERROR-level messages
-        let errors: Vec<&str> = context
+        let errors: Vec<String> = context
             .messages
             .iter()
             .filter(|m| matches!(m.level, LogLevel::Error))
-            .map(|m| m.message.as_str())
+            .map(|m| m.indented("    "))
             .collect();
 
         if errors.is_empty() {
@@ -102,7 +102,7 @@ impl Assertion for NoErrorsOrWarnings {
                     LogLevel::Warn => "WARN",
                     _ => "?",
                 };
-                format!("[{}] {}", level, m.message)
+                format!("[{}] {}", level, m.indented("    "))
             })
             .collect();
 
