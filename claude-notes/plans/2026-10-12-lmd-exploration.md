@@ -36,7 +36,7 @@ stuff: [a, b, c, d]
 
 ```{lmd}
 return tmap(quarto.metadata.get("stuff"), function(v)
-  return {= **`{lmd} v`** =}
+  return {=: **`{lmd} v`** :=}
 end)
 ```
 
@@ -46,27 +46,33 @@ end)
 Two pieces of syntax:
 
 1. **The `{lmd}` cell.** An executable cell whose body is Lua. The eventual design desugars it into a Lua filter that dispatches the cell's result to the cell's own position in the document, so the author never names a class to match on. Inline form `` `{lmd} expr` ``.
-2. **The `{= markdown =}` expression.** Inside lmd Lua, a markdown fragment is an expression. The fragment is parsed with the qmd parser and becomes a Pandoc AST value, written out as `pandoc.*` constructor calls. Markdown inside a fragment can contain lmd code again, so the languages nest in both directions.
+2. **The markdown fragment expression.** Inside lmd Lua, a markdown fragment is an expression. The fragment is parsed with the qmd parser and becomes a Pandoc AST value, written out as `pandoc.*` constructor calls. Three forms: `{=: … :=}` for blocks, `{=[ … ]=}` for inlines, and the unmarked `{= … =}` whose context is meant to be decided by the caller (see the delimiter design notes). Markdown inside a fragment can contain lmd code again, so the languages nest in both directions.
 
 The result should approach the ergonomics of Hugo, Astro and Docusaurus templates while plain Lua filter extensions keep working alongside, because the whole thing is desugaring: the output is ordinary qmd plus ordinary Lua filters.
 
 ## Spike 1 (done 2026-10-12): the grammar and a visible desugaring
 
-The goal of the first spike is to **read** the desugaring, not run it. A pipeline stage takes each `{lmd}` cell, desugars its `{= =}` fragments into `pandoc.*` calls, and leaves the result in the document as a non-executable ```` ```lmd ```` block so `q2 render --to markdown` shows it.
+The goal of the first spike is to **read** the desugaring, not run it. A pipeline stage takes each `{lmd}` cell, desugars its markdown fragments into `pandoc.*` calls, and leaves the result in the document as a non-executable ```` ```lmd ```` block so `q2 render --to markdown` shows it.
+
+Spike 1 first shipped with a single `{= … =}` form that always produced blocks; the same day it was revised to the three forms decided under "Delimiter design notes" below. The description that follows is the revised state.
 
 ### What landed
 
-- **`crates/tree-sitter-lmd`**: a vendored fork of [tree-sitter-grammars/tree-sitter-lua](https://github.com/tree-sitter-grammars/tree-sitter-lua) v0.5.0 (full Lua 5.4, plus the 5.5 `global` keyword), renamed to grammar `lmd` so it coexists with the upstream `tree-sitter-lua` crate `quarto-highlight` links. One rule added, `markdown_fragment`, hung off `expression`:
+- **`crates/tree-sitter-lmd`**: a vendored fork of [tree-sitter-grammars/tree-sitter-lua](https://github.com/tree-sitter-grammars/tree-sitter-lua) v0.5.0 (full Lua 5.4, plus the 5.5 `global` keyword), renamed to grammar `lmd` so it coexists with the upstream `tree-sitter-lua` crate `quarto-highlight` links. One rule added, `markdown_fragment`, hung off `expression`, in three forms:
 
   ```
-  markdown_fragment: '{=' markdown_content? '=}'
+  markdown_fragment: '{='  markdown_content? '=}'
+                   | '{=:' markdown_content? ':=}'
+                   | '{=[' markdown_content? ']=}'
   ```
 
-  All three tokens come from the external scanner. `{=` cannot begin any Lua construct (a table-constructor field never starts with `=`), so the token is unambiguous wherever an expression is valid; on a lone `{` the scanner returns false and the internal lexer's `{` (table constructor) wins. The content token is raw text up to the matching `=}`, balancing nested `{=`/`=}` pairs so a fragment whose markdown has inline lmd code with its own fragment still ends in the right place. Content keeps its whitespace; the Rust side trims.
+  All nine tokens come from the external scanner; the Rust side tells the forms apart by the node kind of the `start` field. `{=` cannot begin any Lua construct (a table-constructor field never starts with `=`), so the openers are unambiguous wherever an expression is valid; on a lone `{` the scanner returns false and the internal lexer's `{` (table constructor) wins. The content token is raw text up to this form's closer, balancing nested fragments of any form so a fragment whose markdown has inline lmd code with its own fragment still ends in the right place. Content keeps its whitespace; the Rust side trims.
 
-  Layout mirrors `crates/tree-sitter-doctemplate`: `grammar/` holds the upstream sources (only `grammar.js`, `src/`, `test/corpus/`, `queries/`, `tree-sitter.json`, the license), `build.rs` and `src/lib.rs` are ours. `cargo xtask ts-test lmd` regenerates and tests. The corpus has 49 tests, 42 upstream and 7 new; the Rust crate has 3.
+  Layout mirrors `crates/tree-sitter-doctemplate`: `grammar/` holds the upstream sources (only `grammar.js`, `src/`, `test/corpus/`, `queries/`, `tree-sitter.json`, the license), `build.rs` and `src/lib.rs` are ours. `cargo xtask ts-test lmd` regenerates and tests. The corpus has 53 tests, 42 upstream and 11 new; the Rust crate has 3.
 
-- **`quarto_core::lmd`**: `desugar_lua(src) -> Result<String, LmdError>`. Parses the Lua with tree-sitter-lmd (a parse error fails the whole cell, with a position), finds every `markdown_fragment` in source order, parses each fragment's markdown with `pampa::readers::qmd::read`, and splices in the emitted expression. Continuation lines are indented past the column the `{=` sat at, so the splice reads as one expression inside whatever Lua surrounded it.
+- **`quarto_core::lmd`**: `desugar_lua(src) -> Result<String, LmdError>`. Parses the Lua with tree-sitter-lmd (a parse error fails the whole cell, with a position), finds every `markdown_fragment` in source order, parses each fragment's markdown with `pampa::readers::qmd::read`, and splices in the emitted expression: `pandoc.Blocks({ … })` for `{=: :=}`, `pandoc.Inlines({ … })` for `{=[ ]=}` (the markdown must parse to one paragraph or nothing, else `LmdError::NotInlines`), and `pandoc.Nodes({ … })` for the unmarked form. Continuation lines are indented past the column the opener sat at, so the splice reads as one expression inside whatever Lua surrounded it.
+
+- **`pandoc.Nodes`** exists in pampa's Lua API as a stub that raises an error naming the two marked forms, so the desugared Lua is well-formed but an unmarked fragment cannot run until the context-deferred semantics are designed.
 
   The emitter (`lmd/emit.rs`) covers every `Block` and `Inline` that has a pandoc constructor, with pandoc's argument order (`Link(content, target, title, attr)`, `Header(level, content, attr)`, ...). An empty `Attr` is omitted. Unsupported nodes (`Table`, note definitions, `Shortcode`, the CriticMarkup inlines, `Custom`) fail the cell with `LmdError::Unsupported`.
 
@@ -80,12 +86,54 @@ The motivating example renders to:
 
 ```lua
 return tmap(quarto.metadata.get("stuff"), function(v)
-  return pandoc.Para({
-           pandoc.Strong({
-             v,
+  return pandoc.Blocks({
+           pandoc.Para({
+             pandoc.Strong({
+               v,
+             }),
            }),
          })
 end)
+```
+
+The three forms side by side, from
+
+````qmd
+```{lmd}
+local unmarked = {= **hello** =}
+local blocks = {=: **hello** :=}
+local inlines = {=[ **hello** ]=}
+local strong = pandoc.Strong({=[ *inner* ]=})
+```
+````
+
+render to:
+
+```lua
+local unmarked = pandoc.Nodes({
+                   pandoc.Para({
+                     pandoc.Strong({
+                       pandoc.Str("hello"),
+                     }),
+                   }),
+                 })
+local blocks = pandoc.Blocks({
+                 pandoc.Para({
+                   pandoc.Strong({
+                     pandoc.Str("hello"),
+                   }),
+                 }),
+               })
+local inlines = pandoc.Inlines({
+                  pandoc.Strong({
+                    pandoc.Str("hello"),
+                  }),
+                })
+local strong = pandoc.Strong(pandoc.Inlines({
+                               pandoc.Emph({
+                                 pandoc.Str("inner"),
+                               }),
+                             }))
 ```
 
 Nesting in both directions, from
@@ -93,7 +141,7 @@ Nesting in both directions, from
 `````qmd
 ````{lmd}
 local function card(title, body)
-  return {=
+  return {=:
 ::: {.card}
 ### `{lmd} title`
 
@@ -101,9 +149,9 @@ local function card(title, body)
 return body
 ```
 :::
-=}
+:=}
 end
-return card("Hello", {= Some *body* text. =})
+return card({=[ Hello ]=}, {=: Some *body* text. :=})
 ````
 `````
 
@@ -111,38 +159,45 @@ renders to:
 
 ```lua
 local function card(title, body)
-  return pandoc.Div({
-           pandoc.Header(3, {
-             title,
-           }, pandoc.Attr("lmd-title", {}, {})),
-           (function()
-             return body
-           end)(),
-         }, pandoc.Attr("", {
-           "card",
-         }, {}))
+  return pandoc.Blocks({
+           pandoc.Div({
+             pandoc.Header(3, {
+               title,
+             }, pandoc.Attr("lmd-title", {}, {})),
+             (function()
+               return body
+             end)(),
+           }, pandoc.Attr("", {
+             "card",
+           }, {})),
+         })
 end
-return card("Hello", pandoc.Para({
-                       pandoc.Str("Some"),
-                       pandoc.Space(),
-                       pandoc.Emph({
-                         pandoc.Str("body"),
-                       }),
-                       pandoc.Space(),
-                       pandoc.Str("text."),
-                     }))
+return card(pandoc.Inlines({
+              pandoc.Str("Hello"),
+            }), pandoc.Blocks({
+                             pandoc.Para({
+                               pandoc.Str("Some"),
+                               pandoc.Space(),
+                               pandoc.Emph({
+                                 pandoc.Str("body"),
+                               }),
+                               pandoc.Space(),
+                               pandoc.Str("text."),
+                             }),
+                           }))
 ```
 
 Headings, bullet lists, links with titles, inline code, math, quotes, line breaks and attributes all come through (`scratchpad/lmd-demo.qmd` during the session; worth turning into a fixture in spike 2).
 
 ### Observations from reading it
 
-1. **Block context is forced.** A fragment always produces a block: one paragraph becomes `pandoc.Para`, another single block becomes its own constructor, several become `pandoc.Blocks`. `{= **x** =}` therefore cannot sit inside `pandoc.Strong(...)`: there is no way to ask for inlines. See open question 1.
-2. **Inline splices have no coercion contract.** `v` lands as a bare list element, so the Lua value must already be an `Inline` (or whatever pampa's `pandoc.Strong` accepts in a content list). A string works in pandoc proper by coercion to `Str`, but spaces would not become `Space`. Something like `lmd.inlines(v)` at the splice may be needed; it should be decided with question 1.
+1. **Context is now explicit.** `{=[ … ]=}` can sit inside `pandoc.Strong(...)` and `{=: … :=}` inside `pandoc.Div(...)`; the unmarked form waits on `pandoc.Nodes`. (The first cut of spike 1 forced block context; the delimiter design notes record how that was resolved.)
+2. **Inline splices have no coercion contract.** `v` lands as a bare list element, so the Lua value must already be an `Inline` (or whatever pampa's `pandoc.Strong` accepts in a content list). A string works in pandoc proper by coercion to `Str`, but spaces would not become `Space`. Something like `lmd.inlines(v)` at the splice may be needed; `pandoc.Nodes` is the natural home for the same question.
 3. **Spliced headings get a derived id.** The qmd reader auto-generates `lmd-title` from the heading text `` `{lmd} title` `` before the splice happens. The desugaring should probably strip reader-derived ids (and anything else derived from text that is really a placeholder).
 4. **Footnotes do not work yet.** The reader emits `NoteDefinitionPara` blocks that are resolved later in the pipeline, so a fragment with a footnote is `Unsupported`. Either resolve notes inside the fragment parse or run the fragment through the same early transforms the document gets.
 5. **Fence nesting is on the author.** A cell containing a block-level `` ```{lmd} `` must itself use four backticks. Normal markdown, but it will surprise people.
 6. **Inline lmd outside a fragment is untouched.** `` `{lmd} v` `` in a document paragraph (not inside a cell) is left as a `Code` node. Whether it should be an inline cell is a design question for the dispatch half.
+7. **Continuation indent is computed from the source column.** When two fragments share a line and the first expands to several lines, the second is still indented to its *source* column (see the `card(...)` call above). Cosmetic; fixing it means tracking the output column during splicing.
 
 ## Delimiter design notes (2026-10-12)
 
@@ -185,11 +240,25 @@ Counted over the 2139 `.qmd` and `.md` files under `claude-notes/` and `docs/`, 
 | `{|: … :|}` | `{|[ … ]|}` | same | a discriminator `|` then the context character; zero corpus collisions; more typing; OCaml quoted strings `{| … |}` and `{id| … |id}` are a precedent for the shape |
 | `{=: … :=}` | `{=[ … ]=}` | same | same idea with `=`, keeping continuity with spike 1; zero corpus collisions |
 
-Whichever pair is chosen, nested pairs balance in the scanner the way `{=`/`=}` do today, and `Para` versus `Plain` stops being a syntax question: the block form yields whatever the qmd reader produces (a top-level paragraph is `Para`), and an explicit `pandoc.Plain([: … :])` covers the rest. The inline form should reject markdown that parses to more than one block, since the author asked for inlines.
+Whichever pair is chosen, nested pairs balance in the scanner the way `{=`/`=}` do today, and `Para` versus `Plain` stops being a syntax question: the block form yields whatever the qmd reader produces (a top-level paragraph is `Para`), and an explicit `pandoc.Plain(…)` covers the rest. The inline form should reject markdown that parses to more than one block, since the author asked for inlines.
+
+### Decision (2026-10-12): `{=`, `{=:`, `{=[`
+
+The third row, with one addition: the unmarked `{= … =}` stays, as a third form. Adding `:` or `[` to the opener adds exactly the specificity it names.
+
+| form | expands to | status |
+|---|---|---|
+| `{= … =}` | `pandoc.Nodes({ blocks })` | `pandoc.Nodes` is a stub in pampa that errors when called |
+| `{=: … :=}` | `pandoc.Blocks({ blocks })` | works |
+| `{=[ … ]=}` | `pandoc.Inlines({ inlines })` | works; the markdown must parse to one paragraph or nothing |
+
+`pandoc.Nodes` is the interesting one: a value that defers the blocks-versus-inlines decision to the surrounding context, so `pandoc.Para({= text =})` and `pandoc.Div({= text =})` could both work. Its semantics are not designed yet, so the desugaring emits the call and pampa's entry raises an error naming the two marked forms. The emitter hands it the reader's blocks, which carry enough to become either (a lone `Para` unwraps to inlines).
+
+Scanner rules, so they are not re-derived: every `{=` opens a nested fragment whatever follows it, every `=}` closes one when nested, and at depth zero only the current kind's closer (`=}`, `:=}`, `]=}`) ends the content. A bare `=}` at depth zero inside a marked fragment is content. The character after `{=` decides the kind, so `{=[` opens an inline fragment while `{= [link](u)` (with a space) opens an unmarked one.
 
 ## Open questions
 
-1. Block vs inline result context for `{= =}`. Decided in principle: two delimiter pairs, one per context (see the delimiter design notes above). The exact characters are still open.
+1. The semantics of `pandoc.Nodes`, the target of the unmarked `{= … =}`: a value that becomes blocks or inlines depending on the constructor it is passed to. The delimiter design notes record the decision that created it.
 2. The splice coercion contract for inline and block lmd code inside a fragment (observation 2).
 3. The dispatch half: how an `{lmd}` cell's result replaces the cell at its own AST position, and how the desugared Lua becomes a filter that existing Lua filters compose with. Also whether the cell runs at render time only or has a preview-time story.
 4. Error locations. `LmdError` carries a position inside the cell text; the warning does not yet map it back to the document.
@@ -203,7 +272,7 @@ Whichever pair is chosen, nested pairs balance in the scanner the way `{=`/`=}` 
 
 ## Verification (spike 1)
 
-- `cargo xtask ts-test lmd`: 49 of 49 corpus tests.
-- `cargo nextest run -p quarto-core -E 'test(lmd)'`: 14 of 14.
+- `cargo xtask ts-test lmd`: 53 of 53 corpus tests.
+- `cargo nextest run -p quarto-core -E 'test(lmd)'`: 18 of 18, plus the `pandoc.Nodes` stub test in pampa.
 - `cargo test -p xtask tree_sitter`, `cargo clippy -p quarto-core -p tree-sitter-lmd -p xtask --all-targets -- -D warnings`, `cargo xtask lint`: green.
 - WASM: not built locally in this session; the crate follows `tree-sitter-doctemplate`\'s build exactly, and `quarto-core` already pulls two other C-backed grammars into the wasm32 tree. CI's build-wasm job is the check.

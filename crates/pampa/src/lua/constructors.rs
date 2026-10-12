@@ -2614,6 +2614,25 @@ fn register_list_constructors(lua: &Lua, pandoc: &LuaTable) -> Result<()> {
         })?,
     )?;
 
+    // pandoc.Nodes(content) - reserved for the lmd exploration
+    // (bd-lmd-exploration-jqv2nbl4): an unmarked `{= markdown =}` fragment
+    // desugars to this call. The value is meant to defer the blocks-versus-
+    // inlines decision to the surrounding context (a `pandoc.Para` wants
+    // inlines; a `pandoc.Div` wants blocks). Not implemented yet: calling it
+    // is an error, so the desugared Lua can be read but not run until the
+    // semantics are designed. See claude-notes/plans/2026-10-12-lmd-exploration.md.
+    pandoc.set(
+        "Nodes",
+        lua.create_function(|_, _content: Option<Value>| -> Result<Value> {
+            Err(Error::runtime(
+                "pandoc.Nodes is not implemented yet: it is the target of an unmarked \
+                 `{= markdown =}` lmd fragment, whose blocks-versus-inlines decision \
+                 is meant to be deferred to the surrounding context. Write `{=: … :=}` \
+                 for pandoc.Blocks or `{=[ … ]=}` for pandoc.Inlines instead.",
+            ))
+        })?,
+    )?;
+
     Ok(())
 }
 
@@ -4902,6 +4921,26 @@ mod tests {
     }
 
     // ========== List constructors tests ==========
+
+    #[test]
+    fn test_nodes_constructor_is_an_unimplemented_stub() {
+        // lmd exploration (bd-lmd-exploration-jqv2nbl4): the entry exists so
+        // desugared Lua that names it is well-formed, but calling it errors
+        // until the context-deferred semantics are designed.
+        let lua = create_lua_env();
+        let is_function: bool = lua
+            .load("return type(pandoc.Nodes) == 'function'")
+            .eval()
+            .unwrap();
+        assert!(is_function);
+        let err = lua
+            .load("return pandoc.Nodes({})")
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pandoc.Nodes is not implemented yet"), "{err}");
+        assert!(err.contains("{=: … :=}"), "{err}");
+    }
 
     #[test]
     fn test_inlines_constructor_nil_errors() {

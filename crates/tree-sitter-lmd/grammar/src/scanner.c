@@ -12,10 +12,19 @@ enum TokenType {
   BLOCK_STRING_CONTENT,
   BLOCK_STRING_END,
 
-  // lmd extension: `{=` markdown `=}`
-  MARKDOWN_FRAGMENT_START,
-  MARKDOWN_FRAGMENT_CONTENT,
-  MARKDOWN_FRAGMENT_END,
+  // lmd extension: markdown fragments, three kinds.
+  //   `{=`  … `=}`   unmarked (pandoc.Nodes: context decides)
+  //   `{=:` … `:=}`  blocks  (pandoc.Blocks)
+  //   `{=[` … `]=}`  inlines (pandoc.Inlines)
+  NODES_FRAGMENT_START,
+  NODES_FRAGMENT_CONTENT,
+  NODES_FRAGMENT_END,
+  BLOCKS_FRAGMENT_START,
+  BLOCKS_FRAGMENT_CONTENT,
+  BLOCKS_FRAGMENT_END,
+  INLINES_FRAGMENT_START,
+  INLINES_FRAGMENT_CONTENT,
+  INLINES_FRAGMENT_END,
 };
 
 static inline void consume(TSLexer *lexer) { lexer->advance(lexer, false); }
@@ -159,54 +168,68 @@ static bool scan_comment_content(Scanner *scanner, TSLexer *lexer) {
   return false;
 }
 
-// lmd: `{=`. Both characters must be present; on a lone `{` we return
-// false and the parser falls back to the internal lexer's `{` (table
-// constructor). Advancing before returning false is fine: a false return
-// discards the external scanner's progress.
-static bool scan_markdown_fragment_start(TSLexer *lexer) {
-  return consume_char('{', lexer) && consume_char('=', lexer);
-}
-
-// lmd: `=}`.
-static bool scan_markdown_fragment_end(TSLexer *lexer) {
+// lmd fragment closers: `=}` for the unmarked form, `<close_char>=}` for
+// the marked forms (`:=}` for blocks, `]=}` for inlines).
+static bool scan_fragment_end(TSLexer *lexer, char close_char) {
+  if (close_char != 0 && !consume_char(close_char, lexer)) {
+    return false;
+  }
   return consume_char('=', lexer) && consume_char('}', lexer);
 }
 
-// lmd: everything up to the `=}` that closes the fragment, balancing
-// nested `{=` / `=}` pairs so a fragment whose markdown contains inline
-// lmd code with its own fragment still ends in the right place. The token
-// stops just before the closing `=}` (mark_end), which the parser then
-// lexes as MARKDOWN_FRAGMENT_END. Returns false on an empty fragment so
-// `{==}` parses as start + end with no content node.
-static bool scan_markdown_fragment_content(TSLexer *lexer) {
+// lmd fragment content: everything up to the closer of this fragment's
+// kind, balancing nested fragments of any kind so a fragment whose markdown
+// contains inline lmd code with its own fragment still ends in the right
+// place. The rule is simple: every `{=` opens (its context marker, if any,
+// is ordinary content), every `=}` closes when nested, and at depth zero
+// only this kind's closer ends the token. The token stops just before the
+// closer (mark_end), which the parser then lexes as the END token. Returns
+// false on an empty fragment so `{==}` parses as start + end with no
+// content node.
+static bool scan_fragment_content(TSLexer *lexer, char close_char) {
   uint32_t depth = 0;
   bool consumed_any = false;
   while (lexer->lookahead != 0) {
-    if (lexer->lookahead == '=') {
+    if (lexer->lookahead == '{') {
+      consume(lexer);
+      if (lexer->lookahead == '=') {
+        consume(lexer);
+        depth++;
+      }
+    } else if (close_char != 0 && lexer->lookahead == close_char) {
+      // Possible `<close_char>=}` closer: remember the position before it.
+      lexer->mark_end(lexer);
+      consume(lexer);
+      if (lexer->lookahead == '=') {
+        consume(lexer);
+        if (lexer->lookahead == '}') {
+          if (depth == 0) {
+            return consumed_any;
+          }
+          depth--;
+          consume(lexer);
+        }
+      }
+    } else if (lexer->lookahead == '=') {
       lexer->mark_end(lexer);
       consume(lexer);
       if (lexer->lookahead == '}') {
         if (depth == 0) {
-          return consumed_any;
+          if (close_char == 0) {
+            return consumed_any;
+          }
+          // A bare `=}` at depth zero inside a marked fragment is content.
+          consume(lexer);
+        } else {
+          depth--;
+          consume(lexer);
         }
-        depth--;
-        consume(lexer);
       }
-      consumed_any = true;
-      lexer->mark_end(lexer);
-    } else if (lexer->lookahead == '{') {
-      consume(lexer);
-      if (lexer->lookahead == '=') {
-        depth++;
-        consume(lexer);
-      }
-      consumed_any = true;
-      lexer->mark_end(lexer);
     } else {
       consume(lexer);
-      consumed_any = true;
-      lexer->mark_end(lexer);
     }
+    consumed_any = true;
+    lexer->mark_end(lexer);
   }
   return false;
 }
@@ -214,16 +237,30 @@ static bool scan_markdown_fragment_content(TSLexer *lexer) {
 bool tree_sitter_lmd_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
   Scanner *scanner = (Scanner *)payload;
 
-  // lmd: inside a fragment, END wins over CONTENT at `=}`; CONTENT is
-  // raw (no whitespace skipping) so the markdown keeps its layout.
-  if (valid_symbols[MARKDOWN_FRAGMENT_END] && scan_markdown_fragment_end(lexer)) {
-    lexer->result_symbol = MARKDOWN_FRAGMENT_END;
-    return true;
-  }
+  // lmd: inside a fragment, END wins over CONTENT at the closer; CONTENT
+  // is raw (no whitespace skipping) so the markdown keeps its layout. Only
+  // one kind's CONTENT/END symbols are valid at a time (the one whose
+  // START the parser just consumed), so the kind is read off valid_symbols
+  // and no scanner state is needed.
+  static const struct {
+    enum TokenType start, content, end;
+    char close_char;
+  } fragment_kinds[] = {
+    {NODES_FRAGMENT_START, NODES_FRAGMENT_CONTENT, NODES_FRAGMENT_END, 0},
+    {BLOCKS_FRAGMENT_START, BLOCKS_FRAGMENT_CONTENT, BLOCKS_FRAGMENT_END, ':'},
+    {INLINES_FRAGMENT_START, INLINES_FRAGMENT_CONTENT, INLINES_FRAGMENT_END, ']'},
+  };
+  const size_t fragment_kind_count = sizeof(fragment_kinds) / sizeof(fragment_kinds[0]);
 
-  if (valid_symbols[MARKDOWN_FRAGMENT_CONTENT] && scan_markdown_fragment_content(lexer)) {
-    lexer->result_symbol = MARKDOWN_FRAGMENT_CONTENT;
-    return true;
+  for (size_t i = 0; i < fragment_kind_count; i++) {
+    if (valid_symbols[fragment_kinds[i].end] && scan_fragment_end(lexer, fragment_kinds[i].close_char)) {
+      lexer->result_symbol = fragment_kinds[i].end;
+      return true;
+    }
+    if (valid_symbols[fragment_kinds[i].content] && scan_fragment_content(lexer, fragment_kinds[i].close_char)) {
+      lexer->result_symbol = fragment_kinds[i].content;
+      return true;
+    }
   }
 
   if (valid_symbols[BLOCK_STRING_END] && scan_block_end(scanner, lexer)) {
@@ -249,9 +286,36 @@ bool tree_sitter_lmd_external_scanner_scan(void *payload, TSLexer *lexer, const 
 
   skip_whitespaces(lexer);
 
-  if (valid_symbols[MARKDOWN_FRAGMENT_START] && scan_markdown_fragment_start(lexer)) {
-    lexer->result_symbol = MARKDOWN_FRAGMENT_START;
-    return true;
+  // lmd: the marked openers are longer than the unmarked one, so they are
+  // tried first; on failure the lexer position is not reset between
+  // attempts, so each attempt re-scans from a fresh `{`.
+  if (valid_symbols[BLOCKS_FRAGMENT_START] || valid_symbols[INLINES_FRAGMENT_START] || valid_symbols[NODES_FRAGMENT_START]) {
+    // Peek without committing: all three openers start with `{=`.
+    if (lexer->lookahead == '{') {
+      consume(lexer);
+      if (lexer->lookahead == '=') {
+        consume(lexer);
+        if (lexer->lookahead == ':') {
+          if (!valid_symbols[BLOCKS_FRAGMENT_START]) return false;
+          consume(lexer);
+          lexer->result_symbol = BLOCKS_FRAGMENT_START;
+          return true;
+        }
+        if (lexer->lookahead == '[') {
+          if (!valid_symbols[INLINES_FRAGMENT_START]) return false;
+          consume(lexer);
+          lexer->result_symbol = INLINES_FRAGMENT_START;
+          return true;
+        }
+        if (!valid_symbols[NODES_FRAGMENT_START]) return false;
+        lexer->result_symbol = NODES_FRAGMENT_START;
+        return true;
+      }
+      // A lone `{`: not ours. Fall through; the block-string / comment
+      // scans below start with other characters and will not match the
+      // already-consumed `{`, so this returns false for the internal lexer.
+      return false;
+    }
   }
 
   if (valid_symbols[BLOCK_STRING_START] && scan_block_start(scanner, lexer)) {

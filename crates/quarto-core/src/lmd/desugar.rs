@@ -24,8 +24,36 @@ pub enum LmdError {
     LuaParse { line: usize, column: usize },
     #[error("lmd: markdown fragment failed to parse: {0}")]
     MarkdownParse(String),
-    #[error("lmd: `{0}` nodes are not supported inside `{{= … =}}` yet")]
+    #[error("lmd: `{0}` nodes are not supported inside markdown fragments yet")]
     Unsupported(&'static str),
+    #[error("lmd: `{{=[ … ]=}}` asks for inlines but the markdown parsed to {0} blocks")]
+    NotInlines(usize),
+}
+
+/// Which of the three fragment forms a `markdown_fragment` node is, read
+/// off the node kind of its `start` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentKind {
+    /// `{= … =}`: `pandoc.Nodes`, the surrounding context decides.
+    Nodes,
+    /// `{=: … :=}`: `pandoc.Blocks`.
+    Blocks,
+    /// `{=[ … ]=}`: `pandoc.Inlines`.
+    Inlines,
+}
+
+impl FragmentKind {
+    fn of(fragment: tree_sitter::Node<'_>) -> Self {
+        let start = fragment
+            .child_by_field_name("start")
+            .expect("markdown_fragment has a start field");
+        match start.kind() {
+            tree_sitter_lmd::BLOCKS_START => Self::Blocks,
+            tree_sitter_lmd::INLINES_START => Self::Inlines,
+            tree_sitter_lmd::NODES_START => Self::Nodes,
+            other => unreachable!("unknown fragment start kind {other:?}"),
+        }
+    }
 }
 
 /// Desugar `src` (lmd) into plain Lua.
@@ -79,7 +107,7 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
         let pos = fragment.start_position();
         let shift = if pos.row == 0 { first_line_offset } else { 0 };
         let column = base + pos.column.saturating_sub(shift);
-        out.push_str(&emit_fragment(content, column)?);
+        out.push_str(&emit_fragment(content, column, FragmentKind::of(fragment))?);
         last = fragment.end_byte();
     }
     out.push_str(&src[last..]);
@@ -88,18 +116,26 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
 
 /// Parse one fragment's markdown and print it as a Lua expression.
 ///
-/// One paragraph becomes `pandoc.Para(...)`; any other single block becomes
-/// that block's constructor; several blocks become `pandoc.Blocks({...})`.
-/// Whether a fragment should ever produce *inlines* (so it can sit inside
-/// `pandoc.Strong`) is an open design question; the spike always produces
-/// blocks.
-fn emit_fragment(markdown: &str, column: usize) -> Result<String, LmdError> {
+/// - `{= … =}` becomes `pandoc.Nodes({ blocks })`: the reader's blocks,
+///   handed to a constructor that is meant to adapt them to the context
+///   (not implemented yet; see `pandoc.Nodes` in pampa).
+/// - `{=: … :=}` becomes `pandoc.Blocks({ blocks })`.
+/// - `{=[ … ]=}` becomes `pandoc.Inlines({ inlines })`, where the markdown
+///   must parse to a single paragraph (or nothing); anything else is an
+///   error, since the author asked for inlines.
+fn emit_fragment(markdown: &str, column: usize, kind: FragmentKind) -> Result<String, LmdError> {
     let markdown = markdown.trim();
     let blocks = parse_markdown(markdown)?;
     let mut emitter = Emitter::new(column);
-    match blocks.as_slice() {
-        [single] => emitter.block(single)?,
-        many => emitter.blocks_call(many)?,
+    match kind {
+        FragmentKind::Nodes => emitter.blocks_call("Nodes", &blocks)?,
+        FragmentKind::Blocks => emitter.blocks_call("Blocks", &blocks)?,
+        FragmentKind::Inlines => match blocks.as_slice() {
+            [] => emitter.inlines_call("Inlines", &[])?,
+            [Block::Paragraph(p)] => emitter.inlines_call("Inlines", &p.content)?,
+            [Block::Plain(p)] => emitter.inlines_call("Inlines", &p.content)?,
+            other => return Err(LmdError::NotInlines(other.len())),
+        },
     }
     Ok(emitter.finish())
 }
@@ -187,11 +223,33 @@ mod tests {
     }
 
     #[test]
-    fn simple_fragment_becomes_a_para() {
+    fn unmarked_fragment_becomes_nodes() {
         let out = desugar_lua("return {= **hello** =}").unwrap();
         assert_eq!(
             out,
-            r#"return pandoc.Para({
+            r#"return pandoc.Nodes({
+         pandoc.Para({
+           pandoc.Strong({
+             pandoc.Str("hello"),
+           }),
+         }),
+       })"#
+        );
+    }
+
+    #[test]
+    fn blocks_fragment_becomes_blocks() {
+        let out = desugar_lua("return {=: **hello** :=}").unwrap();
+        assert!(out.starts_with("return pandoc.Blocks({\n"), "{out}");
+        assert!(out.contains("pandoc.Para({"), "{out}");
+    }
+
+    #[test]
+    fn inlines_fragment_becomes_inlines_without_a_para() {
+        let out = desugar_lua("return {=[ **hello** ]=}").unwrap();
+        assert_eq!(
+            out,
+            r#"return pandoc.Inlines({
          pandoc.Strong({
            pandoc.Str("hello"),
          }),
@@ -200,8 +258,24 @@ mod tests {
     }
 
     #[test]
+    fn inlines_fragment_rejects_several_blocks() {
+        let err = desugar_lua("return {=[ a\n\nb ]=}").unwrap_err();
+        assert!(matches!(err, LmdError::NotInlines(2)), "{err}");
+    }
+
+    #[test]
+    fn inlines_fragment_can_sit_inside_a_constructor() {
+        let out = desugar_lua("return pandoc.Strong({=[ *a* ]=})").unwrap();
+        assert!(
+            out.starts_with("return pandoc.Strong(pandoc.Inlines({\n"),
+            "{out}"
+        );
+        assert!(out.contains("pandoc.Emph({"), "{out}");
+    }
+
+    #[test]
     fn inline_lmd_code_splices_lua_back_in() {
-        let src = "return tmap(xs, function(v) return {= **`{lmd} v`** =} end)";
+        let src = "return tmap(xs, function(v) return {=: **`{lmd} v`** :=} end)";
         let out = desugar_lua(src).unwrap();
         assert!(out.contains("pandoc.Strong({\n"), "{out}");
         assert!(out.contains("  v,\n"), "{out}");
@@ -211,17 +285,17 @@ mod tests {
 
     #[test]
     fn nested_fragment_inside_inline_lmd_code() {
-        let src = "return {= *a* `{lmd} f({= b =})` =}";
+        let src = "return {=: *a* `{lmd} f({=[ b ]=})` :=}";
         let out = desugar_lua(src).unwrap();
         assert!(out.contains("pandoc.Emph("), "{out}");
-        assert!(out.contains("f(pandoc.Para({"), "{out}");
+        assert!(out.contains("f(pandoc.Inlines({"), "{out}");
         assert!(out.contains("pandoc.Str(\"b\")"), "{out}");
         assert!(!out.contains("{="), "{out}");
     }
 
     #[test]
     fn block_lmd_cell_inside_fragment_becomes_an_iife() {
-        let src = "return {=\nIntro\n\n```{lmd}\nreturn x\n```\n=}";
+        let src = "return {=:\nIntro\n\n```{lmd}\nreturn x\n```\n:=}";
         let out = desugar_lua(src).unwrap();
         assert!(out.starts_with("return pandoc.Blocks({\n"), "{out}");
         assert!(out.contains("(function()\n"), "{out}");
@@ -230,17 +304,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_fragment_is_empty_blocks() {
+    fn empty_fragments() {
         assert_eq!(
             desugar_lua("return {==}").unwrap(),
+            "return pandoc.Nodes({})"
+        );
+        assert_eq!(
+            desugar_lua("return {=::=}").unwrap(),
             "return pandoc.Blocks({})"
+        );
+        assert_eq!(
+            desugar_lua("return {=[]=}").unwrap(),
+            "return pandoc.Inlines({})"
         );
     }
 
     #[test]
     fn several_fragments_in_one_chunk() {
-        let out = desugar_lua("local a = {= x =}\nlocal b = {= y =}").unwrap();
-        assert_eq!(out.matches("pandoc.Para(").count(), 2);
+        let out = desugar_lua("local a = {= x =}\nlocal b = {=[ y ]=}").unwrap();
+        assert_eq!(out.matches("pandoc.Nodes(").count(), 1);
+        assert_eq!(out.matches("pandoc.Inlines(").count(), 1);
         assert!(out.contains("pandoc.Str(\"x\")"));
         assert!(out.contains("pandoc.Str(\"y\")"));
     }
@@ -253,7 +336,7 @@ mod tests {
 
     #[test]
     fn unsupported_node_is_an_error() {
-        let src = "return {= | a | b |\n|---|---|\n| 1 | 2 | =}";
+        let src = "return {=: | a | b |\n|---|---|\n| 1 | 2 | :=}";
         let err = desugar_lua(src).unwrap_err();
         assert!(matches!(err, LmdError::Unsupported("Table")), "{err}");
     }

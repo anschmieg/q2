@@ -150,9 +150,15 @@ impl Emitter {
         self.list(blocks, |e, b| e.block(b))
     }
 
-    /// `pandoc.Blocks({...})`: the form a multi-block fragment takes.
-    pub(super) fn blocks_call(&mut self, blocks: &[Block]) -> Result<(), LmdError> {
-        self.call("Blocks", |e| e.blocks(blocks))
+    /// `pandoc.<name>({ blocks })`: the top of a `{=: … :=}` or `{= … =}`
+    /// fragment (`Blocks` / `Nodes`).
+    pub(super) fn blocks_call(&mut self, name: &str, blocks: &[Block]) -> Result<(), LmdError> {
+        self.call(name, |e| e.blocks(blocks))
+    }
+
+    /// `pandoc.<name>({ inlines })`: the top of a `{=[ … ]=}` fragment.
+    pub(super) fn inlines_call(&mut self, name: &str, inlines: &[Inline]) -> Result<(), LmdError> {
+        self.call(name, |e| e.inlines(inlines))
     }
 
     pub(super) fn block(&mut self, block: &Block) -> Result<(), LmdError> {

@@ -139,10 +139,11 @@ mod tests {
         assert_eq!(cell.attr.1, vec!["lmd".to_string()]);
         assert!(engine_cell_lang(&div.content[0]).is_none());
         assert!(
-            cell.text.starts_with("return pandoc.Para({\n"),
+            cell.text.starts_with("return pandoc.Nodes({\n"),
             "{}",
             cell.text
         );
+        assert!(cell.text.contains("pandoc.Para({"), "{}", cell.text);
         assert!(cell.text.contains("pandoc.Strong({"), "{}", cell.text);
         assert!(cell.text.contains("pandoc.Str(\"hello\")"), "{}", cell.text);
     }

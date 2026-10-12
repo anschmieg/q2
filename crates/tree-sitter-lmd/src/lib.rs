@@ -8,9 +8,17 @@
 //!
 //! The grammar is a fork of `tree-sitter-grammars/tree-sitter-lua` v0.5.0
 //! with one addition: [`markdown_fragment`], an expression whose content is
-//! raw markdown text that the caller hands to the qmd parser. The grammar is
-//! named `lmd` (not `lua`) so this crate can coexist with the upstream
-//! `tree-sitter-lua` crate that `quarto-highlight` links.
+//! raw markdown text that the caller hands to the qmd parser. It comes in
+//! three forms, told apart by the node kind of the `start` field:
+//!
+//! | form | start kind | meaning |
+//! |---|---|---|
+//! | `{= … =}` | [`NODES_START`] | unmarked: the surrounding context decides |
+//! | `{=: … :=}` | [`BLOCKS_START`] | blocks |
+//! | `{=[ … ]=}` | [`INLINES_START`] | inlines |
+//!
+//! The grammar is named `lmd` (not `lua`) so this crate can coexist with the
+//! upstream `tree-sitter-lua` crate that `quarto-highlight` links.
 //!
 //! See `claude-notes/plans/2026-10-12-lmd-exploration.md`.
 //!
@@ -30,8 +38,17 @@ pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_lmd) 
 /// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers#static-node-types
 pub const NODE_TYPES: &str = include_str!("../grammar/src/node-types.json");
 
-/// Node kind of the `{= … =}` expression.
+/// Node kind of the fragment expression, all three forms.
 pub const MARKDOWN_FRAGMENT: &str = "markdown_fragment";
+
+/// Node kind of a fragment's `start` field for the unmarked form `{= … =}`.
+pub const NODES_START: &str = "{=";
+
+/// Node kind of a fragment's `start` field for the blocks form `{=: … :=}`.
+pub const BLOCKS_START: &str = "{=:";
+
+/// Node kind of a fragment's `start` field for the inlines form `{=[ … ]=}`.
+pub const INLINES_START: &str = "{=[";
 
 /// Node kind of the raw markdown text inside a [`MARKDOWN_FRAGMENT`]
 /// (absent when the fragment is empty, `{==}`).
@@ -54,43 +71,53 @@ mod tests {
         parse("return 42");
     }
 
-    #[test]
-    fn markdown_fragment_is_an_expression_with_raw_content() {
-        let src = "return {= **hello** =}";
-        let tree = parse(src);
-        assert!(
-            !tree.root_node().has_error(),
-            "{}",
-            tree.root_node().to_sexp()
-        );
+    fn first_fragment(tree: &tree_sitter::Tree) -> tree_sitter::Node<'_> {
         let mut cursor = tree.walk();
-        let mut found = None;
-        'outer: loop {
+        loop {
             let node = cursor.node();
             if node.kind() == MARKDOWN_FRAGMENT {
-                found = Some(node);
-                break;
+                return node;
             }
             if cursor.goto_first_child() {
                 continue;
             }
             while !cursor.goto_next_sibling() {
-                if !cursor.goto_parent() {
-                    break 'outer;
-                }
+                assert!(cursor.goto_parent(), "no markdown_fragment node");
             }
         }
-        let fragment = found.expect("no markdown_fragment node");
-        let content = fragment
-            .child_by_field_name("content")
-            .expect("fragment has content");
-        assert_eq!(content.kind(), MARKDOWN_CONTENT);
-        assert_eq!(content.utf8_text(src.as_bytes()).unwrap(), " **hello** ");
+    }
+
+    #[test]
+    fn markdown_fragment_forms_are_told_apart_by_the_start_kind() {
+        for (src, start_kind) in [
+            ("return {= **hello** =}", NODES_START),
+            ("return {=: **hello** :=}", BLOCKS_START),
+            ("return {=[ **hello** ]=}", INLINES_START),
+        ] {
+            let tree = parse(src);
+            assert!(
+                !tree.root_node().has_error(),
+                "{}",
+                tree.root_node().to_sexp()
+            );
+            let fragment = first_fragment(&tree);
+            let start = fragment.child_by_field_name("start").expect("start");
+            assert_eq!(start.kind(), start_kind, "{src}");
+            let content = fragment
+                .child_by_field_name("content")
+                .expect("fragment has content");
+            assert_eq!(content.kind(), MARKDOWN_CONTENT);
+            assert_eq!(
+                content.utf8_text(src.as_bytes()).unwrap(),
+                " **hello** ",
+                "{src}"
+            );
+        }
     }
 
     #[test]
     fn plain_tables_still_parse() {
-        let tree = parse("local t = { 1, x = 2, [3] = 4 }\nlocal u = {}");
+        let tree = parse("local t = { 1, x = 2, [3] = 4, [k] = t[1], [[s]] }\nlocal u = {}");
         assert!(
             !tree.root_node().has_error(),
             "{}",

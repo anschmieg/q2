@@ -52,12 +52,19 @@ export default grammar({
     $._block_string_content,
     $._block_string_end,
 
-    // lmd: `{=` … `=}` markdown fragment. The content is scanned
-    // externally because markdown can contain anything, including `}`
-    // and `{`; the scanner balances nested `{=` / `=}` pairs.
-    $._markdown_fragment_start,
-    $._markdown_fragment_content,
-    $._markdown_fragment_end,
+    // lmd: markdown fragments `{= … =}` (unmarked), `{=: … :=}` (blocks)
+    // and `{=[ … ]=}` (inlines). The content is scanned externally because
+    // markdown can contain anything, including `}` and `{`; the scanner
+    // balances nested fragments.
+    $._nodes_fragment_start,
+    $._nodes_fragment_content,
+    $._nodes_fragment_end,
+    $._blocks_fragment_start,
+    $._blocks_fragment_content,
+    $._blocks_fragment_end,
+    $._inlines_fragment_start,
+    $._inlines_fragment_content,
+    $._inlines_fragment_end,
   ],
 
   supertypes: ($) => [$.statement, $.expression, $.declaration, $.variable],
@@ -470,20 +477,35 @@ export default grammar({
         )
       ),
 
-    // lmd: '{=' markdown '=}'
+    // lmd: a markdown fragment is an expression, in three forms that differ
+    // only in how the result is typed:
     //
-    // A markdown fragment is an expression. `{=` cannot begin any Lua
-    // construct (a table constructor field never starts with `=`), so
-    // the token is unambiguous wherever an expression is valid. The
-    // content is raw text; the Rust side hands it to the qmd parser.
+    //   {= … =}    unmarked: pandoc.Nodes, the surrounding context decides
+    //   {=: … :=}  blocks:   pandoc.Blocks
+    //   {=[ … ]=}  inlines:  pandoc.Inlines
+    //
+    // `{=` cannot begin any Lua construct (a table constructor field never
+    // starts with `=`), so the openers are unambiguous wherever an
+    // expression is valid; `{[` would not be (`{[k] = v}`, `{[[s]]}`). The
+    // content is raw text; the Rust side hands it to the qmd parser. The
+    // `start` field's node kind (`{=`, `{=:`, `{=[`) tells the form apart.
     markdown_fragment: ($) =>
-      seq(
-        field('start', alias($._markdown_fragment_start, '{=')),
-        field(
-          'content',
-          optional(alias($._markdown_fragment_content, $.markdown_content))
+      choice(
+        seq(
+          field('start', alias($._nodes_fragment_start, '{=')),
+          field('content', optional(alias($._nodes_fragment_content, $.markdown_content))),
+          field('end', alias($._nodes_fragment_end, '=}'))
         ),
-        field('end', alias($._markdown_fragment_end, '=}'))
+        seq(
+          field('start', alias($._blocks_fragment_start, '{=:')),
+          field('content', optional(alias($._blocks_fragment_content, $.markdown_content))),
+          field('end', alias($._blocks_fragment_end, ':=}'))
+        ),
+        seq(
+          field('start', alias($._inlines_fragment_start, '{=[')),
+          field('content', optional(alias($._inlines_fragment_content, $.markdown_content))),
+          field('end', alias($._inlines_fragment_end, ']=}'))
+        )
       ),
 
     // '...'

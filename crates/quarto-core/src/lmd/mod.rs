@@ -11,9 +11,18 @@
 //! Two pieces of syntax:
 //!
 //! 1. An executable cell `` ```{lmd} `` whose body is Lua.
-//! 2. Inside that Lua, `{= markdown =}` is an expression: the markdown is
-//!    parsed with the qmd reader and rewritten into `pandoc.*` constructor
-//!    calls. Markdown inside a fragment can itself contain lmd code
+//! 2. Inside that Lua, a markdown fragment is an expression: the markdown
+//!    is parsed with the qmd reader and rewritten into `pandoc.*`
+//!    constructor calls. Three forms, differing only in how the result is
+//!    typed:
+//!
+//!    | form | expands to |
+//!    |---|---|
+//!    | `{= … =}` | `pandoc.Nodes({ … })`, the context decides (not implemented yet) |
+//!    | `{=: … :=}` | `pandoc.Blocks({ … })` |
+//!    | `{=[ … ]=}` | `pandoc.Inlines({ … })` |
+//!
+//!    Markdown inside a fragment can itself contain lmd code
 //!    (`` `{lmd} expr` `` inline, `` ```{lmd} `` as a block), which splices
 //!    the Lua back in, so the two languages nest in either direction.
 //!
@@ -26,7 +35,7 @@
 mod desugar;
 mod emit;
 
-pub use desugar::{LmdError, desugar_lua};
+pub use desugar::{FragmentKind, LmdError, desugar_lua};
 
 /// The language tag an lmd cell carries: `` ```{lmd} `` parses to a
 /// `CodeBlock` whose first class is `{lmd}`, and `` `{lmd} expr` `` to a

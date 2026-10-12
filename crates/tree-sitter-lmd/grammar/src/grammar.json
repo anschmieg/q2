@@ -2030,54 +2030,163 @@
       }
     },
     "markdown_fragment": {
-      "type": "SEQ",
+      "type": "CHOICE",
       "members": [
         {
-          "type": "FIELD",
-          "name": "start",
-          "content": {
-            "type": "ALIAS",
-            "content": {
-              "type": "SYMBOL",
-              "name": "_markdown_fragment_start"
-            },
-            "named": false,
-            "value": "{="
-          }
-        },
-        {
-          "type": "FIELD",
-          "name": "content",
-          "content": {
-            "type": "CHOICE",
-            "members": [
-              {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "start",
+              "content": {
                 "type": "ALIAS",
                 "content": {
                   "type": "SYMBOL",
-                  "name": "_markdown_fragment_content"
+                  "name": "_nodes_fragment_start"
                 },
-                "named": true,
-                "value": "markdown_content"
-              },
-              {
-                "type": "BLANK"
+                "named": false,
+                "value": "{="
               }
-            ]
-          }
+            },
+            {
+              "type": "FIELD",
+              "name": "content",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_nodes_fragment_content"
+                    },
+                    "named": true,
+                    "value": "markdown_content"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "FIELD",
+              "name": "end",
+              "content": {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_nodes_fragment_end"
+                },
+                "named": false,
+                "value": "=}"
+              }
+            }
+          ]
         },
         {
-          "type": "FIELD",
-          "name": "end",
-          "content": {
-            "type": "ALIAS",
-            "content": {
-              "type": "SYMBOL",
-              "name": "_markdown_fragment_end"
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "start",
+              "content": {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_blocks_fragment_start"
+                },
+                "named": false,
+                "value": "{=:"
+              }
             },
-            "named": false,
-            "value": "=}"
-          }
+            {
+              "type": "FIELD",
+              "name": "content",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_blocks_fragment_content"
+                    },
+                    "named": true,
+                    "value": "markdown_content"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "FIELD",
+              "name": "end",
+              "content": {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_blocks_fragment_end"
+                },
+                "named": false,
+                "value": ":=}"
+              }
+            }
+          ]
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "start",
+              "content": {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_inlines_fragment_start"
+                },
+                "named": false,
+                "value": "{=["
+              }
+            },
+            {
+              "type": "FIELD",
+              "name": "content",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "ALIAS",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_inlines_fragment_content"
+                    },
+                    "named": true,
+                    "value": "markdown_content"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "FIELD",
+              "name": "end",
+              "content": {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "_inlines_fragment_end"
+                },
+                "named": false,
+                "value": "]=}"
+              }
+            }
+          ]
         }
       ]
     },
@@ -3515,15 +3624,39 @@
     },
     {
       "type": "SYMBOL",
-      "name": "_markdown_fragment_start"
+      "name": "_nodes_fragment_start"
     },
     {
       "type": "SYMBOL",
-      "name": "_markdown_fragment_content"
+      "name": "_nodes_fragment_content"
     },
     {
       "type": "SYMBOL",
-      "name": "_markdown_fragment_end"
+      "name": "_nodes_fragment_end"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_blocks_fragment_start"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_blocks_fragment_content"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_blocks_fragment_end"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_inlines_fragment_start"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_inlines_fragment_content"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_inlines_fragment_end"
     }
   ],
   "inline": [],
