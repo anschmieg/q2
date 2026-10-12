@@ -390,6 +390,7 @@ impl PipelineStage for LmdExecuteStage {
             ctx.format.lua_format(),
             &ctx.document.input,
             attribution,
+            &doc.ast.meta,
         )
         .map_err(|err| PipelineError::stage_error(self.name(), err.to_string()))?;
 
@@ -411,12 +412,13 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    fn runtime() -> LmdRuntime {
+    fn runtime(meta: &quarto_pandoc_types::config_value::ConfigValue) -> LmdRuntime {
         LmdRuntime::new(
             Arc::new(NativeRuntime::new()),
             "html",
             Path::new("doc.qmd"),
             None,
+            meta,
         )
         .expect("lmd runtime")
     }
@@ -432,7 +434,11 @@ mod tests {
         let errors = super::super::lmd_desugar::desugar_lmd_cells(&mut blocks);
         assert!(errors.is_empty(), "{errors:?}");
         let mut diagnostics = Vec::new();
-        pollster::block_on(execute_lmd_cells(&mut blocks, &runtime(), &mut diagnostics));
+        pollster::block_on(execute_lmd_cells(
+            &mut blocks,
+            &runtime(&ast.meta),
+            &mut diagnostics,
+        ));
         (blocks, diagnostics)
     }
 
@@ -480,6 +486,21 @@ mod tests {
         assert_eq!(div.content.len(), 2, "{:?}", div.content);
         assert_eq!(para_text(&div.content[0]), "**a**");
         assert_eq!(para_text(&div.content[1]), "**b**");
+    }
+
+    /// The example the exploration started from, now runnable as written
+    /// (spike 6): metadata reached through `meta` and `quarto.metadata.get`.
+    #[test]
+    fn the_motivating_example_against_document_metadata() {
+        let qmd = "---\nstuff: [a, b, c, d]\n---\n\n::: foo\n\n```{lmd}\nlocal out = pandoc.Blocks({})\nfor _, v in ipairs(meta.stuff) do\n  out:extend({=: **`{lmd} v`** :=})\nend\nreturn out\n```\n\n:::\n\nAlso `{lmd} quarto.metadata.get('stuff')[4]` and `{lmd} tostring(#meta.stuff)`.\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Div(div) = &blocks[0] else {
+            panic!("expected Div, got {:?}", blocks[0]);
+        };
+        let texts: Vec<String> = div.content.iter().map(para_text).collect();
+        assert_eq!(texts, vec!["**a**", "**b**", "**c**", "**d**"]);
+        assert_eq!(para_text(&blocks[1]), "Also d and 4.");
     }
 
     #[test]

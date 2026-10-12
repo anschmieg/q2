@@ -47,7 +47,10 @@ use super::filter::{FilterResult, create_filter_environment};
 use super::list::get_or_create_blocks_metatable;
 use super::list::get_or_create_inlines_metatable;
 use super::nodes::LuaNodes;
-use super::types::{LuaBlock, LuaInline, lua_facing_type_name, peek_inlines_fuzzy};
+use super::types::{
+    LuaBlock, LuaInline, is_tagged_list, lua_facing_type_name, peek_blocks_fuzzy,
+    peek_inlines_fuzzy,
+};
 use crate::attribution::AttributionLookup;
 use crate::pandoc::{Block, Inline};
 use quarto_system_runtime::SystemRuntime;
@@ -117,8 +120,12 @@ impl LmdRuntime {
         target_format: &str,
         document_path: &Path,
         attribution: Option<Arc<dyn AttributionLookup>>,
+        meta: &quarto_pandoc_types::config_value::ConfigValue,
     ) -> FilterResult<Self> {
         let lua = create_filter_environment(runtime, target_format, document_path, attribution)?;
+        // quarto.metadata.get / global `meta`: the document's merged
+        // metadata, the same snapshot every cell sees.
+        super::metadata::register_quarto_metadata(&lua, meta)?;
         Ok(Self { lua })
     }
 
@@ -223,6 +230,17 @@ fn classify_cell_value(lua: &Lua, value: Value) -> Result<LmdCellValue, LmdCellE
                         let nodes = ud.borrow::<LuaNodes>().expect("checked above");
                         blocks.extend(nodes.to_blocks(lua));
                     }
+                    // A tagged `pandoc.Blocks` element splices, as it does in
+                    // every constructor (`meta.stuff:map(function(v) return
+                    // {=: … :=} end)` is a List of Blocks).
+                    Value::Table(inner)
+                        if is_tagged_list(lua, inner, get_or_create_blocks_metatable)
+                            .map_err(LmdCellError::Lua)? =>
+                    {
+                        blocks.extend(
+                            peek_blocks_fuzzy(lua, item.clone()).map_err(LmdCellError::Lua)?,
+                        );
+                    }
                     other => {
                         return Err(LmdCellError::NotBlocks {
                             got: format!("a list whose element {} is {}", i + 1, describe(other)),
@@ -288,6 +306,16 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
                         let nodes = ud.borrow::<LuaNodes>().expect("checked above");
                         inlines.extend(nodes.to_inlines().map_err(LmdCellError::Lua)?);
                     }
+                    // A tagged `pandoc.Inlines` element splices (metadata
+                    // strings are Inlines: `{ meta.a, meta.b }`).
+                    Value::Table(inner)
+                        if is_tagged_list(lua, inner, get_or_create_inlines_metatable)
+                            .map_err(LmdCellError::Lua)? =>
+                    {
+                        inlines.extend(
+                            peek_inlines_fuzzy(lua, item.clone()).map_err(LmdCellError::Lua)?,
+                        );
+                    }
                     other => {
                         return not_inlines(format!(
                             "a list whose element {} is {}",
@@ -327,6 +355,7 @@ mod tests {
             "html",
             Path::new("doc.qmd"),
             None,
+            &quarto_pandoc_types::config_value::ConfigValue::default(),
         )
         .expect("lmd runtime")
     }
@@ -512,6 +541,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("holds 2 blocks"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tagged_lists_splice_as_cell_list_elements() {
+        // A List of Blocks (what `:map` over fragments produces) flattens.
+        let out = blocks(
+            run("return pandoc.List({ pandoc.Blocks({pandoc.Para({})}), pandoc.Blocks({pandoc.Para({}), pandoc.HorizontalRule()}) })")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 3, "{out:?}");
+        let out = inlines(
+            run_inline("{ pandoc.Str('a'), pandoc.Inlines({pandoc.Str('b'), pandoc.Str('c')}) }")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 3, "{out:?}");
+        // An untagged nested table is still rejected.
+        let err = run("return { { pandoc.Para({}) } }").await.unwrap_err();
+        assert!(err.to_string().contains("element 1 is table"), "{err}");
     }
 
     #[tokio::test]

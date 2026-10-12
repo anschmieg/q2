@@ -421,6 +421,31 @@ mod tests {
         assert!(matches!(&d.content[3], Block::Plain(_)));
     }
 
+    /// q2 extension pinned next to the Nodes rows: a tagged Inlines or
+    /// Blocks list splices when it is an element of a content list. Pandoc
+    /// rejects a list inside a list, so this changes no valid program.
+    #[test]
+    fn tagged_inlines_and_blocks_lists_splice_as_content_list_elements() {
+        let lua = env();
+        let Inline::Strong(s) = eval_inline(
+            &lua,
+            "pandoc.Strong({pandoc.Str('a'), pandoc.Inlines({pandoc.Str('b'), pandoc.Str('c')}), 'd'})",
+        ) else {
+            panic!("expected Strong");
+        };
+        assert_eq!(inline_texts(&s.content), vec!["a", "b", "c", "d"]);
+        let Block::Div(d) = eval_block(
+            &lua,
+            &format!("pandoc.Div({{{PARA_X}, pandoc.Blocks({{{PARA_X}, {PARA_X}}})}})"),
+        ) else {
+            panic!("expected Div");
+        };
+        assert_eq!(d.content.len(), 3, "{:?}", d.content);
+        // An untagged plain table as an element is still an error.
+        let err = eval_err(&lua, "pandoc.Strong({pandoc.Str('a'), {pandoc.Str('b')}})");
+        assert!(err.contains("expected"), "{err}");
+    }
+
     #[test]
     fn where_exactly_one_node_is_required_nodes_must_resolve_to_one() {
         let lua = env();

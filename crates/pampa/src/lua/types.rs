@@ -2103,6 +2103,19 @@ pub fn peek_inline_fuzzy(lua: &Lua, val: Value) -> Result<Inline> {
     }
 }
 
+/// Whether `table` carries the metatable `get_mt` hands out (the
+/// `pandoc.Inlines` / `pandoc.Blocks` tag).
+pub(crate) fn is_tagged_list(
+    lua: &Lua,
+    table: &mlua::Table,
+    get_mt: fn(&Lua) -> Result<mlua::Table>,
+) -> Result<bool> {
+    let Some(mt) = table.metatable() else {
+        return Ok(false);
+    };
+    Ok(mt.to_pointer() == get_mt(lua)?.to_pointer())
+}
+
 /// Peek a list of Inlines from a Lua value, with fuzzy coercion.
 ///
 /// Matches Pandoc's `peekInlinesFuzzy`:
@@ -2130,6 +2143,16 @@ pub fn peek_inlines_fuzzy(lua: &Lua, val: Value) -> Result<Vec<Inline>> {
                     && let Ok(nodes) = ud.borrow::<super::nodes::LuaNodes>()
                 {
                     inlines.extend(nodes.to_inlines()?);
+                    continue;
+                }
+                // So does a tagged `pandoc.Inlines` element. Pandoc rejects a
+                // list inside a list, so no valid pandoc program changes
+                // meaning; q2 adds it because metadata strings and lmd
+                // splices arrive as Inlines (`pandoc.Strong({ meta.title })`).
+                if let Value::Table(inner) = &value
+                    && is_tagged_list(lua, inner, super::list::get_or_create_inlines_metatable)?
+                {
+                    inlines.extend(peek_inlines_fuzzy(lua, value)?);
                     continue;
                 }
                 inlines.push(peek_inline_fuzzy(lua, value)?);
@@ -2236,6 +2259,15 @@ pub fn peek_blocks_fuzzy(lua: &Lua, val: Value) -> Result<Vec<Block>> {
                     && let Ok(nodes) = ud.borrow::<super::nodes::LuaNodes>()
                 {
                     blocks.extend(nodes.to_blocks(lua));
+                    continue;
+                }
+                // So does a tagged `pandoc.Blocks` element (see the Inlines
+                // case in `peek_inlines_fuzzy`): `pandoc.Blocks({ card(1),
+                // card(2) })` where each card is Blocks.
+                if let Value::Table(inner) = &value
+                    && is_tagged_list(lua, inner, super::list::get_or_create_blocks_metatable)?
+                {
+                    blocks.extend(peek_blocks_fuzzy(lua, value)?);
                     continue;
                 }
                 blocks.push(peek_block_fuzzy(lua, value)?);

@@ -254,6 +254,9 @@ pub async fn apply_lua_filter(
     })?;
 
     let lua = create_filter_environment(runtime, target_format, filter_path, attribution)?;
+    // quarto.metadata.get / `meta`: a snapshot of the document's metadata
+    // as this filter starts (Q1 parity, quarto-cli PR 13246).
+    super::metadata::register_quarto_metadata(&lua, &pandoc.meta)?;
 
     // Load and run the filter script, KEEPING its return values.
     //

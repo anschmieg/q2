@@ -210,7 +210,7 @@ Taken as proposed on 2026-10-12, with the user's explicit yes on the last two:
 1. **A cell may return a `Block`, a list of `Block`s, or `nil`** (the cell vanishes). `Inlines`, a single `Inline`, and strings are errors that name what came back, not wrapped in a `Plain`: a cell is block context, and `{=: … :=}` already says "blocks". Multiple return values are ignored past the first.
 2. **One Lua state per document.** Globals set by one cell are visible to later cells, like a notebook. Cells run in pre-order document order, so a cell inside a div runs before a top-level cell that follows the div.
 3. **After the engine, before user pre-filters.** `LmdDesugarStage` (pre-engine) rewrites the cell in place, drops the `{lmd}` class for a plain `lmd` one, and sets `lmd="pending"`; an unbraced class is plain code to every engine, so knitr and jupyter never see a cell. `LmdExecuteStage` finds the marked cells.
-4. **Metadata stays out.** Q1's `quarto.metadata` (quarto-cli PR 13246; see `external-sources/quarto-cli/src/resources/lua-types/quarto/metadata.lua`) is not ported to q2 yet, and `quarto.doc.meta` is listed as unsupported in pampa. The spike runs in immediate mode. Porting it is its own strand when wanted.
+4. **Metadata stays out** of spike 2; the spike runs in immediate mode. (Ported in spike 6, below.)
 5. **Echo is a cell option**, `--| echo: true` in Lua comment syntax, off by default. It keeps the (option-stripped) desugared Lua as a plain `lmd` code block above the result.
 6. **A failing cell is an error diagnostic, located at the cell**, and the cell stays in the document as that displayed block, so the rest of the page renders and the failing Lua can be read. Three failure kinds: the chunk does not compile or raises, or it returns the wrong kind of value (the hint names the three accepted shapes and `{=: … :=}`).
 7. **Inline `{lmd}` code in ordinary paragraphs stays out of scope** for this spike. (Done in spike 3, below.)
@@ -382,6 +382,38 @@ On the lmd side the desugarer now strips reader-derived ids from fragment headin
 
 `{{{< meta foo >}}}` with `foo: 1.2` (a YAML number) expanded to nothing in the heading, so the fixture uses a string. Not investigated here.
 
+## Spike 6 (done 2026-10-12): `quarto.metadata` and the `meta` proxy
+
+The motivating example now runs as it was first written: metadata is reachable from a cell.
+
+### `quarto.metadata.get(key)`
+
+Quarto 1's API (quarto-cli PR 13246; the vendored tree has its type stub at `src/resources/lua-types/quarto/metadata.lua` and one caller in `email.lua`): the value at a dotted key, or `nil` when the key or any part of it is missing. Values come back in the shapes a filter's `Meta` handler already sees (`push_config_value`): strings are `Inlines` (a YAML string in document metadata is markdown, as pandoc's `MetaInlines`), numbers and booleans are themselves, arrays are `pandoc.List`s, maps are plain tables. q2 extends the path syntax with numeric segments that index arrays 1-based (`"authors.1.name"`), which the shortcode engine's `meta["author.1"]` fallback already did. A segment is read as a key when the node is a map, so `'2024': year` is reachable as `get("2024")`.
+
+Registered in three environments: every Lua filter (a snapshot of the metadata as that filter starts), every shortcode handler call, and the lmd cell runtime. Implementation: `crates/pampa/src/lua/metadata.rs`.
+
+### `meta`
+
+The same lookup as a global object you navigate instead of spelling a key: `meta.a.b` is `get("a.b")`, `meta.authors[1].name` is `get("authors.1.name")`. The design question was arrays, and the answer is that maps and arrays are treated differently on purpose:
+
+| value reached through `meta` | what you get | why |
+|---|---|---|
+| map | a lazy, read-only proxy (`LuaMetaProxy`) | navigation keeps going; `pairs`, `#`, `tostring` (`meta.author.affil`) work; a write is an error instead of silently going nowhere |
+| array | a real `pandoc.List` of its converted items; map items are proxies again | arrays are *iterated*: `#`, `ipairs`, `table.concat` and `List:map` all want a real table, and no proxy can offer `List` methods |
+| anything else | the leaf value, as `get` returns it | |
+
+So `meta.stuff:map(function(v) … end)` works with no helper, which was the `tmap` in the original sketch. A missing key is `nil` at that point, so `meta.missing.inner` raises Lua's usual "attempt to index a nil value"; `get("missing.inner")` is the form for a chain that may be absent. `pandoc.utils.type(meta.x)` says `Meta` for proxies.
+
+An "absent proxy" that never errors was considered and rejected: `if meta.missing then` would be truthy.
+
+### The splice fix it forced
+
+`meta.stuff` items are `Inlines`, and the desugarer splices an inline cell's value as a *list element*: `` **`{lmd} v`** `` becomes `pandoc.Strong({ v })`. Pandoc rejects a list inside a list, so that failed. The coercion layer now splices a tagged `pandoc.Inlines` element into the enclosing inline list, and a tagged `pandoc.Blocks` element into the enclosing block list (so `pandoc.Blocks({ card(1), card(2) })` from spike 5 also just works). The lmd cell contracts do the same, so `return meta.stuff:map(function(v) return {=: … :=} end)`, a `List` of `Blocks`, is accepted by a block cell. Untagged plain tables as elements still error. No valid pandoc program changes meaning; this is pinned next to the `Nodes` rows in `nodes.rs` and in `lmd.rs`.
+
+### Pins
+
+`pampa::lua::metadata::tests` (8): leaf shapes, dotted and numeric paths, every missing-part case is `nil`, lists and tables from `get`; `meta` navigation agrees with `get`, arrays are real lists with proxy items and `:map`, missing keys are `nil` and writes error, `pairs`/`#`/type. `lmd_execute::tests::the_motivating_example_against_document_metadata` runs the original example through `meta.stuff` and `quarto.metadata.get`.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -449,7 +481,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 6 candidates**, in no particular order: porting `quarto.metadata` from Q1 so the motivating example works as written; `file:line` chunk names for Lua error messages.
+- **Spike 7 candidates**: `file:line` chunk names for Lua error messages; a fixture-and-snapshot suite for the demo documents.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 
