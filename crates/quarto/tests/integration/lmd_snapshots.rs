@@ -46,13 +46,18 @@ fn render(name: &str) -> (String, String) {
         .env("NO_COLOR", "1")
         .output()
         .expect("q2 runs");
-    let md = std::fs::read_to_string(dir.join(format!("{name}.md")))
-        .unwrap_or_else(|e| panic!("no markdown output for {name}: {e}"));
     let stderr = normalize(
         &strip_ansi(&String::from_utf8_lossy(&output.stderr)),
         &dir,
         name,
     );
+    let md = std::fs::read_to_string(dir.join(format!("{name}.md"))).unwrap_or_else(|e| {
+        panic!(
+            "no markdown output for {name}: {e}\nexit: {:?}\nstdout:\n{}\nstderr:\n{stderr}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
     (md, stderr)
 }
 

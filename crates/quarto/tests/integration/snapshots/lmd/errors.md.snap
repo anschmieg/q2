@@ -4,20 +4,20 @@ expression: md
 ---
 A Lua syntax error (left as written):
 
-``` {.{lmd} .code-with-copy}
+``` {.lmd .code-with-copy}
 local x = 1
 return {= a =} +
 ```
 
 A markdown error inside a fragment (left as written):
 
-``` {.{lmd} .code-with-copy}
+``` {.lmd .code-with-copy}
 return {=: This line mentions the groups' Unique IDs. :=}
 ```
 
 An unsupported node inside a fragment (left as written):
 
-``` {.{lmd} .code-with-copy}
+``` {.lmd .code-with-copy}
 return {=:
 | a | b |
 |---|---|

@@ -13,7 +13,8 @@
 //! The stage runs before engine execution so no engine is asked to run an
 //! `lmd` cell: an unbraced `lmd` class is plain code to every engine. A
 //! cell that fails to desugar (Lua syntax error, unsupported markdown node)
-//! is left untouched and reported as a warning. Spike 1 of
+//! keeps its text, loses the braced class for the same reason, and is
+//! reported as a warning. Spike 1 of
 //! `claude-notes/plans/2026-10-12-lmd-exploration.md` stopped here, which
 //! is why `q2 render --to markdown` of a document shows the desugared Lua
 //! whenever the execute stage is absent or a cell fails to run.
@@ -111,6 +112,10 @@ pub fn desugar_lmd_cells(
                         error: err,
                         location,
                     });
+                    // Left as written, but as plain `lmd` code: an engine
+                    // must never be asked to run a cell lmd could not read.
+                    code.text = expr.to_string();
+                    code.attr.1.push(LMD_LANG.to_string());
                 }
             }
         }
@@ -147,6 +152,17 @@ pub fn desugar_lmd_cells(
                         error: err,
                         location,
                     });
+                    // Left as written, but with the class un-braced: a
+                    // braced `{lmd}` class is an unclaimed engine cell, and
+                    // on a machine with no engine runtime that fails the
+                    // whole render (CI caught this). The text stays so the
+                    // author can read what did not parse.
+                    let tag = format!("{{{LMD_LANG}}}");
+                    for class in cell.attr.1.iter_mut() {
+                        if *class == tag {
+                            *class = LMD_LANG.to_string();
+                        }
+                    }
                 }
             }
         }
@@ -360,12 +376,32 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_cell_is_left_alone_and_reported() {
-        let (mut blocks, sources) = parse("```{lmd}\nreturn {= a =} +\n```\n");
-        let before = blocks.clone();
+    fn a_broken_cell_keeps_its_text_but_is_no_longer_an_engine_cell() {
+        let (mut blocks, sources) =
+            parse("```{lmd}\nreturn {= a =} +\n```\n\nAnd `{lmd} {= b =} +` inline.\n");
         let errors = desugar_lmd_cells(&mut blocks, &sources);
-        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(matches!(errors[0].error, LmdError::LuaParse { .. }));
-        assert_eq!(blocks, before);
+        // The block cell: text as written, class un-braced, no marker.
+        let cell = code_block(&blocks[0]);
+        assert_eq!(cell.text, "return {= a =} +");
+        assert_eq!(cell.attr.1, vec!["lmd".to_string()]);
+        assert!(cell.attr.2.get("lmd").is_none());
+        assert!(engine_cell_lang(&blocks[0]).is_none());
+        // The inline cell: expression as written, tag moved to the class.
+        let Block::Paragraph(p) = &blocks[1] else {
+            panic!("expected Para");
+        };
+        let code = p
+            .content
+            .iter()
+            .find_map(|i| match i {
+                Inline::Code(c) => Some(c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(code.text, "{= b =} +");
+        assert_eq!(code.attr.1, vec!["lmd".to_string()]);
+        assert!(code.attr.2.get("lmd").is_none());
     }
 }

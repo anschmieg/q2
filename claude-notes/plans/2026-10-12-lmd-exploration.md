@@ -502,6 +502,8 @@ Both include cases from the review hold and are pinned end to end in `tests/inte
 
 The stderr snapshots are the guard for source mapping: a regression in line padding, chunk naming or rerooting changes a line number or an underline, and the diff says where.
 
+CI caught one thing the suite's first run missed locally: a cell that fails to *desugar* used to be left entirely as written, braced `{lmd}` class included, so the engine stage saw it as an unclaimed engine cell and fell back to jupyter; on a machine with no engine runtime (CI) that fails the whole render before any output. Locally jupyter is installed, which hid it. A failed cell now keeps its text but loses the braced class (an inline cell keeps its expression and gets the tag as a class), the same shape an execute-time failure already had.
+
 ### Follow-ups filed
 
 - bd-f6tt2exg: `CodeBlock.text_source` for exact anchors under blockquote and list gutters (the `Math.text_source` treatment).
