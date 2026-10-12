@@ -489,6 +489,24 @@ Both include cases from the review hold and are pinned end to end in `tests/inte
 
 `lmd::anchor::tests` (4), `lmd::desugar::tests` line-preserving (3) and unanchored-error (2), `lmd_desugar::tests` located failures (3), `lmd_execute::tests` source mapping (5: runtime line, lines across a fragment and option lines, inline line, blockquote line, option-line location), `pampa::lua::lmd::tests` chunk name and padding (1), and the two include cases.
 
+## Snapshot suite (2026-10-12)
+
+`crates/quarto/tests/integration/lmd_snapshots.rs` drives the real binary over the four fixtures in `tests/integration/fixtures/lmd/` with `--to markdown` and pins, per fixture, the markdown the qmd writer produced and the diagnostics on stderr (ANSI stripped, the scratch directory and Lua's abbreviated chunk tails normalized to `<dir>`). Snapshots live in `tests/integration/snapshots/lmd/`; update with `INSTA_UPDATE=always cargo nextest run -p quarto -E 'test(lmd_snapshots)'` and review the diff.
+
+| fixture | pins |
+|---|---|
+| `fragments.qmd` | the three forms, echoed in the line-preserving form; nesting in both directions; headings, lists, links, code, math, quotes, line breaks, attributes |
+| `cells.qmd` | the motivating example as first written (`meta.stuff:map`); shared state across cells; inline cells reading `meta` and `quarto.metadata.get`; a vanishing cell; echo with a padded multi-line fragment |
+| `nodes-and-ids.qmd` | every `pandoc.Nodes` row; a reused fragment component getting `hello`, `bye`, `hello-1`; a pinned id surviving; a document heading with an inline cell getting `hello-world` |
+| `errors.qmd` | one of each failure: Lua syntax error on its line, markdown error at its byte inside a fragment, unsupported node at the node, runtime error with `<dir>/errors.qmd:32:` and a traceback, wrong return shape, inline runtime error and wrong shape on their code spans, a blockquoted cell on its line, invalid cell options on the option line; every failing cell left displayed |
+
+The stderr snapshots are the guard for source mapping: a regression in line padding, chunk naming or rerooting changes a line number or an underline, and the diff says where.
+
+### Follow-ups filed
+
+- bd-f6tt2exg: `CodeBlock.text_source` for exact anchors under blockquote and list gutters (the `Math.text_source` treatment).
+- bd-o7ujtnk3: project-relative chunk names, so Lua's 60-byte `LUA_IDSIZE` stops abbreviating paths in messages.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -556,7 +574,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 8 candidates**: a fixture-and-snapshot suite for the demo documents; project-relative chunk names; `CodeBlock.text_source` for column accuracy under gutters.
+- Filed as follow-up strands: bd-o7ujtnk3 (project-relative chunk names) and bd-f6tt2exg (`CodeBlock.text_source`). The snapshot suite is in.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 

@@ -6166,6 +6166,7 @@ dependencies = [
  "dunce",
  "include_dir",
  "inquire",
+ "insta",
  "mimalloc",
  "open",
  "openssl-sys",

@@ -379,8 +379,9 @@ pub async fn execute_lmd_cells(
                     Ok(LmdInlineValue::Nothing) => CellOutput::Inlines(Vec::new()),
                     Ok(LmdInlineValue::Inlines(result)) => CellOutput::Inlines(result),
                     Err(err) => {
-                        let at = chunk.locate(&err.to_string(), sources);
-                        diagnostics.push(failure_diagnostic(cell, &err, at));
+                        // The code span is on the reported line and tighter
+                        // than the line, so it stays the location.
+                        diagnostics.push(failure_diagnostic(cell, &err, None));
                         CellOutput::Inlines(vec![displayed_inline_cell(
                             &cell.text,
                             &cell.source_info,
@@ -935,10 +936,9 @@ mod tests {
             "{:?}",
             diags[0]
         );
-        assert_eq!(
-            located_text(&diags[0], &sources),
-            "Second `{lmd} nope()` here."
-        );
+        // The location is the expression itself (exact anchor), tighter
+        // than the line.
+        assert_eq!(located_text(&diags[0], &sources), "nope()");
     }
 
     #[test]
