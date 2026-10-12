@@ -540,7 +540,11 @@ This runs:
    fail-fast lints (step 1 in the xtask's numbering). The CSS lint enforces
    `hub-client/design-system.md` and runs even under `--skip-hub-build`;
    disable it with `--skip-css-lint`.
-1. `cargo build --workspace` - Build all Rust crates
+1. `cargo build --workspace` - Build all Rust crates, then
+   `cargo run --bin q2 -- render --strict claude-notes` - render the notes
+   website the way CI does, so a note that fails to parse or warns fails
+   here too (seconds; skipped by `--skip-rust-build`, or alone with
+   `--skip-claude-notes-render`)
 2. `cargo nextest run --workspace` - Run all Rust tests
 3. `npm run build --if-present -w ts-packages/...` - Build the ts-packages
    workspaces, then smoke-check the quarto-hub-mcp server (`node
@@ -556,6 +560,7 @@ cargo xtask verify --skip-rust-tests    # Skip Rust tests
 cargo xtask verify --skip-hub-tests     # Skip hub-client tests
 cargo xtask verify --skip-hub-build     # Skip hub-client build entirely
 cargo xtask verify --skip-css-lint      # Skip the hub-client CSS lint
+cargo xtask verify --skip-claude-notes-render  # Skip the strict claude-notes render
 cargo xtask verify --e2e                # Include slower e2e browser tests
 ```
 

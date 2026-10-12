@@ -257,6 +257,9 @@ jobs:
       # Linux-only: parsing is platform-independent. `!cancelled()` so a
       # red test does not hide a bad note, or the other way round.
       # Guidance for notes that pass: claude-notes/instructions/writing-notes.md.
+      # `cargo xtask verify` runs the same render after its Rust build
+      # (bd-zn87vwi8); a test in crates/xtask/src/verify.rs fails if this
+      # line's q2 args and verify's CLAUDE_NOTES_RENDER_ARGS diverge.
       - name: Render claude-notes (warnings are errors)
         if: runner.os == 'Linux' && !cancelled()
         shell: bash

@@ -112,8 +112,9 @@ It reports each problem with a location, and for "unclosed" errors the opening
 delimiter. `--strict` makes warnings exit non-zero too, which is what CI does:
 the test suite (`.github/workflows/test-suite.yml`, Linux leg) runs
 `q2 render --strict claude-notes` with the `q2` it built from the branch, so a
-note that fails to parse or warns fails the PR (`cargo run --bin q2 -- render
---strict claude-notes` is the local equivalent; it takes a few seconds). A
+note that fails to parse or warns fails the PR. `cargo xtask verify` runs the
+same render right after its Rust build (`cargo run --bin q2 -- render --strict
+claude-notes` on its own; it takes a few seconds). A
 warning a note triggers on purpose
 is switched off in that note's front matter, with a reason:
 `diagnostics: {Q-2-50: {level: off, reason: "..."}}`. Errors cannot be switched off.
