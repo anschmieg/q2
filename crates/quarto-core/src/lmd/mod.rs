@@ -18,7 +18,7 @@
 //!
 //!    | form | expands to |
 //!    |---|---|
-//!    | `{= … =}` | `pandoc.Nodes({ … })`, the context decides (not implemented yet) |
+//!    | `{= … =}` | `pandoc.Nodes({ … })`, the context decides (see `pampa::lua::nodes`) |
 //!    | `{=: … :=}` | `pandoc.Blocks({ … })` |
 //!    | `{=[ … ]=}` | `pandoc.Inlines({ … })` |
 //!

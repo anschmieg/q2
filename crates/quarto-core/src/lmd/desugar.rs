@@ -117,8 +117,9 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
 /// Parse one fragment's markdown and print it as a Lua expression.
 ///
 /// - `{= … =}` becomes `pandoc.Nodes({ blocks })`: the reader's blocks,
-///   handed to a constructor that is meant to adapt them to the context
-///   (not implemented yet; see `pandoc.Nodes` in pampa).
+///   handed to a value that adapts to the context it lands in (a `Para`
+///   stays a `Para` in block context and unwraps to its inlines in inline
+///   context; see `pampa::lua::nodes` for the full table).
 /// - `{=: … :=}` becomes `pandoc.Blocks({ blocks })`.
 /// - `{=[ … ]=}` becomes `pandoc.Inlines({ inlines })`, where the markdown
 ///   must parse to a single paragraph (or nothing); anything else is an

@@ -20,7 +20,10 @@
 //! Anything else is an error that names what came back. In particular
 //! `Inlines`, a single `Inline` and strings are rejected rather than
 //! wrapped in a `Plain`: a cell is block context, and the fragment syntax
-//! already lets the author say `{=: … :=}` when they mean blocks.
+//! already lets the author say `{=: … :=}` when they mean blocks. The one
+//! value that *is* adapted is `pandoc.Nodes` (the unmarked `{= … =}`
+//! fragment), which resolves by the table in `nodes.rs`: a block cell is
+//! block context, an inline cell is inline context.
 //!
 //! An *inline* cell (`` `{lmd} expr` `` in a paragraph) is an expression
 //! evaluated in the same state, with the mirror-image contract
@@ -43,6 +46,7 @@ use quarto_error_reporting::DiagnosticMessage;
 use super::filter::{FilterResult, create_filter_environment};
 use super::list::get_or_create_blocks_metatable;
 use super::list::get_or_create_inlines_metatable;
+use super::nodes::LuaNodes;
 use super::types::{LuaBlock, LuaInline, lua_facing_type_name, peek_inlines_fuzzy};
 use crate::attribution::AttributionLookup;
 use crate::pandoc::{Block, Inline};
@@ -180,6 +184,10 @@ fn classify_cell_value(lua: &Lua, value: Value) -> Result<LmdCellValue, LmdCellE
                 let block = block.extract_flushed(lua).map_err(LmdCellError::Lua)?;
                 return Ok(LmdCellValue::Blocks(vec![block]));
             }
+            if let Ok(nodes) = ud.borrow::<LuaNodes>() {
+                // Block context: blocks stay, inlines become a Plain.
+                return Ok(LmdCellValue::Blocks(nodes.to_blocks(lua)));
+            }
             if ud.borrow::<LuaInline>().is_ok() {
                 return Err(LmdCellError::NotBlocks {
                     got: "an Inline".to_string(),
@@ -211,6 +219,10 @@ fn classify_cell_value(lua: &Lua, value: Value) -> Result<LmdCellValue, LmdCellE
                             .map_err(LmdCellError::Lua)?;
                         blocks.push(block);
                     }
+                    Value::UserData(ud) if ud.borrow::<LuaNodes>().is_ok() => {
+                        let nodes = ud.borrow::<LuaNodes>().expect("checked above");
+                        blocks.extend(nodes.to_blocks(lua));
+                    }
                     other => {
                         return Err(LmdCellError::NotBlocks {
                             got: format!("a list whose element {} is {}", i + 1, describe(other)),
@@ -240,6 +252,13 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
                 let inline = inline.extract_flushed(lua).map_err(LmdCellError::Lua)?;
                 return Ok(LmdInlineValue::Inlines(vec![inline]));
             }
+            if let Ok(nodes) = ud.borrow::<LuaNodes>() {
+                // Inline context: a single paragraph unwraps; more is an error.
+                return nodes
+                    .to_inlines()
+                    .map(LmdInlineValue::Inlines)
+                    .map_err(LmdCellError::Lua);
+            }
             not_inlines(describe(&value).to_string())
         }
         Value::Table(table) => {
@@ -265,6 +284,10 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
                     Value::String(_) => {
                         inlines.extend(peek_inlines_fuzzy(lua, item).map_err(LmdCellError::Lua)?);
                     }
+                    Value::UserData(ud) if ud.borrow::<LuaNodes>().is_ok() => {
+                        let nodes = ud.borrow::<LuaNodes>().expect("checked above");
+                        inlines.extend(nodes.to_inlines().map_err(LmdCellError::Lua)?);
+                    }
                     other => {
                         return not_inlines(format!(
                             "a list whose element {} is {}",
@@ -284,6 +307,7 @@ fn describe(value: &Value) -> &'static str {
     match value {
         Value::UserData(ud) if ud.borrow::<LuaInline>().is_ok() => "an Inline",
         Value::UserData(ud) if ud.borrow::<LuaBlock>().is_ok() => "a Block",
+        Value::UserData(ud) if ud.borrow::<LuaNodes>().is_ok() => "Nodes",
         Value::String(_) => "a string",
         Value::Number(_) | Value::Integer(_) => "a number",
         Value::Boolean(_) => "a boolean",
@@ -441,6 +465,53 @@ mod tests {
         }
         let err = run_inline("undefined_fn()").await.unwrap_err();
         assert!(matches!(err, LmdCellError::Lua(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn nodes_in_a_block_cell_resolve_as_block_context() {
+        // blocks shape: the reader's Para stays a Para.
+        let out = blocks(
+            run("return pandoc.Nodes({pandoc.Para({pandoc.Str('a')})})")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], Block::Paragraph(_)), "{out:?}");
+        // inlines shape: one Plain.
+        let out = blocks(run("return pandoc.Nodes({pandoc.Str('a')})").await.unwrap());
+        assert!(matches!(&out[0], Block::Plain(_)), "{out:?}");
+        // empty: nothing.
+        assert!(blocks(run("return pandoc.Nodes({})").await.unwrap()).is_empty());
+        // as a list element: splices.
+        let out = blocks(
+            run("return { pandoc.HorizontalRule(), pandoc.Nodes({pandoc.Para({}), pandoc.Para({})}) }")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 3, "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn nodes_in_an_inline_cell_resolve_as_inline_context() {
+        // blocks shape, one paragraph: its inlines.
+        let out = inlines(
+            run_inline("pandoc.Nodes({pandoc.Para({pandoc.Str('a'), pandoc.Str('b')})})")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 2);
+        // inlines shape; as a list element: splices.
+        let out = inlines(
+            run_inline("{ pandoc.Str('x'), pandoc.Nodes({pandoc.Str('a'), pandoc.Str('b')}) }")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out.len(), 3);
+        // blocks shape with two blocks: an error naming the count.
+        let err = run_inline("pandoc.Nodes({pandoc.Para({}), pandoc.Para({})})")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("holds 2 blocks"), "{err}");
     }
 
     #[tokio::test]

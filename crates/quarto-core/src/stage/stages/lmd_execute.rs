@@ -605,6 +605,107 @@ mod tests {
         assert_eq!(para_text(&blocks[1]), "*Em Title*");
     }
 
+    // ----- pandoc.Nodes: the unmarked `{= … =}` fragment -----
+    //
+    // End-to-end pins of the resolution table in pampa's lua/nodes.rs, one
+    // row per assertion, so the lmd syntax and the runtime cannot drift
+    // apart.
+
+    #[test]
+    fn unmarked_fragment_in_a_block_cell_keeps_the_readers_para() {
+        let (blocks, diags) = render("```{lmd}\nreturn {= **hello** =}\n```\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        // blocks shape, block context: the Para stays a Para, not a Plain.
+        assert!(matches!(&blocks[0], Block::Paragraph(_)), "{:?}", blocks[0]);
+        assert_eq!(para_text(&blocks[0]), "**hello**");
+    }
+
+    #[test]
+    fn unmarked_fragment_inside_a_block_constructor_keeps_the_para() {
+        let (blocks, diags) = render("```{lmd}\nreturn pandoc.Div({= hello =})\n```\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Div(div) = &blocks[0] else {
+            panic!("expected Div, got {:?}", blocks[0]);
+        };
+        assert_eq!(div.content.len(), 1);
+        assert!(
+            matches!(&div.content[0], Block::Paragraph(_)),
+            "{:?}",
+            div.content[0]
+        );
+    }
+
+    #[test]
+    fn unmarked_fragment_inside_an_inline_constructor_unwraps_to_inlines() {
+        let (blocks, diags) =
+            render("```{lmd}\nreturn pandoc.Para({ pandoc.Strong({= hello =}) })\n```\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(para_text(&blocks[0]), "**hello**");
+    }
+
+    #[test]
+    fn unmarked_fragment_in_an_inline_cell_unwraps_to_inlines() {
+        let (blocks, diags) = render("Say `{lmd} {= *hi* there =}` now.\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(para_text(&blocks[0]), "Say *hi* there now.");
+    }
+
+    #[test]
+    fn nodes_with_several_blocks_in_inline_context_is_an_error() {
+        // In an inline cell (a code span cannot hold a blank line, so the
+        // two-block Nodes is built by hand) …
+        let (blocks, diags) =
+            render("Say `{lmd} pandoc.Nodes({pandoc.Para({}), pandoc.Para({})})` now.\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].title.contains("lmd cell failed"), "{:?}", diags[0]);
+        assert!(
+            diags[0]
+                .problem
+                .as_ref()
+                .is_some_and(|p| format!("{p:?}").contains("holds 2 blocks")),
+            "{:?}",
+            diags[0]
+        );
+        // … the cell stays displayed and the paragraph survives.
+        assert!(
+            para_text(&blocks[0]).starts_with("Say `"),
+            "{}",
+            para_text(&blocks[0])
+        );
+        // … and inside an inline constructor in a block cell, where the
+        // fragment syntax can hold two paragraphs.
+        let (blocks, diags) =
+            render("```{lmd}\nreturn pandoc.Para({ pandoc.Strong({= one\n\ntwo =}) })\n```\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0]
+                .problem
+                .as_ref()
+                .is_some_and(|p| format!("{p:?}").contains("holds 2 blocks")),
+            "{:?}",
+            diags[0]
+        );
+        assert!(matches!(&blocks[0], Block::CodeBlock(_)), "{:?}", blocks[0]);
+    }
+
+    #[test]
+    fn unmarked_fragments_nest_through_inline_lmd_code() {
+        // The inner fragment is a Nodes element of the outer paragraph's
+        // content list; it is resolved when pandoc.Para is built.
+        let (blocks, diags) = render("```{lmd}\nreturn {= a `{lmd} {= b =}` c =}\n```\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert_eq!(para_text(&blocks[0]), "a b c");
+    }
+
+    #[test]
+    fn a_hand_built_nodes_of_inlines_in_a_block_cell_becomes_a_plain() {
+        let (blocks, diags) = render("```{lmd}\nreturn pandoc.Nodes({ pandoc.Str('x') })\n```\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(matches!(&blocks[0], Block::Plain(_)), "{:?}", blocks[0]);
+    }
+
     #[test]
     fn a_failing_inline_cell_is_reported_and_left_as_a_code_span() {
         let qmd = "A `{lmd} pandoc.Para({})` B `{lmd} nope()` C\n";

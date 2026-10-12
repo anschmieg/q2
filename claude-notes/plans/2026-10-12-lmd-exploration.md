@@ -270,7 +270,7 @@ each underlining the cell in the source, and leave the desugared cell displayed.
 1. **String splices already work, by accident of pampa.** `greeting` is a Lua string spliced into a `Header` content list; pampa's fuzzy inline coercion turned it into `Str("Hello")`, and a string with spaces would become `Str`/`Space` runs. So observation 2 of spike 1 (no coercion contract for inline splices) is partly answered by the runtime: strings and `Inline`s work in inline lists. What is still undefined is a *list* value or a block in an inline list, and anything in block lists other than blocks.
 2. **The derived heading id is now visible in output**: `{#lmd-greeting-world}` is the reader's auto id for the placeholder text. Spike 1's observation 3 stands and now has a user-visible effect.
 3. **Lua error messages name the cell by number** (`lmd cell 6`), which is the cell's position among lmd cells, not a line in the document. The diagnostic's location underlines the right cell, so this is cosmetic, but a `file:line` chunk name would read better.
-4. **`pandoc.Nodes` fails at run time**, as designed: an unmarked fragment in a cell that runs produces "pandoc.Nodes is not implemented yet" with the hint to use a marked form.
+4. **`pandoc.Nodes` failed at run time** at the time of spike 2, as designed; spike 4 implemented it.
 
 ## Spike 3 (done 2026-10-12): inline cells in paragraphs
 
@@ -315,6 +315,43 @@ renders to `## Hello, world {#hello-lmd-name}` and "There are 3 things, and the 
 ### Verification
 
 `cargo nextest run -p quarto-core -p pampa -E 'test(lmd)'`: 47 tests (18 desugaring, 12 execute-stage, 8 runtime, the rest grammar and stub).
+
+## Spike 4 (done 2026-10-12): `pandoc.Nodes`
+
+The unmarked `{= … =}` fragment now runs. `pandoc.Nodes` is a real value in pampa (`crates/pampa/src/lua/nodes.rs`): a container whose shape is fixed at construction, empty, all blocks, or all inlines, and whose meaning is decided by the context it lands in.
+
+### Where it is resolved
+
+The entry point is the fuzzy coercion layer in pampa's `types.rs`, `peek_inlines_fuzzy` and `peek_blocks_fuzzy` and their singleton forms, which every constructor's `content` argument (41 call sites), every filter-function return value (8), shortcodes, and `quarto.utils.as_inlines` / `as_blocks` already go through. So a `Nodes` works anywhere a filter author could already return a bare string. Three hooks: a `Nodes` passed as the whole content, a `Nodes` as an element of a content table (which splices, several nodes rather than one), and the singleton positions, where it must resolve to exactly one node. The lmd cell contracts resolve it the same way: a block cell is block context, an inline cell is inline context.
+
+### The resolution table
+
+| `Nodes` holds | inline context | block context |
+|---|---|---|
+| blocks (what the desugarer emits) | one `Para` or `Plain`: its inlines. Empty: nothing. Otherwise an error naming the block count, or the block kind if it is a single non-paragraph. | the blocks, unchanged: a `Para` stays a `Para` |
+| inlines (hand-built, or a string) | the inlines | one `Plain`, pandoc's own convention for bare inlines |
+| nothing | nothing | nothing |
+
+The asymmetry was the one point decided against the first proposal (which was `Plain` in block context for every `Nodes`). A fragment that came from the markdown reader carries the reader's decision that its text is a paragraph; dropping it to `Plain` would make `pandoc.Div({= hello =})` render without a `<p>` while `pandoc.Div({=: hello :=})` renders with one, the kind of difference between the marked and unmarked forms the three-form syntax exists to avoid. A bare list of inlines carries no such information, so it gets pandoc's `Plain`.
+
+### Construction
+
+`pandoc.Nodes(x)` accepts a `Block`, an `Inline`, another `Nodes`, a string (word-split, like `pandoc.Inlines("…")`), or a table: a `pandoc.Blocks`, a `pandoc.Inlines`, or a plain list of blocks, inlines, strings (single `Str`s, element-wise, like every other list), and `Nodes` of a matching shape, which flatten. Mixed blocks and inlines are rejected: "pandoc.Nodes cannot hold blocks and inlines together". `pandoc.utils.type` says `Nodes`; `tostring` says `Nodes(2 blocks)`; `#` is the element count.
+
+### Tests that pin the table
+
+Each row and each hook is pinned, so the semantics cannot drift unnoticed:
+
+- `pampa::lua::nodes::tests`, 12 tests, one behaviour class each: blocks shape in inline context (unwrap, and the two error forms), blocks shape in block context (Para preserved), inlines shape in both contexts, empty in both, element splicing in both, the singleton positions, construction rejects and accepts.
+- `pampa::lua::filter::tests::test_handle_{inline,block}_return_nodes`: the same table on the filter-return path.
+- `pampa::lua::lmd::tests::nodes_in_{a_block,an_inline}_cell_resolve_as_*_context`: the cell contracts.
+- `quarto_core::stage::stages::lmd_execute::tests::unmarked_fragment_*` and `a_hand_built_nodes_*`: end to end from `{= … =}` syntax, including nesting through inline lmd code (`` {= a `{lmd} {= b =}` c =} `` gives "a b c").
+
+### What changed for the lmd syntax
+
+Nothing in the grammar or the desugarer. `{= **hello** =}` still emits `pandoc.Nodes({ pandoc.Para({ … }) })`; the stub and its "not implemented" error are gone. Spike 1's observation 2 (no coercion contract for splices) is now closed in full: strings, `Inline`s and `Nodes` all have defined meanings in both contexts.
+
+One usability note from the demo: an inline lmd code span whose own fragment holds another code span must be written with a double-backtick delimiter, because single backticks pair up left to right and the inner span would close the outer one. Ordinary markdown, but the nesting lmd invites makes it easy to hit.
 
 ## Delimiter design notes (2026-10-12)
 
@@ -365,7 +402,7 @@ The third row, with one addition: the unmarked `{= … =}` stays, as a third for
 
 | form | expands to | status |
 |---|---|---|
-| `{= … =}` | `pandoc.Nodes({ blocks })` | `pandoc.Nodes` is a stub in pampa that errors when called |
+| `{= … =}` | `pandoc.Nodes({ blocks })` | works since spike 4 (`pandoc.Nodes` resolves by context) |
 | `{=: … :=}` | `pandoc.Blocks({ blocks })` | works |
 | `{=[ … ]=}` | `pandoc.Inlines({ inlines })` | works; the markdown must parse to one paragraph or nothing |
 
@@ -375,7 +412,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Open questions
 
-1. The semantics of `pandoc.Nodes`, the target of the unmarked `{= … =}`: a value that becomes blocks or inlines depending on the constructor it is passed to. The delimiter design notes record the decision that created it.
+1. ~~The semantics of `pandoc.Nodes`~~ Decided and built in spike 4.
 2. The splice coercion contract for inline and block lmd code inside a fragment (observation 2).
 3. The dispatch half: how an `{lmd}` cell's result replaces the cell at its own AST position, and how the desugared Lua becomes a filter that existing Lua filters compose with. Also whether the cell runs at render time only or has a preview-time story.
 4. Error locations. `LmdError` carries a position inside the cell text; the warning does not yet map it back to the document.
@@ -383,7 +420,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 4 candidates**, in no particular order: `pandoc.Nodes` semantics (a value that becomes blocks or inlines by the constructor it is passed to); porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder; `file:line` chunk names for Lua error messages.
+- **Spike 5 candidates**, in no particular order: porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder; `file:line` chunk names for Lua error messages.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 

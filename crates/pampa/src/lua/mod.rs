@@ -19,6 +19,7 @@ mod list;
 // lmd cell execution (bd-lmd-exploration-jqv2nbl4).
 pub mod lmd;
 pub mod mediabag;
+mod nodes;
 mod os_wasm;
 mod pandoc_doc;
 mod path;
