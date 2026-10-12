@@ -129,7 +129,13 @@ impl LmdRuntime {
         Ok(Self { lua })
     }
 
-    /// Run one cell. `chunk_name` is what Lua error messages call it.
+    /// Run one cell.
+    ///
+    /// `chunk_name` is what Lua error messages and tracebacks call the
+    /// chunk; mlua passes it through unchanged, so a name of the form
+    /// `@path` is printed by Lua as `path:line:`. `line_padding` newlines
+    /// are prepended so the chunk's line numbers match the document's: pass
+    /// the 1-based document line the source starts on, minus one.
     ///
     /// Only the first return value is looked at; Lua's multiple returns
     /// have no meaning for a cell.
@@ -137,10 +143,12 @@ impl LmdRuntime {
         &self,
         source: &str,
         chunk_name: &str,
+        line_padding: usize,
     ) -> Result<LmdCellValue, LmdCellError> {
+        let padded = format!("{}{source}", "\n".repeat(line_padding));
         let returned: MultiValue = self
             .lua
-            .load(source)
+            .load(&padded)
             .set_name(chunk_name)
             .call_async(())
             .await
@@ -151,13 +159,15 @@ impl LmdRuntime {
 
     /// Evaluate one inline cell's expression. `expr` is a Lua expression
     /// (the desugarer already stripped the `{lmd}` tag); it is run as
-    /// `return <expr>` so a bare expression is a valid chunk.
+    /// `return <expr>` so a bare expression is a valid chunk. `chunk_name`
+    /// and `line_padding` as for [`run_cell`](Self::run_cell).
     pub async fn run_inline_cell(
         &self,
         expr: &str,
         chunk_name: &str,
+        line_padding: usize,
     ) -> Result<LmdInlineValue, LmdCellError> {
-        let source = format!("return {expr}");
+        let source = format!("{}return {expr}", "\n".repeat(line_padding));
         let returned: MultiValue = self
             .lua
             .load(&source)
@@ -361,7 +371,7 @@ mod tests {
     }
 
     async fn run(src: &str) -> Result<LmdCellValue, LmdCellError> {
-        runtime().run_cell(src, "cell").await
+        runtime().run_cell(src, "cell", 0).await
     }
 
     fn blocks(value: LmdCellValue) -> Vec<Block> {
@@ -424,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn lua_errors_are_reported_with_the_chunk_name() {
         let err = runtime()
-            .run_cell("error('boom')", "cell 3")
+            .run_cell("error('boom')", "cell 3", 0)
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -434,7 +444,7 @@ mod tests {
     }
 
     async fn run_inline(expr: &str) -> Result<LmdInlineValue, LmdCellError> {
-        runtime().run_inline_cell(expr, "inline").await
+        runtime().run_inline_cell(expr, "inline", 0).await
     }
 
     fn inlines(value: LmdInlineValue) -> Vec<Inline> {
@@ -564,11 +574,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_at_chunk_name_and_line_padding_make_lua_report_document_lines() {
+        // Body starts on document line 42, so padding is 41; the error is
+        // on the body's second line, document line 43.
+        let err = runtime()
+            .run_cell("local x = 1\nerror('boom')", "@doc.qmd", 41)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("doc.qmd:43:"), "{msg}");
+        assert!(!msg.contains("[string"), "{msg}");
+        // The same for an inline cell, whose `return ` prefix is on the
+        // padded line itself.
+        let err = runtime()
+            .run_inline_cell("nope()", "@doc.qmd", 6)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("doc.qmd:7:"), "{err}");
+    }
+
+    #[tokio::test]
     async fn state_is_shared_across_cells() {
         let rt = runtime();
-        rt.run_cell("shared = 'yes'", "cell 1").await.unwrap();
+        rt.run_cell("shared = 'yes'", "cell 1", 0).await.unwrap();
         let out = blocks(
-            rt.run_cell("return pandoc.Para({pandoc.Str(shared)})", "cell 2")
+            rt.run_cell("return pandoc.Para({pandoc.Str(shared)})", "cell 2", 0)
                 .await
                 .unwrap(),
         );
@@ -578,7 +608,9 @@ mod tests {
     #[tokio::test]
     async fn log_diagnostics_are_drained() {
         let rt = runtime();
-        rt.run_cell("quarto.warn('careful')", "cell").await.unwrap();
+        rt.run_cell("quarto.warn('careful')", "cell", 0)
+            .await
+            .unwrap();
         let first = rt.take_diagnostics();
         assert_eq!(first.len(), 1, "{first:?}");
         assert!(rt.take_diagnostics().is_empty());

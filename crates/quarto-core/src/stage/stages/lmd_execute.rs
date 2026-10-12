@@ -2,7 +2,7 @@
  * stage/stages/lmd_execute.rs
  * Copyright (c) 2026 Posit, PBC
  *
- * lmd exploration spikes 2 and 3: run desugared `{lmd}` cells.
+ * lmd exploration spikes 2, 3 and 7: run desugared `{lmd}` cells.
  */
 
 //! `LmdExecuteStage`: run every cell `LmdDesugarStage` marked, in document
@@ -27,14 +27,22 @@
 //! displayed `lmd` code block or code span, so the rest of the page still
 //! renders and the failing Lua can be read.
 //!
-//! Spikes 2 and 3 of `claude-notes/plans/2026-10-12-lmd-exploration.md`.
+//! Lua errors name document lines. Each cell runs under the chunk name
+//! `@<path of the file it came from>` with as many newlines prepended as
+//! the cell's text starts lines into that file, so Lua's own `path:line:`
+//! in messages and tracebacks is the document position; the desugarer's
+//! line-preserving output keeps that true across fragment expansions. The
+//! diagnostic takes the first such position as its location, so the
+//! underline lands on the line. Cells from an included file name the
+//! included file, since include expansion registers it in the source
+//! context under its own id.
 
 use async_trait::async_trait;
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::attr::AttrSourceInfo;
 use quarto_pandoc_types::block::{Block, CodeBlock};
 use quarto_pandoc_types::inline::{Code, Inline, Inlines};
-use quarto_source_map::SourceInfo;
+use quarto_source_map::{FileId, SourceContext, SourceInfo};
 use std::collections::HashMap;
 
 use crate::ast_walk::{
@@ -42,7 +50,8 @@ use crate::ast_walk::{
     inline_children_mut,
 };
 use crate::cell_options::{options_to_config, partition_cell_options};
-use crate::lmd::{LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE};
+use crate::lmd::anchor::file_line_span;
+use crate::lmd::{Anchor, LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE};
 use crate::stage::{
     EventLevel, PipelineData, PipelineDataKind, PipelineError, PipelineStage, StageContext,
 };
@@ -71,6 +80,8 @@ struct PendingCell {
     kind: CellKind,
     text: String,
     source_info: SourceInfo,
+    /// Where `text` lives in the document (see [`Anchor`]).
+    anchor: Anchor,
 }
 
 /// What a cell produced, ready to splice.
@@ -95,16 +106,24 @@ fn is_pending_inline_cell(inline: &Inline) -> bool {
 /// inline cells together, overwriting each one's marker with its number.
 struct Numberer<'a> {
     cells: &'a mut Vec<PendingCell>,
+    sources: &'a SourceContext,
 }
 
 impl Numberer<'_> {
-    fn record(&mut self, kind: CellKind, text: &str, source_info: &SourceInfo) -> String {
+    fn record(
+        &mut self,
+        kind: CellKind,
+        text: &str,
+        source_info: &SourceInfo,
+        anchor: Anchor,
+    ) -> String {
         let id = self.cells.len();
         self.cells.push(PendingCell {
             id,
             kind,
             text: text.to_string(),
             source_info: source_info.clone(),
+            anchor,
         });
         id.to_string()
     }
@@ -117,7 +136,8 @@ impl ListVisitor for Numberer<'_> {
                 let Block::CodeBlock(cb) = block else {
                     unreachable!("is_pending_block_cell matched a CodeBlock");
                 };
-                let id = self.record(CellKind::Block, &cb.text, &cb.source_info);
+                let anchor = Anchor::for_block_cell(cb, self.sources);
+                let id = self.record(CellKind::Block, &cb.text, &cb.source_info, anchor);
                 cb.attr.2.insert(LMD_PENDING_ATTR.to_string(), id);
                 continue;
             }
@@ -131,7 +151,8 @@ impl ListVisitor for Numberer<'_> {
                 let Inline::Code(code) = inline else {
                     unreachable!("is_pending_inline_cell matched a Code");
                 };
-                let id = self.record(CellKind::Inline, &code.text, &code.source_info);
+                let anchor = Anchor::for_inline_cell(code, &code.text, self.sources);
+                let id = self.record(CellKind::Inline, &code.text, &code.source_info, anchor);
                 code.attr.2.insert(LMD_PENDING_ATTR.to_string(), id);
                 continue;
             }
@@ -173,12 +194,12 @@ fn displayed_inline_cell(expr: &str, source_info: &SourceInfo) -> Inline {
 
 fn cell_error(
     title: &str,
-    cell: &PendingCell,
+    location: SourceInfo,
     problem: String,
     hint: Option<&str>,
 ) -> DiagnosticMessage {
     let mut builder = DiagnosticMessageBuilder::error(title)
-        .with_location(cell.source_info.clone())
+        .with_location(location)
         .problem(problem);
     if let Some(hint) = hint {
         builder = builder.add_hint(hint);
@@ -186,7 +207,64 @@ fn cell_error(
     builder.build()
 }
 
-fn failure_diagnostic(cell: &PendingCell, err: &LmdCellError) -> DiagnosticMessage {
+/// How a cell is named to Lua, and how its lines map to the document.
+struct ChunkIdentity {
+    /// `@path` when the cell's file is known, else a cell number.
+    name: String,
+    /// Newlines to prepend so chunk lines are document lines.
+    padding: usize,
+    /// The file, when known, for locating `path:LINE:` positions.
+    file: Option<(FileId, String)>,
+}
+
+impl ChunkIdentity {
+    /// `extra_lines` are lines of the cell text that are not run (the
+    /// option lines a block cell starts with).
+    fn for_cell(cell: &PendingCell, sources: &SourceContext, extra_lines: usize) -> Self {
+        match cell.anchor.start(sources) {
+            Some((file_id, path, start_line)) => Self {
+                name: format!("@{path}"),
+                padding: start_line - 1 + extra_lines,
+                file: Some((file_id, path)),
+            },
+            None => Self {
+                name: format!("lmd cell {}", cell.id + 1),
+                padding: 0,
+                file: None,
+            },
+        }
+    }
+
+    /// The document line of the first `path:LINE:` in a Lua error, as the
+    /// line's span. Lua abbreviates a chunk name longer than its `LUA_IDSIZE`
+    /// (60 bytes) to `...` plus a tail, so the match is on the file name,
+    /// which any such tail still ends with.
+    fn locate(&self, message: &str, sources: &SourceContext) -> Option<SourceInfo> {
+        let (file_id, path) = self.file.as_ref()?;
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
+        let needle = format!("{file_name}:");
+        let mut rest = message;
+        while let Some(i) = rest.find(&needle) {
+            let after = &rest[i + needle.len()..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() && after[digits.len()..].starts_with(':') {
+                let line: usize = digits.parse().ok()?;
+                return file_line_span(sources, *file_id, line);
+            }
+            rest = &rest[i + needle.len()..];
+        }
+        None
+    }
+}
+
+fn failure_diagnostic(
+    cell: &PendingCell,
+    err: &LmdCellError,
+    location: Option<SourceInfo>,
+) -> DiagnosticMessage {
     let (title, hint) = match err {
         LmdCellError::Lua(_) => ("lmd cell failed", None),
         LmdCellError::NotBlocks { .. } => (
@@ -202,18 +280,21 @@ fn failure_diagnostic(cell: &PendingCell, err: &LmdCellError) -> DiagnosticMessa
             ),
         ),
     };
-    cell_error(title, cell, err.to_string(), hint)
+    let location = location.unwrap_or_else(|| cell.anchor.span.clone());
+    cell_error(title, location, err.to_string(), hint)
 }
 
-/// Split a block cell's text into its code and the `echo` option.
+/// Split a block cell's text into its code, the `echo` option, and the
+/// number of option lines stripped (they still count toward line numbers).
 fn block_cell_code_and_echo(
     cell: &PendingCell,
     diagnostics: &mut Vec<DiagnosticMessage>,
-) -> (String, bool) {
+) -> (String, bool, usize) {
     // Cell options use Lua's comment syntax; the language key is `lua`
     // because `lmd` is unknown to the comment table and would default
-    // to `#`.
-    match partition_cell_options("lua", &cell.text, cell.source_info.clone()) {
+    // to `#`. The anchor is the cell *body*, so option-line spans land on
+    // the option lines.
+    match partition_cell_options("lua", &cell.text, cell.anchor.span.clone()) {
         Ok(partitioned) => {
             let echo =
                 partitioned
@@ -226,41 +307,53 @@ fn block_cell_code_and_echo(
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false)
                     });
-            (partitioned.code, echo)
+            let option_lines = cell.text[..partitioned.options_len].matches('\n').count();
+            (partitioned.code, echo, option_lines)
         }
         Err(err) => {
+            let location = err
+                .location()
+                .cloned()
+                .unwrap_or_else(|| cell.anchor.span.clone());
             diagnostics.push(cell_error(
                 "lmd cell options are not valid",
-                cell,
+                location,
                 err.to_string(),
                 None,
             ));
-            (cell.text.clone(), false)
+            (cell.text.clone(), false, 0)
         }
     }
 }
 
 /// Run every marked cell in `blocks` and splice the results in place.
-/// Diagnostics (cell failures, `quarto.warn` calls) go to `diagnostics`.
+/// `sources` anchors each cell in the document (chunk names, line
+/// numbers, diagnostic locations). Diagnostics (cell failures,
+/// `quarto.warn` calls) go to `diagnostics`.
 pub async fn execute_lmd_cells(
     blocks: &mut Vec<Block>,
     runtime: &LmdRuntime,
+    sources: &SourceContext,
     diagnostics: &mut Vec<DiagnosticMessage>,
 ) {
     let mut cells = Vec::new();
-    Numberer { cells: &mut cells }.blocks(blocks);
+    Numberer {
+        cells: &mut cells,
+        sources,
+    }
+    .blocks(blocks);
     if cells.is_empty() {
         return;
     }
 
     let mut results: HashMap<usize, CellOutput> = HashMap::new();
     for cell in &cells {
-        let chunk_name = format!("lmd cell {}", cell.id + 1);
         let output = match cell.kind {
             CellKind::Block => {
-                let (code, echo) = block_cell_code_and_echo(cell, diagnostics);
+                let (code, echo, option_lines) = block_cell_code_and_echo(cell, diagnostics);
+                let chunk = ChunkIdentity::for_cell(cell, sources, option_lines);
                 let mut out: Vec<Block> = Vec::new();
-                match runtime.run_cell(&code, &chunk_name).await {
+                match runtime.run_cell(&code, &chunk.name, chunk.padding).await {
                     Ok(value) => {
                         if echo {
                             out.push(displayed_block_cell(&code, &cell.source_info));
@@ -270,20 +363,31 @@ pub async fn execute_lmd_cells(
                         }
                     }
                     Err(err) => {
-                        diagnostics.push(failure_diagnostic(cell, &err));
+                        let at = chunk.locate(&err.to_string(), sources);
+                        diagnostics.push(failure_diagnostic(cell, &err, at));
                         out.push(displayed_block_cell(&code, &cell.source_info));
                     }
                 }
                 CellOutput::Blocks(out)
             }
-            CellKind::Inline => match runtime.run_inline_cell(&cell.text, &chunk_name).await {
-                Ok(LmdInlineValue::Nothing) => CellOutput::Inlines(Vec::new()),
-                Ok(LmdInlineValue::Inlines(result)) => CellOutput::Inlines(result),
-                Err(err) => {
-                    diagnostics.push(failure_diagnostic(cell, &err));
-                    CellOutput::Inlines(vec![displayed_inline_cell(&cell.text, &cell.source_info)])
+            CellKind::Inline => {
+                let chunk = ChunkIdentity::for_cell(cell, sources, 0);
+                match runtime
+                    .run_inline_cell(&cell.text, &chunk.name, chunk.padding)
+                    .await
+                {
+                    Ok(LmdInlineValue::Nothing) => CellOutput::Inlines(Vec::new()),
+                    Ok(LmdInlineValue::Inlines(result)) => CellOutput::Inlines(result),
+                    Err(err) => {
+                        let at = chunk.locate(&err.to_string(), sources);
+                        diagnostics.push(failure_diagnostic(cell, &err, at));
+                        CellOutput::Inlines(vec![displayed_inline_cell(
+                            &cell.text,
+                            &cell.source_info,
+                        )])
+                    }
                 }
-            },
+            }
         };
         results.insert(cell.id, output);
     }
@@ -395,7 +499,13 @@ impl PipelineStage for LmdExecuteStage {
         .map_err(|err| PipelineError::stage_error(self.name(), err.to_string()))?;
 
         let mut diagnostics = Vec::new();
-        execute_lmd_cells(&mut doc.ast.blocks, &runtime, &mut diagnostics).await;
+        execute_lmd_cells(
+            &mut doc.ast.blocks,
+            &runtime,
+            &doc.source_context,
+            &mut diagnostics,
+        )
+        .await;
         for diag in &diagnostics {
             trace_event!(ctx, EventLevel::Warn, "{}", diag.title);
         }
@@ -426,20 +536,46 @@ mod tests {
     /// Parse `qmd`, desugar its `{lmd}` cells (what the desugar stage
     /// does), and run them.
     fn render(qmd: &str) -> (Vec<Block>, Vec<DiagnosticMessage>) {
+        let (blocks, diagnostics, _sources) = render_with_sources(qmd);
+        (blocks, diagnostics)
+    }
+
+    fn render_with_sources(qmd: &str) -> (Vec<Block>, Vec<DiagnosticMessage>, SourceContext) {
         let mut sink: Vec<u8> = Vec::new();
-        let (ast, _ctx, _warnings) =
+        let (ast, ctx, _warnings) =
             pampa::readers::qmd::read(qmd.as_bytes(), false, "test.qmd", &mut sink, true, None)
                 .expect("test document parses");
+        let sources = ctx.source_context;
         let mut blocks = ast.blocks;
-        let errors = super::super::lmd_desugar::desugar_lmd_cells(&mut blocks);
+        let errors = super::super::lmd_desugar::desugar_lmd_cells(&mut blocks, &sources);
         assert!(errors.is_empty(), "{errors:?}");
         let mut diagnostics = Vec::new();
         pollster::block_on(execute_lmd_cells(
             &mut blocks,
             &runtime(&ast.meta),
+            &sources,
             &mut diagnostics,
         ));
-        (blocks, diagnostics)
+        (blocks, diagnostics, sources)
+    }
+
+    /// The text a diagnostic's location resolves to in the test file.
+    fn located_text<'a>(diag: &DiagnosticMessage, sources: &'a SourceContext) -> &'a str {
+        let loc = diag.location.as_ref().expect("diagnostic is located");
+        let (fid, s, e) = loc.resolve_byte_range().expect("location resolves");
+        &sources
+            .get_file(FileId(fid))
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()[s..e]
+    }
+
+    fn problem_text(diag: &DiagnosticMessage) -> String {
+        diag.problem
+            .as_ref()
+            .map(|p| format!("{p:?}"))
+            .unwrap_or_default()
     }
 
     fn inlines_text(inlines: &[Inline]) -> String {
@@ -755,5 +891,83 @@ mod tests {
             assert!(code.attr.2.get(LMD_PENDING_ATTR).is_none());
         }
         assert_eq!(para_text(&blocks[0]), "A `pandoc.Para({})` B `nope()` C");
+    }
+
+    // ----- source mapping (spike 7) -----
+
+    #[test]
+    fn a_runtime_error_names_the_document_line_and_is_located_on_it() {
+        let qmd = "Intro\n\n```{lmd}\nlocal x = 1\nerror('boom')\n```\n";
+        let (_blocks, diags, sources) = render_with_sources(qmd);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        // Document line 5 is `error('boom')`.
+        assert!(
+            problem_text(&diags[0]).contains("test.qmd:5:"),
+            "{:?}",
+            diags[0]
+        );
+        assert_eq!(located_text(&diags[0], &sources), "error('boom')");
+    }
+
+    #[test]
+    fn line_numbers_survive_fragment_expansion_and_option_lines() {
+        let qmd =
+            "```{lmd}\n--| echo: false\nlocal a = {=:\nOne.\n\nTwo.\n:=}\nerror('after')\n```\n";
+        let (_blocks, diags, sources) = render_with_sources(qmd);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        // Document line 8 is `error('after')`: the option line and the
+        // five-line fragment keep their lines.
+        assert!(
+            problem_text(&diags[0]).contains("test.qmd:8:"),
+            "{:?}",
+            diags[0]
+        );
+        assert_eq!(located_text(&diags[0], &sources), "error('after')");
+    }
+
+    #[test]
+    fn an_inline_cell_error_names_its_line() {
+        let qmd = "First.\n\nSecond `{lmd} nope()` here.\n";
+        let (_blocks, diags, sources) = render_with_sources(qmd);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            problem_text(&diags[0]).contains("test.qmd:3:"),
+            "{:?}",
+            diags[0]
+        );
+        assert_eq!(
+            located_text(&diags[0], &sources),
+            "Second `{lmd} nope()` here."
+        );
+    }
+
+    #[test]
+    fn a_cell_in_a_blockquote_still_gets_its_line() {
+        // The gutter makes the body anchor approximate, but the start line
+        // is known from the block span, so the chunk is still padded right.
+        let qmd = "> ```{lmd}\n> local x = 1\n> error('quoted')\n> ```\n";
+        let (_blocks, diags, sources) = render_with_sources(qmd);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            problem_text(&diags[0]).contains("test.qmd:3:"),
+            "{:?}",
+            diags[0]
+        );
+        assert_eq!(located_text(&diags[0], &sources), "> error('quoted')");
+    }
+
+    #[test]
+    fn cell_option_errors_are_located_on_the_option_line() {
+        let qmd = "```{lmd}\n--| echo: [\nreturn nil\n```\n";
+        let (_blocks, diags, sources) = render_with_sources(qmd);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].title.contains("options are not valid"),
+            "{:?}",
+            diags[0]
+        );
+        let loc = diags[0].location.as_ref().expect("located");
+        let mapped = loc.map_offset(0, &sources).expect("maps");
+        assert_eq!(mapped.location.row, 1, "{mapped:?}");
     }
 }

@@ -98,6 +98,7 @@ pub mod listing_inline_records;
 pub mod listing_pipeline;
 pub mod listing_title_markup;
 pub mod llms_txt;
+pub mod lmd_error_locations;
 pub mod marimo_engine_e2e;
 pub mod marimo_resolution;
 pub mod math_mode_pipeline;

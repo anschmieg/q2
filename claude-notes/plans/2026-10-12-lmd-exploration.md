@@ -460,6 +460,35 @@ L0 and L1 together are about a day and change two files plus tests; L2 is a few 
 
 Column-exact positions under blockquote and list gutters, and positions inside a splice inside a fragment, wait for `CodeBlock.text_source` (the `Math.text_source` treatment) and a column map respectively; both are the same shape of work as `ProvenanceBuilder` and neither is needed for the error messages to be useful.
 
+## Spike 7 (done 2026-10-12): source mapping, layers L0 to L2
+
+All three layers of the assessment above landed, in the shape proposed, with two findings on the way.
+
+### What a render shows now
+
+For a document with each kind of failure, `q2 render` prints:
+
+- a markdown error inside a `{=: … :=}` fragment as the reader's own diagnostic (here Q-2-10, the bare apostrophe), underlined at the offending byte *inside the fragment*, with a hint that it sits in an lmd fragment and the cell will not run;
+- a Lua runtime error as `…/doc.qmd:9: boom` with a traceback whose frames carry the same name, underlined on line 9, not on the whole cell;
+- the same for an inline cell, on the paragraph's line, and for a cell inside a blockquote, where the body is not byte-identical to the source but the line is still right.
+
+### How
+
+- **L0** (`lmd/anchor.rs`): an `Anchor` is the span of a cell's text plus whether it is byte-exact. Block cells use `body_source_for` (lifted to `pub(crate)` from the crossref shorthand), inline cells find their expression in the code span's bytes. An approximate anchor still knows the text's first document line, since a fenced block's body starts one line below its span. The cell-option diagnostic that used to be one fence line off is now on the option line.
+- **L1**: the desugarer takes an anchor and parses each fragment's markdown with `parent_source_info` set to the trimmed content's span, so the reader reroots node spans and Err-path diagnostics into the document (the front-matter markdown path). `LmdError::MarkdownParse` now carries those diagnostics and the stage reports them as they are; `Unsupported` carries the node's span; a Lua syntax error is located on its line. Nested splices pass the code span down as an approximate anchor.
+- **L2**: a second emitter mode, line-preserving, keeps lists on one line and pads a multi-line fragment's expansion with newlines after its opening parenthesis, so every expansion occupies exactly the lines the fragment did; the lines inside a spliced block cell are the fragment's own lines and count toward the budget. The execute stage runs each cell under the chunk name `@<path>` with the body's start line (plus any option lines) of newline padding, so Lua's `path:line:` is the document position; the diagnostic location is that line's span.
+
+### Findings
+
+1. **Lua abbreviates long chunk names.** Anything over `LUA_IDSIZE` (60 bytes) prints as `...` plus a tail, so the message says `...scratchpad/doc.qmd:9:` for an absolute path. The locator therefore matches on the file name, not the full path. A path relative to the project directory would read better and rarely be truncated; left for later since the file name is enough to locate.
+2. **The echoed form is the line-preserving one.** The assessment said the pretty form would stay for `echo`. Keeping both would mean storing the original cell text somewhere that survives the engine round trip, and a multi-line attribute value does not; so `--| echo: true` shows the single-line-per-fragment form. `desugar_lua` (pretty) remains for the plan's samples and tests.
+
+Both include cases from the review hold and are pinned end to end in `tests/integration/lmd_error_locations.rs`: a cell inside an included file names the included file and its line (include expansion registers the file under its own id), and a cell after a plain include keeps its main-file line. The engine round trip keeps a desugared cell's span because reconcile keeps unchanged nodes; a notebook converted by the source-conversion stage has spans in the converted text, so its lines refer to that text, which is the one known limit.
+
+### Pins
+
+`lmd::anchor::tests` (4), `lmd::desugar::tests` line-preserving (3) and unanchored-error (2), `lmd_desugar::tests` located failures (3), `lmd_execute::tests` source mapping (5: runtime line, lines across a fragment and option lines, inline line, blockquote line, option-line location), `pampa::lua::lmd::tests` chunk name and padding (1), and the two include cases.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -527,7 +556,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 7**: the source mapping layers L0 to L2 above; a fixture-and-snapshot suite for the demo documents first.
+- **Spike 8 candidates**: a fixture-and-snapshot suite for the demo documents; project-relative chunk names; `CodeBlock.text_source` for column accuracy under gutters.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 

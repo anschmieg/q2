@@ -5,9 +5,18 @@
 
 //! Pandoc AST → Lua `pandoc.*` constructor source.
 //!
-//! The output is meant to be read by a person first and run by a Lua
-//! interpreter second: one constructor per line, lists broken across lines,
-//! two-space indentation relative to the column the fragment started at.
+//! Two output modes ([`EmitMode`]):
+//!
+//! - **Pretty**: one constructor per line, lists broken across lines,
+//!   two-space indentation relative to the column the fragment started at.
+//!   Meant to be read (the plan's samples, tests).
+//! - **Line-preserving**: lists on one line, so a fragment's expansion
+//!   never takes more lines than the fragment did in the source; the
+//!   desugarer then pads it to exactly that many. Meant to be run: with an
+//!   `@path` chunk name and line padding, Lua's own line numbers are
+//!   document lines. The only newlines that survive are those inside a
+//!   block lmd cell spliced from the fragment's markdown, which are source
+//!   lines of the fragment anyway.
 //!
 //! Call shapes follow pandoc's Lua API (and pampa's implementation of it in
 //! `pampa::lua::constructors`): `pandoc.Link(content, target, title, attr)`,
@@ -20,30 +29,43 @@
 //!   recursively, in the enclosing inline list.
 //! - `` ```{lmd} `` (a `CodeBlock`) becomes `(function() body end)()`, body
 //!   desugared recursively, in the enclosing block list.
+//!
+//! When the fragment was parsed with a source anchor, both carry their own
+//! node span down as the anchor of the nested desugar (approximate: the
+//! span of the code, not of the text inside it), so errors inside point at
+//! the code span in the document.
 
 use quarto_pandoc_types::attr::Attr;
 use quarto_pandoc_types::block::Block;
 use quarto_pandoc_types::inline::{CitationMode, Inline, MathType, QuoteType};
 use quarto_pandoc_types::list::{ListNumberDelim, ListNumberStyle};
+use quarto_source_map::SourceInfo;
 
-use super::desugar::{LmdError, desugar_lua_at, desugar_lua_expr};
+use super::anchor::Anchor;
+use super::desugar::{DesugarOptions, EmitMode, LmdError, desugar_lua_at, desugar_lua_expr_with};
 use crate::engine::capture_splice::engine_cell_lang;
 
 /// Output buffer plus indentation state.
 pub(super) struct Emitter {
     out: String,
-    /// Column of the `{=` this fragment replaces; continuation lines are
-    /// indented past it so the splice reads as one expression.
+    /// Column of the opener this fragment replaces; continuation lines are
+    /// indented past it so the splice reads as one expression (pretty mode).
     base: usize,
     depth: usize,
+    mode: EmitMode,
+    /// Whether the fragment was parsed with a source anchor, so node spans
+    /// are document spans worth attaching to errors and nested desugars.
+    anchored: bool,
 }
 
 impl Emitter {
-    pub(super) fn new(base: usize) -> Self {
+    pub(super) fn new(base: usize, mode: EmitMode, anchored: bool) -> Self {
         Self {
             out: String::new(),
             base,
             depth: 0,
+            mode,
+            anchored,
         }
     }
 
@@ -59,7 +81,20 @@ impl Emitter {
         self.out.push_str(s);
     }
 
-    /// Write `{` item `,` … `}` with one item per line, or `{}` when empty.
+    /// A node span worth attaching, when anchored.
+    fn loc(&self, span: &SourceInfo) -> Option<SourceInfo> {
+        self.anchored.then(|| span.clone())
+    }
+
+    fn unsupported(&self, kind: &'static str, span: &SourceInfo) -> LmdError {
+        LmdError::Unsupported {
+            kind,
+            location: self.loc(span),
+        }
+    }
+
+    /// Write `{` item `,` … `}`: one item per line in pretty mode, one line
+    /// in line-preserving mode, `{}` when empty.
     fn list<T>(
         &mut self,
         items: &[T],
@@ -69,18 +104,32 @@ impl Emitter {
             self.push("{}");
             return Ok(());
         }
-        self.push("{\n");
-        self.depth += 1;
-        for item in items {
-            let indent = self.indent();
-            self.push(&indent);
-            each(self, item)?;
-            self.push(",\n");
+        match self.mode {
+            EmitMode::Pretty => {
+                self.push("{\n");
+                self.depth += 1;
+                for item in items {
+                    let indent = self.indent();
+                    self.push(&indent);
+                    each(self, item)?;
+                    self.push(",\n");
+                }
+                self.depth -= 1;
+                let indent = self.indent();
+                self.push(&indent);
+                self.push("}");
+            }
+            EmitMode::LinePreserving => {
+                self.push("{");
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.push(", ");
+                    }
+                    each(self, item)?;
+                }
+                self.push("}");
+            }
         }
-        self.depth -= 1;
-        let indent = self.indent();
-        self.push(&indent);
-        self.push("}");
         Ok(())
     }
 
@@ -133,15 +182,32 @@ impl Emitter {
         })
     }
 
+    fn nested_options<'a>(&self, anchor: &'a Option<Anchor>) -> DesugarOptions<'a> {
+        DesugarOptions {
+            anchor: anchor.as_ref(),
+            mode: self.mode,
+        }
+    }
+
     /// A Lua chunk spliced in from an lmd cell inside the markdown. Nested
     /// fragments inside it are desugared at this emitter's current indent.
-    fn splice_lua_chunk(&mut self, src: &str) -> Result<String, LmdError> {
-        desugar_lua_at(src, self.base + 2 * self.depth)
+    fn splice_lua_chunk(&mut self, src: &str, span: &SourceInfo) -> Result<String, LmdError> {
+        let anchor = self.loc(span).map(Anchor::approximate);
+        desugar_lua_at(
+            src,
+            self.base + 2 * self.depth,
+            &self.nested_options(&anchor),
+        )
     }
 
     /// A Lua expression spliced in from inline lmd code inside the markdown.
-    fn splice_lua_expr(&mut self, src: &str) -> Result<String, LmdError> {
-        desugar_lua_expr(src, self.base + 2 * self.depth)
+    fn splice_lua_expr(&mut self, src: &str, span: &SourceInfo) -> Result<String, LmdError> {
+        let anchor = self.loc(span).map(Anchor::approximate);
+        desugar_lua_expr_with(
+            src,
+            self.base + 2 * self.depth,
+            &self.nested_options(&anchor),
+        )
     }
 
     // ----- blocks -------------------------------------------------------
@@ -167,19 +233,29 @@ impl Emitter {
         if let Block::CodeBlock(cb) = block
             && engine_cell_lang(block) == Some(super::LMD_LANG)
         {
-            let body = self.splice_lua_chunk(cb.text.trim_end())?;
-            let inner = " ".repeat(self.base + 2 * (self.depth + 1));
-            let outer = self.indent();
-            self.push("(function()\n");
-            for line in body.lines() {
-                self.push(&inner);
-                self.push(line);
-                self.push("\n");
+            let body = self.splice_lua_chunk(cb.text.trim_end(), &cb.source_info)?;
+            match self.mode {
+                EmitMode::Pretty => {
+                    let inner = " ".repeat(self.base + 2 * (self.depth + 1));
+                    let outer = self.indent();
+                    self.push("(function()\n");
+                    for line in body.lines() {
+                        self.push(&inner);
+                        self.push(line);
+                        self.push("\n");
+                    }
+                    self.push(&outer);
+                    self.push("end)()");
+                }
+                EmitMode::LinePreserving => {
+                    self.push("(function() ");
+                    self.push(&body);
+                    self.push(" end)()");
+                }
             }
-            self.push(&outer);
-            self.push("end)()");
             return Ok(());
         }
+        let span = block.source_info();
         match block {
             Block::Plain(b) => self.call("Plain", |e| e.inlines(&b.content)),
             Block::Paragraph(b) => self.call("Para", |e| e.inlines(&b.content)),
@@ -251,14 +327,14 @@ impl Emitter {
                 e.push("}");
                 e.attr_arg(&b.attr)
             }),
-            Block::Table(_) => Err(LmdError::Unsupported("Table")),
-            Block::BlockMetadata(_) => Err(LmdError::Unsupported("BlockMetadata")),
-            Block::NoteDefinitionPara(_) => Err(LmdError::Unsupported("NoteDefinitionPara")),
+            Block::Table(_) => Err(self.unsupported("Table", span)),
+            Block::BlockMetadata(_) => Err(self.unsupported("BlockMetadata", span)),
+            Block::NoteDefinitionPara(_) => Err(self.unsupported("NoteDefinitionPara", span)),
             Block::NoteDefinitionFencedBlock(_) => {
-                Err(LmdError::Unsupported("NoteDefinitionFencedBlock"))
+                Err(self.unsupported("NoteDefinitionFencedBlock", span))
             }
-            Block::CaptionBlock(_) => Err(LmdError::Unsupported("CaptionBlock")),
-            Block::Custom(_) => Err(LmdError::Unsupported("Custom")),
+            Block::CaptionBlock(_) => Err(self.unsupported("CaptionBlock", span)),
+            Block::Custom(_) => Err(self.unsupported("Custom", span)),
         }
     }
 
@@ -274,10 +350,11 @@ impl Emitter {
         if let Inline::Code(code) = inline
             && let Some(expr) = inline_lmd_source(&code.attr, &code.text)
         {
-            let lua = self.splice_lua_expr(expr)?;
+            let lua = self.splice_lua_expr(expr, &code.source_info)?;
             self.push(&lua);
             return Ok(());
         }
+        let span = inline.source_info();
         match inline {
             Inline::Str(s) => self.call("Str", |e| {
                 e.string(&s.text);
@@ -362,14 +439,14 @@ impl Emitter {
                 e.inlines(&i.content)?;
                 e.attr_arg(&i.attr)
             }),
-            Inline::Shortcode(_) => Err(LmdError::Unsupported("Shortcode")),
-            Inline::NoteReference(_) => Err(LmdError::Unsupported("NoteReference")),
-            Inline::Attr(_) => Err(LmdError::Unsupported("Attr")),
-            Inline::Insert(_) => Err(LmdError::Unsupported("Insert")),
-            Inline::Delete(_) => Err(LmdError::Unsupported("Delete")),
-            Inline::Highlight(_) => Err(LmdError::Unsupported("Highlight")),
-            Inline::EditComment(_) => Err(LmdError::Unsupported("EditComment")),
-            Inline::Custom(_) => Err(LmdError::Unsupported("Custom")),
+            Inline::Shortcode(_) => Err(self.unsupported("Shortcode", span)),
+            Inline::NoteReference(_) => Err(self.unsupported("NoteReference", span)),
+            Inline::Attr(_) => Err(self.unsupported("Attr", span)),
+            Inline::Insert(_) => Err(self.unsupported("Insert", span)),
+            Inline::Delete(_) => Err(self.unsupported("Delete", span)),
+            Inline::Highlight(_) => Err(self.unsupported("Highlight", span)),
+            Inline::EditComment(_) => Err(self.unsupported("EditComment", span)),
+            Inline::Custom(_) => Err(self.unsupported("Custom", span)),
         }
     }
 }

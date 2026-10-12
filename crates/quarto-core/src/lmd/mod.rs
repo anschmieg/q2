@@ -40,10 +40,15 @@
 //!   A cell option `--| echo: true` keeps the desugared Lua visible above
 //!   a block cell's result.
 
+pub mod anchor;
 mod desugar;
 mod emit;
 
-pub use desugar::{FragmentKind, LmdError, desugar_lua, desugar_lua_expr};
+pub use anchor::Anchor;
+pub use desugar::{
+    DesugarOptions, EmitMode, FragmentKind, LmdError, desugar_lua, desugar_lua_expr,
+    desugar_lua_expr_with, desugar_lua_with,
+};
 pub(crate) use emit::inline_lmd_source;
 
 /// The language tag an lmd cell carries: `` ```{lmd} `` parses to a

@@ -3,31 +3,97 @@
  * Copyright (c) 2026 Posit, PBC
  */
 
-//! lmd source → plain Lua: every `{= markdown =}` becomes `pandoc.*` calls.
+//! lmd source → plain Lua: every markdown fragment becomes `pandoc.*` calls.
 //!
 //! The Lua is parsed with `tree-sitter-lmd`; each `markdown_fragment` node
 //! (never nested in the tree: fragment content is one raw token) is cut out
 //! and replaced by the emitted expression. Markdown inside a fragment is
 //! parsed with pampa's qmd reader; lmd code inside *that* markdown comes
-//! back through [`desugar_lua_at`] from the emitter, which is how fragments
-//! nest.
+//! back through [`desugar_lua_at`] / [`desugar_lua_expr_with`] from the
+//! emitter, which is how fragments nest.
+//!
+//! With a source [`Anchor`] (where the text lives in the document), each
+//! fragment's markdown is parsed *under* the span of its content, so the
+//! nodes and any parse diagnostics reroot into the document; and in
+//! [`EmitMode::LinePreserving`] every expansion is padded to the lines the
+//! fragment occupied, so Lua line numbers stay document line numbers.
 
+use quarto_error_reporting::DiagnosticMessage;
 use quarto_pandoc_types::block::Block;
+use quarto_source_map::SourceInfo;
 
+use super::anchor::Anchor;
 use super::emit::Emitter;
 
 /// Why an lmd cell could not be desugared. Every variant leaves the cell as
-/// it was; the stage reports the error as a warning.
-#[derive(Debug, thiserror::Error)]
+/// it was; the stage reports the error.
+#[derive(Debug)]
 pub enum LmdError {
-    #[error("lmd: Lua syntax error at line {line}, column {column}")]
+    /// Lua syntax error, with the position in the cell text (1-based).
     LuaParse { line: usize, column: usize },
-    #[error("lmd: markdown fragment failed to parse: {0}")]
-    MarkdownParse(String),
-    #[error("lmd: `{0}` nodes are not supported inside markdown fragments yet")]
-    Unsupported(&'static str),
-    #[error("lmd: `{{=[ … ]=}}` asks for inlines but the markdown parsed to {0} blocks")]
+    /// A fragment's markdown failed to parse. `diagnostics` are the reader's
+    /// own, rerooted into the document when the parse was anchored.
+    MarkdownParse {
+        summary: String,
+        diagnostics: Vec<DiagnosticMessage>,
+    },
+    /// A node kind the emitter has no constructor for, at its span when the
+    /// parse was anchored.
+    Unsupported {
+        kind: &'static str,
+        location: Option<SourceInfo>,
+    },
+    /// `{=[ … ]=}` asked for inlines but the markdown parsed to this many blocks.
     NotInlines(usize),
+}
+
+impl std::fmt::Display for LmdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LmdError::LuaParse { line, column } => {
+                write!(f, "lmd: Lua syntax error at line {line}, column {column}")
+            }
+            LmdError::MarkdownParse { summary, .. } => {
+                write!(f, "lmd: markdown fragment failed to parse: {summary}")
+            }
+            LmdError::Unsupported { kind, .. } => write!(
+                f,
+                "lmd: `{kind}` nodes are not supported inside markdown fragments yet"
+            ),
+            LmdError::NotInlines(n) => write!(
+                f,
+                "lmd: `{{=[ … ]=}}` asks for inlines but the markdown parsed to {n} blocks"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LmdError {}
+
+/// How emitted Lua is laid out. See `emit.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitMode {
+    /// Readable: one constructor per line.
+    Pretty,
+    /// Runnable with document line numbers: each fragment expansion occupies
+    /// exactly the source lines the fragment did.
+    LinePreserving,
+}
+
+/// What a desugar knows about where its text lives and how to lay out the
+/// result.
+#[derive(Debug, Clone, Copy)]
+pub struct DesugarOptions<'a> {
+    pub anchor: Option<&'a Anchor>,
+    pub mode: EmitMode,
+}
+
+impl DesugarOptions<'_> {
+    /// No anchor, pretty output: the form the plan's samples use.
+    pub const PRETTY: DesugarOptions<'static> = DesugarOptions {
+        anchor: None,
+        mode: EmitMode::Pretty,
+    };
 }
 
 /// Which of the three fragment forms a `markdown_fragment` node is, read
@@ -56,30 +122,54 @@ impl FragmentKind {
     }
 }
 
-/// Desugar `src` (lmd) into plain Lua.
+/// Desugar `src` (lmd) into plain Lua: unanchored, pretty.
 pub fn desugar_lua(src: &str) -> Result<String, LmdError> {
-    desugar_lua_at(src, 0)
+    desugar_lua_with(src, &DesugarOptions::PRETTY)
 }
 
-/// [`desugar_lua`] for a chunk that will be spliced in at column `base`:
-/// continuation lines of each emitted fragment are indented past it.
-pub(super) fn desugar_lua_at(src: &str, base: usize) -> Result<String, LmdError> {
-    desugar_inner(src, base, 0)
+/// Desugar a chunk with the given anchor and layout.
+pub fn desugar_lua_with(src: &str, opts: &DesugarOptions<'_>) -> Result<String, LmdError> {
+    desugar_inner(src, 0, 0, opts)
 }
 
-/// [`desugar_lua_at`] for a single Lua *expression* (what an inline
-/// `` `{lmd} expr` `` holds). A bare expression is not a chunk, so it is
+/// [`desugar_lua_with`] for a chunk spliced in at column `base`: in pretty
+/// mode, continuation lines of each emitted fragment are indented past it.
+pub(super) fn desugar_lua_at(
+    src: &str,
+    base: usize,
+    opts: &DesugarOptions<'_>,
+) -> Result<String, LmdError> {
+    desugar_inner(src, base, 0, opts)
+}
+
+/// Desugar a single Lua *expression* (what an inline `` `{lmd} expr` ``
+/// holds), unanchored, pretty. A bare expression is not a chunk, so it is
 /// parsed as `return <expr>` and the prefix is stripped again.
 pub fn desugar_lua_expr(src: &str, base: usize) -> Result<String, LmdError> {
+    desugar_lua_expr_with(src, base, &DesugarOptions::PRETTY)
+}
+
+/// [`desugar_lua_expr`] with an anchor and layout.
+pub fn desugar_lua_expr_with(
+    src: &str,
+    base: usize,
+    opts: &DesugarOptions<'_>,
+) -> Result<String, LmdError> {
     const PREFIX: &str = "return ";
     let wrapped = format!("{PREFIX}{src}");
-    let out = desugar_inner(&wrapped, base, PREFIX.len())?;
+    let out = desugar_inner(&wrapped, base, PREFIX.len(), opts)?;
     Ok(out[PREFIX.len()..].to_string())
 }
 
-/// `first_line_offset` is subtracted from the column of fragments on the
-/// first line, for callers that prepended text to `src`.
-fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<String, LmdError> {
+/// `prefix_len` bytes were prepended to the caller's text (all on its first
+/// line): fragment columns on that line and all fragment byte offsets are
+/// shifted back by it, so an exact anchor still lines up with the text.
+fn desugar_inner(
+    src: &str,
+    base: usize,
+    prefix_len: usize,
+    opts: &DesugarOptions<'_>,
+) -> Result<String, LmdError> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_lmd::LANGUAGE.into())
@@ -91,9 +181,10 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
     if root.has_error() {
         let err = first_error(root);
         let pos = err.start_position();
+        let shift = if pos.row == 0 { prefix_len } else { 0 };
         return Err(LmdError::LuaParse {
             line: pos.row + 1,
-            column: pos.column + 1,
+            column: pos.column.saturating_sub(shift) + 1,
         });
     }
 
@@ -101,17 +192,59 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
     let mut last = 0;
     for fragment in fragments(root) {
         out.push_str(&src[last..fragment.start_byte()]);
-        let content = fragment
-            .child_by_field_name("content")
-            .map_or("", |c| &src[c.byte_range()]);
+        let content = fragment.child_by_field_name("content");
+        let raw = content.map_or("", |c| &src[c.byte_range()]);
+        let lead = raw.len() - raw.trim_start().len();
+        let trail = raw.len() - raw.trim_end().len();
+        let markdown = raw.trim();
+
+        // The document span of the trimmed markdown, for the fragment
+        // parse to reroot into. Exact anchors are byte-for-byte the
+        // caller's text; approximate ones locate the containing node only.
+        let parent = opts.anchor.map(|anchor| {
+            if anchor.exact {
+                let (s, e) = match content {
+                    Some(c) => (c.start_byte() + lead, c.end_byte() - trail),
+                    None => (fragment.start_byte(), fragment.end_byte()),
+                };
+                SourceInfo::substring(
+                    anchor.span.clone(),
+                    s.saturating_sub(prefix_len),
+                    e.saturating_sub(prefix_len),
+                )
+            } else {
+                anchor.span.clone()
+            }
+        });
+
         let pos = fragment.start_position();
-        let shift = if pos.row == 0 { first_line_offset } else { 0 };
+        let shift = if pos.row == 0 { prefix_len } else { 0 };
         let column = base + pos.column.saturating_sub(shift);
-        out.push_str(&emit_fragment(content, column, FragmentKind::of(fragment))?);
+        let mut emitted =
+            emit_fragment(markdown, column, FragmentKind::of(fragment), parent, opts)?;
+        if opts.mode == EmitMode::LinePreserving {
+            pad_to_source_lines(&mut emitted, fragment.end_position().row - pos.row);
+        }
+        out.push_str(&emitted);
         last = fragment.end_byte();
     }
     out.push_str(&src[last..]);
     Ok(out)
+}
+
+/// Make a fragment's expansion occupy exactly `rows` line breaks (the
+/// fragment's own span) by padding newlines right after the opening `(`,
+/// where Lua ignores them. Newlines already inside the expansion come from
+/// a block lmd cell spliced from the fragment's markdown, which are source
+/// lines of the fragment, so they count toward the budget.
+fn pad_to_source_lines(emitted: &mut String, rows: usize) {
+    let used = emitted.matches('\n').count();
+    let pad = rows.saturating_sub(used);
+    if pad > 0
+        && let Some(open) = emitted.find('(')
+    {
+        emitted.insert_str(open + 1, &"\n".repeat(pad));
+    }
 }
 
 /// Parse one fragment's markdown and print it as a Lua expression.
@@ -124,10 +257,16 @@ fn desugar_inner(src: &str, base: usize, first_line_offset: usize) -> Result<Str
 /// - `{=[ … ]=}` becomes `pandoc.Inlines({ inlines })`, where the markdown
 ///   must parse to a single paragraph (or nothing); anything else is an
 ///   error, since the author asked for inlines.
-fn emit_fragment(markdown: &str, column: usize, kind: FragmentKind) -> Result<String, LmdError> {
-    let markdown = markdown.trim();
-    let blocks = parse_markdown(markdown)?;
-    let mut emitter = Emitter::new(column);
+fn emit_fragment(
+    markdown: &str,
+    column: usize,
+    kind: FragmentKind,
+    parent: Option<SourceInfo>,
+    opts: &DesugarOptions<'_>,
+) -> Result<String, LmdError> {
+    let anchored = parent.is_some();
+    let blocks = parse_markdown(markdown, parent)?;
+    let mut emitter = Emitter::new(column, opts.mode, anchored);
     match kind {
         FragmentKind::Nodes => emitter.blocks_call("Nodes", &blocks)?,
         FragmentKind::Blocks => emitter.blocks_call("Blocks", &blocks)?,
@@ -141,10 +280,15 @@ fn emit_fragment(markdown: &str, column: usize, kind: FragmentKind) -> Result<St
     Ok(emitter.finish())
 }
 
-fn parse_markdown(markdown: &str) -> Result<Vec<Block>, LmdError> {
+/// Parse a fragment's markdown. With `parent`, the reader reroots every
+/// node span and every parse diagnostic into it (the same path front-matter
+/// markdown uses); without it, diagnostics are stripped of their locations,
+/// which would otherwise point into a private, meaningless file.
+fn parse_markdown(markdown: &str, parent: Option<SourceInfo>) -> Result<Vec<Block>, LmdError> {
     if markdown.is_empty() {
         return Ok(vec![]);
     }
+    let anchored = parent.is_some();
     let mut sink: Vec<u8> = Vec::new();
     match pampa::readers::qmd::read(
         markdown.as_bytes(),
@@ -152,20 +296,31 @@ fn parse_markdown(markdown: &str) -> Result<Vec<Block>, LmdError> {
         "fragment.lmd",
         &mut sink,
         true,
-        None,
+        parent,
     ) {
         Ok((pandoc, _ctx, _warnings)) => {
             let mut blocks = pandoc.blocks;
             strip_derived_heading_ids(&mut blocks);
             Ok(blocks)
         }
-        Err(diags) => Err(LmdError::MarkdownParse(
-            diags
-                .iter()
-                .map(|d| d.title.clone())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )),
+        Err(mut diags) => {
+            if !anchored {
+                for d in &mut diags {
+                    d.location = None;
+                    for detail in &mut d.details {
+                        detail.location = None;
+                    }
+                }
+            }
+            Err(LmdError::MarkdownParse {
+                summary: diags
+                    .iter()
+                    .map(|d| d.title.clone())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                diagnostics: diags,
+            })
+        }
     }
 }
 
@@ -241,6 +396,16 @@ fn first_error(root: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_preserving(src: &str) -> Result<String, LmdError> {
+        desugar_lua_with(
+            src,
+            &DesugarOptions {
+                anchor: None,
+                mode: EmitMode::LinePreserving,
+            },
+        )
+    }
 
     #[test]
     fn lua_without_fragments_is_unchanged() {
@@ -370,9 +535,72 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_node_is_an_error() {
+    fn unsupported_node_is_an_error_without_a_location_when_unanchored() {
         let src = "return {=: | a | b |\n|---|---|\n| 1 | 2 | :=}";
         let err = desugar_lua(src).unwrap_err();
-        assert!(matches!(err, LmdError::Unsupported("Table")), "{err}");
+        assert!(
+            matches!(
+                err,
+                LmdError::Unsupported {
+                    kind: "Table",
+                    location: None
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn markdown_parse_errors_carry_the_readers_diagnostics() {
+        // Q-2-10: a bare apostrophe after a plural noun reads as an
+        // unmatched closing smart quote.
+        let src = "return {=: the groups' Unique IDs :=}";
+        let err = desugar_lua(src).unwrap_err();
+        let LmdError::MarkdownParse { diagnostics, .. } = &err else {
+            panic!("expected MarkdownParse, got {err}");
+        };
+        assert!(!diagnostics.is_empty());
+        // Unanchored: no location, rather than one into a private file.
+        assert!(diagnostics.iter().all(|d| d.location.is_none()));
+    }
+
+    // ----- line-preserving mode -----
+
+    #[test]
+    fn line_preserving_keeps_single_line_fragments_on_one_line() {
+        let out = line_preserving("return {=: **hello** :=}").unwrap();
+        assert_eq!(
+            out,
+            r#"return pandoc.Blocks({pandoc.Para({pandoc.Strong({pandoc.Str("hello")})})})"#
+        );
+    }
+
+    #[test]
+    fn line_preserving_pads_multi_line_fragments_to_their_source_lines() {
+        let src = "local a = {=:\nOne.\n\nTwo.\n:=}\nlocal b = 1";
+        let out = line_preserving(src).unwrap();
+        assert_eq!(
+            out.lines().count(),
+            src.lines().count(),
+            "line count must match\n{out}"
+        );
+        // `local b` is still on line 6 of the output.
+        assert_eq!(out.lines().nth(5), Some("local b = 1"));
+        assert!(
+            out.starts_with("local a = pandoc.Blocks(\n\n\n\n{"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn line_preserving_counts_a_nested_cells_lines_toward_the_budget() {
+        let src = "local a = {=:\nIntro\n\n```{lmd}\nlocal y = 1\nreturn y\n```\n:=}\nlocal b = 2";
+        let out = line_preserving(src).unwrap();
+        assert_eq!(out.lines().count(), src.lines().count(), "{out}");
+        assert_eq!(out.lines().last(), Some("local b = 2"));
+        assert!(
+            out.contains("(function() local y = 1\nreturn y end)()"),
+            "{out}"
+        );
     }
 }
