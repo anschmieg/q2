@@ -213,7 +213,7 @@ Taken as proposed on 2026-10-12, with the user's explicit yes on the last two:
 4. **Metadata stays out.** Q1's `quarto.metadata` (quarto-cli PR 13246; see `external-sources/quarto-cli/src/resources/lua-types/quarto/metadata.lua`) is not ported to q2 yet, and `quarto.doc.meta` is listed as unsupported in pampa. The spike runs in immediate mode. Porting it is its own strand when wanted.
 5. **Echo is a cell option**, `--| echo: true` in Lua comment syntax, off by default. It keeps the (option-stripped) desugared Lua as a plain `lmd` code block above the result.
 6. **A failing cell is an error diagnostic, located at the cell**, and the cell stays in the document as that displayed block, so the rest of the page renders and the failing Lua can be read. Three failure kinds: the chunk does not compile or raises, or it returns the wrong kind of value (the hint names the three accepted shapes and `{=: … :=}`).
-7. **Inline `{lmd}` code in ordinary paragraphs stays out of scope.** It needs the inline coercion contract that `pandoc.Nodes` also waits on.
+7. **Inline `{lmd}` code in ordinary paragraphs stays out of scope** for this spike. (Done in spike 3, below.)
 
 ### What landed
 
@@ -271,6 +271,50 @@ each underlining the cell in the source, and leave the desugared cell displayed.
 2. **The derived heading id is now visible in output**: `{#lmd-greeting-world}` is the reader's auto id for the placeholder text. Spike 1's observation 3 stands and now has a user-visible effect.
 3. **Lua error messages name the cell by number** (`lmd cell 6`), which is the cell's position among lmd cells, not a line in the document. The diagnostic's location underlines the right cell, so this is cosmetic, but a `file:line` chunk name would read better.
 4. **`pandoc.Nodes` fails at run time**, as designed: an unmarked fragment in a cell that runs produces "pandoc.Nodes is not implemented yet" with the hint to use a marked form.
+
+## Spike 3 (done 2026-10-12): inline cells in paragraphs
+
+`` `{lmd} expr` `` anywhere inline (paragraphs, headings, list items, emphasis, captions) is now an inline cell: the desugar stage strips the tag, desugars the expression (so it may contain `{=[ … ]=}` fragments) and marks the `Code` node; the execute stage evaluates it in the same Lua state as the block cells and splices the inlines in.
+
+### Contract
+
+The mirror image of the block cell contract: the expression may evaluate to an `Inline`, a list of `Inline`s (a `pandoc.Inlines` or a plain table that may also hold strings), a string, or `nil` (the inline vanishes). A string is split the way pandoc's own coercion does it, into `Str` and `Space` runs. A `Block`, `Blocks`, a number, or a function is an error naming the value, with a hint pointing at `{=[ … ]=}`.
+
+This settles spike 1's observation 2 for inline positions, and it is the same rule pampa's constructors already apply to spliced values inside fragments, so `pandoc.Strong(name)` and an inline-fragment markdown that holds `` `{lmd} name` `` agree.
+
+### Ordering
+
+Block and inline cells are numbered by one pre-order walk (`ast_walk::ListVisitor` over `block_children_mut` / `inline_children_mut`), so document order holds across kinds: an inline cell in the paragraph above a block cell runs first and sees `nil` for a global the block cell sets; the one below sees the value. The hand-rolled block-only walk from spike 2 is gone.
+
+### Failures
+
+Same policy as block cells: an error diagnostic located at the code span (the underline lands on the span, not the paragraph), and the span stays in the document as a plain `lmd` code span holding the desugared expression. There is no `echo` for inline cells; there is nowhere to put options.
+
+### Mentions versus cells
+
+This plan was the first casualty: its prose says `` `{lmd}` `` in several places, and a bare tag with no expression became an empty cell that failed to parse. The rule is now that `` `{lmd}` `` alone is a *mention* and is left as code, the same convention the docs rely on when they write `` `{python}` ``. To show the inline-cell syntax itself, write it as code containing backticks, `` `{lmd} expr` `` inside a double-backtick span: the code's text then starts with a backtick, not the tag. A `{lmd}` tag followed by an expression in prose *will* run, exactly as `` `{python} expr` `` does in a Quarto 1 document; there is no inline equivalent of wrapping a fence in a `markdown` block, which is a gap shared with the other engines.
+
+Desugar failures are now located diagnostics (warning at the cell, with the cell left as written); they used to be bare messages, which is why the empty cell above took a search to find.
+
+### What the output looks like
+
+````qmd
+```{lmd}
+name = "world"
+count = 3
+```
+
+## Hello, `{lmd} name`
+
+There are `{lmd} tostring(count)` things, and the third is
+`{lmd} {=[ *emphasised* ]=}`. A bold one: `{lmd} pandoc.Strong(name)`.
+````
+
+renders to `## Hello, world {#hello-lmd-name}` and "There are 3 things, and the third is *emphasised*. A bold one: **world**." The heading id is the reader's, derived from the placeholder text (spike 1, observation 3; still open).
+
+### Verification
+
+`cargo nextest run -p quarto-core -p pampa -E 'test(lmd)'`: 47 tests (18 desugaring, 12 execute-stage, 8 runtime, the rest grammar and stub).
 
 ## Delimiter design notes (2026-10-12)
 
@@ -339,7 +383,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 3 candidates**, in no particular order: `pandoc.Nodes` semantics (a value that becomes blocks or inlines by the constructor it is passed to); inline `{lmd}` code in paragraphs; porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder.
+- **Spike 4 candidates**, in no particular order: `pandoc.Nodes` semantics (a value that becomes blocks or inlines by the constructor it is passed to); porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder; `file:line` chunk names for Lua error messages.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 

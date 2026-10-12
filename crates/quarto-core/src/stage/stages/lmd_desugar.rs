@@ -19,12 +19,17 @@
 //! whenever the execute stage is absent or a cell fails to run.
 
 use async_trait::async_trait;
-use quarto_error_reporting::DiagnosticMessage;
+use quarto_error_reporting::DiagnosticMessageBuilder;
 use quarto_pandoc_types::block::Block;
+use quarto_pandoc_types::inline::Inline;
+use quarto_source_map::SourceInfo;
 
-use crate::ast_walk::for_each_block_list_mut;
+use crate::ast_walk::{for_each_block_list_mut, for_each_inline_list_mut};
 use crate::engine::capture_splice::engine_cell_lang;
-use crate::lmd::{LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE, LmdError, desugar_lua};
+use crate::lmd::{
+    LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE, LmdError, desugar_lua, desugar_lua_expr,
+    inline_lmd_source,
+};
 use crate::stage::{
     EventLevel, PipelineData, PipelineDataKind, PipelineError, PipelineStage, StageContext,
 };
@@ -39,10 +44,43 @@ impl LmdDesugarStage {
     }
 }
 
-/// Desugar every `{lmd}` cell in `blocks` in place. Returns one error per
-/// cell that was left as it was.
-pub fn desugar_lmd_cells(blocks: &mut Vec<Block>) -> Vec<LmdError> {
+/// A cell that could not be desugared and was left as written.
+#[derive(Debug)]
+pub struct LmdDesugarFailure {
+    pub error: LmdError,
+    /// The cell (code block or code span) in the source.
+    pub location: SourceInfo,
+}
+
+/// Desugar every `{lmd}` cell in `blocks` in place, block cells and inline
+/// cells alike. Returns one failure per cell that was left as it was.
+pub fn desugar_lmd_cells(blocks: &mut Vec<Block>) -> Vec<LmdDesugarFailure> {
     let mut errors = Vec::new();
+    // Inline cells: `` `{lmd} expr` `` is a `Code` whose text carries the
+    // tag. The tag is dropped, the expression desugared, and the node
+    // marked; the execute stage evaluates it as an expression.
+    for_each_inline_list_mut(blocks, &mut |list| {
+        for inline in list.iter_mut() {
+            let Inline::Code(code) = inline else {
+                continue;
+            };
+            let Some(expr) = inline_lmd_source(&code.attr, &code.text) else {
+                continue;
+            };
+            match desugar_lua_expr(expr, 0) {
+                Ok(lua) => {
+                    code.text = lua;
+                    code.attr
+                        .2
+                        .insert(LMD_PENDING_ATTR.to_string(), LMD_PENDING_VALUE.to_string());
+                }
+                Err(err) => errors.push(LmdDesugarFailure {
+                    error: err,
+                    location: code.source_info.clone(),
+                }),
+            }
+        }
+    });
     for_each_block_list_mut(blocks, &mut |list| {
         for block in list.iter_mut() {
             if engine_cell_lang(block) != Some(LMD_LANG) {
@@ -64,7 +102,10 @@ pub fn desugar_lmd_cells(blocks: &mut Vec<Block>) -> Vec<LmdError> {
                         .2
                         .insert(LMD_PENDING_ATTR.to_string(), LMD_PENDING_VALUE.to_string());
                 }
-                Err(err) => errors.push(err),
+                Err(err) => errors.push(LmdDesugarFailure {
+                    error: err,
+                    location: cell.source_info.clone(),
+                }),
             }
         }
     });
@@ -99,10 +140,15 @@ impl PipelineStage for LmdDesugarStage {
         };
 
         let errors = desugar_lmd_cells(&mut doc.ast.blocks);
-        for err in errors {
-            trace_event!(ctx, EventLevel::Warn, "{}", err);
-            ctx.diagnostics
-                .push(DiagnosticMessage::warning(err.to_string()));
+        for failure in errors {
+            trace_event!(ctx, EventLevel::Warn, "{}", failure.error);
+            ctx.diagnostics.push(
+                DiagnosticMessageBuilder::warning("lmd cell could not be desugared")
+                    .with_location(failure.location)
+                    .problem(failure.error.to_string())
+                    .add_hint("The cell is left as written and will not run.")
+                    .build(),
+            );
         }
 
         Ok(PipelineData::DocumentAst(doc))
@@ -151,6 +197,45 @@ mod tests {
     }
 
     #[test]
+    fn inline_cell_is_desugared_and_marked() {
+        let mut blocks = parse("Value `{lmd} f({=[ *x* ]=})` here and `plain` code.\n");
+        let errors = desugar_lmd_cells(&mut blocks);
+        assert!(errors.is_empty(), "{errors:?}");
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!("expected Para");
+        };
+        let codes: Vec<&quarto_pandoc_types::inline::Code> = p
+            .content
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Code(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes.len(), 2);
+        assert!(
+            codes[0].text.starts_with("f(pandoc.Inlines({"),
+            "{}",
+            codes[0].text
+        );
+        assert_eq!(
+            codes[0].attr.2.get("lmd").map(String::as_str),
+            Some("pending")
+        );
+        assert_eq!(codes[1].text, "plain");
+        assert!(codes[1].attr.2.get("lmd").is_none());
+    }
+
+    #[test]
+    fn a_bare_tag_mention_is_not_an_inline_cell() {
+        let mut blocks = parse("The `{lmd}` cell and the `{lmd} ` tag.\n");
+        let before = blocks.clone();
+        let errors = desugar_lmd_cells(&mut blocks);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(blocks, before);
+    }
+
+    #[test]
     fn other_cells_and_plain_code_are_untouched() {
         let src = "```{python}\n1 + 1\n```\n\n```lua\nreturn {= x =}\n```\n";
         let mut blocks = parse(src);
@@ -166,7 +251,7 @@ mod tests {
         let before = blocks.clone();
         let errors = desugar_lmd_cells(&mut blocks);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(matches!(errors[0], LmdError::LuaParse { .. }));
+        assert!(matches!(errors[0].error, LmdError::LuaParse { .. }));
         assert_eq!(blocks, before);
     }
 }

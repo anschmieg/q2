@@ -378,16 +378,19 @@ impl Emitter {
 ///
 /// The qmd reader turns both `` `{lmd} expr` `` and `` `expr`{lmd} `` into a
 /// `Code` whose text is `{lmd} expr`; a `{lmd}` class is accepted too in
-/// case a filter built the node.
-fn inline_lmd_source<'a>(attr: &Attr, text: &'a str) -> Option<&'a str> {
+/// case a filter built the node. A bare `` `{lmd}` `` with no expression is
+/// a *mention* of the tag (prose about the syntax), not a cell, and is left
+/// alone; the same convention lets the docs write `` `{python}` ``.
+pub(crate) fn inline_lmd_source<'a>(attr: &Attr, text: &'a str) -> Option<&'a str> {
     let tag = format!("{{{}}}", super::LMD_LANG);
-    if let Some(rest) = text.strip_prefix(&tag) {
-        return Some(rest.trim());
-    }
-    if attr.1.iter().any(|c| c == &tag) {
-        return Some(text.trim());
-    }
-    None
+    let expr = if let Some(rest) = text.strip_prefix(&tag) {
+        rest.trim()
+    } else if attr.1.iter().any(|c| c == &tag) {
+        text.trim()
+    } else {
+        return None;
+    };
+    (!expr.is_empty()).then_some(expr)
 }
 
 fn list_number_style(style: &ListNumberStyle) -> &'static str {
@@ -455,6 +458,9 @@ mod tests {
         assert_eq!(inline_lmd_source(&empty, "{lmd}v + 1"), Some("v + 1"));
         assert_eq!(inline_lmd_source(&empty, "{python} v"), None);
         assert_eq!(inline_lmd_source(&empty, "code"), None);
+        // A bare tag is a mention of the syntax, not a cell.
+        assert_eq!(inline_lmd_source(&empty, "{lmd}"), None);
+        assert_eq!(inline_lmd_source(&empty, "{lmd} "), None);
         let classed: Attr = (String::new(), vec!["{lmd}".into()], Default::default());
         assert_eq!(inline_lmd_source(&classed, " v "), Some("v"));
     }

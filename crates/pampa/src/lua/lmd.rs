@@ -22,6 +22,13 @@
 //! wrapped in a `Plain`: a cell is block context, and the fragment syntax
 //! already lets the author say `{=: … :=}` when they mean blocks.
 //!
+//! An *inline* cell (`` `{lmd} expr` `` in a paragraph) is an expression
+//! evaluated in the same state, with the mirror-image contract
+//! ([`LmdRuntime::run_inline_cell`]): `nil` (vanishes), an `Inline`,
+//! `Inlines` or a plain table of `Inline`s and strings, or a string, which
+//! pandoc's own coercion splits into `Str` / `Space` runs. Blocks are an
+//! error.
+//!
 //! One [`LmdRuntime`] serves a whole document, so globals set by one cell
 //! are visible to the cells after it, like a notebook.
 //!
@@ -34,10 +41,11 @@ use mlua::{Lua, MultiValue, Value};
 use quarto_error_reporting::DiagnosticMessage;
 
 use super::filter::{FilterResult, create_filter_environment};
+use super::list::get_or_create_blocks_metatable;
 use super::list::get_or_create_inlines_metatable;
-use super::types::{LuaBlock, LuaInline, lua_facing_type_name};
+use super::types::{LuaBlock, LuaInline, lua_facing_type_name, peek_inlines_fuzzy};
 use crate::attribution::AttributionLookup;
-use crate::pandoc::Block;
+use crate::pandoc::{Block, Inline};
 use quarto_system_runtime::SystemRuntime;
 
 /// What a cell evaluated to, once accepted by the contract above.
@@ -49,7 +57,17 @@ pub enum LmdCellValue {
     Blocks(Vec<Block>),
 }
 
-/// Why a cell could not be turned into blocks.
+/// What an inline cell evaluated to, once accepted by the contract above.
+#[derive(Debug)]
+pub enum LmdInlineValue {
+    /// The expression was `nil`: the inline is removed.
+    Nothing,
+    /// The inline is replaced by these inlines.
+    Inlines(Vec<Inline>),
+}
+
+/// Why a cell could not be turned into blocks (or an inline cell into
+/// inlines).
 #[derive(Debug)]
 pub enum LmdCellError {
     /// The chunk failed to compile or raised at runtime.
@@ -57,6 +75,8 @@ pub enum LmdCellError {
     /// The chunk ran but returned something that is not blocks. `got`
     /// describes the value the way the error message should.
     NotBlocks { got: String },
+    /// The inline expression evaluated to something that is not inlines.
+    NotInlines { got: String },
 }
 
 impl std::fmt::Display for LmdCellError {
@@ -66,6 +86,10 @@ impl std::fmt::Display for LmdCellError {
             LmdCellError::NotBlocks { got } => write!(
                 f,
                 "an lmd cell must return a Block, a list of Blocks, or nil; this one returned {got}"
+            ),
+            LmdCellError::NotInlines { got } => write!(
+                f,
+                "an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to {got}"
             ),
         }
     }
@@ -112,6 +136,26 @@ impl LmdRuntime {
             .map_err(LmdCellError::Lua)?;
         let value = returned.into_iter().next().unwrap_or(Value::Nil);
         classify_cell_value(&self.lua, value)
+    }
+
+    /// Evaluate one inline cell's expression. `expr` is a Lua expression
+    /// (the desugarer already stripped the `{lmd}` tag); it is run as
+    /// `return <expr>` so a bare expression is a valid chunk.
+    pub async fn run_inline_cell(
+        &self,
+        expr: &str,
+        chunk_name: &str,
+    ) -> Result<LmdInlineValue, LmdCellError> {
+        let source = format!("return {expr}");
+        let returned: MultiValue = self
+            .lua
+            .load(&source)
+            .set_name(chunk_name)
+            .call_async(())
+            .await
+            .map_err(LmdCellError::Lua)?;
+        let value = returned.into_iter().next().unwrap_or(Value::Nil);
+        classify_inline_value(&self.lua, value)
     }
 
     /// Diagnostics the cells recorded through `quarto.warn` / `quarto.error`, drained so the
@@ -182,9 +226,64 @@ fn classify_cell_value(lua: &Lua, value: Value) -> Result<LmdCellValue, LmdCellE
     }
 }
 
+/// Apply the inline cell contract to a value.
+fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdCellError> {
+    let not_inlines = |got: String| Err(LmdCellError::NotInlines { got });
+    match &value {
+        Value::Nil => Ok(LmdInlineValue::Nothing),
+        Value::String(_) => {
+            let inlines = peek_inlines_fuzzy(lua, value).map_err(LmdCellError::Lua)?;
+            Ok(LmdInlineValue::Inlines(inlines))
+        }
+        Value::UserData(ud) => {
+            if let Ok(inline) = ud.borrow::<LuaInline>() {
+                let inline = inline.extract_flushed(lua).map_err(LmdCellError::Lua)?;
+                return Ok(LmdInlineValue::Inlines(vec![inline]));
+            }
+            not_inlines(describe(&value).to_string())
+        }
+        Value::Table(table) => {
+            if let Ok(blocks_mt) = get_or_create_blocks_metatable(lua)
+                && table
+                    .metatable()
+                    .is_some_and(|mt| mt.to_pointer() == blocks_mt.to_pointer())
+            {
+                return not_inlines("Blocks".to_string());
+            }
+            let mut inlines = Vec::new();
+            for (i, item) in table.sequence_values::<Value>().enumerate() {
+                let item = item.map_err(LmdCellError::Lua)?;
+                match &item {
+                    Value::UserData(ud) if ud.borrow::<LuaInline>().is_ok() => {
+                        let inline = ud
+                            .borrow::<LuaInline>()
+                            .expect("checked above")
+                            .extract_flushed(lua)
+                            .map_err(LmdCellError::Lua)?;
+                        inlines.push(inline);
+                    }
+                    Value::String(_) => {
+                        inlines.extend(peek_inlines_fuzzy(lua, item).map_err(LmdCellError::Lua)?);
+                    }
+                    other => {
+                        return not_inlines(format!(
+                            "a list whose element {} is {}",
+                            i + 1,
+                            describe(other)
+                        ));
+                    }
+                }
+            }
+            Ok(LmdInlineValue::Inlines(inlines))
+        }
+        other => not_inlines(describe(other).to_string()),
+    }
+}
+
 fn describe(value: &Value) -> &'static str {
     match value {
         Value::UserData(ud) if ud.borrow::<LuaInline>().is_ok() => "an Inline",
+        Value::UserData(ud) if ud.borrow::<LuaBlock>().is_ok() => "a Block",
         Value::String(_) => "a string",
         Value::Number(_) | Value::Integer(_) => "a number",
         Value::Boolean(_) => "a boolean",
@@ -279,6 +378,69 @@ mod tests {
         assert!(matches!(err, LmdCellError::Lua(_)), "{msg}");
         assert!(msg.contains("boom"), "{msg}");
         assert!(msg.contains("cell 3"), "{msg}");
+    }
+
+    async fn run_inline(expr: &str) -> Result<LmdInlineValue, LmdCellError> {
+        runtime().run_inline_cell(expr, "inline").await
+    }
+
+    fn inlines(value: LmdInlineValue) -> Vec<Inline> {
+        match value {
+            LmdInlineValue::Inlines(i) => i,
+            LmdInlineValue::Nothing => panic!("expected inlines, got Nothing"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_cells_accept_inlines_an_inline_and_strings() {
+        assert!(matches!(
+            run_inline("nil").await.unwrap(),
+            LmdInlineValue::Nothing
+        ));
+        assert_eq!(
+            inlines(run_inline("pandoc.Str('a')").await.unwrap()).len(),
+            1
+        );
+        assert_eq!(
+            inlines(
+                run_inline("pandoc.Inlines({pandoc.Str('a'), pandoc.Space(), pandoc.Str('b')})")
+                    .await
+                    .unwrap()
+            )
+            .len(),
+            3
+        );
+        // A string is split the way pandoc does it: Str, Space, Str.
+        let split = inlines(run_inline("'two words'").await.unwrap());
+        assert_eq!(split.len(), 3, "{split:?}");
+        // A plain table may mix Inlines and strings.
+        let mixed = inlines(
+            run_inline("{ pandoc.Emph({pandoc.Str('a')}), ' b' }")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(mixed.len(), 3, "{mixed:?}");
+    }
+
+    #[tokio::test]
+    async fn inline_cells_reject_blocks_and_other_values() {
+        for (expr, expect) in [
+            ("pandoc.Para({pandoc.Str('a')})", "a Block"),
+            ("pandoc.Blocks({pandoc.Para({pandoc.Str('a')})})", "Blocks"),
+            ("{ pandoc.Para({pandoc.Str('a')}) }", "element 1 is a Block"),
+            ("42", "a number"),
+            ("function() end", "a function"),
+        ] {
+            let err = run_inline(expr).await.unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, LmdCellError::NotInlines { .. }),
+                "{expr}: {msg}"
+            );
+            assert!(msg.contains(expect), "{expr}: {msg}");
+        }
+        let err = run_inline("undefined_fn()").await.unwrap_err();
+        assert!(matches!(err, LmdCellError::Lua(_)), "{err}");
     }
 
     #[tokio::test]

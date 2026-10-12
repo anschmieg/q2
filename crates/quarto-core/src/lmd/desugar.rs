@@ -70,7 +70,7 @@ pub(super) fn desugar_lua_at(src: &str, base: usize) -> Result<String, LmdError>
 /// [`desugar_lua_at`] for a single Lua *expression* (what an inline
 /// `` `{lmd} expr` `` holds). A bare expression is not a chunk, so it is
 /// parsed as `return <expr>` and the prefix is stripped again.
-pub(super) fn desugar_lua_expr(src: &str, base: usize) -> Result<String, LmdError> {
+pub fn desugar_lua_expr(src: &str, base: usize) -> Result<String, LmdError> {
     const PREFIX: &str = "return ";
     let wrapped = format!("{PREFIX}{src}");
     let out = desugar_inner(&wrapped, base, PREFIX.len())?;

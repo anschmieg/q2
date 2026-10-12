@@ -30,16 +30,21 @@
 //! into plain Lua. Two stages apply it to a document:
 //!
 //! - [`crate::stage::stages::LmdDesugarStage`], before the engine, rewrites
-//!   each `{lmd}` cell in place and marks it [`LMD_PENDING_ATTR`].
+//!   each `{lmd}` cell in place and marks it [`LMD_PENDING_ATTR`]. Inline
+//!   cells, `` `{lmd} expr` `` in a paragraph, are rewritten the same way:
+//!   the tag is stripped, the expression desugared, the `Code` marked.
 //! - [`crate::stage::stages::LmdExecuteStage`], after the engine and right
 //!   before user pre-filters, runs the marked cells in one Lua state
-//!   (`pampa::lua::lmd`) and splices their blocks in. A cell option
-//!   `--| echo: true` keeps the desugared Lua visible above the result.
+//!   (`pampa::lua::lmd`) and splices their blocks in; an inline cell's
+//!   expression is evaluated in the same state and its inlines spliced in.
+//!   A cell option `--| echo: true` keeps the desugared Lua visible above
+//!   a block cell's result.
 
 mod desugar;
 mod emit;
 
-pub use desugar::{FragmentKind, LmdError, desugar_lua};
+pub use desugar::{FragmentKind, LmdError, desugar_lua, desugar_lua_expr};
+pub(crate) use emit::inline_lmd_source;
 
 /// The language tag an lmd cell carries: `` ```{lmd} `` parses to a
 /// `CodeBlock` whose first class is `{lmd}`, and `` `{lmd} expr` `` to a

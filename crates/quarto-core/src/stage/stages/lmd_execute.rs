@@ -2,44 +2,52 @@
  * stage/stages/lmd_execute.rs
  * Copyright (c) 2026 Posit, PBC
  *
- * lmd exploration spike 2: run desugared `{lmd}` cells.
+ * lmd exploration spikes 2 and 3: run desugared `{lmd}` cells.
  */
 
 //! `LmdExecuteStage`: run every cell `LmdDesugarStage` marked, in document
-//! order, in one Lua state per document, and replace each cell with the
-//! blocks it returned.
+//! order, in one Lua state per document, and replace each cell with what it
+//! produced.
 //!
 //! Sits after engine execution and right before `user-filters-pre`, so a
 //! cell sees engine output and lives where the eventual "a cell is a
-//! filter" story lives. The contract for what a cell may return is in
-//! `pampa::lua::lmd`: a `Block`, a list of `Block`s, or `nil` (the cell
-//! vanishes); `Inlines` and strings are errors.
+//! filter" story lives. The contracts for what a cell may produce are in
+//! `pampa::lua::lmd`: a block cell returns a `Block`, a list of `Block`s,
+//! or `nil` (the cell vanishes); an inline cell (`` `{lmd} expr` `` in a
+//! paragraph) evaluates to an `Inline`, a list of `Inline`s, a string, or
+//! `nil`. Block and inline cells share the state and run in one document
+//! order, so a paragraph's inline cell sees the globals of the block cell
+//! above it.
 //!
-//! Cell options use Lua comment syntax, `--| key: value`, at the top of the
-//! cell. `echo: true` keeps the desugared Lua visible as a plain `lmd` code
-//! block above the result (off by default). A cell that fails, at compile
-//! time, at run time, or by returning the wrong kind of value, is reported
-//! as an error diagnostic and left in the document as that same displayed
-//! block, so the rest of the page still renders and the failing Lua can be
-//! read.
+//! Cell options use Lua comment syntax, `--| key: value`, at the top of a
+//! block cell. `echo: true` keeps the desugared Lua visible as a plain
+//! `lmd` code block above the result (off by default). A cell that fails,
+//! at compile time, at run time, or by producing the wrong kind of value,
+//! is reported as an error diagnostic and left in the document as a
+//! displayed `lmd` code block or code span, so the rest of the page still
+//! renders and the failing Lua can be read.
 //!
-//! Spike 2 of `claude-notes/plans/2026-10-12-lmd-exploration.md`.
+//! Spikes 2 and 3 of `claude-notes/plans/2026-10-12-lmd-exploration.md`.
 
 use async_trait::async_trait;
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::attr::AttrSourceInfo;
 use quarto_pandoc_types::block::{Block, CodeBlock};
+use quarto_pandoc_types::inline::{Code, Inline, Inlines};
 use quarto_source_map::SourceInfo;
 use std::collections::HashMap;
 
-use crate::ast_walk::for_each_block_list_mut;
+use crate::ast_walk::{
+    ListVisitor, block_children_mut, for_each_block_list_mut, for_each_inline_list_mut,
+    inline_children_mut,
+};
 use crate::cell_options::{options_to_config, partition_cell_options};
 use crate::lmd::{LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE};
 use crate::stage::{
     EventLevel, PipelineData, PipelineDataKind, PipelineError, PipelineStage, StageContext,
 };
 use crate::trace_event;
-use pampa::lua::lmd::{LmdCellError, LmdCellValue, LmdRuntime};
+use pampa::lua::lmd::{LmdCellError, LmdCellValue, LmdInlineValue, LmdRuntime};
 
 #[derive(Default)]
 pub struct LmdExecuteStage;
@@ -50,68 +58,92 @@ impl LmdExecuteStage {
     }
 }
 
-/// A marked cell found by the pre-order walk, with the attribute value the
-/// splice pass will look for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellKind {
+    Block,
+    Inline,
+}
+
+/// A marked cell found by the pre-order walk. Its marker attribute has
+/// been overwritten with `id`, which the splice pass looks for.
 struct PendingCell {
     id: usize,
+    kind: CellKind,
     text: String,
     source_info: SourceInfo,
 }
 
-fn is_pending_cell(block: &Block) -> bool {
-    matches!(block, Block::CodeBlock(cb)
-        if cb.attr.2.get(LMD_PENDING_ATTR).map(String::as_str) == Some(LMD_PENDING_VALUE))
+/// What a cell produced, ready to splice.
+enum CellOutput {
+    Blocks(Vec<Block>),
+    Inlines(Vec<Inline>),
 }
 
-/// Collect marked cells in document order (pre-order), overwriting each
-/// one's marker with its sequence number so the splice pass can find it
-/// after the async run loop. Extend the arms if `Block` gains a container.
-fn collect_pending_cells(blocks: &mut [Block], out: &mut Vec<PendingCell>) {
-    for block in blocks.iter_mut() {
-        if is_pending_cell(block) {
-            let Block::CodeBlock(cb) = block else {
-                unreachable!("is_pending_cell matched a CodeBlock");
-            };
-            let id = out.len();
-            cb.attr
-                .2
-                .insert(LMD_PENDING_ATTR.to_string(), id.to_string());
-            out.push(PendingCell {
-                id,
-                text: cb.text.clone(),
-                source_info: cb.source_info.clone(),
-            });
-            continue;
+fn pending_marker(attrs: &hashlink::LinkedHashMap<String, String>) -> bool {
+    attrs.get(LMD_PENDING_ATTR).map(String::as_str) == Some(LMD_PENDING_VALUE)
+}
+
+fn is_pending_block_cell(block: &Block) -> bool {
+    matches!(block, Block::CodeBlock(cb) if pending_marker(&cb.attr.2))
+}
+
+fn is_pending_inline_cell(inline: &Inline) -> bool {
+    matches!(inline, Inline::Code(code) if pending_marker(&code.attr.2))
+}
+
+/// Pre-order walk that numbers marked cells in document order, block and
+/// inline cells together, overwriting each one's marker with its number.
+struct Numberer<'a> {
+    cells: &'a mut Vec<PendingCell>,
+}
+
+impl Numberer<'_> {
+    fn record(&mut self, kind: CellKind, text: &str, source_info: &SourceInfo) -> String {
+        let id = self.cells.len();
+        self.cells.push(PendingCell {
+            id,
+            kind,
+            text: text.to_string(),
+            source_info: source_info.clone(),
+        });
+        id.to_string()
+    }
+}
+
+impl ListVisitor for Numberer<'_> {
+    fn blocks(&mut self, list: &mut Vec<Block>) {
+        for block in list.iter_mut() {
+            if is_pending_block_cell(block) {
+                let Block::CodeBlock(cb) = block else {
+                    unreachable!("is_pending_block_cell matched a CodeBlock");
+                };
+                let id = self.record(CellKind::Block, &cb.text, &cb.source_info);
+                cb.attr.2.insert(LMD_PENDING_ATTR.to_string(), id);
+                continue;
+            }
+            block_children_mut(block, self);
         }
-        match block {
-            Block::BlockQuote(bq) => collect_pending_cells(&mut bq.content, out),
-            Block::Div(div) => collect_pending_cells(&mut div.content, out),
-            Block::Figure(fig) => collect_pending_cells(&mut fig.content, out),
-            Block::OrderedList(list) => {
-                for item in &mut list.content {
-                    collect_pending_cells(item, out);
-                }
+    }
+
+    fn inlines(&mut self, list: &mut Inlines) {
+        for inline in list.iter_mut() {
+            if is_pending_inline_cell(inline) {
+                let Inline::Code(code) = inline else {
+                    unreachable!("is_pending_inline_cell matched a Code");
+                };
+                let id = self.record(CellKind::Inline, &code.text, &code.source_info);
+                code.attr.2.insert(LMD_PENDING_ATTR.to_string(), id);
+                continue;
             }
-            Block::BulletList(list) => {
-                for item in &mut list.content {
-                    collect_pending_cells(item, out);
-                }
-            }
-            Block::DefinitionList(dl) => {
-                for (_term, defs) in &mut dl.content {
-                    for def in defs {
-                        collect_pending_cells(def, out);
-                    }
-                }
-            }
-            _ => {}
+            inline_children_mut(inline, self);
         }
     }
 }
 
-/// The displayed form of a cell: a plain `lmd` code block holding its
-/// (option-stripped) desugared Lua. Used for `echo: true` and for failures.
-fn displayed_cell(code: &str, source_info: &SourceInfo) -> Block {
+/// The displayed form of a block cell: a plain `lmd` code block holding
+/// its (option-stripped) desugared Lua. Used for `echo: true` and for
+/// failures.
+fn displayed_block_cell(code: &str, source_info: &SourceInfo) -> Block {
     Block::CodeBlock(CodeBlock {
         attr: (
             String::new(),
@@ -119,6 +151,21 @@ fn displayed_cell(code: &str, source_info: &SourceInfo) -> Block {
             Default::default(),
         ),
         text: code.to_string(),
+        source_info: source_info.clone(),
+        attr_source: AttrSourceInfo::empty(),
+    })
+}
+
+/// The displayed form of a failed inline cell: a plain `lmd` code span
+/// holding its desugared expression.
+fn displayed_inline_cell(expr: &str, source_info: &SourceInfo) -> Inline {
+    Inline::Code(Code {
+        attr: (
+            String::new(),
+            vec![LMD_LANG.to_string()],
+            Default::default(),
+        ),
+        text: expr.to_string(),
         source_info: source_info.clone(),
         attr_source: AttrSourceInfo::empty(),
     })
@@ -139,6 +186,60 @@ fn cell_error(
     builder.build()
 }
 
+fn failure_diagnostic(cell: &PendingCell, err: &LmdCellError) -> DiagnosticMessage {
+    let (title, hint) = match err {
+        LmdCellError::Lua(_) => ("lmd cell failed", None),
+        LmdCellError::NotBlocks { .. } => (
+            "lmd cell did not return blocks",
+            Some(
+                "Return a Block, a list of Blocks, or nil. Write `{=: … :=}` for a markdown fragment that is blocks.",
+            ),
+        ),
+        LmdCellError::NotInlines { .. } => (
+            "inline lmd cell did not produce inlines",
+            Some(
+                "An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
+            ),
+        ),
+    };
+    cell_error(title, cell, err.to_string(), hint)
+}
+
+/// Split a block cell's text into its code and the `echo` option.
+fn block_cell_code_and_echo(
+    cell: &PendingCell,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> (String, bool) {
+    // Cell options use Lua's comment syntax; the language key is `lua`
+    // because `lmd` is unknown to the comment table and would default
+    // to `#`.
+    match partition_cell_options("lua", &cell.text, cell.source_info.clone()) {
+        Ok(partitioned) => {
+            let echo =
+                partitioned
+                    .options
+                    .map(options_to_config)
+                    .is_some_and(|(config, option_diags)| {
+                        diagnostics.extend(option_diags);
+                        config
+                            .get("echo")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    });
+            (partitioned.code, echo)
+        }
+        Err(err) => {
+            diagnostics.push(cell_error(
+                "lmd cell options are not valid",
+                cell,
+                err.to_string(),
+                None,
+            ));
+            (cell.text.clone(), false)
+        }
+    }
+}
+
 /// Run every marked cell in `blocks` and splice the results in place.
 /// Diagnostics (cell failures, `quarto.warn` calls) go to `diagnostics`.
 pub async fn execute_lmd_cells(
@@ -147,96 +248,91 @@ pub async fn execute_lmd_cells(
     diagnostics: &mut Vec<DiagnosticMessage>,
 ) {
     let mut cells = Vec::new();
-    collect_pending_cells(blocks, &mut cells);
+    Numberer { cells: &mut cells }.blocks(blocks);
     if cells.is_empty() {
         return;
     }
 
-    let mut results: HashMap<usize, Vec<Block>> = HashMap::new();
+    let mut results: HashMap<usize, CellOutput> = HashMap::new();
     for cell in &cells {
-        // Cell options use Lua's comment syntax; the language key is
-        // `lua` because `lmd` is unknown to the comment table and would
-        // default to `#`.
-        let (code, echo) = match partition_cell_options("lua", &cell.text, cell.source_info.clone())
-        {
-            Ok(partitioned) => {
-                let echo = partitioned.options.map(options_to_config).is_some_and(
-                    |(config, option_diags)| {
-                        diagnostics.extend(option_diags);
-                        config
-                            .get("echo")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                    },
-                );
-                (partitioned.code, echo)
-            }
-            Err(err) => {
-                diagnostics.push(cell_error(
-                    "lmd cell options are not valid",
-                    cell,
-                    err.to_string(),
-                    None,
-                ));
-                (cell.text.clone(), false)
-            }
-        };
-
         let chunk_name = format!("lmd cell {}", cell.id + 1);
-        let mut output: Vec<Block> = Vec::new();
-        match runtime.run_cell(&code, &chunk_name).await {
-            Ok(LmdCellValue::Nothing) => {
-                if echo {
-                    output.push(displayed_cell(&code, &cell.source_info));
+        let output = match cell.kind {
+            CellKind::Block => {
+                let (code, echo) = block_cell_code_and_echo(cell, diagnostics);
+                let mut out: Vec<Block> = Vec::new();
+                match runtime.run_cell(&code, &chunk_name).await {
+                    Ok(value) => {
+                        if echo {
+                            out.push(displayed_block_cell(&code, &cell.source_info));
+                        }
+                        if let LmdCellValue::Blocks(result) = value {
+                            out.extend(result);
+                        }
+                    }
+                    Err(err) => {
+                        diagnostics.push(failure_diagnostic(cell, &err));
+                        out.push(displayed_block_cell(&code, &cell.source_info));
+                    }
                 }
+                CellOutput::Blocks(out)
             }
-            Ok(LmdCellValue::Blocks(result)) => {
-                if echo {
-                    output.push(displayed_cell(&code, &cell.source_info));
+            CellKind::Inline => match runtime.run_inline_cell(&cell.text, &chunk_name).await {
+                Ok(LmdInlineValue::Nothing) => CellOutput::Inlines(Vec::new()),
+                Ok(LmdInlineValue::Inlines(result)) => CellOutput::Inlines(result),
+                Err(err) => {
+                    diagnostics.push(failure_diagnostic(cell, &err));
+                    CellOutput::Inlines(vec![displayed_inline_cell(&cell.text, &cell.source_info)])
                 }
-                output.extend(result);
-            }
-            Err(err) => {
-                let (title, hint) = match &err {
-                    LmdCellError::Lua(_) => ("lmd cell failed", None),
-                    LmdCellError::NotBlocks { .. } => (
-                        "lmd cell did not return blocks",
-                        Some(
-                            "Return a Block, a list of Blocks, or nil. Write `{=: … :=}` for a markdown fragment that is blocks.",
-                        ),
-                    ),
-                };
-                diagnostics.push(cell_error(title, cell, err.to_string(), hint));
-                output.push(displayed_cell(&code, &cell.source_info));
-            }
-        }
+            },
+        };
         results.insert(cell.id, output);
     }
     diagnostics.extend(runtime.take_diagnostics());
 
     for_each_block_list_mut(blocks, &mut |list| {
-        if !list.iter().any(is_numbered_cell) {
+        if !list.iter().any(|b| numbered_block_cell_id(b).is_some()) {
             return;
         }
         let old = std::mem::take(list);
         for block in old {
-            match numbered_cell_id(&block) {
-                Some(id) => list.extend(results.remove(&id).unwrap_or_default()),
+            match numbered_block_cell_id(&block).and_then(|id| results.remove(&id)) {
+                Some(CellOutput::Blocks(out)) => list.extend(out),
+                Some(CellOutput::Inlines(_)) => {
+                    unreachable!("a block cell never produces inlines")
+                }
                 None => list.push(block),
+            }
+        }
+    });
+    for_each_inline_list_mut(blocks, &mut |list| {
+        if !list.iter().any(|i| numbered_inline_cell_id(i).is_some()) {
+            return;
+        }
+        let old = std::mem::take(list);
+        for inline in old {
+            match numbered_inline_cell_id(&inline).and_then(|id| results.remove(&id)) {
+                Some(CellOutput::Inlines(out)) => list.extend(out),
+                Some(CellOutput::Blocks(_)) => {
+                    unreachable!("an inline cell never produces blocks")
+                }
+                None => list.push(inline),
             }
         }
     });
 }
 
-fn numbered_cell_id(block: &Block) -> Option<usize> {
+fn numbered_block_cell_id(block: &Block) -> Option<usize> {
     let Block::CodeBlock(cb) = block else {
         return None;
     };
     cb.attr.2.get(LMD_PENDING_ATTR)?.parse().ok()
 }
 
-fn is_numbered_cell(block: &Block) -> bool {
-    numbered_cell_id(block).is_some()
+fn numbered_inline_cell_id(inline: &Inline) -> Option<usize> {
+    let Inline::Code(code) = inline else {
+        return None;
+    };
+    code.attr.2.get(LMD_PENDING_ATTR)?.parse().ok()
 }
 
 #[async_trait(?Send)]
@@ -270,8 +366,13 @@ impl PipelineStage for LmdExecuteStage {
         // lmd cells.
         let mut any = false;
         for_each_block_list_mut(&mut doc.ast.blocks, &mut |list| {
-            any |= list.iter().any(is_pending_cell);
+            any |= list.iter().any(is_pending_block_cell);
         });
+        if !any {
+            for_each_inline_list_mut(&mut doc.ast.blocks, &mut |list| {
+                any |= list.iter().any(is_pending_inline_cell);
+            });
+        }
         if !any {
             return Ok(PipelineData::DocumentAst(doc));
         }
@@ -306,7 +407,6 @@ impl PipelineStage for LmdExecuteStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lmd::desugar_lua;
     use quarto_system_runtime::NativeRuntime;
     use std::path::Path;
     use std::sync::Arc;
@@ -336,28 +436,25 @@ mod tests {
         (blocks, diagnostics)
     }
 
+    fn inlines_text(inlines: &[Inline]) -> String {
+        inlines
+            .iter()
+            .map(|i| match i {
+                Inline::Str(s) => s.text.clone(),
+                Inline::Space(_) => " ".to_string(),
+                Inline::Strong(s) => format!("**{}**", inlines_text(&s.content)),
+                Inline::Emph(e) => format!("*{}*", inlines_text(&e.content)),
+                Inline::Code(c) => format!("`{}`", c.text),
+                _ => "?".to_string(),
+            })
+            .collect()
+    }
+
     fn para_text(block: &Block) -> String {
         let Block::Paragraph(p) = block else {
             panic!("expected Para, got {block:?}");
         };
-        p.content
-            .iter()
-            .map(|i| match i {
-                quarto_pandoc_types::inline::Inline::Str(s) => s.text.clone(),
-                quarto_pandoc_types::inline::Inline::Space(_) => " ".to_string(),
-                quarto_pandoc_types::inline::Inline::Strong(s) => format!(
-                    "**{}**",
-                    s.content
-                        .iter()
-                        .map(|i| match i {
-                            quarto_pandoc_types::inline::Inline::Str(s) => s.text.clone(),
-                            _ => "?".to_string(),
-                        })
-                        .collect::<String>()
-                ),
-                _ => "?".to_string(),
-            })
-            .collect()
+        inlines_text(&p.content)
     }
 
     #[test]
@@ -369,7 +466,7 @@ mod tests {
         assert_eq!(para_text(&blocks[0]), "Before");
         assert_eq!(para_text(&blocks[1]), "**hello**");
         assert_eq!(para_text(&blocks[2]), "After");
-        assert!(!blocks.iter().any(is_pending_cell));
+        assert!(!blocks.iter().any(is_pending_block_cell));
     }
 
     #[test]
@@ -454,6 +551,87 @@ mod tests {
         let (blocks, diags) = render(qmd);
         assert!(diags.is_empty());
         assert_eq!(blocks.len(), 2);
-        let _ = desugar_lua; // keep the import honest for future tests
+    }
+
+    // ----- inline cells (spike 3) -----
+
+    #[test]
+    fn an_inline_cell_is_replaced_by_its_inlines() {
+        let qmd = "```{lmd}\nname = 'world'\n```\n\nHello `{lmd} name` and `{lmd} {=[ *there* ]=}` and `{lmd} pandoc.Strong('x')`.\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert_eq!(para_text(&blocks[0]), "Hello world and *there* and **x**.");
+    }
+
+    #[test]
+    fn a_string_with_spaces_is_split_and_nil_vanishes() {
+        let qmd = "A `{lmd} 'b c'` D `{lmd} nil` E\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!("expected Para");
+        };
+        assert_eq!(inlines_text(&p.content), "A b c D  E");
+        assert!(
+            p.content
+                .iter()
+                .any(|i| matches!(i, Inline::Str(s) if s.text == "b"))
+        );
+    }
+
+    #[test]
+    fn inline_and_block_cells_share_one_document_order() {
+        // The inline cell in the first paragraph runs before the block
+        // cell below it, and the one in the last paragraph after.
+        let qmd =
+            "First `{lmd} tostring(n)`.\n\n```{lmd}\nn = 2\n```\n\nThen `{lmd} tostring(n)`.\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert_eq!(para_text(&blocks[0]), "First nil.");
+        assert_eq!(para_text(&blocks[1]), "Then 2.");
+    }
+
+    #[test]
+    fn inline_cells_inside_headings_and_emphasis_work() {
+        let qmd = "```{lmd}\nt = 'Title'\n```\n\n## The `{lmd} t`\n\n*Em `{lmd} t`*\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Header(h) = &blocks[0] else {
+            panic!("expected Header, got {:?}", blocks[0]);
+        };
+        assert_eq!(inlines_text(&h.content), "The Title");
+        assert_eq!(para_text(&blocks[1]), "*Em Title*");
+    }
+
+    #[test]
+    fn a_failing_inline_cell_is_reported_and_left_as_a_code_span() {
+        let qmd = "A `{lmd} pandoc.Para({})` B `{lmd} nope()` C\n";
+        let (blocks, diags) = render(qmd);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(
+            diags[0].title.contains("did not produce inlines"),
+            "{:?}",
+            diags[0]
+        );
+        assert!(diags[1].title.contains("lmd cell failed"), "{:?}", diags[1]);
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!("expected Para");
+        };
+        let codes: Vec<&Code> = p
+            .content
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Code(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes.len(), 2, "{:?}", p.content);
+        for code in codes {
+            assert_eq!(code.attr.1, vec!["lmd".to_string()]);
+            assert!(code.attr.2.get(LMD_PENDING_ATTR).is_none());
+        }
+        assert_eq!(para_text(&blocks[0]), "A `pandoc.Para({})` B `nope()` C");
     }
 }
