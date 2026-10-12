@@ -2,7 +2,7 @@
 title: 'Typst Google-font download is a network flake in smoke-all: retry fetches and keep the diagnostic detail (bd-qvl8t3hy)'
 date: 2026-10-10
 description: 'A transient fonts.googleapis.com failure fails the whole smoke_all test and the harness drops the detail that would say why; make the fetch robust and keep the problem text.'
-status: in-progress  # Implemented 2026-10-10 on the topic branch; PR pending
+status: in-progress  # Implemented 2026-10-10 on the topic branch; PR #820 open 2026-10-12
 braid:
   strand: bd-qvl8t3hy
 ---
@@ -254,8 +254,8 @@ leaves the tree green. Checkboxes are updated as work lands.
 - [x] Q-21-4 entry in `crates/quarto-error-catalog/error_catalog.json`:
       mentions the three attempts, the 30 s timeout, the error-status case,
       and that the warning names the URL and last error.
-- [ ] PR description notes the Lua-visible change (non-2xx now fails
-      `mediabag.fetch`).
+- [x] PR description notes the Lua-visible change (non-2xx now fails
+      `mediabag.fetch`). PR: https://github.com/quarto-dev/q2/pull/820
 
 ## Risks / tradeoffs
 
