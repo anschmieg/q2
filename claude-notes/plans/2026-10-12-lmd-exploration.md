@@ -199,6 +199,79 @@ Headings, bullet lists, links with titles, inline code, math, quotes, line break
 6. **Inline lmd outside a fragment is untouched.** `` `{lmd} v` `` in a document paragraph (not inside a cell) is left as a `Code` node. Whether it should be an inline cell is a design question for the dispatch half.
 7. **Continuation indent is computed from the source column.** When two fragments share a line and the first expands to several lines, the second is still indented to its *source* column (see the `card(...)` call above). Cosmetic; fixing it means tracking the output column during splicing.
 
+## Spike 2 (done 2026-10-12): running the cells
+
+The desugared Lua now runs. A second stage, `LmdExecuteStage`, sits after engine execution and right before `user-filters-pre`; it runs every cell `LmdDesugarStage` marked, in document order, in one Lua state per document, and splices the returned blocks in place of the cell.
+
+### Decisions
+
+Taken as proposed on 2026-10-12, with the user's explicit yes on the last two:
+
+1. **A cell may return a `Block`, a list of `Block`s, or `nil`** (the cell vanishes). `Inlines`, a single `Inline`, and strings are errors that name what came back, not wrapped in a `Plain`: a cell is block context, and `{=: … :=}` already says "blocks". Multiple return values are ignored past the first.
+2. **One Lua state per document.** Globals set by one cell are visible to later cells, like a notebook. Cells run in pre-order document order, so a cell inside a div runs before a top-level cell that follows the div.
+3. **After the engine, before user pre-filters.** `LmdDesugarStage` (pre-engine) rewrites the cell in place, drops the `{lmd}` class for a plain `lmd` one, and sets `lmd="pending"`; an unbraced class is plain code to every engine, so knitr and jupyter never see a cell. `LmdExecuteStage` finds the marked cells.
+4. **Metadata stays out.** Q1's `quarto.metadata` (quarto-cli PR 13246; see `external-sources/quarto-cli/src/resources/lua-types/quarto/metadata.lua`) is not ported to q2 yet, and `quarto.doc.meta` is listed as unsupported in pampa. The spike runs in immediate mode. Porting it is its own strand when wanted.
+5. **Echo is a cell option**, `--| echo: true` in Lua comment syntax, off by default. It keeps the (option-stripped) desugared Lua as a plain `lmd` code block above the result.
+6. **A failing cell is an error diagnostic, located at the cell**, and the cell stays in the document as that displayed block, so the rest of the page renders and the failing Lua can be read. Three failure kinds: the chunk does not compile or raises, or it returns the wrong kind of value (the hint names the three accepted shapes and `{=: … :=}`).
+7. **Inline `{lmd}` code in ordinary paragraphs stays out of scope.** It needs the inline coercion contract that `pandoc.Nodes` also waits on.
+
+### What landed
+
+- **`pampa::lua::lmd`**: `LmdRuntime` wraps the same Lua environment a user filter gets (`create_filter_environment`: `pandoc.*`, `quarto.*`, `FORMAT`, scoped `require`), with the document path standing in for the script path. `run_cell(source, chunk_name)` loads the chunk as a block (`call_async`, like filters), applies the return contract (`LmdCellValue::{Nothing, Blocks}` / `LmdCellError::{Lua, NotBlocks}`), and `take_diagnostics` drains `quarto.warn` / `quarto.error` records. 6 tests.
+- **`LmdExecuteStage`** (`stage/stages/lmd_execute.rs`): a pre-order walk numbers the marked cells, an async loop runs them (partitioning `--|` options first), and a post-order splice replaces each cell by its output list. Skips building a Lua state when the document has no cells. 7 tests, run through `execute_lmd_cells` on parsed documents with no stage context.
+- **`LmdDesugarStage`** now marks instead of merely displaying.
+- Stage lists: 29 stages on the HTML list; `lmd-execute` also survives into the pandoc leg.
+
+### What the output looks like
+
+The motivating example in immediate mode,
+
+````qmd
+::: foo
+
+```{lmd}
+local out = pandoc.Blocks({})
+for _, v in ipairs({ "a", "b", "c", "d" }) do
+  out:extend({=: **`{lmd} v`** :=})
+end
+return out
+```
+
+:::
+````
+
+renders to a div holding four paragraphs, `**a**` through `**d**`. A cell that sets `greeting = "Hello"` followed by
+
+````qmd
+```{lmd}
+--| echo: true
+return {=:
+### `{lmd} greeting`, world
+
+A paragraph with *emphasis*.
+:=}
+```
+````
+
+renders to the echoed Lua, then `### Hello, world {#lmd-greeting-world}` and the paragraph. A cell with no `return` leaves nothing behind. The two failure cases print, respectively,
+
+```
+Error: lmd cell did not return blocks
+  … an lmd cell must return a Block, a list of Blocks, or nil; this one returned Inlines
+  ℹ Return a Block, a list of Blocks, or nil. Write `{=: … :=}` for a markdown fragment that is blocks.
+Error: lmd cell failed
+  … runtime error: [string "lmd cell 6"]:1: boom
+```
+
+each underlining the cell in the source, and leave the desugared cell displayed.
+
+### Observations
+
+1. **String splices already work, by accident of pampa.** `greeting` is a Lua string spliced into a `Header` content list; pampa's fuzzy inline coercion turned it into `Str("Hello")`, and a string with spaces would become `Str`/`Space` runs. So observation 2 of spike 1 (no coercion contract for inline splices) is partly answered by the runtime: strings and `Inline`s work in inline lists. What is still undefined is a *list* value or a block in an inline list, and anything in block lists other than blocks.
+2. **The derived heading id is now visible in output**: `{#lmd-greeting-world}` is the reader's auto id for the placeholder text. Spike 1's observation 3 stands and now has a user-visible effect.
+3. **Lua error messages name the cell by number** (`lmd cell 6`), which is the cell's position among lmd cells, not a line in the document. The diagnostic's location underlines the right cell, so this is cosmetic, but a `file:line` chunk name would read better.
+4. **`pandoc.Nodes` fails at run time**, as designed: an unmarked fragment in a cell that runs produces "pandoc.Nodes is not implemented yet" with the hint to use a marked form.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -266,13 +339,13 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 2: run it.** Feed the desugared Lua to pampa's Lua runtime for a cell whose fragments use only immediate values, and replace the cell with the result. This is the smallest version of the dispatch half and will settle questions 1 and 2 by forcing them.
-- Turn `lmd-demo.qmd` into an integration fixture with a snapshot of the `--to markdown` output.
-- Decide the inline-context syntax (question 1) once spike 2 shows what the Lua side needs.
+- **Spike 3 candidates**, in no particular order: `pandoc.Nodes` semantics (a value that becomes blocks or inlines by the constructor it is passed to); inline `{lmd}` code in paragraphs; porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder.
+- Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
+- The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 
 ## Verification (spike 1)
 
 - `cargo xtask ts-test lmd`: 53 of 53 corpus tests.
-- `cargo nextest run -p quarto-core -E 'test(lmd)'`: 18 of 18, plus the `pandoc.Nodes` stub test in pampa.
+- `cargo nextest run -p quarto-core -p pampa -E 'test(lmd)'`: 18 desugaring tests, 7 execute-stage tests, 6 runtime tests, plus the `pandoc.Nodes` stub test.
 - `cargo test -p xtask tree_sitter`, `cargo clippy -p quarto-core -p tree-sitter-lmd -p xtask --all-targets -- -D warnings`, `cargo xtask lint`: green.
 - WASM: not built locally in this session; the crate follows `tree-sitter-doctemplate`\'s build exactly, and `quarto-core` already pulls two other C-backed grammars into the wasm32 tree. CI's build-wasm job is the check.

@@ -16,6 +16,8 @@ mod filter;
 mod io_wasm;
 mod json;
 mod list;
+// lmd cell execution (bd-lmd-exploration-jqv2nbl4).
+pub mod lmd;
 pub mod mediabag;
 mod os_wasm;
 mod pandoc_doc;

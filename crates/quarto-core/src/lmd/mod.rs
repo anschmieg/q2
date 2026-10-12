@@ -27,10 +27,14 @@
 //!    the Lua back in, so the two languages nest in either direction.
 //!
 //! This module is the desugaring half: [`desugar_lua`] turns lmd source
-//! into plain Lua. The stage that applies it to a document
-//! ([`crate::stage::stages::LmdDesugarStage`]) currently only *shows* the
-//! result, replacing each `{lmd}` cell with a non-executable `lmd` code
-//! block, so the desugaring can be inspected by eye before anything runs it.
+//! into plain Lua. Two stages apply it to a document:
+//!
+//! - [`crate::stage::stages::LmdDesugarStage`], before the engine, rewrites
+//!   each `{lmd}` cell in place and marks it [`LMD_PENDING_ATTR`].
+//! - [`crate::stage::stages::LmdExecuteStage`], after the engine and right
+//!   before user pre-filters, runs the marked cells in one Lua state
+//!   (`pampa::lua::lmd`) and splices their blocks in. A cell option
+//!   `--| echo: true` keeps the desugared Lua visible above the result.
 
 mod desugar;
 mod emit;
@@ -41,3 +45,12 @@ pub use desugar::{FragmentKind, LmdError, desugar_lua};
 /// `CodeBlock` whose first class is `{lmd}`, and `` `{lmd} expr` `` to a
 /// `Code` whose text starts with `{lmd}`.
 pub const LMD_LANG: &str = "lmd";
+
+/// Attribute key the desugar stage sets on a cell it has rewritten, so the
+/// execute stage (which runs after the engine) can find it again. The
+/// cell's `{lmd}` class is gone by then, on purpose: an unbraced `lmd`
+/// class is plain code to every engine.
+pub const LMD_PENDING_ATTR: &str = "lmd";
+
+/// Value of [`LMD_PENDING_ATTR`] on a desugared cell that has not run yet.
+pub const LMD_PENDING_VALUE: &str = "pending";

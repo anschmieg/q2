@@ -60,6 +60,7 @@ mod link_resolution;
 // desugared Lua. See claude-notes/plans/2026-10-12-lmd-exploration.md.
 pub(crate) mod listing_item_info;
 mod lmd_desugar;
+mod lmd_execute;
 mod source_conversion;
 // Math-mode stage: injects a math-rendering JS engine (MathJax / KaTeX)
 // when the document contains Math elements. Included on both native
@@ -138,6 +139,7 @@ pub use language_resolve::LanguageResolveStage;
 pub use link_resolution::LinkResolutionStage;
 pub use listing_item_info::ListingItemInfoStage;
 pub use lmd_desugar::LmdDesugarStage;
+pub use lmd_execute::LmdExecuteStage;
 pub use math_js::{DEFAULT_KATEX_URL_BASE, DEFAULT_MATHJAX_URL, MathEngine, MathJsStage};
 pub use math_ml::MathMlStage;
 pub use metadata_merge::MetadataMergeStage;

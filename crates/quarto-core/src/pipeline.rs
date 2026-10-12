@@ -401,6 +401,11 @@ pub fn build_html_pipeline_stages_with_options(
     // sidecar in both `pre` and `post` filter passes. No-op when
     // no provider is installed (`ctx.attribution_provider` is None).
     stages.push(Box::new(AttributionGenerateStage::new()));
+    // lmd exploration spike 2 (bd-lmd-exploration-jqv2nbl4): run the cells
+    // `lmd-desugar` marked, after the engine (so they see its output) and
+    // before user pre-filters (where the eventual cell-as-filter story
+    // lives). Same Lua environment as a user filter.
+    stages.push(Box::new(crate::stage::stages::LmdExecuteStage::new()));
     stages.push(Box::new(UserFiltersStage::pre()));
     stages.push(Box::new(AstTransformsStage::new()));
     stages.push(Box::new(UserFiltersStage::post()));
@@ -3515,8 +3520,9 @@ mod tests {
         // (bd-llhlzd7p) and TabsetsJsStage in the JS block
         // (bd-toc-tabset-titles-zq93gjvf) — plus EquationNumberStage and
         // MathMlStage after the post filters (bd-vlhi2zkj, bd-3evfzwal),
-        // plus LmdDesugarStage before the engine (bd-lmd-exploration-jqv2nbl4): 28.
-        assert_eq!(stages.len(), 28);
+        // plus LmdDesugarStage before the engine and LmdExecuteStage before
+        // the user pre-filters (bd-lmd-exploration-jqv2nbl4): 29.
+        assert_eq!(stages.len(), 29);
         // Pre-parse file-claim/convert (Task 10).
         assert_eq!(stages[0].name(), "source-conversion");
         assert_eq!(stages[1].name(), "parse-document");
@@ -3563,27 +3569,30 @@ mod tests {
         // `quarto.attribution.*` Lua host binding sees a populated
         // sidecar (bd-0fd0). No-op when no provider is installed.
         assert_eq!(stages[17].name(), "attribution-generate");
-        assert_eq!(stages[18].name(), "user-filters-pre");
-        assert_eq!(stages[19].name(), "ast-transforms");
-        assert_eq!(stages[20].name(), "user-filters-post");
+        // lmd exploration spike 2: cells run after the engine, before user
+        // pre-filters.
+        assert_eq!(stages[18].name(), "lmd-execute");
+        assert_eq!(stages[19].name(), "user-filters-pre");
+        assert_eq!(stages[20].name(), "ast-transforms");
+        assert_eq!(stages[21].name(), "user-filters-post");
         // bd-o8pr Phase 3: finalize per-doc resource report.
-        assert_eq!(stages[21].name(), "resource-report");
+        assert_eq!(stages[22].name(), "resource-report");
         // Equation-number encoding (bd-vlhi2zkj) must follow
         // user-filters-post: a Lua post filter may rewrite or delete the
         // reserved `quarto-eq-number` attribute the stage consumes.
-        assert_eq!(stages[22].name(), "equation-number");
+        assert_eq!(stages[23].name(), "equation-number");
         // Native MathML (bd-3evfzwal) follows equation-number (the TeX it
         // converts carries no `\tag`) and precedes math-js (which loads
         // MathJax only for what this stage left as TeX).
-        assert_eq!(stages[23].name(), "math-ml");
-        assert_eq!(stages[24].name(), "code-highlight");
+        assert_eq!(stages[24].name(), "math-ml");
+        assert_eq!(stages[25].name(), "code-highlight");
         // Math-mode (bd-w5ov) walks the post-transform AST and
         // populates meta.math when math is present. Sits just before
         // render-html-body so any late-introduced math (sugar, user
         // filters, the `\tag{N}` equation-number encoding) is visible.
-        assert_eq!(stages[25].name(), "math-js");
-        assert_eq!(stages[26].name(), "render-html-body");
-        assert_eq!(stages[27].name(), "apply-template");
+        assert_eq!(stages[26].name(), "math-js");
+        assert_eq!(stages[27].name(), "render-html-body");
+        assert_eq!(stages[28].name(), "apply-template");
     }
 
     #[test]
@@ -3591,8 +3600,9 @@ mod tests {
         let pipeline = build_html_pipeline();
         // Merged pipeline carries both SourceConversionStage (Task 10, branch)
         // LanguageResolveStage and TabsetsJsStage (main), plus
-        // EquationNumberStage and MathMlStage, plus LmdDesugarStage → 28 stages.
-        assert_eq!(pipeline.len(), 28);
+        // EquationNumberStage and MathMlStage, plus LmdDesugarStage and
+        // LmdExecuteStage → 29 stages.
+        assert_eq!(pipeline.len(), 29);
     }
 
     #[test]
@@ -6938,6 +6948,7 @@ mod tests {
                 "lmd-desugar",
                 "engine-execution",
                 "attribution-generate",
+                "lmd-execute",
                 "user-filters-pre",
                 "ast-transforms",
                 "user-filters-post",

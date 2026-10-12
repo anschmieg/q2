@@ -5,20 +5,18 @@
  * lmd exploration spike: show the desugaring of `{lmd}` cells.
  */
 
-//! `LmdDesugarStage`: rewrite every `` ```{lmd} `` cell into a plain `lmd`
-//! code block whose text is the desugared Lua, so the desugaring can be
-//! inspected in the rendered output (`q2 render doc.qmd --to markdown` is
-//! the quickest way to look).
-//!
-//! This is the first spike of the lmd exploration
-//! (`claude-notes/plans/2026-10-12-lmd-exploration.md`). Nothing is
-//! executed: the point is to read the generated `pandoc.*` calls and judge
-//! whether the desugaring could carry the real design, where a cell becomes
-//! a Lua filter dispatched to the cell's position in the document.
+//! `LmdDesugarStage`: rewrite every `` ```{lmd} `` cell in place into a
+//! plain `lmd` code block whose text is the desugared Lua, marked
+//! `lmd="pending"` for [`super::LmdExecuteStage`] to pick up after the
+//! engine has run.
 //!
 //! The stage runs before engine execution so no engine is asked to run an
-//! `lmd` cell. A cell that fails to desugar (Lua syntax error, unsupported
-//! markdown node) is left untouched and reported as a warning.
+//! `lmd` cell: an unbraced `lmd` class is plain code to every engine. A
+//! cell that fails to desugar (Lua syntax error, unsupported markdown node)
+//! is left untouched and reported as a warning. Spike 1 of
+//! `claude-notes/plans/2026-10-12-lmd-exploration.md` stopped here, which
+//! is why `q2 render --to markdown` of a document shows the desugared Lua
+//! whenever the execute stage is absent or a cell fails to run.
 
 use async_trait::async_trait;
 use quarto_error_reporting::DiagnosticMessage;
@@ -26,7 +24,7 @@ use quarto_pandoc_types::block::Block;
 
 use crate::ast_walk::for_each_block_list_mut;
 use crate::engine::capture_splice::engine_cell_lang;
-use crate::lmd::{LMD_LANG, LmdError, desugar_lua};
+use crate::lmd::{LMD_LANG, LMD_PENDING_ATTR, LMD_PENDING_VALUE, LmdError, desugar_lua};
 use crate::stage::{
     EventLevel, PipelineData, PipelineDataKind, PipelineError, PipelineStage, StageContext,
 };
@@ -62,6 +60,9 @@ pub fn desugar_lmd_cells(blocks: &mut Vec<Block>) -> Vec<LmdError> {
                             *class = LMD_LANG.to_string();
                         }
                     }
+                    cell.attr
+                        .2
+                        .insert(LMD_PENDING_ATTR.to_string(), LMD_PENDING_VALUE.to_string());
                 }
                 Err(err) => errors.push(err),
             }
@@ -137,6 +138,7 @@ mod tests {
         };
         let cell = code_block(&div.content[0]);
         assert_eq!(cell.attr.1, vec!["lmd".to_string()]);
+        assert_eq!(cell.attr.2.get("lmd").map(String::as_str), Some("pending"));
         assert!(engine_cell_lang(&div.content[0]).is_none());
         assert!(
             cell.text.starts_with("return pandoc.Nodes({\n"),
