@@ -22,6 +22,8 @@ import {
   bootHarness,
   expectNoHorizontalScroll,
   expectInsideViewport,
+  openDefaultTemplate,
+  openNewProjectMenu,
 } from './helpers/harness';
 
 test.setTimeout(60_000);
@@ -85,9 +87,9 @@ test('project rows keep their identity at 320px', async ({ page }) => {
 
 test('projects home New menu stays inside the viewport at 320px', async ({ page }) => {
   await bootAt(page, 320, 'projects-home', '.projects-home');
-  await page.getByRole('button', { name: '＋ New ▾' }).click();
-  const menu = page.locator('[role="menu"]');
-  await expect(menu).toBeVisible();
+  // Measure the registry-backed menu, not the one-item placeholder that
+  // precedes it (openNewProjectMenu waits for the swap).
+  const menu = await openNewProjectMenu(page);
   await expectInsideViewport(page, menu, 'New menu');
 });
 
@@ -163,10 +165,8 @@ test('new-asset dialog stays reachable in a short viewport (320×400)', async ({
 
 test('projects-home form dialog fits inside the viewport at 320px', async ({ page }) => {
   await bootAt(page, 320, 'projects-home', '.projects-home');
-  await page.getByRole('button', { name: '＋ New ▾' }).click();
-  await page.locator('[role="menu"] [role="menuitem"]').first().click();
-  const dialog = page.locator('[role="dialog"]');
-  await expect(dialog).toBeVisible();
+  const menu = await openNewProjectMenu(page);
+  const dialog = await openDefaultTemplate(page, menu);
   await expectInsideViewport(page, dialog, 'New project dialog');
 });
 
