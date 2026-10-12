@@ -414,6 +414,52 @@ An "absent proxy" that never errors was considered and rejected: `if meta.missin
 
 `pampa::lua::metadata::tests` (8): leaf shapes, dotted and numeric paths, every missing-part case is `nil`, lists and tables from `get`; `meta` navigation agrees with `get`, arrays are real lists with proxy items and `:map`, missing keys are `nil` and writes error, `pairs`/`#`/type. `lmd_execute::tests::the_motivating_example_against_document_metadata` runs the original example through `meta.stuff` and `quarto.metadata.get`.
 
+## Source mapping assessment (2026-10-12)
+
+Written before any code, as the design for the next spike. Two questions: can a Lua error name the document line it came from, and can a markdown syntax error inside a `{=: … :=}` fragment be underlined in the document. Both turn out to be mostly plumbing: the facilities exist, and lmd would be the first engine in q2 to map an execution error to a line.
+
+### Where errors point today
+
+| error | raised in | message carries | diagnostic location |
+|---|---|---|---|
+| Lua syntax error in a cell | desugar | line and column *within the cell text* | the whole cell |
+| markdown parse error inside a fragment | desugar | the inner diagnostics\' titles, joined | the whole cell |
+| unsupported node inside a fragment | desugar | the node kind | the whole cell |
+| Lua compile or runtime error | execute | `[string "lmd cell 6"]:3:` plus a traceback with the same names | the whole cell |
+| wrong return shape | execute | what came back | the whole cell |
+| cell options not valid YAML | execute | the YAML error | located, but against the *block* span, so one fence line off (a bug; see L0) |
+| `quarto.warn` / `quarto.error` from a cell | execute | the message | `By::filter("lmd cell 6", line)`: a chunk name, not a file |
+
+"The whole cell" is honest but blunt: a ten-line cell with a typo on line 7 underlines all ten lines, and an error inside a fragment's markdown underlines the Lua that contains it. Inline cells fare better only because a code span is short.
+
+### What already exists
+
+- **`SourceInfo::substring` chains, and `read` reroots through them.** `pampa::readers::qmd::read(…, parent_source_info)` makes every node span of the nested parse a `Substring` of the parent, and `reroot_diagnostics_into_parent` does the same to the Err-path diagnostics. This is exactly how a markdown string inside front matter gets its errors underlined in the YAML today. A fragment is the same situation: markdown embedded in a span of the document. The user's half-hope is a yes.
+- **Anchoring a cell's text in the document.** `crossref::codeblock_shorthand::body_source_for` finds a `CodeBlock`\'s text inside its own fence region and returns a `Substring` of the block span: byte-exact for a top-level fence, and an honest fallback to the block span when a blockquote or list gutter makes the text not a substring of the source. `partition_cell_options` then composes option-line provenance over whatever it is given. The reader records `Math.text_source` for the same problem on math; `CodeBlock` has no such field yet, which is the "substantial" version of the fix.
+- **Lua chunk names.** mlua passes `set_name` through unchanged; a name of the form `@path` is formatted by Lua as `path:line:` in messages and tracebacks, and `filter_source_info` reads the same name and line back when a cell constructs AST nodes.
+
+### Proposal, in three layers
+
+**L0, anchor the cell text (small).** Lift `body_source_for` into a shared helper next to `partition_cell_options`, use it for block cells, and anchor inline cells by finding the text inside the code span. Fixes the one-fence-line offset in cell-option diagnostics as a side effect. Under a gutter the fallback is the block span, as today.
+
+**L1, fragment markdown errors (small).** The desugarer takes the source of the text it is desugaring (`Option<SourceInfo>`) and passes `substring(body, fragment content range)` as the `parent_source_info` of each fragment parse, adjusting for the whitespace it trims. Markdown errors then underline the offending markdown inside the fragment. Nesting composes: a fragment's inline lmd code is a `Code` whose span is already a `Substring` of the fragment's parent, so the recursive desugar of that code passes it on, and a fragment inside it reroots one level deeper. Unsupported-node errors get the node's own span for free, since the node carries it.
+
+**L2, Lua errors to document lines (medium).** Three pieces, no mapping table:
+
+1. *Line-preserving emission.* A second emitter mode in which every fragment expansion occupies exactly the source lines the fragment occupied: a one-line fragment expands on one line, a multi-line fragment pads its expression with newlines (Lua allows them between tokens) so the lines after it keep their numbers. The pretty multi-line form stays for `echo`. Within a fragment, spliced inline cells are compressed onto the fragment's lines; an error inside one points at the fragment, which is the honest resolution available without a column map.
+2. *Chunk name and padding.* Name the chunk `@<document path>` and prepend as many newlines as the cell body's start line minus one. Lua then reports `doc.qmd:42:` for an error on document line 42, in the message and in every traceback frame, and `filter_source_info` records `By::filter("doc.qmd", 42)` for nodes the cell builds, so lmd-built nodes become located for free. Only the body's *start line* is needed, which `resolve_byte_range` on the block span gives even where byte-exact anchoring fails, so line mapping survives gutters; columns shift by the gutter width there.
+3. *A located diagnostic.* Parse `path:LINE:` out of the error and attach that line's span (a `Substring` of the body source) as the diagnostic location, so the underline lands on the line. The message keeps the full traceback.
+
+Inline cells are one line; the padding is the paragraph's line and the `return ` prefix shifts columns by seven. The `--|` option lines are part of the body and count toward line numbers, which is what an author expects.
+
+### Effort and order
+
+L0 and L1 together are about a day and change two files plus tests; L2 is a few days, mostly the emitter mode and its tests. L0 should go first in any case since it fixes a wrong location that ships today. A snapshot fixture of the demo documents would pay for itself here: every layer changes what the diagnostics say.
+
+### What this does not do
+
+Column-exact positions under blockquote and list gutters, and positions inside a splice inside a fragment, wait for `CodeBlock.text_source` (the `Math.text_source` treatment) and a column map respectively; both are the same shape of work as `ProvenanceBuilder` and neither is needed for the error messages to be useful.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -481,7 +527,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 7 candidates**: `file:line` chunk names for Lua error messages; a fixture-and-snapshot suite for the demo documents.
+- **Spike 7**: the source mapping layers L0 to L2 above; a fixture-and-snapshot suite for the demo documents first.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 
