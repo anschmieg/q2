@@ -67,6 +67,14 @@ This plan hit the same trap while I was writing it. Its first draft used an inde
   - The `verify.rs` module doc.
 - Phase 4: End-to-end check. Run `cargo xtask verify --skip-hub-build` with the bad-note copy in place and confirm it fails at the new step with the CI report. Then run it without the copy and confirm it passes.
 
+## Decisions (2026-10-12)
+
+- **Q1 placement:** right after the build in step 3, before tree-sitter and nextest.
+- **Q2 numbering:** a sub-step of step 3 (`↳ claude-notes render`); `TOTAL_STEPS` stays 14.
+- **Q4 `--skip-rust-build`:** implies skipping the render, with a skip message. `--skip-rust-tests` leaves it on.
+- **Q5 platform:** runs on every platform.
+- **Q3 structural guard:** still open (the user asked for more context).
+
 ## Open design questions for the user
 
 1. **Placement.** CI runs the render after nextest. I recommend putting it **right after step 3 (build)**, before the tree-sitter and nextest steps. Verify bails on the first failure, a 7 s check should fail fast instead of after a multi-minute nextest, and a note typo is the most likely failure on a docs-heavy branch. The alternative is to mirror CI and run it after step 5.
