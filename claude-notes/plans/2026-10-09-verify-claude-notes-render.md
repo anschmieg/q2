@@ -2,13 +2,12 @@
 title: 'cargo xtask verify does not run CI''s strict claude-notes render (bd-zn87vwi8)'
 date: 2026-10-09
 description: 'Adds a `q2 render --strict claude-notes` step to `cargo xtask verify`, reusing the debug q2 that verify already builds, so a note that CI rejects fails the local gate too.'
-status: draft  # Investigation — pending design alignment with user; do not implement before the go-ahead
+status: complete  # Implemented 2026-10-12; awaiting push approval.
 braid:
   strand: bd-zn87vwi8
 ---
 
-**Branch:** `main` @ `3b3e8aeaf` (main checkout; no worktree)
-**Do not start implementation until the user gives the go-ahead.**
+**Branch:** `braid/bd-zn87vwi8-cargo-xtask-verify-does` (main checkout, off `main` @ `3b3e8aeaf` plus the plan commits)
 
 ## Triage verdict
 
@@ -50,22 +49,51 @@ real 7.13   user 29.80   sys 4.49        exit 0
 
 This plan hit the same trap while I was writing it. Its first draft used an indented code block, which `--strict` rejected. That draft would have passed verify and failed CI.
 
-## Proposed phases (draft)
+## Checklist
 
-- Phase 0: Tests first.
-  - A wiring/drift guard in the style of `css_lint_command_matches_ci_workflow`: the local render args (`render --strict claude-notes`) appear in a `run:` line of `test-suite.yml`.
-  - A reachability guard like `pandoc_preflight_is_wired_into_run`.
-  - Unit tests for the skip predicate (`runs_claude_notes_render(&config)`) covering `--skip-claude-notes-render` and `--skip-rust-build`.
-- Phase 1: The step in `verify.rs`.
-  - Run `cargo run --bin q2 -- render --strict claude-notes` through `run_command` with the same `rustflags` as step 3. Use `cargo run` rather than a hard-coded `target/debug/q2`, so `CARGO_TARGET_DIR` and Windows `.exe` are handled and the step is link-only after step 3.
-  - Add the `--skip-claude-notes-render` flag in `main.rs` and `VerifyConfig`, and bump `TOTAL_STEPS`. Placement and numbering are design questions 1 and 2.
-- Phase 2: Structural guard, if Q3 says yes.
-- Phase 3: Docs.
-  - The AGENTS.md "Full Project Verification" step list and skip options.
-  - `claude-notes/instructions/writing-notes.md` (mention that verify runs it).
-  - The CI step's comment in `test-suite.yml` (point at the verify counterpart).
-  - The `verify.rs` module doc.
-- Phase 4: End-to-end check. Run `cargo xtask verify --skip-hub-build` with the bad-note copy in place and confirm it fails at the new step with the CI report. Then run it without the copy and confirm it passes.
+Phase 0: tests first (TDD).
+
+- [x] `claude_notes_render_command_matches_ci_workflow`: the local q2 args (`render --strict claude-notes`) appear in a `run:` line of `test-suite.yml`. This is the per-step guard chosen in Q3.
+- [x] `claude_notes_render_is_wired_into_run`: a reachability guard like `pandoc_preflight_is_wired_into_run`.
+- [x] `runs_claude_notes_render`: on by default; off under `--skip-claude-notes-render` or `--skip-rust-build`; on under `--skip-rust-tests`.
+- [x] Run the tests and confirm they fail (do not compile) before implementing.
+
+Phase 1: the step.
+
+- [x] `CLAUDE_NOTES_RENDER_ARGS` constant and the `runs_claude_notes_render` predicate.
+- [x] A `↳ claude-notes render` sub-step at the end of step 3. It runs `cargo run --bin q2 -- render --strict claude-notes` via `run_command` with step 3\'s `rustflags`, so it is link-only. It prints a skip line under `--skip-claude-notes-render` or `--skip-rust-build`.
+- [x] Add the `--skip-claude-notes-render` flag (`main.rs`, `VerifyConfig`).
+
+Phase 2: docs.
+
+- [x] The `verify.rs` module doc step list.
+- [x] The AGENTS.md "Full Project Verification" step list and skip options.
+- [x] The CI step comment in `test-suite.yml`, pointing at the verify counterpart.
+- [x] `claude-notes/instructions/writing-notes.md`.
+
+Phase 3: verification.
+
+- [x] End to end, with the bad-note copy in place: `cargo xtask verify --skip-hub-build --skip-rust-tests` fails at the sub-step with the CI report. Without the copy, it passes.
+- [x] `--skip-claude-notes-render` and `--skip-rust-build` print their skip lines.
+- [x] `cargo xtask verify --skip-hub-build` is green; its step 5 is the workspace nextest, 16060 passed. Before that run I rebuilt the local WASM, which was stale since Sep 18 and failed `test:wasm` regardless of this change.
+
+## Verification log
+
+`cargo xtask verify --skip-hub-build --skip-rust-tests --skip-treesitter-tests`, run with the repro copied to `claude-notes/zz-tmp-bad.md` (output inspected):
+
+```
+━━━ Step 3/14: Building Rust workspace (warnings denied) ━━━
+✓ Rust build complete
+  ↳ claude-notes render (q2 render --strict claude-notes)...
+Error: [Q-2-10] Closed Quote Without Matching Open Quote
+Error: [Q-2-7] Unclosed Single Quote
+Rendered 1460 of 1461 files to …/claude-notes/_site — 2 errors
+Error: claude-notes render failed (see claude-notes/instructions/writing-notes.md)
+```
+
+The same run without the repro prints `✓ claude-notes render clean`. `--skip-claude-notes-render` and `--skip-rust-build` print `↳ Skipping claude-notes render (<flag>)`.
+
+`cargo run` is not quite link-only. It recompiles the `quarto` crate (about 1.3 s; dependencies are reused). `crates/quarto/build.rs` watches `agents-docs-dist/`, and when that tree has not been staged, every cargo invocation reruns the build script. That predates this change, and `cargo build --workspace` recompiles `quarto` for the same reason.
 
 ## Decisions (2026-10-12)
 
@@ -73,7 +101,7 @@ This plan hit the same trap while I was writing it. Its first draft used an inde
 - **Q2 numbering:** a sub-step of step 3 (`↳ claude-notes render`); `TOTAL_STEPS` stays 14.
 - **Q4 `--skip-rust-build`:** implies skipping the render, with a skip message. `--skip-rust-tests` leaves it on.
 - **Q5 platform:** runs on every platform.
-- **Q3 structural guard:** still open (the user asked for more context).
+- **Q3 structural guard:** (a) a per-step guard test for this step only, like the lint:css one. The general workflow cross-check (b) is filed as backlog strand bd-jk3xlp3j.
 
 ## Open design questions for the user
 

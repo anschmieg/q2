@@ -6,7 +6,8 @@
 //!    `node_version.rs`; skipped only when every npm-driven step is off)
 //! 1. Run custom lint checks, hub-client `lint:css`, and clippy
 //! 2. Check Rust formatting (cargo fmt --check)
-//! 3. Build all Rust crates (with -D warnings, matching CI)
+//! 3. Build all Rust crates (with -D warnings, matching CI), then render
+//!    claude-notes with `q2 render --strict` (matching CI's test-suite step)
 //! 4. Test tree-sitter grammars
 //! 5. Run all Rust tests (with -D warnings, matching CI)
 //! 6. Build ts-packages workspaces + quarto-hub-mcp smoke check
@@ -33,6 +34,11 @@ const TOTAL_STEPS: u32 = 14;
 /// `.github/workflows/ts-test-suite.yml` runs it (from the repo root, via the
 /// npm workspace). Kept as a constant so a test can hold the two in sync.
 const CSS_LINT_ARGS: [&str; 4] = ["run", "lint:css", "-w", "hub-client"];
+
+/// The q2 args of CI's `Render claude-notes (warnings are errors)` step in
+/// `.github/workflows/test-suite.yml`. Kept as a constant so a test can hold
+/// the two in sync (bd-zn87vwi8).
+const CLAUDE_NOTES_RENDER_ARGS: [&str; 3] = ["render", "--strict", "claude-notes"];
 
 /// Configuration for the verify command.
 #[derive(Default)]
@@ -63,6 +69,8 @@ pub struct VerifyConfig {
     pub skip_hub_mcp_tests: bool,
     /// Skip the hub-client CSS lint (`npm run lint:css`).
     pub skip_css_lint: bool,
+    /// Skip the strict claude-notes render (`q2 render --strict claude-notes`).
+    pub skip_claude_notes_render: bool,
     /// Run hub-client e2e tests (slower, requires browser).
     pub include_e2e: bool,
     /// Do not set RUSTFLAGS="-D warnings" (allows warnings during iteration).
@@ -75,6 +83,13 @@ pub struct VerifyConfig {
 /// (bd-4bu7vwi5).
 fn runs_css_lint(config: &VerifyConfig) -> bool {
     !config.skip_css_lint
+}
+
+/// Whether step 3 renders claude-notes. Off under `--skip-rust-build` too:
+/// the render goes through `cargo run`, which would otherwise build the q2
+/// the caller asked not to build.
+fn runs_claude_notes_render(config: &VerifyConfig) -> bool {
+    !config.skip_claude_notes_render && !config.skip_rust_build
 }
 
 /// Whether any npm-driven step is enabled, so the Node preflight has
@@ -287,6 +302,34 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
         println!("✓ Rust build complete");
     } else {
         println!("\n━━━ Step 3/{}: Skipping Rust build ━━━\n", TOTAL_STEPS);
+    }
+
+    // claude-notes is a q2 website, and CI renders it with `--strict`
+    // (test-suite.yml, bd-7v3trpxn), so a note that fails to parse or warns
+    // fails the PR. Nearly every branch adds a plan note, so run it here,
+    // right after the build that produced q2 and before the long test
+    // steps: a note typo fails in seconds (bd-zn87vwi8). The same
+    // `rustflags` as the build keep `cargo run` link-only; a different
+    // value would rebuild the whole tree (CI hit this in PR #809).
+    if runs_claude_notes_render(config) {
+        println!("  ↳ claude-notes render (q2 render --strict claude-notes)...");
+        let mut render_args = vec!["run", "--bin", "q2", "--"];
+        render_args.extend_from_slice(&CLAUDE_NOTES_RENDER_ARGS);
+        run_command(
+            "cargo",
+            &render_args,
+            &project_root,
+            rustflags,
+            "claude-notes render failed (see claude-notes/instructions/writing-notes.md)",
+        )?;
+        println!("  ✓ claude-notes render clean");
+    } else {
+        let reason = if config.skip_rust_build {
+            "--skip-rust-build"
+        } else {
+            "--skip-claude-notes-render"
+        };
+        println!("  ↳ Skipping claude-notes render ({})", reason);
     }
 
     // Step 4: Tree-sitter grammar tests
@@ -889,6 +932,55 @@ mod tests {
         assert!(
             workflow.contains(&format!("run: {local}")),
             "ts-test-suite.yml has no `run: {local}` step; keep CI and verify in sync"
+        );
+    }
+
+    /// Same guard for the strict claude-notes render (bd-zn87vwi8: CI got
+    /// the step via bd-7v3trpxn, verify did not). Matches only the q2 args,
+    /// not the cargo line, since CI builds under `--profile ci`.
+    #[test]
+    fn claude_notes_render_command_matches_ci_workflow() {
+        let workflow = include_str!("../../../.github/workflows/test-suite.yml");
+        let local = format!("--bin q2 -- {}", CLAUDE_NOTES_RENDER_ARGS.join(" "));
+        assert!(
+            workflow
+                .lines()
+                .any(|line| line.trim_start().starts_with("run: cargo run")
+                    && line.trim_end().ends_with(&local)),
+            "test-suite.yml has no `run: cargo run … {local}` step; keep CI and verify in sync"
+        );
+    }
+
+    #[test]
+    fn claude_notes_render_runs_by_default_and_honours_skip_flags() {
+        assert!(runs_claude_notes_render(&VerifyConfig::default()));
+        assert!(!runs_claude_notes_render(&VerifyConfig {
+            skip_claude_notes_render: true,
+            ..VerifyConfig::default()
+        }));
+        // No q2 build was asked for, so don't let `cargo run` build one.
+        assert!(!runs_claude_notes_render(&VerifyConfig {
+            skip_rust_build: true,
+            ..VerifyConfig::default()
+        }));
+        assert!(runs_claude_notes_render(&VerifyConfig {
+            skip_rust_tests: true,
+            ..VerifyConfig::default()
+        }));
+    }
+
+    /// A test of the args constant alone survives deleting the step from
+    /// `run`; assert the wiring, as `pandoc_preflight_is_wired_into_run` does.
+    #[test]
+    fn claude_notes_render_is_wired_into_run() {
+        let source = include_str!("verify.rs");
+        assert!(
+            source.contains("if runs_claude_notes_render(config) {"),
+            "`run` no longer gates a step on `runs_claude_notes_render`"
+        );
+        assert!(
+            source.contains("render_args.extend_from_slice(&CLAUDE_NOTES_RENDER_ARGS);"),
+            "`run` no longer passes CLAUDE_NOTES_RENDER_ARGS to q2"
         );
     }
 

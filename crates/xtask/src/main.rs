@@ -257,6 +257,12 @@ enum Command {
         #[arg(long)]
         skip_css_lint: bool,
 
+        /// Skip the strict claude-notes render (q2 render --strict
+        /// claude-notes) that runs right after the Rust build. Also skipped
+        /// by --skip-rust-build.
+        #[arg(long)]
+        skip_claude_notes_render: bool,
+
         /// Include hub-client e2e tests (slower, requires browser).
         #[arg(long)]
         e2e: bool,
@@ -529,6 +535,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_tests,
             skip_css_lint,
+            skip_claude_notes_render,
             e2e,
             no_deny_warnings,
         } => {
@@ -546,6 +553,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_tests,
                 skip_css_lint,
+                skip_claude_notes_render,
                 include_e2e: e2e,
                 no_deny_warnings,
             };
