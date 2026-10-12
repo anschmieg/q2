@@ -154,7 +154,11 @@ fn parse_markdown(markdown: &str) -> Result<Vec<Block>, LmdError> {
         true,
         None,
     ) {
-        Ok((pandoc, _ctx, _warnings)) => Ok(pandoc.blocks),
+        Ok((pandoc, _ctx, _warnings)) => {
+            let mut blocks = pandoc.blocks;
+            strip_derived_heading_ids(&mut blocks);
+            Ok(blocks)
+        }
         Err(diags) => Err(LmdError::MarkdownParse(
             diags
                 .iter()
@@ -163,6 +167,27 @@ fn parse_markdown(markdown: &str) -> Result<Vec<Block>, LmdError> {
                 .join("; "),
         )),
     }
+}
+
+/// Drop the ids the reader derived for a fragment's headings.
+///
+/// A fragment is parsed on its own, so its derived ids are made from
+/// placeholder text (`### `{lmd} title`` gives `lmd-title`) and are
+/// de-duplicated only within the fragment; a fragment reused as a component
+/// would emit the same id every time. Emitting the heading with no id lets
+/// the `heading-id` transform derive one from the final text, unique across
+/// the whole document. Author-written ids (`{#x}`, which carry a source
+/// location) are kept.
+fn strip_derived_heading_ids(blocks: &mut Vec<Block>) {
+    crate::ast_walk::for_each_block_list_mut(blocks, &mut |list| {
+        for block in list.iter_mut() {
+            if let Block::Header(h) = block
+                && h.attr_source.id.is_none()
+            {
+                h.attr.0.clear();
+            }
+        }
+    });
 }
 
 /// Every `markdown_fragment` node under `root`, in source order. The walk
@@ -272,6 +297,15 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("pandoc.Emph({"), "{out}");
+    }
+
+    #[test]
+    fn fragment_headings_carry_no_derived_id_but_keep_explicit_ones() {
+        let out =
+            desugar_lua("return {=:\n### `{lmd} title`\n\n### Pinned {#pinned}\n:=}").unwrap();
+        assert!(!out.contains("lmd-title"), "{out}");
+        assert!(out.contains("pandoc.Header(3, {\n"), "{out}");
+        assert!(out.contains("pandoc.Attr(\"pinned\""), "{out}");
     }
 
     #[test]

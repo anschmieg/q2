@@ -2029,6 +2029,8 @@ fn capture_untransformed_ast_json(content: &[u8], source_name: &str) -> Option<S
 /// 1. `CalloutTransform` - Convert callout Divs to CustomNodes
 /// 2. `CalloutResolveTransform` - Resolve CustomNodes to structured Divs
 /// 3. `ShortcodeResolveTransform` - Resolve shortcodes (e.g., `{{< meta title >}}`)
+/// 3a. `HeadingIdTransform` - Re-derive heading ids that expansion (shortcodes,
+///     lmd cells) made stale, unique document-wide
 /// 4. `MetadataNormalizeTransform` - Add derived metadata (pagetitle, etc.)
 /// 4a. `WebsiteTitlePrefixTransform` - Combine `website.title` with the page's title
 ///     into the rendered `<title>` (Phase 7)
@@ -2197,6 +2199,11 @@ pub fn build_transform_pipeline(
         project_env,
         quarto_profile,
     )));
+    // Heading ids follow the *final* text: shortcode expansion just above
+    // and lmd cells (`lmd-execute`, before the transforms) both rewrite
+    // heading text after the reader derived ids from it (bd-2wv8431v,
+    // bd-lmd-exploration-jqv2nbl4 spike 5). Before sectionize and the TOC.
+    pipeline.push(Box::new(crate::transforms::HeadingIdTransform::new()));
     pipeline.push(Box::new(MetadataNormalizeTransform::new()));
     // Date normalization (bd-gx9cic8z P4): resolves today/now/
     // last-modified, writes ISO `date-meta`/`date-modified-meta` for
@@ -2861,6 +2868,8 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     // Format-*parameterized*, not format-specific: `lua_format_for()` hands
     // Lua the canonical Pandoc format string.
     ("shortcode-resolve", Bucket::B1),
+    // Re-derives heading ids from expanded text; format-neutral.
+    ("heading-id", Bucket::B1),
     ("metadata-normalize", Bucket::B1),
     ("date-normalize", Bucket::B1),
     ("authors-normalize", Bucket::B1),
@@ -6354,6 +6363,7 @@ mod tests {
                 "panel-tabset-resolve",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6443,6 +6453,7 @@ mod tests {
                 "panel-tabset-resolve",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6624,6 +6635,7 @@ mod tests {
                 "panel-tabset",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6817,6 +6829,7 @@ mod tests {
                 "callout",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",

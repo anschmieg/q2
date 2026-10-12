@@ -193,7 +193,7 @@ Headings, bullet lists, links with titles, inline code, math, quotes, line break
 
 1. **Context is now explicit.** `{=[ … ]=}` can sit inside `pandoc.Strong(...)` and `{=: … :=}` inside `pandoc.Div(...)`; the unmarked form waits on `pandoc.Nodes`. (The first cut of spike 1 forced block context; the delimiter design notes record how that was resolved.)
 2. **Inline splices have no coercion contract.** `v` lands as a bare list element, so the Lua value must already be an `Inline` (or whatever pampa's `pandoc.Strong` accepts in a content list). A string works in pandoc proper by coercion to `Str`, but spaces would not become `Space`. Something like `lmd.inlines(v)` at the splice may be needed; `pandoc.Nodes` is the natural home for the same question.
-3. **Spliced headings get a derived id.** The qmd reader auto-generates `lmd-title` from the heading text `` `{lmd} title` `` before the splice happens. The desugaring should probably strip reader-derived ids (and anything else derived from text that is really a placeholder).
+3. **Spliced headings get a derived id.** The qmd reader auto-generates `lmd-title` from the heading text `` `{lmd} title` `` before the splice happens. Fixed in spike 5: fragments carry no derived ids and the `heading-id` transform derives them from the final text.
 4. **Footnotes do not work yet.** The reader emits `NoteDefinitionPara` blocks that are resolved later in the pipeline, so a fragment with a footnote is `Unsupported`. Either resolve notes inside the fragment parse or run the fragment through the same early transforms the document gets.
 5. **Fence nesting is on the author.** A cell containing a block-level `` ```{lmd} `` must itself use four backticks. Normal markdown, but it will surprise people.
 6. **Inline lmd outside a fragment is untouched.** `` `{lmd} v` `` in a document paragraph (not inside a cell) is left as a `Code` node. Whether it should be an inline cell is a design question for the dispatch half.
@@ -353,6 +353,35 @@ Nothing in the grammar or the desugarer. `{= **hello** =}` still emits `pandoc.N
 
 One usability note from the demo: an inline lmd code span whose own fragment holds another code span must be written with a double-backtick delimiter, because single backticks pair up left to right and the inner span would close the outer one. Ordinary markdown, but the nesting lmd invites makes it easy to hit.
 
+## Spike 5 (done 2026-10-12): heading ids follow the final text
+
+### The problem
+
+The qmd reader derives a heading's auto id in its postprocess pass from the text as written, de-duplicated within that parse. Two things rewrite heading text afterwards, and both left ids derived from placeholders:
+
+- an inline lmd cell in a document heading: `` ## Hello, `{lmd} name` `` rendered as "Hello, world" with the anchor `hello-lmd-name`;
+- a heading inside a fragment: parsed on its own, so a component like `card(title)` with `` ### `{lmd} title` `` gave every instance the same `lmd-title`, duplicated anchors, TOC links and crossref targets included.
+
+Shortcodes had the same problem already, tracked as bd-2wv8431v: `## before {{{< meta foo >}}} after` got `before-after` because the unexpanded shortcode contributes no text, where Quarto 1 folds the expansion in.
+
+### The fix
+
+One transform, `heading-id`, registered immediately after `shortcode-resolve` (lmd cells ran earlier, in `lmd-execute`), before sectionize and the TOC. It re-derives the id of every heading whose id is **stale**: empty, or reader-derived but no longer what `auto_generated_id` gives for the current content. The work is pampa's existing `dedup_scoped_heading_ids` (Pandoc's `uniqueIdent` probe seeded with every id that must not be renamed), scoped by that predicate, so the reader keeps deriving provisional ids and nothing moved out of it. The qmd writer's round-trip rule, omit an id equal to `auto_generated_id(content)`, still holds, since that is what the pass writes.
+
+Two kinds of id are never touched. Author-written `{#x}` carries a source location on `attr_source.id`. A heading a filter or cell built with `pandoc.Header(…, pandoc.Attr("x"))` has no such location, but its `source_info` is generated rather than original, which is how it is told apart; renaming those would break every Q1 filter that builds sections. A heading with an *empty* id is filled whatever its origin, since an unlinkable heading helps nobody (pandoc leaves filter-created headings id-less; this is one place Q2 does better).
+
+On the lmd side the desugarer now strips reader-derived ids from fragment headings, so a fragment heading reaches the document with no id and the transform assigns one from its final text, unique document-wide. Explicit ids inside fragments are kept, duplicates and all: reusing a fragment with a pinned id is the author's call.
+
+### Pins
+
+- `transforms::heading_id::tests`: untouched when ids match; stale reader id re-derived; empty id filled whatever the origin; explicit id never renamed; filter-built heading keeps its given id; re-derived ids unique against explicit ones (`hello-1`, `hello-2`, `hello`); idempotent.
+- `tests/integration/heading_id_after_expansion.rs`, through the real HTML pipeline: `before-hello-after` for the shortcode case; `hello-world` for an inline cell in a heading; `hello`, `bye`, `hello-1` for a fragment component used three times; a pinned `{#pinned}` inside a fragment survives.
+- `lmd::desugar::tests::fragment_headings_carry_no_derived_id_but_keep_explicit_ones`.
+
+### Noticed on the way
+
+`{{{< meta foo >}}}` with `foo: 1.2` (a YAML number) expanded to nothing in the heading, so the fixture uses a string. Not investigated here.
+
 ## Delimiter design notes (2026-10-12)
 
 Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
@@ -420,7 +449,7 @@ Scanner rules, so they are not re-derived: every `{=` opens a nested fragment wh
 
 ## Next spikes
 
-- **Spike 5 candidates**, in no particular order: porting `quarto.metadata` from Q1 so the motivating example works as written; dropping reader-derived ids on headings whose text is a placeholder; `file:line` chunk names for Lua error messages.
+- **Spike 6 candidates**, in no particular order: porting `quarto.metadata` from Q1 so the motivating example works as written; `file:line` chunk names for Lua error messages.
 - Turn the demo documents into integration fixtures with snapshots of the `--to markdown` output.
 - The dispatch half proper: whether a cell's Lua should become a filter that other Lua filters compose with, rather than a chunk that runs once at its position.
 
