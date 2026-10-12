@@ -144,9 +144,52 @@ Headings, bullet lists, links with titles, inline code, math, quotes, line break
 5. **Fence nesting is on the author.** A cell containing a block-level `` ```{lmd} `` must itself use four backticks. Normal markdown, but it will surprise people.
 6. **Inline lmd outside a fragment is untouched.** `` `{lmd} v` `` in a document paragraph (not inside a cell) is left as a `Code` node. Whether it should be an inline cell is a design question for the dispatch half.
 
+## Delimiter design notes (2026-10-12)
+
+Spike 1 uses one fragment form, `{= … =}`, and always produces blocks. The next step wants two forms, so the block-versus-inline context is explicit in the syntax, matching the pandoc habit that `[...]` means inline (spans, links) and `:::` means block (divs, the block-footnote extension). This section records what the Lua side allows, so the choice can be made later without re-deriving it.
+
+### What can follow `{` in Lua
+
+A fragment opener has to be a two-character sequence that no valid Lua program contains at an expression start, because the external scanner is consulted first wherever an expression can begin. After `{` (a table constructor) Lua accepts a field start: a name or `_`, a digit, a string quote, `[` (bracketed key or long string), `{`, `(`, `-`, `#`, `~`, `.` (for `...`), `}`, or a `--` comment. Every other ASCII punctuation character is free as the second character: `=` `:` `|` `!` `@` `$` `?` `<` `>` `/` `*` `^` `&` `%` `+` `,` `;` `` ` `` `\`.
+
+So `{=` (current), `{:`, `{|`, `{!`, `{$`, and so on are all unambiguous openers. Once the first two characters are free, the third is unconstrained: `{|:` and `{|[` are as safe as `{|`.
+
+### Why `{[ … ]}` does not work
+
+`{[` is valid Lua twice over: a bracketed key, `{[k] = v}`, and a long string in a table, `{[[text]]}`. The scanner cannot rescue it with lookahead either, because ordinary code contains the closer: `{[k] = t[1]}` ends in `]}` and would lex as a fragment. Keep this example in mind whenever a `[`-led opener comes up again.
+
+### `[: … :]` is available but reads wrong
+
+An expression can begin with `[` only as a long string (`[[` or `[=`), and the index form `a[...]` is only valid after a prefix expression, where no expression can start. So `[:` never competes with existing Lua for the same lookahead. It was rejected on reading grounds: it combines the span character `[` with the div character `:`, so it has to be taught as *not* div-related.
+
+### Closer collisions, measured
+
+Counted over the 2139 `.qmd` and `.md` files under `claude-notes/` and `docs/`, counting lines containing the sequence anywhere (every hit is inside code or YAML, not prose; a fragment containing such a code block would collide with any delimiter equally):
+
+| sequence | files | lines |
+|---|---|---|
+| `]}` | 78 | 164 |
+| `:}` | 13 | 26 |
+| `*}` | 5 | 7 |
+| `:]` | 5 | 7 |
+| `|}` | 1 | 1 |
+| `:|}` `]|}` `:=}` `]=}` | 0 | 0 |
+
+`]}` is the worst closer on the markdown side as well as the Lua side.
+
+### Candidates on the table
+
+| blocks | inlines | expands to | notes |
+|---|---|---|---|
+| `{: … :}` | `[: … :]` | `pandoc.Blocks`, `pandoc.Inlines` | shortest; `[:` has the teaching problem above |
+| `{|: … :|}` | `{|[ … ]|}` | same | a discriminator `|` then the context character; zero corpus collisions; more typing; OCaml quoted strings `{| … |}` and `{id| … |id}` are a precedent for the shape |
+| `{=: … :=}` | `{=[ … ]=}` | same | same idea with `=`, keeping continuity with spike 1; zero corpus collisions |
+
+Whichever pair is chosen, nested pairs balance in the scanner the way `{=`/`=}` do today, and `Para` versus `Plain` stops being a syntax question: the block form yields whatever the qmd reader produces (a top-level paragraph is `Para`), and an explicit `pandoc.Plain([: … :])` covers the rest. The inline form should reject markdown that parses to more than one block, since the author asked for inlines.
+
 ## Open questions
 
-1. Block vs inline result context for `{= =}`. Options: infer from the surrounding Lua (hard: needs type knowledge), a second delimiter pair for inlines, or a rule such as "a fragment with no blank line and a single paragraph is inlines".
+1. Block vs inline result context for `{= =}`. Decided in principle: two delimiter pairs, one per context (see the delimiter design notes above). The exact characters are still open.
 2. The splice coercion contract for inline and block lmd code inside a fragment (observation 2).
 3. The dispatch half: how an `{lmd}` cell's result replaces the cell at its own AST position, and how the desugared Lua becomes a filter that existing Lua filters compose with. Also whether the cell runs at render time only or has a preview-time story.
 4. Error locations. `LmdError` carries a position inside the cell text; the warning does not yet map it back to the document.
