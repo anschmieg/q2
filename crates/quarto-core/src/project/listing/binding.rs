@@ -101,12 +101,13 @@ pub(crate) fn effective_date_style(listing: &Listing, project_meta: &ConfigValue
 /// sets can never fully empty). Author-explicit `fields:` is used
 /// verbatim. A `custom` listing has no type default; like Q1's
 /// `defaultFields(Custom, itemFields)` it gets every field some
-/// item carries ([`fields_items_carry`]).
+/// item carries ([`fields_items_carry`]); so does a `metadata`
+/// listing, whose consumer is code reading `meta.listings.<id>`.
 pub(crate) fn effective_fields(listing: &Listing, items: &[ListingItem]) -> Vec<String> {
     if listing.fields_explicit {
         return listing.fields.clone();
     }
-    if listing.kind == ListingType::Custom {
+    if matches!(listing.kind, ListingType::Custom | ListingType::Metadata) {
         return fields_items_carry(items);
     }
     let filtered: Vec<String> = listing

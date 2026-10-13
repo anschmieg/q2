@@ -121,7 +121,8 @@ end
     );
 }
 
-/// The motivating example: an lmd cell iterates `meta.listings` and
+/// The motivating example: a `type: metadata` listing resolves the
+/// items and renders nothing; an lmd cell iterates `meta.listings` and
 /// builds the markup itself. Item links go through `pandoc.Link` with
 /// the host-relative `.qmd` path, which the link rewriter later turns
 /// into the output URL, exactly as a doctemplate listing's links are.
@@ -129,7 +130,7 @@ end
 fn lmd_cell_builds_a_listing_from_meta_listings() {
     let html = render_blog(
         concat!(
-            "---\ntitle: Blog\nlisting:\n  id: posts\n  contents: \"*.qmd\"\n  sort: \"date desc\"\nformat: html\n---\n\n",
+            "---\ntitle: Blog\nlisting:\n  id: posts\n  type: metadata\n  contents: \"*.qmd\"\n  sort: \"date desc\"\nformat: html\n---\n\n",
             "```{lmd}\n",
             "local cards = meta.listings.posts.items:map(function(it)\n",
             "  return {=:\n",
@@ -166,4 +167,15 @@ fn lmd_cell_builds_a_listing_from_meta_listings() {
         "First has one category; got:\n{div}"
     );
     assert!(div.contains("0 categories"), "Second has none; got:\n{div}");
+    // `type: metadata` rendered no listing of its own: no container,
+    // no "No matching items" placeholder, no List.js bootstrap.
+    assert!(
+        !html.contains("quarto-listing"),
+        "no built-in container; got:\n{html}"
+    );
+    assert!(!html.contains("listing-no-matching"));
+    assert!(
+        !html.contains("list.min.js"),
+        "no List.js script; got:\n{html}"
+    );
 }
