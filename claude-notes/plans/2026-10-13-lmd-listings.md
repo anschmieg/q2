@@ -2,7 +2,7 @@
 title: 'lmd-driven listings: declare the items in YAML, build the listing in an lmd cell (bd-2oqen84t)'
 date: 2026-10-13
 description: 'How q2 listings resolve and render today, how lmd cells run, where the two do not meet, and the mechanisms that would let a listing publish its resolved items to metadata so an lmd cell can iterate over them and build the markup. Design and spikes; not a replacement for doctemplate custom listings.'
-status: approved  # Design written 2026-10-13 from a code study; questions answered by the user the same day (see § Decisions). Awaiting the go-ahead before any spike runs.
+status: implemented  # S1 to S5 landed 2026-10-13 on the topic branch, full `cargo xtask verify` green; awaiting review and merge.
 braid:
   strand: bd-2oqen84t
 ---
@@ -10,6 +10,8 @@ braid:
 **Strand:** bd-2oqen84t (exploration; discovered from bd-lmd-exploration-jqv2nbl4). **Related:** bd-0fd0 (Lua filter slot between generate and render transforms), bd-61cd (listings epic), bd-0t4e07jk (listing items cannot read bare front-matter keys).
 
 **Branch:** `braid/bd-2oqen84t-lmd-driven-listings-declare` (topic branch in the main checkout, based on `main` @ `b976329ed`; no worktree).
+
+**What landed (2026-10-13), one commit per spike.** Every resolved listing is published at `meta.listings.<id>` in the template binding\'s vocabulary and native `ConfigValue` kinds (`project/listing/metadata.rs`); a `listing-resolve` stage runs before `lmd-execute` and `user-filters-pre`, sharing `resolve_listings` with the generate transform; `type: metadata` resolves and renders nothing; the `lmd-blog` fixture pins the motivating example through the real binary; the listings guide documents the metadata contract for Lua filters. `cargo xtask verify` (full, WASM included) green at the last commit. Details per spike under § Spikes; the two follow-up strands are bd-0o82ly9c (string-typed grammar positions) and bd-u1rxccq7 (date helper).
 
 ## The idea
 
@@ -136,7 +138,7 @@ What has to hold for this to be safe:
 - Item hydration reads only pass-1 profiles and the host\'s own `listing:` YAML. Verified in `listing_generate.rs`: the inputs are `ast.meta`, `ctx.project_index`, `ctx.project.dir`, `page_relative_source(ctx)` and `ctx.source_context`.
 - `meta.listing` is read before `ConfigMarkdownTransform`/shortcode resolution normalize metadata. Globs and record scalars are plain strings; a shortcode inside `contents:` is not supported today either. Records\' `title`/`description` are parsed as markdown at record-parse time (`record.rs`), not by the normalization transforms. To confirm in the spike: render the existing listing fixtures with the stage moved and diff the snapshots.
 - Book pipelines pause/resume `ast-transforms` by phase (`pause_stages_from`, `finishing_stages_from`). A stage before `lmd-execute` sits in the prefix and runs once; the resumed tail\'s `ListingGenerateTransform` sees `resolved_listings` populated only if the stash survives on `StageContext`. Listings on book pages are not a supported combination today, so a regression test that the book pipeline still builds is enough.
-- WASM: `ListingGenerateTransform` already runs in the hub-client preview; the stage must not pull native-only code. `LmdExecuteStage` runs on both targets too.
+- WASM: `ListingGenerateTransform` already runs in the hub-client preview; the stage must not pull native-only code. `LmdExecuteStage` runs on both targets too. (Checked after landing: `build_q2_preview_pipeline_stages`, which both `q2 preview` and the hub client use, is the HTML stage list minus `Q2_PREVIEW_STAGE_EXCLUDED`, and `listing-resolve` is not on that list, so preview renders see `meta.listings.<id>` exactly as `q2 render` does.)
 
 Side effect worth having: `user-filters-pre` runs after the new stage, so Lua filters see `meta.listings.<id>` too. That is most of bd-0fd0\'s read half for free.
 
