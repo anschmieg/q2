@@ -59,7 +59,8 @@ skips; bundle.test.ts green (release path, real WASM);
 - local-prod-server.mjs drive-by: DROPPED from this branch (user
   decision 2026-10-13 — no behavior regression: the branch never
   touches the local-dev proxy, and main behaves this way today). The
-  fix remains in the PR's original commits on origin if wanted later.
+  fix remains in the PR's original commits on origin; the user will
+  file it as a separate PR (2026-10-13).
 - Docs check: no user-facing source page for the MCP tools exists on
   main (only stale _site output) — nothing small to fix; a tools guide
   is a follow-up candidate.
