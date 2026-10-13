@@ -382,6 +382,32 @@ describe('NewFileDialog', () => {
     });
   });
 
+  describe('initial focus', () => {
+    // The filename input used to be focused on a 100ms timer. A keyboard
+    // user (or Playwright) who moved focus within that window had it
+    // yanked back to the input, so Enter on Cancel submitted the form
+    // (flaky new-file-dialog.harness.spec.ts on Firefox CI).
+    it('focuses the filename input on open', () => {
+      render(<NewFileDialog {...defaultProps} />);
+
+      expect(screen.getByLabelText('Filename:')).toHaveFocus();
+    });
+
+    it('does not pull focus back to the filename input later', () => {
+      vi.useFakeTimers();
+      try {
+        render(<NewFileDialog {...defaultProps} />);
+        const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+        cancelButton.focus();
+        vi.advanceTimersByTime(500);
+
+        expect(cancelButton).toHaveFocus();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('accessibility semantics', () => {
     it('exposes role="dialog" with aria-modal and the title as accessible name', () => {
       render(<NewFileDialog {...defaultProps} />);
