@@ -2,7 +2,6 @@ import React, { useContext } from 'react';
 import { RegistryContext } from './RegistryContext';
 import { liItemAttrProps } from './listItemAttr';
 import { childKey } from './nodeKey';
-import { HostAnchor, hostedNodesEnabled } from './hostedNodes';
 import { isAtomicSourceInfo, ATOMIC_KINDS } from '../utils/sourceInfo';
 import { isAtomicCustomNode } from '../utils/atomicCustomNodes';
 
@@ -406,18 +405,12 @@ export function Node(props: {
     onNavigateToDocument?: (path: string, anchor: string | null) => void,
     setLocalAst: (newNode: BlockNode | InlineNode) => void
 }) {
-    // Hosted mode (see hostedNodes.tsx): the markup lives in a persistent
-    // per-node host rendered via <HostedPortals>; here we only anchor it.
-    if (hostedNodesEnabled()) {
-        return <HostAnchor {...props} />;
-    }
     return <NodeContent {...props} />;
 }
 
 /**
  * A node's actual markup: the atomic gate plus dispatch to the format's
- * 'Block' / 'Inline' component. Rendered inline by `Node`, or inside the
- * node's host by `HostedPortals` when hosted nodes are enabled.
+ * 'Block' / 'Inline' component.
  */
 export function NodeContent({
     node,

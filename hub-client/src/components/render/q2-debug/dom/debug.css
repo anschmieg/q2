@@ -1,0 +1,79 @@
+/*
+ * q2-debug document styling (dom/document.ts, dom/render.ts).
+ *
+ * Every element here is created by the renderer, so there are no inline
+ * styles and no fallbacks for foreign markup. Backgrounds are solid (the
+ * hub-client theming rule).
+ */
+
+.pandoc-content-debug {
+    padding: 20px;
+    font-size: 16px;
+}
+
+.pandoc-content-debug .node.block {
+    border: 1px solid #666;
+    padding: 4px;
+    margin: 4px 0;
+    background-color: #f5f5f5;
+    position: relative;
+}
+
+.pandoc-content-debug .node.inline {
+    border: 1px solid #999;
+    padding: 2px;
+    margin: 1px;
+    background-color: #e8e8e8;
+    display: inline-block;
+}
+
+.pandoc-content-debug .node.run {
+    white-space: pre-wrap;
+}
+
+.pandoc-content-debug .slot-label {
+    font-size: 11px;
+    color: #666;
+}
+
+.pandoc-content-debug .slot:empty::after {
+    content: '(empty)';
+    font-size: 11px;
+    color: #999;
+}
+
+/*
+ * Change highlights, painted from the edit script (document.ts). Each is a
+ * constant colour for one second: a single held keyframe with step timing,
+ * whose end fires `animationend` and removes the class. A box can carry
+ * more than one class; later rules win: inserted > changed > removed.
+ */
+
+@keyframes q2-hold-inserted {
+    from, to { background-color: #8ee6a0; box-shadow: 0 0 0 2px #2fb344; }
+}
+
+@keyframes q2-hold-changed {
+    from, to { background-color: #ffe08a; box-shadow: 0 0 0 2px #e0a800; }
+}
+
+@keyframes q2-hold-removed {
+    from, to { box-shadow: 0 0 0 3px #e03131; }
+}
+
+.pandoc-content-debug .q2-flash-removed { animation: q2-hold-removed 1s step-end; }
+.pandoc-content-debug .q2-flash-changed { animation: q2-hold-changed 1s step-end; }
+.pandoc-content-debug .q2-flash-inserted { animation: q2-hold-inserted 1s step-end; }
+
+/*
+ * Deleted-node ghosts and character-level changes inside a text run are
+ * coloured from document.ts with the Web Animations API (a CSS animation
+ * would restart if the element were moved in the DOM); these rules only
+ * give them their resting look.
+ */
+
+.pandoc-content-debug .q2-del {
+    background-color: #f6dada;
+    text-decoration: line-through;
+    color: #8b1a1a;
+}

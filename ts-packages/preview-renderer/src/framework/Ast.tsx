@@ -5,8 +5,6 @@ import {
     type NodeAttributionIdentity,
 } from './AttributionLookupContext';
 import { unwrapCustomNodes } from './customNode';
-import { NodeContent } from './dispatch';
-import { HostedPortals, hostedNodesEnabled, type HostedNodeProps } from './hostedNodes';
 import type { PandocAST } from './types';
 import type { SourceInfoPool } from '../types/sourceInfo';
 
@@ -49,10 +47,6 @@ type AstProps =
  *     RegistryContext.Provider value so the atomic-aware gate inside
  *     `Node` (in dispatch.tsx) can read it.
  */
-// Markup for one hosted node (see hostedNodes.tsx). Module-level so the
-// portal list gets a stable `render` identity.
-const renderHostedNode = (props: HostedNodeProps) => <NodeContent {...props} />;
-
 export function Ast(props: AstProps) {
     const {
         currentFilePath: _currentFilePath,
@@ -128,7 +122,6 @@ export function Ast(props: AstProps) {
         <RegistryContext.Provider value={{ registry, sourceInfoPool: pool }}>
             <AttributionLookupContext.Provider value={attributionLookup}>
                 <AstComponent ast={ast} onNavigateToDocument={onNavigateToDocument} setAst={setAst} />
-                {hostedNodesEnabled() && <HostedPortals render={renderHostedNode} />}
             </AttributionLookupContext.Provider>
         </RegistryContext.Provider>
     );

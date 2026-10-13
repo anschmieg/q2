@@ -110,10 +110,16 @@ export interface Touched {
      * show the removed characters in place.
      */
     removedText: { node: unknown; text: string; before: unknown | null; after: unknown | null }[];
+    /**
+     * Nodes whose child lists changed (the document root for the top-level
+     * list): a renderer that mirrors the AST by node identity re-places
+     * exactly these nodes' children and leaves everything else alone.
+     */
+    relisted: unknown[];
 }
 
 export function emptyTouched(): Touched {
-    return { insertedSubtrees: [], createdNodes: [], changedNodes: [], removedNodes: [], removedFrom: [], textChanges: [], removedText: [] };
+    return { insertedSubtrees: [], createdNodes: [], changedNodes: [], removedNodes: [], removedFrom: [], textChanges: [], removedText: [], relisted: [] };
 }
 
 function textOf(node: unknown): string {
@@ -151,6 +157,9 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             desc.text.set(op.new);
             touched.changedNodes.push(node.value);
             touched.textChanges.push({ node: node.value, old: op.old, new: op.new });
+            // A renderer may show text-like inlines as part of a run rather
+            // than one by one; the run belongs to the parent's child list.
+            if (isTextLike(node.value)) touched.relisted.push(parentOf(root, op.path));
             return touched;
         }
         case 'insert': {
@@ -158,6 +167,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             if (index > list.length) throw new Error(`astdiff: insert index out of range at ${formatPath(op.path)}`);
             list.splice(index, 0, op.node);
             touched.insertedSubtrees.push(op.node);
+            touched.relisted.push(parentOf(root, op.path));
             return touched;
         }
         case 'delete': {
@@ -170,6 +180,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             } else {
                 touched.removedNodes.push(removed);
             }
+            touched.relisted.push(parentOf(root, op.path));
             return touched;
         }
         case 'wrap': {
@@ -180,6 +191,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             target.length = 0;
             target.push(...inner);
             touched.createdNodes.push(op.wrapper);
+            touched.relisted.push(parentOf(root, op.path), op.wrapper);
             // Intermediate single-child levels of the wrapper (e.g. the list
             // item of a one-item bullet list) are new as well.
             let value = op.wrapper;
@@ -189,6 +201,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
                 value = slot.write()[step.index];
                 desc = describe(value, slot.elem);
                 touched.createdNodes.push(value);
+                touched.relisted.push(value);
             }
             return touched;
         }
@@ -197,6 +210,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             const children = innerSlot(list[index], elem, op.via, op.slot, op.path).read();
             list.splice(index, 1, ...children);
             if (!op.replaced) touched.removedFrom.push(parentOf(root, op.path));
+            touched.relisted.push(parentOf(root, op.path));
             return touched;
         }
         case 'split': {
@@ -204,6 +218,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             const node = list[index];
             const desc = describe(node, elem);
             touched.changedNodes.push(node);
+            touched.relisted.push(node, parentOf(root, op.path));
             if (desc.text) {
                 const chars = Array.from(String(desc.text.get()));
                 const second = cloneShell(node);
@@ -236,6 +251,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             const desc = describe(node, elem);
             const nextDesc = describe(next, elem);
             touched.changedNodes.push(node);
+            touched.relisted.push(node, parentOf(root, op.path));
             if (desc.text && nextDesc.text) {
                 desc.text.set(String(desc.text.get()) + String(nextDesc.text.get()));
                 return touched;
@@ -291,5 +307,6 @@ export function applyOps(root: PandocAST, ops: Op[]): Touched {
         removedFrom: keep(touched.removedFrom),
         textChanges: touched.textChanges.filter((c) => present.has(c.node)),
         removedText: touched.removedText,
+        relisted: keep(touched.relisted),
     };
 }
