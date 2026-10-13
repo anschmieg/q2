@@ -218,6 +218,7 @@ fn page_without_components_ships_nothing() {
     copy_dir(&fixture(), dir.path());
     // The fixture's gallery page binds a component of its own; this test is about a site without any.
     std::fs::remove_file(dir.path().join("gallery.qmd")).unwrap();
+    std::fs::remove_file(dir.path().join("typed.qmd")).unwrap();
     std::fs::write(
         dir.path().join("index.qmd"),
         "---\ntitle: plain\n---\n\n::: {#counter}\nJust a div.\n:::\n",
@@ -251,6 +252,7 @@ fn unbound_component_warns_q_25_4_and_ships_nothing() {
     copy_dir(&fixture(), dir.path());
     // The fixture's gallery page binds a component of its own; this test is about a site without any.
     std::fs::remove_file(dir.path().join("gallery.qmd")).unwrap();
+    std::fs::remove_file(dir.path().join("typed.qmd")).unwrap();
     std::fs::write(
         dir.path().join("index.qmd"),
         "---\ntitle: plain\ncomponents:\n  - name: counter\n    src: counter.js\n---\n\nNo host here.\n",
@@ -401,4 +403,30 @@ fn content_ast_ships_the_node_json_as_a_child_script() {
     );
     let head = between(&html, "<head>", "</head>");
     assert!(head.contains("\"gallery\":{\"content\":\"ast\""), "{head}");
+}
+
+/// S4: a `.tsx` source is transpiled at render time (types stripped, JSX
+/// through the automatic runtime), its relative TypeScript import is
+/// shipped beside it as `.js`, and the manifest points at the `.js`.
+#[test]
+fn tsx_component_is_transpiled_with_its_imports() {
+    let r = render(&[]);
+    assert!(!r.stderr.contains("Q-25-"), "{}", r.stderr);
+    let typed = r.read("site_libs/quarto-components/typed.js");
+    assert!(typed.contains("from \"react/jsx-runtime\""), "{typed}");
+    assert!(typed.contains("from \"./lib/pad.js\""), "{typed}");
+    assert!(
+        !typed.contains("QuartoComponentProps") && !typed.contains("<number>"),
+        "{typed}"
+    );
+    let pad = r.read("site_libs/quarto-components/lib/pad.js");
+    assert!(!pad.contains(": number"), "{pad}");
+    assert!(
+        !r.site()
+            .join("site_libs/quarto-components/typed.tsx")
+            .exists()
+    );
+    let html = r.read("typed.html");
+    let head = between(&html, "<head>", "</head>");
+    assert!(head.contains("\"typed\":{\"content\":\"dom\",\"export\":\"default\",\"module\":\"site_libs/quarto-components/typed.js\"}"), "{head}");
 }

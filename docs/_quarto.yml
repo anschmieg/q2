@@ -75,6 +75,7 @@ website:
             - guides/authoring/engines.qmd
             - guides/authoring/navigation.qmd
             - guides/authoring/extensions.qmd
+            - guides/authoring/components.qmd
             - guides/authoring/templates.qmd
             - guides/publishing/index.qmd
     - id: guide
@@ -440,6 +441,7 @@ website:
             - errors/components/Q-25-6.qmd
             - errors/components/Q-25-7.qmd
             - errors/components/Q-25-8.qmd
+            - errors/components/Q-25-9.qmd
 
 format:
   html:

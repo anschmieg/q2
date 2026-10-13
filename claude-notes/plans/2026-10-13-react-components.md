@@ -2,7 +2,7 @@
 title: 'React components bound to document elements in `format: html` (bd-react-components-a8flgldm)'
 date: 2026-10-13
 description: 'Assessment and design for letting a .qmd bind React components to elements of its HTML output: the pandoc-rendered markup is the no-script version, a small ESM runtime mounts the component over it, components come from project files or npm, and the binding is declared in metadata or on the element. Designed to compose with lmd and type: metadata listings and to share one component contract with the q2 preview renderer.'
-status: in-progress  # S1 to S3 landed 2026-10-13; S4 (oxc spike) next
+status: in-progress  # S1 to S4 landed 2026-10-13; S5 (docs) next
 braid:
   strand: bd-react-components-a8flgldm
 ---
@@ -182,6 +182,8 @@ Authors will write TSX. Three ways to get JS out of it, none of which bundles:
 
 Recommendation: S1 proves the architecture with plain `.js` ESM (no transpiler, no new dependency), S4 measures option B and decides. If B's cost is acceptable it becomes the default and A stays available for authors who want a real bundle; if not, A ships and B is filed. The user's stated leaning, distribution ESM files rather than bundles, is compatible with both.
 
+**Decided in S4 (2026-10-13): B.** The cost is small (see the S4 entry under § Spikes for the numbers), the crate builds for wasm32, and `.tsx` sources work with no author-side build. Option A was not built; an author who wants a bundle can still ship a prebuilt `.js`, which S1 supports unchanged.
+
 ### D8. The same components in the q2 preview
 
 Owned by a sibling strand under bd-j3764r9a (decision 6), not by this one. The contract above is chosen so that half is additive:
@@ -248,7 +250,8 @@ Each spike is one commit with its tests and ends with this plan updated. S1 is t
 
 - [x] **S3. `content: ast` and the types package.** Done 2026-10-13. For every element bound to a `content: ast` declaration the transform prepends a `script.quarto-component-ast` child holding the node's Pandoc JSON (the writer's source-free form, the `{t, c}` shape the preview wire format uses, with the element's own props script left out of the payload; idempotent on re-run); the runtime removes the script before capturing the children and passes the parsed value as `node`. Image targets inside the payload are already page-relative, since link rewriting runs earlier in Finalization, and the images are still collected, since the transform runs before `resource-collector`. `ts-packages/components` (`@quarto/components`, types only: `QuartoComponentProps`, `QuartoComponent`, `defineComponent`, the attribute and event names) builds under the workspace's `tsc` and is a workspace link in the lockfile. The `StaticContent` reparenting element was already in S1. Fixture: `gallery.qmd` in `components-basic`, a `content: ast` component that walks `node` for its images. Tests: 3 unit tests (payload shape and props-script exclusion, span payload, no payload for `dom`), 1 end-to-end pin; verified by hand in Chromium (the component counts two images from `node`, the payload script is consumed, the static list survives).
 
-- [ ] **S4. `.tsx` decision (oxc spike).** After S1 to S3 are green. Measure option B: add `oxc_*` behind a feature, transpile the S1 fixture rewritten in TSX, build for wasm32, record compile-time and binary-size deltas and the transpile time per file. Decide B as default or A (`q2 call build-components` over node + esbuild) as default, record it here, implement the winner. Either way `.tsx` in `src:` works at the end of S4.
+- [x] **S4. `.tsx` decision (oxc spike).** Done 2026-10-13; option B (transpile in Rust) is the default and option A was not built. New crate `crates/quarto-transpile` wraps `oxc_parser`, `oxc_semantic`, `oxc_transformer` and `oxc_codegen` (0.154, source maps off): `transpile(source, file_name)` strips types, compiles JSX through the automatic runtime from `react`, rewrites relative `.ts`/`.tsx` import specifiers to `.js`, and reports oxc's diagnostics with line and column; `relative_imports_of` lists a module's relative imports without transforming it. The transform ships a bound component's whole module graph within the project: TypeScript and JSX files become artifacts under `site_libs/quarto-components/<path>.js`, plain JavaScript is copied, each file once per page, with the `./x.js`-for-`x.ts` convention accepted. New code Q-25-9 (module could not be prepared: a syntax error with its position, an unreadable file, an import that names no file). Measurements: the oxc dependency set adds about 18 s of wall-clock debug compile time (parallel, cold) natively and about 11 s for wasm32; the debug `q2` binary grows by 5.0 MB (2.7%); the crate builds for `wasm32-unknown-unknown` under the workspace's `panic=unwind` flags once `oxc_codegen`\'s source-map feature is off. Fixture: `typed.qmd` in `components-basic`, a `.tsx` component importing a typed helper from `lib/pad.ts`. Tests: 6 in the crate, 5 transform tests on a real on-disk project (TSX entry with TS and JS imports, JS entry with shared helper shipped once, transpile error, missing import, import outside the project), 1 end-to-end pin; verified by hand in Chromium (the transpiled module and its helper load, state updates).
+
 - [ ] **S5. Docs and diagnostics.** `docs/guides/authoring/components.qmd` (or a section of `extensions.qmd`), the `Q-` error pages, a line in the listings guide's "Listings as data" pointing at D9, the `render-components:` versus `components:` distinction in the preview docs, and a short "when to use `content: ast`" note aimed at authors who want the same component in the preview.
 
 Rough size: S1 two to three days (the vendoring xtask and the runtime are new ground); S2 one day; S3 one day; S4 one to two days including the measurement; S5 one day.
@@ -280,6 +283,13 @@ Rough size: S1 two to three days (the vendoring xtask and the runtime are new gr
 1. **The payload is a child, not a sibling.** The plan said sibling; a child keeps the association trivial for the runtime (one `takeChildScript`), keeps the element self-contained when a filter moves it, and is removed before the static children are captured, so it never reaches `children`. D3 is updated to say child.
 2. **The source-free JSON writer was already there** (`pampa::writers::json::blocks_to_source_free_json`, built for `q2 get-config`), so `content: ast` is a few lines; the wire shape is the one `@quarto/pandoc-types` types, which is what makes the preview half additive.
 3. **Adding a workspace package rewrites unrelated `"peer": true` flags in the lockfile.** `@quarto/components` lists `@types/react` as a dev dependency and `react` as a peer, so entries that were previously peer-only lose the flag. That is npm's bookkeeping, not drift; `npm ci` is consistent.
+
+## S4 findings (2026-10-13)
+
+1. **oxc builds for wasm32 only without source maps.** `oxc_codegen` enables `oxc_sourcemap` by default, and that crate fails under the workspace's wasm32 `panic=unwind` rustflags ("the crate `panic_unwind` does not have the panic strategy `unwind`"). With `default-features = false` on `oxc_codegen` the crate builds for the target in about 11 s. Source maps are not wanted anyway: the output is served as-is.
+2. **The module graph is cheap to follow with oxc.** The parser's `ModuleRecord` lists every requested specifier, so the transform ships relative imports transitively (TypeScript transpiled, JavaScript copied, each file once per page) instead of asking the author to list helpers. The TypeScript convention of importing `./x.js` for a file called `x.ts` is resolved by trying `.ts` and `.tsx` when the literal path does not exist, which is also what the transpiler's extension rewriting assumes.
+3. **Bare imports other than `react` still have no story.** `import x from "lodash"` transpiles fine and fails in the browser; that is the deferred `npm:` route (decision 5), and Q-25-9's page says so.
+4. **The preview can drop Babel.** The same crate compiled into the hub-client WASM would replace the 2.9 MB `@babel/standalone` chunk the preview loads for `render-components:`. That belongs to the preview sibling strand; nothing in this strand depends on it.
 
 ## Decisions (2026-10-13)
 

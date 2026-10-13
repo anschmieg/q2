@@ -2105,5 +2105,12 @@
     "message_template": "An element's `component-props` attribute is not a JSON object literal. The value is dropped; the component gets only the props declared in metadata.",
     "docs_url": "https://quarto.org/docs/errors/components/Q-25-8",
     "since_version": "99.9.9"
+  },
+  "Q-25-9": {
+    "subsystem": "components",
+    "title": "Component Module Could Not Be Prepared",
+    "message_template": "A component's TypeScript or JSX module (or one it imports) failed to transpile, could not be read, or has an import that names no file. The component was not shipped; its element keeps the static content.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-9",
+    "since_version": "99.9.9"
   }
 }

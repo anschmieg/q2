@@ -40,6 +40,7 @@
 //! `resource-collector`, so a bound subtree's images are still
 //! collected.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
@@ -50,7 +51,7 @@ use quarto_pandoc_types::pandoc::Pandoc;
 use quarto_source_map::SourceInfo;
 
 use crate::Result;
-use crate::artifact::ArtifactScope;
+use crate::artifact::{Artifact, ArtifactScope};
 use crate::ast_walk::{for_each_block_list_mut, for_each_inline_list_mut};
 use crate::components::runtime::{
     HEAD_SENTINEL, ManifestEntry, asset_url, head_block, script_json,
@@ -138,33 +139,32 @@ impl AstTransform for ComponentsResolveTransform {
 
         let mut entries = Vec::new();
         let mut copies = Vec::new();
+        let mut shipped: BTreeSet<PathBuf> = BTreeSet::new();
         bound.sort_by_key(|i| *i);
         for decl in bound.iter().map(|&i| &decls[i]) {
             let ComponentSource::File(doc_relative) = &decl.src;
             let source = lexically_normalize(&document_dir.join(doc_relative));
-            let Some(project_relative) =
-                pathdiff::diff_paths(&source, &ctx.project.dir).filter(|p| {
-                    !p.components()
-                        .next()
-                        .is_some_and(|c| c == Component::ParentDir)
-                })
-            else {
+            let Some(project_relative) = project_relative_path(&source, &ctx.project.dir) else {
                 diags.push(outside_project_diagnostic(decl, &source));
                 continue;
             };
-            let lib_path = format!(
-                "{COMPONENTS_LIB_PREFIX}{}",
-                quarto_util::to_forward_slashes(&project_relative)
-            );
+            let lib_path = shipped_lib_path(&project_relative);
             if can_ship {
-                let resolver = ctx.resource_resolver.as_ref().expect("checked by can_ship");
-                let dest = resolver.on_disk_path_for(ArtifactScope::Project, Path::new(&lib_path));
-                if dest != source {
-                    copies.push(ResourceCopyIntent {
-                        src: source,
-                        dest,
-                        origin: decl.src_source_info.clone(),
-                    });
+                let mut shipper = Shipper {
+                    ctx,
+                    decl,
+                    diags: &mut diags,
+                    copies: &mut copies,
+                    shipped: &mut shipped,
+                    new_artifacts: Vec::new(),
+                };
+                let ok = shipper.ship(&source, &project_relative, &decl.src_source_info);
+                let new_artifacts = std::mem::take(&mut shipper.new_artifacts);
+                for (key, artifact) in new_artifacts {
+                    ctx.artifacts.store(key, artifact);
+                }
+                if !ok {
+                    continue;
                 }
             }
             entries.push(ManifestEntry {
@@ -185,6 +185,172 @@ impl AstTransform for ComponentsResolveTransform {
         ctx.diagnostics.extend(diags);
         Ok(())
     }
+}
+
+/// The project-relative path of a module, or `None` when it escapes the
+/// project root (nothing outside the project can be shipped).
+fn project_relative_path(source: &Path, project_dir: &Path) -> Option<PathBuf> {
+    pathdiff::diff_paths(source, project_dir).filter(|p| {
+        !p.components()
+            .next()
+            .is_some_and(|c| c == Component::ParentDir)
+    })
+}
+
+/// Where a module lands under the lib dir: its project-relative path
+/// under `quarto-components/`, with a TypeScript or JSX extension
+/// rewritten to `.js` (the transpiler's output), matching how the
+/// transpiler rewrites relative import specifiers.
+fn shipped_lib_path(project_relative: &Path) -> String {
+    let rel = quarto_util::to_forward_slashes(project_relative);
+    let rel = if quarto_transpile::needs_transpile(&rel) {
+        match rel.rfind('.') {
+            Some(i) => format!("{}.js", &rel[..i]),
+            None => rel,
+        }
+    } else {
+        rel
+    };
+    format!("{COMPONENTS_LIB_PREFIX}{rel}")
+}
+
+/// Ships one component's module graph: the entry module and, transitively,
+/// every relative import inside the project. TypeScript and JSX files are
+/// transpiled and stored as artifacts; plain JavaScript is copied. A file
+/// is shipped once per page however many components reach it.
+struct Shipper<'a, 'c> {
+    ctx: &'a RenderContext<'c>,
+    decl: &'a ComponentDecl,
+    diags: &'a mut Vec<DiagnosticMessage>,
+    copies: &'a mut Vec<ResourceCopyIntent>,
+    shipped: &'a mut BTreeSet<PathBuf>,
+    /// Artifacts to store once the borrow of `ctx` ends.
+    new_artifacts: Vec<(String, Artifact)>,
+}
+
+impl Shipper<'_, '_> {
+    /// Returns false when the entry module itself cannot be shipped
+    /// (then the component is left out of the manifest).
+    fn ship(&mut self, source: &Path, project_relative: &Path, origin: &SourceInfo) -> bool {
+        if !self.shipped.insert(source.to_path_buf()) {
+            return true;
+        }
+        let resolver = self
+            .ctx
+            .resource_resolver
+            .as_ref()
+            .expect("shipping needs a resolver");
+        let lib_path = shipped_lib_path(project_relative);
+        let file_name = quarto_util::to_forward_slashes(project_relative);
+        let dest = resolver.on_disk_path_for(ArtifactScope::Project, Path::new(&lib_path));
+
+        let imports: Vec<String> = if quarto_transpile::needs_transpile(&file_name) {
+            let text = match std::fs::read_to_string(source) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.diags.push(transpile_diagnostic(
+                        self.decl,
+                        &file_name,
+                        &format!("could not read the file: {e}"),
+                        origin,
+                    ));
+                    return false;
+                }
+            };
+            match quarto_transpile::transpile(&text, &file_name) {
+                Ok(out) => {
+                    self.new_artifacts.push((
+                        format!("components:module:{lib_path}"),
+                        Artifact::from_string(&out.code, "text/javascript")
+                            .with_path(&lib_path)
+                            .with_scope(ArtifactScope::Project),
+                    ));
+                    out.relative_imports
+                }
+                Err(errors) => {
+                    let first = errors.first().map(ToString::to_string).unwrap_or_default();
+                    self.diags
+                        .push(transpile_diagnostic(self.decl, &file_name, &first, origin));
+                    return false;
+                }
+            }
+        } else {
+            if dest != source {
+                self.copies.push(ResourceCopyIntent {
+                    src: source.to_path_buf(),
+                    dest,
+                    origin: origin.clone(),
+                });
+            }
+            // Follow the module's relative imports; an unreadable file is
+            // the copy drain's Q-5-6, and ships nothing further.
+            std::fs::read_to_string(source)
+                .map(|text| quarto_transpile::relative_imports_of(&text, &file_name))
+                .unwrap_or_default()
+        };
+
+        let dir = source.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        for spec in imports {
+            let Some(target) = resolve_relative_import(&dir, &spec) else {
+                self.diags.push(transpile_diagnostic(
+                    self.decl,
+                    &file_name,
+                    &format!("import `{spec}` names no file"),
+                    origin,
+                ));
+                continue;
+            };
+            let Some(target_relative) = project_relative_path(&target, &self.ctx.project.dir)
+            else {
+                self.diags
+                    .push(outside_project_diagnostic(self.decl, &target));
+                continue;
+            };
+            // Imports are shipped on a best-effort basis: a broken helper
+            // is reported, and the entry module still ships.
+            self.ship(&target, &target_relative, origin);
+        }
+        true
+    }
+}
+
+/// Resolve `./x.js`-style specifier against a directory, accepting the
+/// TypeScript convention of importing `./x.js` when the file on disk is
+/// `x.ts` or `x.tsx`.
+fn resolve_relative_import(dir: &Path, spec: &str) -> Option<PathBuf> {
+    let direct = lexically_normalize(&dir.join(spec));
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if let Some(stem) = spec.strip_suffix(".js") {
+        for ext in ["ts", "tsx"] {
+            let candidate = lexically_normalize(&dir.join(format!("{stem}.{ext}")));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn transpile_diagnostic(
+    decl: &ComponentDecl,
+    file_name: &str,
+    detail: &str,
+    origin: &SourceInfo,
+) -> DiagnosticMessage {
+    DiagnosticMessageBuilder::warning(format!(
+        "component `{}`: `{file_name}` could not be prepared for the browser",
+        decl.name
+    ))
+    .with_code("Q-25-9")
+    .with_location(origin.clone())
+    .problem(format!(
+        "TypeScript and JSX modules are transpiled at render time, and this one failed: \
+         {detail}. The component was not shipped; its element keeps the static content."
+    ))
+    .add_hint("Fix the error in the module (the position is in the module, not the document).")
+    .build()
 }
 
 /// Bind elements to declarations, by both routes, and set the host
@@ -609,6 +775,7 @@ mod tests {
         diags: Vec<DiagnosticMessage>,
         copies: Vec<ResourceCopyIntent>,
         artifact_keys: Vec<String>,
+        artifact_text: std::collections::BTreeMap<String, String>,
     }
 
     async fn run_with(
@@ -635,6 +802,7 @@ mod tests {
             diags: ctx.diagnostics,
             copies: ctx.resource_copies,
             artifact_keys,
+            artifact_text: Default::default(),
         }
     }
 
@@ -1056,6 +1224,223 @@ mod tests {
             unreachable!()
         };
         assert_eq!(d.content, vec![para("hi")]);
+    }
+
+    /// A real project on disk, for the shipping tests: the transform
+    /// reads TypeScript sources and follows imports there.
+    struct DiskProject {
+        temp: tempfile::TempDir,
+    }
+
+    impl DiskProject {
+        fn new(files: &[(&str, &str)]) -> Self {
+            let temp = tempfile::TempDir::new().unwrap();
+            for (rel, text) in files {
+                let p = temp.path().join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            }
+            Self { temp }
+        }
+
+        fn root(&self) -> PathBuf {
+            self.temp.path().canonicalize().unwrap()
+        }
+
+        async fn run(&self, yaml: &str, blocks: Vec<Block>) -> Run {
+            let root = self.root();
+            let project = ProjectContext {
+                dir: root.clone(),
+                config: ProjectConfig::default(),
+                is_single_file: false,
+                files: vec![DocumentInfo::from_path(root.join("index.qmd"))],
+                output_dir: root.join("_site"),
+                ..Default::default()
+            };
+            let doc = DocumentInfo::from_path(root.join("index.qmd"));
+            let format = Format::html();
+            let binaries = BinaryDependencies::new();
+            let resolver = ResourceResolverContext::website(
+                root.join("_site"),
+                root.join("_site/index.html"),
+                "site_libs",
+                "index",
+            );
+            let mut ctx = RenderContext::new(&project, &doc, &format, &binaries)
+                .with_resource_resolver(resolver);
+            let mut ast = Pandoc {
+                meta: meta(yaml),
+                blocks,
+            };
+            ComponentsResolveTransform::new()
+                .transform(&mut ast, &mut ctx)
+                .await
+                .unwrap();
+            let mut artifact_keys: Vec<String> =
+                ctx.artifacts.keys().map(|k| k.to_string()).collect();
+            artifact_keys.sort();
+            Run {
+                ast,
+                diags: ctx.diagnostics,
+                copies: ctx.resource_copies,
+                artifact_keys,
+                artifact_text: ctx
+                    .artifacts
+                    .keys()
+                    .map(|k| {
+                        (
+                            k.to_string(),
+                            String::from_utf8_lossy(&ctx.artifacts.get(k).unwrap().content)
+                                .to_string(),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    const TSX: &str = "components:\n  - name: counter\n    src: counter.tsx\n";
+
+    #[tokio::test]
+    async fn tsx_entry_is_transpiled_and_its_ts_imports_follow() {
+        let p = DiskProject::new(&[
+            (
+                "counter.tsx",
+                "import { fmt } from \"./lib/format.ts\";\nexport default function C({ children }: { children: unknown }) { return <b>{fmt(1)}{children}</b>; }\n",
+            ),
+            (
+                "lib/format.ts",
+                "import { pad } from \"./pad.js\";\nexport const fmt = (n: number): string => pad(String(n));\n",
+            ),
+            (
+                "lib/pad.js",
+                "export const pad = (s) => s.padStart(2, \"0\");\n",
+            ),
+        ]);
+        let r = p.run(TSX, vec![div("counter", &[], vec![])]).await;
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        assert!(
+            r.artifact_keys
+                .contains(&"components:module:quarto-components/counter.js".to_string()),
+            "{:?}",
+            r.artifact_keys
+        );
+        assert!(
+            r.artifact_keys
+                .contains(&"components:module:quarto-components/lib/format.js".to_string()),
+            "{:?}",
+            r.artifact_keys
+        );
+        let counter = &r.artifact_text["components:module:quarto-components/counter.js"];
+        assert!(counter.contains("from \"./lib/format.js\""), "{counter}");
+        assert!(counter.contains("react/jsx-runtime"), "{counter}");
+        assert!(!counter.contains(": unknown"), "types stripped: {counter}");
+        let format = &r.artifact_text["components:module:quarto-components/lib/format.js"];
+        assert!(!format.contains(": number"), "{format}");
+        // The plain JS helper is copied, not transpiled.
+        assert_eq!(r.copies.len(), 1);
+        assert!(
+            r.copies[0]
+                .dest
+                .ends_with("site_libs/quarto-components/lib/pad.js")
+        );
+        assert!(
+            header_includes(&r.ast.meta)[0]
+                .contains("\"module\":\"site_libs/quarto-components/counter.js\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn js_entry_imports_are_copied_and_shared_files_ship_once() {
+        let p = DiskProject::new(&[
+            (
+                "a.js",
+                "import { u } from \"./util.js\";\nexport default () => u;\n",
+            ),
+            (
+                "b.js",
+                "import { u } from \"./util.js\";\nexport default () => u + 1;\n",
+            ),
+            ("util.js", "export const u = 1;\n"),
+        ]);
+        let yaml = "components:\n  - name: a\n    src: a.js\n  - name: b\n    src: b.js\n";
+        let r = p
+            .run(yaml, vec![div("a", &[], vec![]), div("b", &[], vec![])])
+            .await;
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        let mut dests: Vec<String> = r
+            .copies
+            .iter()
+            .map(|c| c.dest.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        dests.sort();
+        assert_eq!(dests, vec!["a.js", "b.js", "util.js"]);
+        assert!(
+            r.artifact_keys
+                .iter()
+                .all(|k| !k.starts_with("components:module:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transpile_error_is_q_25_9_and_leaves_the_component_out() {
+        let p = DiskProject::new(&[(
+            "counter.tsx",
+            "export default function C() { return <b>; }\n",
+        )]);
+        let r = p.run(TSX, vec![div("counter", &[], vec![])]).await;
+        assert_eq!(codes(&r.diags), vec!["Q-25-9"]);
+        assert!(
+            r.diags[0].title.contains("counter.tsx"),
+            "{}",
+            r.diags[0].title
+        );
+        assert!(
+            r.artifact_keys.is_empty(),
+            "nothing ships when the entry fails: {:?}",
+            r.artifact_keys
+        );
+        assert!(header_includes(&r.ast.meta).is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_import_is_reported_and_the_entry_still_ships() {
+        let p = DiskProject::new(&[(
+            "counter.tsx",
+            "import { x } from \"./nope.ts\";\nexport default () => x;\n",
+        )]);
+        let r = p.run(TSX, vec![div("counter", &[], vec![])]).await;
+        assert_eq!(codes(&r.diags), vec!["Q-25-9"]);
+        assert!(
+            format!("{:?}", r.diags[0]).contains("names no file"),
+            "{:?}",
+            r.diags[0]
+        );
+        assert!(
+            r.artifact_keys
+                .contains(&"components:module:quarto-components/counter.js".to_string())
+        );
+        assert_eq!(header_includes(&r.ast.meta).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_outside_the_project_is_q_25_2() {
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(outside.path().join("x.js"), "export const x = 1;\n").unwrap();
+        let p = DiskProject::new(&[]);
+        let rel = pathdiff::diff_paths(
+            outside.path().canonicalize().unwrap().join("x.js"),
+            p.root(),
+        )
+        .unwrap();
+        let spec = quarto_util::to_forward_slashes(&rel);
+        std::fs::write(
+            p.root().join("counter.js"),
+            format!("import {{ x }} from \"{spec}\";\nexport default () => x;\n"),
+        )
+        .unwrap();
+        let r = p.run(ONE, vec![div("counter", &[], vec![])]).await;
+        assert_eq!(codes(&r.diags), vec!["Q-25-2"]);
     }
 
     #[tokio::test]
