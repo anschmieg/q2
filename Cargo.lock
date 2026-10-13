@@ -6166,6 +6166,7 @@ dependencies = [
  "dunce",
  "include_dir",
  "inquire",
+ "insta",
  "mimalloc",
  "open",
  "openssl-sys",
@@ -6348,6 +6349,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
+ "tree-sitter-lmd",
  "tree-sitter-r",
  "typst-gather",
  "uuid",
@@ -9272,6 +9274,15 @@ dependencies = [
 [[package]]
 name = "tree-sitter-language"
 version = "0.1.7"
+
+[[package]]
+name = "tree-sitter-lmd"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-lua"
