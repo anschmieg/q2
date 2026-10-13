@@ -268,3 +268,95 @@ fn unbound_component_warns_q_25_4_and_ships_nothing() {
             .exists()
     );
 }
+
+#[test]
+fn element_route_binds_a_span_and_carries_its_props() {
+    let r = render(&[]);
+    let html = r.read("index.html");
+    // The author's keys are consumed: the span carries the runtime's two.
+    assert!(
+        !html.contains("<span component"),
+        "author key leaked: {html}"
+    );
+    assert!(
+        !html.contains("data-component-props"),
+        "writer-prefixed key leaked: {html}"
+    );
+    let span = between(&html, "<span data-quarto-component=\"counter\"", "</span>");
+    assert!(
+        span.contains("data-quarto-component-props=\"{&quot;start&quot;: 40}\""),
+        "{span}"
+    );
+    assert!(span.ends_with(">40</span>"), "{span}");
+}
+
+/// S2 (plan D9): a `type: metadata` listing handed to a component by an
+/// lmd cell through `quarto.component`. The props script carries the
+/// items as plain JSON (titles as text, hrefs rewritten to `.html`), the
+/// bullet list is the no-script version, and the host is bound without a
+/// selector: the cell set the host attribute itself.
+#[test]
+fn lmd_listing_component_ships_props_and_fallback() {
+    let dir = tempfile::TempDir::new().unwrap();
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/integration/fixtures/components-listing"),
+        dir.path(),
+    );
+    let output = Command::new(Q2_BIN)
+        .arg("render")
+        .current_dir(dir.path())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("q2 runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("Q-25-"), "{stderr}");
+    assert!(!stderr.contains("Error"), "{stderr}");
+    let html = std::fs::read_to_string(dir.path().join("_site/index.html")).unwrap();
+
+    let host = between(
+        &html,
+        "<div data-quarto-component=\"filter-table\"",
+        "</ul>",
+    );
+    let script = between(
+        host,
+        "<script type=\"application/json\" class=\"quarto-component-props\">",
+        "</script>",
+    );
+    let json: serde_json::Value = serde_json::from_str(
+        script
+            .trim_start_matches(
+                "<script type=\"application/json\" class=\"quarto-component-props\">",
+            )
+            .trim_end_matches("</script>"),
+    )
+    .expect("props script is JSON");
+    let rows = json["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0]["title"], "Gamma retrospective",
+        "sorted by date desc"
+    );
+    assert_eq!(rows[1]["title"], "Beta notes", "title inlines become text");
+    assert_eq!(rows[0]["href"], "posts/c.html");
+    assert_eq!(rows[0]["categories"], serde_json::json!(["notes"]));
+    // The no-script list follows the script, with rewritten links.
+    assert!(
+        host.contains("<a href=\"posts/c.html\">Gamma retrospective</a>"),
+        "{host}"
+    );
+    assert!(
+        host.contains("<a href=\"posts/b.html\">Beta <em>notes</em></a>"),
+        "{host}"
+    );
+    // Shipped like any declared component.
+    let head = between(&html, "<head>", "</head>");
+    assert!(head.contains("\"filter-table\":{\"content\":\"dom\",\"export\":\"default\",\"module\":\"site_libs/quarto-components/filter-table.js\"}"), "{head}");
+    assert!(
+        dir.path()
+            .join("_site/site_libs/quarto-components/filter-table.js")
+            .is_file()
+    );
+}

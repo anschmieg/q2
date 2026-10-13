@@ -134,6 +134,9 @@ pub struct ComponentDecl {
     pub export: Option<String>,
     pub bind: Binding,
     pub content: ContentMode,
+    /// Static props from `props:`, as plain JSON; overlaid by the
+    /// element's own props in the browser.
+    pub props: Option<serde_json::Value>,
     /// The whole entry, for diagnostics about the binding.
     pub source_info: SourceInfo,
     /// The `src` value, for diagnostics about the file (the copy
@@ -302,12 +305,28 @@ fn parse_entry(
         }
     };
 
+    let props = match item.get("props") {
+        None => None,
+        Some(v) if v.is_map() => Some(v.to_plain_json()),
+        Some(v) => {
+            push_diag(
+                diagnostics,
+                "Q-25-6",
+                format!("component `{name}`: `props` must be a map"),
+                v,
+                "Write `props:` as key/value pairs; they reach the component as a JSON object.",
+            );
+            return None;
+        }
+    };
+
     Some(ComponentDecl {
         name,
         src,
         export,
         bind,
         content,
+        props,
         source_info: item.source_info.clone(),
         src_source_info: src_value.source_info.clone(),
     })
@@ -390,6 +409,23 @@ mod tests {
         // Unmarked (no merge-time marking in this harness): kept as
         // written, forward slashes.
         assert_eq!(d.src, ComponentSource::File("/lib/cards.js".into()));
+    }
+
+    #[test]
+    fn props_map_becomes_plain_json_and_non_map_is_q_25_6() {
+        let (decls, diags) = parse(
+            "components:\n  - name: a\n    src: a.js\n    props:\n      interval: 3000\n      label: \"Hi *there*\"\n      tags: [x, y]\n",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            decls[0].props,
+            Some(serde_json::json!({"interval": 3000, "label": "Hi there", "tags": ["x", "y"]}))
+        );
+        let (decls, diags) = parse("components:\n  - name: a\n    src: a.js\n    props: 3\n");
+        assert!(decls.is_empty());
+        assert_eq!(codes(&diags), vec!["Q-25-6"]);
+        let (decls, _) = parse("components:\n  - name: a\n    src: a.js\n");
+        assert_eq!(decls[0].props, None);
     }
 
     #[test]

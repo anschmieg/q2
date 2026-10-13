@@ -1,0 +1,8 @@
+---
+title: "Gamma retrospective"
+date: 2026-06-20
+categories: [notes]
+description: "Looking back."
+---
+
+Body of c.

@@ -11,4 +11,4 @@ Before the component.
 This is the **no-script** content: a count of `0`.
 :::
 
-After the component.
+After the component, and an inline one: [40]{component=counter component-props='{"start": 40}'}.

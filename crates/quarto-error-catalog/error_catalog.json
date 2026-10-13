@@ -2091,5 +2091,19 @@
     "message_template": "A component's `bind` is not `#id` or `.class`, or its `content` is not `dom`, `ast` or `none`. The entry is skipped.",
     "docs_url": "https://quarto.org/docs/errors/components/Q-25-6",
     "since_version": "99.9.9"
+  },
+  "Q-25-7": {
+    "subsystem": "components",
+    "title": "Unknown Component Name on Element",
+    "message_template": "An element asks for a component (`component=<name>`, or `quarto.component` in Lua) that `components:` does not declare. The element keeps its static content.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-7",
+    "since_version": "99.9.9"
+  },
+  "Q-25-8": {
+    "subsystem": "components",
+    "title": "component-props Is Not a JSON Object",
+    "message_template": "An element's `component-props` attribute is not a JSON object literal. The value is dropped; the component gets only the props declared in metadata.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-8",
+    "since_version": "99.9.9"
   }
 }

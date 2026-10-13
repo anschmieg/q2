@@ -138,6 +138,9 @@ pub struct ManifestEntry {
     pub module_url: String,
     pub export: Option<String>,
     pub content: ContentMode,
+    /// Static props from the declaration, overlaid in the browser by the
+    /// element's own.
+    pub props: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -145,6 +148,8 @@ struct ManifestComponent<'a> {
     module: &'a str,
     export: &'a str,
     content: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    props: Option<&'a serde_json::Value>,
 }
 
 /// The head block for a page: import map, manifest, runtime module tag.
@@ -169,6 +174,7 @@ pub fn head_block(ctx: &RenderContext<'_>, entries: &[ManifestEntry]) -> String 
                     module: &e.module_url,
                     export: e.export.as_deref().unwrap_or("default"),
                     content: e.content.as_str(),
+                    props: e.props.as_ref(),
                 })
                 .expect("manifest entry serializes"),
             )
@@ -246,7 +252,24 @@ mod tests {
             module_url: url.into(),
             export: None,
             content: ContentMode::Dom,
+            props: None,
         }
+    }
+
+    #[test]
+    fn manifest_carries_static_props_when_declared() {
+        let project = make_test_project();
+        let doc = DocumentInfo::from_path("/project/doc.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let ctx = RenderContext::new(&project, &doc, &format, &binaries);
+        let mut e = entry("c", "quarto-components/c.js");
+        e.props = Some(serde_json::json!({"interval": 3000}));
+        let block = head_block(&ctx, &[e]);
+        assert!(
+            block.contains("\"c\":{\"content\":\"dom\",\"export\":\"default\",\"module\":\"quarto-components/c.js\",\"props\":{\"interval\":3000}}"),
+            "{block}"
+        );
     }
 
     /// The committed React files carry the versions `build-info.json`

@@ -65,6 +65,13 @@ use crate::transforms::append_with_sentinel;
 /// Lib-dir prefix under which component modules are shipped.
 const COMPONENTS_LIB_PREFIX: &str = "quarto-components/";
 
+/// The element route: `component=<name>` on a Div/Span attr (plan D1).
+const ELEMENT_KEY: &str = "component";
+/// Element-level props: `component-props='{"a": 1}'`, a JSON object.
+const ELEMENT_PROPS_KEY: &str = "component-props";
+/// The attribute the runtime reads element props from.
+const HOST_PROPS_ATTR: &str = "data-quarto-component-props";
+
 /// See module docs.
 pub struct ComponentsResolveTransform;
 
@@ -98,9 +105,9 @@ impl AstTransform for ComponentsResolveTransform {
             return Ok(());
         };
         let mut diags = Vec::new();
-        let decls = parse_components(value, &mut diags);
+        let mut decls = parse_components(value, &mut diags);
 
-        let mut bound = bind_elements(ast, &decls, &mut diags);
+        let mut bound = bind_elements(ast, &mut decls, &mut diags);
 
         if bound.is_empty() {
             ctx.diagnostics.extend(diags);
@@ -156,6 +163,7 @@ impl AstTransform for ComponentsResolveTransform {
                 module_url: asset_url(ctx, &lib_path),
                 export: decl.export.clone(),
                 content: decl.content,
+                props: decl.props.clone(),
             });
         }
 
@@ -170,19 +178,79 @@ impl AstTransform for ComponentsResolveTransform {
     }
 }
 
-/// Set the host attribute on every `Div`/`Span` a declaration selects.
-/// Returns the indices of the declarations that bound at least one
-/// element, in first-match order; diagnoses the rest (Q-25-4) and any
+/// Bind elements to declarations, by both routes, and set the host
+/// attribute. Returns the indices of the declarations that bound at least
+/// one element, in first-match order; diagnoses the rest (Q-25-4) and any
 /// element two declarations compete for (Q-25-5).
+///
+/// Per element, the element route goes first: a `component=<name>` key
+/// (or a `data-quarto-component` already set by `quarto.component` in
+/// Lua) names a declaration, which must exist (Q-25-7); a path-like value
+/// (`component=./x.js`) declares the component on the spot. Then every
+/// declaration's `bind:` selector is tried. `component-props` must be a
+/// JSON object (Q-25-8) and is renamed to the runtime's attribute.
 fn bind_elements(
     ast: &mut Pandoc,
-    decls: &[ComponentDecl],
+    decls: &mut Vec<ComponentDecl>,
     diags: &mut Vec<DiagnosticMessage>,
 ) -> Vec<usize> {
     let mut matched = vec![0usize; decls.len()];
     let mut order: Vec<usize> = Vec::new();
 
     let mut visit = |attr: &mut Attr, location: Option<SourceInfo>| {
+        // Element route.
+        if let Some(value) = attr.2.remove(ELEMENT_KEY) {
+            let value = value.trim().to_string();
+            match decls.iter().position(|d| d.name == value) {
+                Some(i) => {
+                    attr.2.insert(COMPONENT_HOST_ATTR.to_string(), value);
+                    matched[i] += 1;
+                    if !order.contains(&i) {
+                        order.push(i);
+                    }
+                }
+                None if looks_like_module_path(&value) => {
+                    let i = decls.len();
+                    decls.push(ComponentDecl {
+                        name: value.clone(),
+                        src: ComponentSource::File(value.clone()),
+                        export: None,
+                        bind: crate::components::Binding::Id(value.clone()),
+                        content: Default::default(),
+                        props: None,
+                        source_info: location.clone().unwrap_or_default(),
+                        src_source_info: location.clone().unwrap_or_default(),
+                    });
+                    matched.push(1);
+                    order.push(i);
+                    attr.2.insert(COMPONENT_HOST_ATTR.to_string(), value);
+                }
+                None => {
+                    diags.push(unknown_component_diagnostic(&value, location.clone()));
+                }
+            }
+        } else if let Some(existing) = attr.2.get(COMPONENT_HOST_ATTR).cloned() {
+            // Pre-tagged by `quarto.component(...)`: counts as bound.
+            match decls.iter().position(|d| d.name == existing) {
+                Some(i) => {
+                    matched[i] += 1;
+                    if !order.contains(&i) {
+                        order.push(i);
+                    }
+                }
+                None => diags.push(unknown_component_diagnostic(&existing, location.clone())),
+            }
+        }
+        if let Some(raw) = attr.2.remove(ELEMENT_PROPS_KEY) {
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) if v.is_object() => {
+                    attr.2.insert(HOST_PROPS_ATTR.to_string(), raw);
+                }
+                _ => diags.push(bad_props_diagnostic(&raw, location.clone())),
+            }
+        }
+
+        // Selector route.
         for (i, decl) in decls.iter().enumerate() {
             if !decl.bind.matches(&attr.0, &attr.1) {
                 continue;
@@ -236,6 +304,48 @@ fn bind_elements(
         }
     }
     order
+}
+
+/// `component=./x.js` declares on the spot; `component=name` refers to a
+/// declaration. A value with a path separator or a module extension is
+/// the former.
+fn looks_like_module_path(value: &str) -> bool {
+    value.contains('/') || value.ends_with(".js") || value.ends_with(".mjs")
+}
+
+fn unknown_component_diagnostic(name: &str, location: Option<SourceInfo>) -> DiagnosticMessage {
+    let mut b =
+        DiagnosticMessageBuilder::warning(format!("no component named `{name}` is declared"))
+            .with_code("Q-25-7")
+            .problem(
+                "The element asks for a component that `components:` does not declare, so nothing \
+         will mount on it; it keeps its static content.",
+            )
+            .add_hint(format!(
+                "Add `- name: {name}` with a `src:` under `components:`, or write the module path \
+         directly (`component=./{name}.js`)."
+            ));
+    if let Some(loc) = location {
+        b = b.with_location(loc);
+    }
+    b.build()
+}
+
+fn bad_props_diagnostic(raw: &str, location: Option<SourceInfo>) -> DiagnosticMessage {
+    let shown: String = raw.chars().take(60).collect();
+    let mut b = DiagnosticMessageBuilder::warning(format!(
+        "`component-props` is not a JSON object: {shown}"
+    ))
+    .with_code("Q-25-8")
+    .problem(
+        "Element props must be a JSON object literal; this value was dropped, so the \
+         component gets only the props declared in metadata.",
+    )
+    .add_hint("Write `component-props='{\"key\": value}'`, with the JSON in single quotes.");
+    if let Some(loc) = location {
+        b = b.with_location(loc);
+    }
+    b.build()
 }
 
 fn unbound_diagnostic(decl: &ComponentDecl) -> DiagnosticMessage {
@@ -625,6 +735,134 @@ mod tests {
             "{}",
             header_includes(&r.ast.meta)[0]
         );
+    }
+
+    fn div_with(id: &str, kvs: &[(&str, &str)], content: Vec<Block>) -> Block {
+        let mut b = div(id, &[], content);
+        if let Block::Div(d) = &mut b {
+            for (k, v) in kvs {
+                d.attr.2.insert(k.to_string(), v.to_string());
+            }
+        }
+        b
+    }
+
+    #[tokio::test]
+    async fn element_route_binds_a_declared_name_and_keeps_props() {
+        let ast = Pandoc {
+            meta: meta(ONE),
+            blocks: vec![
+                div_with(
+                    "",
+                    &[
+                        ("component", "counter"),
+                        ("component-props", "{\"start\": 5}"),
+                    ],
+                    vec![],
+                ),
+                div_with("", &[("component", "counter")], vec![]),
+            ],
+        };
+        let r = run(ast).await;
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        for b in &r.ast.blocks {
+            assert_eq!(host_attr(b), Some("counter"));
+            let Block::Div(d) = b else { unreachable!() };
+            assert!(
+                !d.attr.2.contains_key("component"),
+                "the author key is consumed"
+            );
+        }
+        let Block::Div(d) = &r.ast.blocks[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            d.attr
+                .2
+                .get("data-quarto-component-props")
+                .map(String::as_str),
+            Some("{\"start\": 5}")
+        );
+        assert!(!d.attr.2.contains_key("component-props"));
+        assert_eq!(r.copies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn element_route_unknown_name_is_q_25_7_and_bad_props_is_q_25_8() {
+        let ast = Pandoc {
+            meta: meta(ONE),
+            blocks: vec![
+                div_with("", &[("component", "nope")], vec![]),
+                div_with("counter", &[("component-props", "[1, 2]")], vec![]),
+            ],
+        };
+        let r = run(ast).await;
+        assert_eq!(codes(&r.diags), vec!["Q-25-7", "Q-25-8"]);
+        assert_eq!(host_attr(&r.ast.blocks[0]), None);
+        assert_eq!(host_attr(&r.ast.blocks[1]), Some("counter"));
+        let Block::Div(d) = &r.ast.blocks[1] else {
+            unreachable!()
+        };
+        assert!(!d.attr.2.contains_key("component-props"));
+        assert!(!d.attr.2.contains_key("data-quarto-component-props"));
+    }
+
+    #[tokio::test]
+    async fn element_route_path_value_declares_on_the_spot() {
+        let ast = Pandoc {
+            meta: meta("components: []\n"),
+            blocks: vec![div_with("", &[("component", "./widgets/w.js")], vec![])],
+        };
+        let r = run(ast).await;
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        assert_eq!(host_attr(&r.ast.blocks[0]), Some("./widgets/w.js"));
+        assert_eq!(r.copies.len(), 1);
+        assert_eq!(r.copies[0].src, PathBuf::from("/project/docs/widgets/w.js"));
+        assert!(
+            header_includes(&r.ast.meta)[0]
+                .contains("\"./widgets/w.js\":{\"content\":\"dom\",\"export\":\"default\",\"module\":\"../site_libs/quarto-components/docs/widgets/w.js\"}"),
+            "{}",
+            header_includes(&r.ast.meta)[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tagged_element_from_lua_counts_as_bound() {
+        // `quarto.component("counter", …)` sets the host attribute itself.
+        let ast = Pandoc {
+            meta: meta(ONE),
+            blocks: vec![div_with(
+                "",
+                &[("data-quarto-component", "counter")],
+                vec![],
+            )],
+        };
+        let r = run(ast).await;
+        assert!(
+            r.diags.is_empty(),
+            "no Q-25-4: the element route satisfied the declaration: {:?}",
+            r.diags
+        );
+        assert_eq!(r.copies.len(), 1);
+
+        let ast = Pandoc {
+            meta: meta(ONE),
+            blocks: vec![div_with("", &[("data-quarto-component", "ghost")], vec![])],
+        };
+        let r = run(ast).await;
+        assert_eq!(codes(&r.diags), vec!["Q-25-7", "Q-25-4"]);
+    }
+
+    #[tokio::test]
+    async fn declared_props_reach_the_manifest() {
+        let yaml =
+            "components:\n  - name: counter\n    src: counter.js\n    props:\n      start: 2\n";
+        let ast = Pandoc {
+            meta: meta(yaml),
+            blocks: vec![div("counter", &[], vec![])],
+        };
+        let r = run(ast).await;
+        assert!(header_includes(&r.ast.meta)[0].contains("\"props\":{\"start\":2}"));
     }
 
     #[tokio::test]
