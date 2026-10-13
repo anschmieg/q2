@@ -6908,6 +6908,7 @@ dependencies = [
 name = "quarto-wasm-embed"
 version = "0.32.0"
 dependencies = [
+ "sha2 0.11.0",
  "zstd",
 ]
 

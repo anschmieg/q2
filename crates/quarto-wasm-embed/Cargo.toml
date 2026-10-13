@@ -10,7 +10,11 @@ description = "Embeds the wasm-quarto-hub-client render WASM exactly once into t
 zstd.workspace = true
 
 [build-dependencies]
+sha2 = "0.11"
 zstd.workspace = true
+
+[dev-dependencies]
+sha2 = "0.11"
 
 [lints]
 workspace = true

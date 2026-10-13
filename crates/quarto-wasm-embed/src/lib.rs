@@ -34,6 +34,34 @@ pub const WASM_FILENAME: &str = "wasm_quarto_hub_client_bg.wasm";
 /// build). See `build.rs` for the source-file scan order.
 static WASM_ARCHIVE: &[u8] = include_bytes!(env!("QUARTO_WASM_EMBED_ARCHIVE"));
 
+/// Lowercase-hex SHA-256 of the embedded WASM, stamped at build time
+/// from the very bytes [`WASM_ARCHIVE`] compresses; `None` on a
+/// placeholder build. Lets consumers key caches and staleness checks on
+/// the WASM's identity without decoding or hashing it (the `q2 mcp`
+/// launcher's warm-cache path must not pay the ~36 MB decode/hash).
+pub const WASM_SHA256: Option<&str> = option_env!("QUARTO_WASM_EMBED_SHA256");
+
+/// Identity (uncompressed) byte length of the embedded WASM, stamped
+/// at build time alongside [`WASM_SHA256`]; `None` on a placeholder
+/// build.
+pub const WASM_LEN: Option<u64> = match option_env!("QUARTO_WASM_EMBED_LEN") {
+    Some(s) => Some(parse_u64(s)),
+    None => None,
+};
+
+/// The build script emits a decimal byte count; parse it in const
+/// context (`u64::from_str` is not const).
+const fn parse_u64(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let mut n = 0u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        n = n * 10 + (bytes[i] - b'0') as u64;
+        i += 1;
+    }
+    n
+}
+
 /// Lazily decompressed identity bytes. `None` on a placeholder build.
 static WASM_BYTES: OnceLock<Option<Box<[u8]>>> = OnceLock::new();
 
@@ -84,6 +112,37 @@ mod tests {
                 assert!(wasm_bytes().is_none(), "placeholder stays placeholder");
             }
         }
+    }
+
+    /// The build-time stamped identity (sha256, length) must agree with
+    /// the decoded payload — the launcher keys its extraction cache and
+    /// its staleness warning on the stamp precisely so it never has to
+    /// decode or hash the ~36 MB on a warm cache.
+    #[test]
+    fn stamped_identity_matches_decoded_bytes() {
+        match (wasm_bytes(), WASM_SHA256, WASM_LEN) {
+            (Some(bytes), Some(sha), Some(len)) => {
+                assert_eq!(bytes.len() as u64, len, "stamped length");
+                assert_eq!(sha256_hex(bytes), sha, "stamped sha256");
+                assert_eq!(sha.len(), 64, "lowercase hex sha256");
+            }
+            // Placeholder build: stamp and payload are absent together.
+            (None, None, None) => {}
+            (bytes, sha, len) => panic!(
+                "stamp and payload must agree: bytes={:?} sha={:?} len={:?}",
+                bytes.map(|b| b.len()),
+                sha,
+                len
+            ),
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     #[test]

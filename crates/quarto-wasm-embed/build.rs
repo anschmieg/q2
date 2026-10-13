@@ -29,6 +29,7 @@
 //! `QUARTO_WASM_EMBED_ARCHIVE`; the runtime decompresses lazily on first
 //! use so `q2 render`-class invocations pay nothing for the embed.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Basename prefix of the Vite-hashed WASM in the preview SPA dist.
@@ -68,6 +69,17 @@ fn main() {
     match selected.file {
         Some(path) => {
             let bytes = std::fs::read(&path).expect("read selected render WASM");
+            // Stamp the payload's identity so consumers can key caches
+            // and staleness checks on it without decoding the archive
+            // (the launcher's warm-cache path must not pay the ~36 MB
+            // decode/hash). The stamp covers the very bytes compressed
+            // below, so stamp and payload agree by construction.
+            let sha = Sha256::digest(&bytes);
+            println!(
+                "cargo:rustc-env=QUARTO_WASM_EMBED_SHA256={}",
+                sha.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            println!("cargo:rustc-env=QUARTO_WASM_EMBED_LEN={}", bytes.len());
             let mut encoder = zstd::stream::Encoder::new(Vec::new(), 19).expect("zstd encoder");
             if let Ok(n) = std::thread::available_parallelism() {
                 let _ = encoder.multithread(n.get() as u32);
