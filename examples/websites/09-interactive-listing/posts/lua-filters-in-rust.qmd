@@ -1,0 +1,11 @@
+---
+title: "Running Lua filters without Pandoc"
+date: 2025-12-15
+categories: [lua, rust]
+description: "How pampa hosts the filter API natively."
+---
+
+How pampa hosts the filter API natively.
+
+This post is part of the interactive-listing example; its tags are
+`lua`, `rust`.

@@ -46,6 +46,7 @@ Examples that exercise the website-projects feature surface
 | [`websites/06-site-metadata`](websites/06-site-metadata/) | `site-url`, `sitemap.xml`, `robots.txt`, favicon, title prefix, canonical URL |
 | [`websites/07-incremental`](websites/07-incremental/) | Full-project vs subset rendering, profile cache, `--clean-cache` |
 | [`websites/08-hub-preview`](websites/08-hub-preview/) | Hub-client live preview against a website project (manual browser recipe) |
+| [`websites/09-interactive-listing`](websites/09-interactive-listing/) | A `type: metadata` listing, an `{lmd}` cell that writes the page from its items, and a TypeScript React component that filters the posts by tag (bd-react-components-a8flgldm) |
 
 ## Presentation examples
 
