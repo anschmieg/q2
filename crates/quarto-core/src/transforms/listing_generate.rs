@@ -26,12 +26,12 @@
 //! transform owns the diagnostic; the profile stage drops them
 //! silently).
 //!
-//! TODO(bd-0fd0): when a Lua filter slot lands between generate and
-//! render transforms, serialize the resolved listings into
-//! `meta.listings.<id>` at that boundary so user filters can
-//! mutate them. Until then, the typed in-memory shape on
-//! `RenderContext` is the only data path between this transform
-//! and `ListingRenderTransform`.
+//! The resolved listings are also published at `meta.listings.<id>`
+//! ([`crate::project::listing::metadata`], bd-2oqen84t) so Lua
+//! consumers can read them. That is the read half of bd-0fd0; the
+//! typed shape on `RenderContext` remains the only path *into*
+//! `ListingRenderTransform`, so a Lua mutation of the metadata does
+//! not yet change what is rendered (bd-0fd0 proper).
 
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::pandoc::Pandoc;
@@ -446,6 +446,16 @@ impl AstTransform for ListingGenerateTransform {
             resolved.push(ResolvedListing { listing, items });
         }
 
+        // bd-2oqen84t (M1): publish the resolved set at
+        // `meta.listings.<id>` so Lua consumers — user filters at
+        // `user-filters-pre`, lmd cells — can read the items. The
+        // typed field below stays the render transform's input.
+        crate::project::listing::metadata::publish_listings(
+            &mut ast.meta,
+            &resolved,
+            &host_dir_str,
+        );
+
         ctx.resolved_listings = resolved;
         ctx.diagnostics = diags;
         Ok(())
@@ -795,6 +805,83 @@ mod tests {
             "vfs_root mode must not register copy intents; got {:?}",
             copies
         );
+    }
+
+    // bd-2oqen84t (M1): the resolved set is also published at
+    // `meta.listings.<id>` in the binding's vocabulary, so Lua
+    // consumers can read it. Items keep their resolved order and
+    // `path` is host-directory-relative, as the binding computes it.
+    #[tokio::test]
+    async fn resolved_listings_are_published_to_meta_listings() {
+        let mut ast = Pandoc {
+            meta: map(vec![(
+                "listing",
+                map(vec![
+                    ("id", s("posts")),
+                    ("contents", s("*.qmd")),
+                    ("sort", s("date desc")),
+                ]),
+            )]),
+            blocks: vec![],
+        };
+        let profiles = vec![
+            make_profile_with_date("posts/a.qmd", "posts/a.html", "A", "2026-01-01"),
+            make_profile_with_date("posts/b.qmd", "posts/b.html", "B", "2026-03-01"),
+        ];
+        let (project, index) = make_project("posts/index.qmd", profiles);
+        let doc = DocumentInfo::from_path("/project/posts/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ListingGenerateTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.resolved_listings.len(), 1);
+        let items = ast
+            .meta
+            .get_path(&["listings", "posts", "items"])
+            .and_then(|v| v.as_array())
+            .expect("meta.listings.posts.items");
+        let titles: Vec<String> = items
+            .iter()
+            .map(|it| it.get("title").unwrap().as_plain_text().unwrap())
+            .collect();
+        assert_eq!(titles, vec!["B", "A"], "resolved (sorted) order");
+        assert_eq!(items[1].get("path").unwrap().as_str(), Some("a.qmd"));
+        assert_eq!(
+            items[1].get("date-iso").unwrap().as_str(),
+            Some("2026-01-01")
+        );
+        assert_eq!(
+            ast.meta
+                .get_path(&["listings", "posts", "type"])
+                .and_then(|v| v.as_str()),
+            Some("default")
+        );
+    }
+
+    // bd-2oqen84t (M1): nothing is published when the page declares no
+    // listing, so `meta.listings` is absent rather than an empty map.
+    #[tokio::test]
+    async fn no_listing_key_publishes_nothing() {
+        let mut ast = Pandoc {
+            meta: ConfigValue::default(),
+            blocks: vec![],
+        };
+        let (project, index) = make_project("index.qmd", vec![]);
+        let doc = DocumentInfo::from_path("/project/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ListingGenerateTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        assert!(ast.meta.get("listings").is_none());
     }
 
     // 28. generate_skips_when_no_listing_key
