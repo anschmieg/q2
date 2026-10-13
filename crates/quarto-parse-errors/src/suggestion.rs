@@ -21,6 +21,13 @@
 pub(crate) enum Suggestion {
     /// Add this text as a hint.
     Hint(String),
+    /// Add this text as a hint, and report the error over the source bytes
+    /// `start..end` instead of the single token the parser failed at.
+    HintAt {
+        hint: String,
+        start: usize,
+        end: usize,
+    },
     /// Nothing useful to add; report the entry's fixed text alone.
     Nothing,
     /// The source is not the mistake this entry describes, even though it
@@ -133,6 +140,9 @@ fn in_accepted_order<'a>(tokens: &[(Kind, &'a str)], language: Option<&'a str>) 
 /// folded in: as the first class for a code block, or as the leading word of
 /// an executable cell `{python ...}`.
 ///
+/// The error is reported over the braced list, the text the parser did not
+/// expect, rather than the one character where it gave up.
+///
 /// Only a braced list after the word gets a hint. Anything else after the
 /// word (`python .cls`, `python extra`) is not this mistake and is
 /// [`Suggestion::Reject`]ed, as is a list with two identifiers (which
@@ -170,7 +180,9 @@ fn language_with_attributes(input: &[u8], error_offset: usize) -> Suggestion {
         return Suggestion::Reject;
     }
 
-    let after = after.trim_start();
+    let trimmed = after.trim_start();
+    let list_start = error_offset + (after.len() - trimmed.len());
+    let after = trimmed;
     let Some(close) = closing_brace(after.as_bytes()).filter(|_| after.starts_with('{')) else {
         return Suggestion::Reject;
     };
@@ -187,9 +199,13 @@ fn language_with_attributes(input: &[u8], error_offset: usize) -> Suggestion {
         .chain(in_accepted_order(&tokens, None))
         .collect::<Vec<_>>()
         .join(" ");
-    Suggestion::Hint(format!(
-        "Put the language inside the braces: `{{{code_block}}}` for a code block, or `{{{cell}}}` for an executable cell."
-    ))
+    Suggestion::HintAt {
+        hint: format!(
+            "Put the language inside the braces: `{{{code_block}}}` for a code block, or `{{{cell}}}` for an executable cell."
+        ),
+        start: list_start,
+        end: list_start + close + 1,
+    }
 }
 
 /// Byte range `[open, close)` of the innermost `{...}` on the error's line
@@ -369,11 +385,26 @@ mod tests {
         language_with_attributes(line.as_bytes(), offset)
     }
 
+    fn hint_and_span(s: Suggestion) -> (String, (usize, usize)) {
+        match s {
+            Suggestion::HintAt { hint, start, end } => (hint, (start, end)),
+            other => panic!("expected a ranged hint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn language_hint_spans_the_braced_list_not_the_space() {
+        let line = "```python {.marimo} trailing";
+        let (_, (start, end)) = hint_and_span(language_hint(line));
+        assert_eq!(&line[start..end], "{.marimo}");
+        let line = "```python{.marimo}";
+        let (_, (start, end)) = hint_and_span(language_hint(line));
+        assert_eq!(&line[start..end], "{.marimo}");
+    }
+
     #[test]
     fn language_goes_first_among_classes_for_a_code_block() {
-        let Suggestion::Hint(h) = language_hint("```python {.cls #id key=val}") else {
-            panic!("expected a hint");
-        };
+        let (h, _) = hint_and_span(language_hint("```python {.cls #id key=val}"));
         assert!(
             h.contains("`{#id .python .cls key=val}` for a code block"),
             "{h}"
@@ -386,9 +417,7 @@ mod tests {
 
     #[test]
     fn language_hint_without_a_space_before_the_brace() {
-        let Suggestion::Hint(h) = language_hint("```python{.marimo}") else {
-            panic!("expected a hint");
-        };
+        let (h, _) = hint_and_span(language_hint("```python{.marimo}"));
         assert!(
             h.contains("`{.python .marimo}`") && h.contains("`{python .marimo}`"),
             "{h}"
@@ -397,14 +426,15 @@ mod tests {
 
     #[test]
     fn language_hint_with_indented_fence_and_tildes() {
-        assert!(matches!(language_hint("  ~~~r {.x}"), Suggestion::Hint(_)));
+        assert!(matches!(
+            language_hint("  ~~~r {.x}"),
+            Suggestion::HintAt { .. }
+        ));
     }
 
     #[test]
     fn language_hint_keeps_quoted_values() {
-        let Suggestion::Hint(h) = language_hint(r#"```python {title="a b" .c}"#) else {
-            panic!("expected a hint");
-        };
+        let (h, _) = hint_and_span(language_hint(r#"```python {title="a b" .c}"#));
         assert!(h.contains(r#"`{.python .c title="a b"}`"#), "{h}");
     }
 
