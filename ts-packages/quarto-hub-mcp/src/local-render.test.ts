@@ -8,9 +8,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { describe, it, expect } from 'vitest';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { describe, it, expect, vi } from 'vitest';
 import type { FilePayload } from '@quarto/quarto-sync-client';
-import { renderDiagnostics } from './local-render.js';
+import { renderDiagnostics, stripAnsi } from './local-render.js';
+import { realWasmHostAvailable } from './test-wasm-host.js';
 
 const BROKEN_YAML = '---\ntitle: "broken\n---\n\n# Hello\n';
 const BROKEN_STRONG = '---\ntitle: ok\n---\n\nHello **unclosed strong\n';
@@ -30,7 +35,7 @@ function project(files: Record<string, string | Uint8Array>): Map<string, FilePa
   return m;
 }
 
-describe('renderDiagnostics — real WASM', () => {
+describe.skipIf(!realWasmHostAvailable())('renderDiagnostics — real WASM', () => {
   it('reports a structured error with line/column for an unclosed strong emphasis', async () => {
     const result = await renderDiagnostics(
       project({ '_quarto.yml': QUARTO_YML, 'index.qmd': BROKEN_STRONG }),
@@ -118,4 +123,53 @@ describe('renderDiagnostics — real WASM', () => {
     expect(ra.errors.length).toBeGreaterThan(0);
     expect(rb.errors).toEqual([]);
   }, 60000);
+});
+
+describe('stripAnsi', () => {
+  it('removes escape sequences including the ESC byte', () => {
+    expect(stripAnsi('\x1b[31mError\x1b[0m plain')).toBe('Error plain');
+    expect(stripAnsi('\x1b[1;31mBold\x1b[m')).toBe('Bold');
+  });
+
+  it('leaves bracketed text that is not an escape sequence alone', () => {
+    expect(stripAnsi('no escapes [0m here')).toBe('no escapes [0m here');
+  });
+});
+
+describe('loadHost init failure', () => {
+  it('retries the host init instead of caching the failure forever', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'flaky-host-'));
+    const hostPath = path.join(dir, 'flaky-host.mjs');
+    await writeFile(
+      hostPath,
+      `let calls = 0;
+export async function ensureInit() {
+  calls++;
+  if (calls === 1) throw new Error('init boom');
+}
+export function vfs_clear() { return ''; }
+export function vfs_add_file() { return ''; }
+export function vfs_add_binary_file() { return ''; }
+export async function render_page_in_project() {
+  return JSON.stringify({ success: true, diagnostics: [], warnings: [] });
+}
+`,
+    );
+    const prev = process.env['QUARTO_HUB_MCP_WASM_HOST'];
+    process.env['QUARTO_HUB_MCP_WASM_HOST'] = pathToFileURL(hostPath).href;
+    try {
+      vi.resetModules();
+      const mod = await import('./local-render.js');
+      const files = new Map<string, FilePayload>([
+        ['a.qmd', { type: 'text', text: 'x' }],
+      ]);
+      await expect(mod.renderDiagnostics(files, 'a.qmd')).rejects.toThrow('init boom');
+      const ok = await mod.renderDiagnostics(files, 'a.qmd');
+      expect(ok.errors).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env['QUARTO_HUB_MCP_WASM_HOST'];
+      else process.env['QUARTO_HUB_MCP_WASM_HOST'] = prev;
+      vi.resetModules();
+    }
+  });
 });

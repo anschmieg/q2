@@ -69,14 +69,30 @@ interface WasmRenderResponse {
 let hostPromise: Promise<WasmHost> | null = null;
 
 function loadHost(): Promise<WasmHost> {
-  hostPromise ??= (async () => {
-    const spec =
-      process.env['QUARTO_HUB_MCP_WASM_HOST'] ?? new URL('./wasm-host.mjs', import.meta.url).href;
-    const host = (await import(spec)) as WasmHost;
-    await host.ensureInit();
-    return host;
-  })();
+  if (!hostPromise) {
+    const p = (async () => {
+      const spec =
+        process.env['QUARTO_HUB_MCP_WASM_HOST'] ??
+        new URL('./wasm-host.mjs', import.meta.url).href;
+      const host = (await import(spec)) as WasmHost;
+      await host.ensureInit();
+      return host;
+    })();
+    hostPromise = p;
+    // A failed init (stub host, OOM, ...) must not wedge the server for
+    // the rest of the process: clear the cache so the next render's
+    // loadHost() tries again.
+    p.catch(() => {
+      if (hostPromise === p) hostPromise = null;
+    });
+  }
   return hostPromise;
+}
+
+/** Remove ANSI SGR escape sequences (ESC, [, params, m) from renderer output. */
+export function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
 /** Strip the `/project/` VFS prefix (and any leading slash) from a WASM-reported path. */
@@ -145,7 +161,14 @@ export function renderDiagnostics(
         errors:
           failure.diagnostics.length > 0
             ? failure.diagnostics.map(clean)
-            : [{ kind: 'error', title: failure.error, hints: [], details: [] }],
+            : [
+                {
+                  kind: 'error',
+                  title: stripAnsi(failure.error).slice(0, 300),
+                  hints: [],
+                  details: [],
+                },
+              ],
       });
     }
 
@@ -158,8 +181,7 @@ export function renderDiagnostics(
       if (named === path) {
         errors.push({
           kind: 'error',
-          // eslint-disable-next-line no-control-regex
-          title: response.error.replace(/\[[0-9;]*m/g, '').slice(0, 300),
+          title: stripAnsi(response.error).slice(0, 300),
           hints: [],
           details: [],
         });

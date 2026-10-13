@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpTestClient } from './mcp-test-client.js';
 import { startTestHub, type TestHub } from './test-hub.js';
+import { wasmPkgAvailable } from './test-wasm-host.js';
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,6 +27,10 @@ let bundleEntry: string;
 let hub: TestHub;
 
 beforeAll(async () => {
+  // The bundle build refuses to run without the Rust WASM artifacts
+  // (a stub must never ship), so this whole suite is a no-op in the
+  // no-Rust/no-WASM CI leg.
+  if (!wasmPkgAvailable()) return;
   execFileSync('node', [path.join(pkgRoot, 'scripts/bundle.mjs')], {
     stdio: 'pipe',
   });
@@ -44,7 +49,7 @@ afterAll(async () => {
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('bundle smoke', () => {
+describe.skipIf(!wasmPkgAvailable())('bundle smoke', () => {
   it('ships the expected artifacts', () => {
     const bundleDir = path.join(tmpDir, 'bundle');
     expect(fs.existsSync(path.join(bundleDir, 'index.mjs'))).toBe(true);

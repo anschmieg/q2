@@ -21,6 +21,7 @@ const renderDiagnostics = vi.hoisted(() => vi.fn());
 vi.mock('./local-render.js', () => ({ renderDiagnostics }));
 
 import { registerTools } from './tools.js';
+import { RENDER_CHECK_TIMEOUT_MS } from './timeout.js';
 import type { ConnectionManager } from './connection-manager.js';
 
 const ERROR_ITEM = {
@@ -198,5 +199,26 @@ describe('write tools render-check the new .qmd content', () => {
     expect(out).toContain('Updated a.qmd');
     expect(out).toMatch(/render check unavailable/i);
     expect(out).toContain('get_errors');
+  });
+
+  it('a hung render check degrades after the timeout instead of hanging the write', async () => {
+    vi.useFakeTimers();
+    try {
+      renderDiagnostics.mockReturnValue(new Promise(() => {}));
+      const h = harness({ 'a.qmd': { type: 'text', text: 'x\n' } });
+
+      const p = h.call('write_file', { project: 'idx', path: 'a.qmd', content: 'y\n' });
+      await vi.advanceTimersByTimeAsync(RENDER_CHECK_TIMEOUT_MS + 1000);
+      const res = await p;
+
+      // The write itself succeeded; the check degraded, it did not hang.
+      expect(res.isError).not.toBe(true);
+      const out = textOf(res);
+      expect(out).toContain('Updated a.qmd');
+      expect(out).toMatch(/render check unavailable/i);
+      expect(out).toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

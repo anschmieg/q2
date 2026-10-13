@@ -139,6 +139,13 @@ describe('MCP protocol (read-only mode)', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain('Unknown tool');
   });
+
+  it('declares no prompts capability (fix_errors needs the write tools)', async () => {
+    // The fix_errors prompt instructs the agent to call patch_file,
+    // which does not exist in read-only mode — so the prompt must not
+    // be offered either.
+    await expect(client.listPrompts()).rejects.toThrow();
+  });
 });
 
 // ============================================================================

@@ -165,3 +165,15 @@ branch commit.
 tested) is preserved as a branch. If a human-facing "see collaborators'
 preview state" feature is ever wanted, that work is a starting point — but
 it is intentionally NOT part of this PR.
+
+## Corrections from the PR #452 review (2026-10-12)
+
+- The spike and Phase 3 above say "`sass` external (never needed for
+  diagnostics)". That did not survive contact with the real render: the
+  html pipeline compiles themes even for a diagnostics-only run, so the
+  shipped host bundles dart-sass in. `wasm-host-entry.mjs`'s header
+  comment repeated the stale claim; corrected in the fixes branch.
+- Review follow-ups landed in `pr-452-fixes` (plan
+  `claude-notes/plans/2026-10-12-pr-452-review-fixes.md`): stub host for
+  no-WASM build legs, render timeouts, init retry, read-only prompt
+  gating.

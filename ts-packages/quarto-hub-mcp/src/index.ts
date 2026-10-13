@@ -269,7 +269,9 @@ async function main(): Promise<void> {
     {
       capabilities: {
         tools: {},
-        prompts: {},
+        // fix_errors drives the write tools, so read-only mode neither
+        // registers the prompt nor advertises the capability.
+        ...(readOnly ? {} : { prompts: {} }),
       },
       instructions:
         'Tools operate on a project identified by its automerge index document ID. ' +
@@ -300,7 +302,9 @@ async function main(): Promise<void> {
       : undefined;
 
   registerTools(server, manager, readOnly, authToolsState);
-  registerPrompts(server);
+  if (!readOnly) {
+    registerPrompts(server);
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

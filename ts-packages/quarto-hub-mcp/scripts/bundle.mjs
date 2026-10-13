@@ -128,8 +128,10 @@ await esbuild.build({
 
 // The WASM render host (`get_errors` local validation): index.mjs
 // dynamic-imports ./wasm-host.mjs next to itself at first use, which
-// loads ./wasm_quarto_hub_client_bg.wasm next to *itself*.
-await buildWasmHost(outDir);
+// loads ./wasm_quarto_hub_client_bg.wasm next to *itself*. No stub
+// allowed here — the bundle ships to users, so missing Rust WASM
+// artifacts must fail the build.
+await buildWasmHost({ outDir });
 
 // --- ship the keyring addon as a mini node_modules ---------------------
 // The staged platform packages must match the **release target's**

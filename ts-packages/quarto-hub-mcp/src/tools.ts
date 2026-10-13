@@ -16,7 +16,12 @@ import {
 import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { fileUnavailableMessage, type FilePayload, type SyncClient } from '@quarto/quarto-sync-client';
 import { ConnectionManager } from './connection-manager.js';
-import { renderDiagnostics, type RenderedDiagnostic } from './local-render.js';
+import {
+  renderDiagnostics,
+  type LocalRenderResult,
+  type RenderedDiagnostic,
+} from './local-render.js';
+import { GET_ERRORS_TIMEOUT_MS, RENDER_CHECK_TIMEOUT_MS, withTimeout } from './timeout.js';
 import {
   AUTH_TOOL_DEFINITIONS,
   AuthToolsState,
@@ -133,7 +138,9 @@ function getReadTools(): Tool[] {
         'the tool read (`checkedContentSha256` names it), plus engine execution errors ' +
         'recorded by executors. After you edit a file, just call get_errors again — it ' +
         'validates the new content immediately; there is nothing to wait for. Pass ' +
-        '`path` to check one document; omit it to check every .qmd in the project.',
+        '`path` to check one document; omit it to check every .qmd in the project. ' +
+        'A full-project check renders each document in turn, so on a large project it ' +
+        'can exceed your client timeout — prefer checking one path at a time there.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -507,7 +514,20 @@ async function handleGetErrors(args: ToolArgs, manager: ConnectionManager): Prom
   };
 
   for (const path of targets) {
-    const result = await renderDiagnostics(state.files, path);
+    // A render that cannot run (host failed to load, render hung past
+    // the timeout) fails the tool with a clean error — unlike the write
+    // tools, which degrade instead because their writes already landed.
+    let result: LocalRenderResult;
+    try {
+      result = await withTimeout(
+        renderDiagnostics(state.files, path),
+        GET_ERRORS_TIMEOUT_MS,
+        `render of ${path}`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return error(`Error: could not render ${path}: ${msg}`);
+    }
     const entry = entryFor(path);
     entry.checkedContentSha256 = result.checkedContentSha256;
     entry.errors = result.errors;
@@ -559,7 +579,11 @@ async function renderCheckSuffix(
   try {
     const staged = new Map(files);
     staged.set(path, { type: 'text', text: newText });
-    const result = await renderDiagnostics(staged, path);
+    const result = await withTimeout(
+      renderDiagnostics(staged, path),
+      RENDER_CHECK_TIMEOUT_MS,
+      `render of ${path}`,
+    );
     if (result.errors.length > 0) {
       const n = result.errors.length;
       return (

@@ -14,11 +14,16 @@ import type { DocumentId } from '@automerge/automerge-repo';
 
 import { McpTestClient } from './mcp-test-client.js';
 import { startTestHub, type TestHub } from './test-hub.js';
+import { realWasmHostAvailable } from './test-wasm-host.js';
 
 const BROKEN = '---\ntitle: ok\n---\n\nHello **unclosed strong\n';
 const FIXED = '---\ntitle: ok\n---\n\nHello **closed strong**\n';
 
-describe('get_errors at the MCP tool surface (test hub, local WASM)', () => {
+// Needs the real prebundled WASM host in dist/ — skipped in the
+// no-Rust/no-WASM CI leg, where the build writes a stub instead.
+describe.skipIf(!realWasmHostAvailable())(
+  'get_errors at the MCP tool surface (test hub, local WASM)',
+  () => {
   let hub: TestHub;
   let client: McpTestClient;
   let indexDocId: string;
