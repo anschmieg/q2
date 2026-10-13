@@ -59,6 +59,9 @@ mod link_resolution;
 // lmd ("lua+md") exploration spike: rewrites `{lmd}` cells into displayed,
 // desugared Lua. See claude-notes/plans/2026-10-12-lmd-exploration.md.
 pub(crate) mod listing_item_info;
+// Listing resolution ahead of `lmd-execute` and the user pre-filters, so
+// `meta.listings.<id>` is populated for Lua consumers (bd-2oqen84t).
+mod listing_resolve;
 mod lmd_desugar;
 mod lmd_execute;
 mod source_conversion;
@@ -138,6 +141,7 @@ pub use inline_table_css::{InlineTableCssStage, inline_table_css};
 pub use language_resolve::LanguageResolveStage;
 pub use link_resolution::LinkResolutionStage;
 pub use listing_item_info::ListingItemInfoStage;
+pub use listing_resolve::ListingResolveStage;
 pub use lmd_desugar::LmdDesugarStage;
 pub use lmd_execute::LmdExecuteStage;
 pub use math_js::{DEFAULT_KATEX_URL_BASE, DEFAULT_MATHJAX_URL, MathEngine, MathJsStage};

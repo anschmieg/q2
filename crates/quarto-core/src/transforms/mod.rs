@@ -81,7 +81,7 @@ mod footnotes_resolve;
 mod format_css;
 mod heading_id;
 mod link_rewrite;
-mod listing_generate;
+pub(crate) mod listing_generate;
 mod listing_render;
 pub mod llms;
 mod mermaid;

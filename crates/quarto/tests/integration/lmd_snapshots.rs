@@ -101,6 +101,84 @@ fn normalize(stderr: &str, dir: &Path, name: &str) -> String {
         .join("\n")
 }
 
+/// Copy a fixture directory into `dst`, recursively.
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// The `<main>` element of a rendered HTML page: the body the document
+/// produced, without the head, navigation chrome and footer that every
+/// website page shares.
+fn main_element(html: &str) -> &str {
+    let start = html.find("<main").expect("<main");
+    let end = html.rfind("</main>").expect("</main>") + "</main>".len();
+    &html[start..end]
+}
+
+/// Render the `lmd-blog` project fixture (a website whose index page
+/// declares a `type: metadata` listing and builds the markup in lmd
+/// cells; bd-2oqen84t) and return the host page's `<main>` plus the
+/// normalized stderr.
+fn render_blog() -> (String, String) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/fixtures/lmd-blog"),
+        &dir,
+    );
+    let output = Command::new(Q2_BIN)
+        .args(["render"])
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("q2 runs");
+    let stderr = normalize(
+        &strip_ansi(&String::from_utf8_lossy(&output.stderr)),
+        &dir,
+        "index",
+    );
+    let html = std::fs::read_to_string(dir.join("_site/posts/index.html")).unwrap_or_else(|e| {
+        panic!(
+            "no host page for lmd-blog: {e}\nexit: {:?}\nstdout:\n{}\nstderr:\n{stderr}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (main_element(&html).to_string(), stderr)
+}
+
+/// bd-2oqen84t: the motivating example end to end. A `type: metadata`
+/// listing publishes its items at `meta.listings.posts`; one cell
+/// builds cards (title inlines in a link whose target the rewriter
+/// turned into the output URL, display date, author, category count,
+/// description and its source), another groups by year over
+/// `date-iso`, and an inline cell counts the items. The listing itself
+/// renders no markup: no `quarto-listing` container, no List.js.
+#[test]
+fn lmd_blog_project_renders_as_snapshotted() {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("snapshots/lmd");
+    settings.set_prepend_module_to_snapshot(false);
+    settings.bind(|| {
+        let (main, stderr) = render_blog();
+        assert!(
+            !main.contains("quarto-listing") && !main.contains("list.min.js"),
+            "a metadata listing renders nothing of its own:\n{main}"
+        );
+        insta::assert_snapshot!("blog.main.html", main);
+        insta::assert_snapshot!("blog.stderr", stderr);
+    });
+}
+
 #[test]
 fn lmd_fixtures_render_as_snapshotted() {
     let mut settings = insta::Settings::clone_current();
