@@ -191,7 +191,8 @@ export async function render_page_in_project() {
 }
 `,
     );
-    const calls = (): string[][] => (globalThis as Record<string, string[][]>).__vfsCalls;
+    const calls = (): string[][] =>
+      (globalThis as unknown as { __vfsCalls: string[][] }).__vfsCalls;
     const prev = process.env['QUARTO_HUB_MCP_WASM_HOST'];
     process.env['QUARTO_HUB_MCP_WASM_HOST'] = pathToFileURL(hostPath).href;
     try {
