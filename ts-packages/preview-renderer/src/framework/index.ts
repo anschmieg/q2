@@ -20,6 +20,8 @@ export { Ast } from './Ast';
 export { liItemAttrProps } from './listItemAttr';
 export { Node, renderChildren, renderNode, blockTypes } from './dispatch';
 export { dataLocProps } from './sourceLoc';
+export { enableStableNodeKeys, childKey, hasNodeKey } from './nodeKey';
+export { enableHostedNodes, hostedNodesEnabled, hostOf } from './hostedNodes';
 export * from './plainText';
 export * from './meta';
 export * from './customNode';

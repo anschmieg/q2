@@ -28,22 +28,27 @@ import type {
     QuotedInline,
 } from '@quarto/preview-renderer/framework';
 import { blockStyle, inlineStyle } from './styles';
+import { renderInlineChildren } from './textRun';
+
+// Inline containers fold consecutive Str/Space/SoftBreak children into one
+// text box with character-level change highlighting (see textRun.tsx).
+const inlines = (args: NodeArgs<any>) => renderInlineChildren(args, renderChildren);
 
 export const Para = (args: NodeArgs<ParaBlock>) => (
     <div style={blockStyle}>
-        <strong>Para:</strong> {renderChildren(args)}
+        <strong>Para:</strong> {inlines(args)}
     </div>
 );
 
 export const Plain = (args: NodeArgs<PlainBlock>) => (
     <div style={blockStyle}>
-        <strong>Plain:</strong> {renderChildren(args)}
+        <strong>Plain:</strong> {inlines(args)}
     </div>
 );
 
 export const Header = (args: NodeArgs<HeaderBlock>) => (
     <div style={blockStyle}>
-        <strong>Header(level={args.node.c[0]}):</strong> {renderChildren(args)}
+        <strong>Header(level={args.node.c[0]}):</strong> {inlines(args)}
     </div>
 );
 
@@ -147,13 +152,13 @@ export const LineBreak = (_args: NodeArgs<LineBreakInline>) => (
 
 export const Emph = (args: NodeArgs<EmphInline>) => (
     <span style={inlineStyle}>
-        <strong>Emph:</strong> {renderChildren(args)}
+        <strong>Emph:</strong> {inlines(args)}
     </span>
 );
 
 export const Strong = (args: NodeArgs<StrongInline>) => (
     <span style={inlineStyle}>
-        <strong>Strong:</strong> {renderChildren(args)}
+        <strong>Strong:</strong> {inlines(args)}
     </span>
 );
 
@@ -163,25 +168,25 @@ export const Code = (args: NodeArgs<CodeInline>) => (
 
 export const Link = (args: NodeArgs<LinkInline>) => (
     <span style={inlineStyle}>
-        <strong>Link({args.node.c[2][0]}):</strong> {renderChildren(args)}
+        <strong>Link({args.node.c[2][0]}):</strong> {inlines(args)}
     </span>
 );
 
 export const Image = (args: NodeArgs<ImageInline>) => (
     <span style={inlineStyle}>
-        <strong>Image({args.node.c[2][0]}):</strong> {renderChildren(args)}
+        <strong>Image({args.node.c[2][0]}):</strong> {inlines(args)}
     </span>
 );
 
 export const Span = (args: NodeArgs<SpanInline>) => (
     <span style={inlineStyle}>
-        <strong>Span:</strong> {renderChildren(args)}
+        <strong>Span:</strong> {inlines(args)}
     </span>
 );
 
 export const Quoted = (args: NodeArgs<QuotedInline>) => (
     <span style={inlineStyle}>
-        <strong>Quoted({args.node.c[0].t}):</strong> {renderChildren(args)}
+        <strong>Quoted({args.node.c[0].t}):</strong> {inlines(args)}
     </span>
 );
 

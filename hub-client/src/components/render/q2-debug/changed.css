@@ -1,0 +1,81 @@
+/*
+ * Highlight what changed in the q2-debug preview.
+ *
+ * entry.tsx derives the highlights from the edit script the reconciler
+ * applied (not from DOM mutations) and sets one of these classes on the
+ * node's own box:
+ *   .q2-flash-inserted  — new node (solid green)
+ *   .q2-flash-changed   — attributes / properties / text changed, or the
+ *                         node was split or merged (solid yellow)
+ *   .q2-flash-removed   — a child was unwrapped out of this container
+ *                         (solid red outline)
+ *   .q2-flash-deleted   — ghost of a deleted node, held in place for the
+ *                         same second (coloured from entry.tsx), then removed
+ *
+ * Each highlight is a constant colour for HIGHLIGHT_MS (one second), with
+ * no interpolation: the "animation" is a single held keyframe whose end
+ * fires `animationend`, which removes the class and restores the box's
+ * own background.
+ */
+
+@keyframes q2-hold-inserted {
+    from, to { background-color: #8ee6a0; box-shadow: 0 0 0 2px #2fb344; }
+}
+
+@keyframes q2-hold-changed {
+    from, to { background-color: #ffe08a; box-shadow: 0 0 0 2px #e0a800; }
+}
+
+@keyframes q2-hold-removed {
+    from, to { box-shadow: 0 0 0 3px #e03131; }
+}
+
+/* A box can carry more than one class; later rules win: inserted > changed > removed. */
+.pandoc-content-debug .q2-flash-removed { animation: q2-hold-removed 1s step-end; }
+.pandoc-content-debug .q2-flash-changed { animation: q2-hold-changed 1s step-end; }
+.pandoc-content-debug .q2-flash-inserted { animation: q2-hold-inserted 1s step-end; }
+
+/*
+ * Character-level changes inside a text run (textRun.tsx). Coloured from
+ * textRun.tsx with the Web Animations API (a CSS animation would restart
+ * whenever the run's paragraph is moved in the DOM); these rules only give
+ * the spans their resting look.
+ */
+
+.pandoc-content-debug .q2-del {
+    background-color: #f6dada;
+    text-decoration: line-through;
+    color: #8b1a1a;
+}
+
+/*
+ * Opaque backgrounds for everything the debug components emit *without*
+ * an inline background (list items, labels, caption lines, attribution
+ * wraps, user-component markup), so a flashing ancestor never shows
+ * through unchanged content. Styled blocks/inlines keep their inline
+ * backgrounds; the colours match them (block #f5f5f5, inline #e8e8e8).
+ */
+
+.pandoc-content-debug div,
+.pandoc-content-debug li,
+.pandoc-content-debug div>* {
+    background-color: #f5f5f5;
+}
+
+.pandoc-content-debug span,
+.pandoc-content-debug span * {
+    background-color: #e8e8e8;
+}
+
+/*
+ * Character-level changes inside a text run (textRun.tsx). The colour holds are
+ * driven from textRun.tsx with the Web Animations API (a CSS animation
+ * would restart whenever the run's paragraph is moved in the DOM); these
+ * rules only give the spans their resting look.
+ */
+
+.pandoc-content-debug .q2-del {
+    background-color: #f6dada;
+    text-decoration: line-through;
+    color: #8b1a1a;
+}
