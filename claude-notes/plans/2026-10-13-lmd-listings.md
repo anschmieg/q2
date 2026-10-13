@@ -9,7 +9,7 @@ braid:
 
 **Strand:** bd-2oqen84t (exploration; discovered from bd-lmd-exploration-jqv2nbl4). **Related:** bd-0fd0 (Lua filter slot between generate and render transforms), bd-61cd (listings epic), bd-0t4e07jk (listing items cannot read bare front-matter keys).
 
-**Branch:** `braid/bd-2oqen84t-lmd-driven-listings-declare` (topic branch in the main checkout, based on `main` @ `b976329ed`; no worktree).
+**Branch:** `braid/bd-2oqen84t-lmd-driven-listings-declare` (topic branch in the main checkout, based on `main` @ `b976329ed`; no worktree). **PR:** [#826](https://github.com/quarto-dev/q2/pull/826).
 
 **What landed (2026-10-13), one commit per spike.** Every resolved listing is published at `meta.listings.<id>` in the template binding\'s vocabulary and native `ConfigValue` kinds (`project/listing/metadata.rs`); a `listing-resolve` stage runs before `lmd-execute` and `user-filters-pre`, sharing `resolve_listings` with the generate transform; `type: metadata` resolves and renders nothing; the `lmd-blog` fixture pins the motivating example through the real binary; the listings guide documents the metadata contract for Lua filters. `cargo xtask verify` (full, WASM included) green at the last commit. Details per spike under § Spikes; the two follow-up strands are bd-0o82ly9c (string-typed grammar positions) and bd-u1rxccq7 (date helper).
 
