@@ -32,6 +32,12 @@
 //!   usable as link targets with no `stringify`.
 //! - Counts (`order`, `word-count`, `reading-time-minutes`) are
 //!   `Scalar` integers, so Lua gets numbers.
+//! - Lists (`authors`, `categories`) are always present, empty when the
+//!   item has none, so `#it.categories` and `ipairs` never need a
+//!   guard. The binding omits empty lists instead (so `$if$` works);
+//!   this is the one presence rule the two contracts do not share.
+//!   Optional scalars and prose (`subtitle`, `date`, `image`, `path`,
+//!   …) are absent keys when the item has no value, as in the binding.
 //! - `date` and `date-modified` are the **display** strings the
 //!   binding shows (listing `date-format`, then document
 //!   `date-format`, then `medium`; decision 2 of the plan); `date-iso`
@@ -208,9 +214,12 @@ pub fn item_to_config_value(
     if let Some(s) = item.author.as_deref() {
         m.string("author", s);
     }
-    if !item.authors.is_empty() {
-        m.strings("authors", &item.authors);
-    }
+    // Lists are always present, empty when the item has none: Lua code
+    // iterates them (`#it.categories`, `ipairs`), and a guard on every
+    // use is the kind of friction this contract exists to remove. The
+    // binding omits them instead so `$if(it.categories)$` works; that
+    // is the one place the two contracts differ in presence.
+    m.strings("authors", &item.authors);
     if let Some(s) = item.date.as_deref() {
         m.string("date", &display_date(s, date_style));
         m.string("date-iso", s);
@@ -219,9 +228,7 @@ pub fn item_to_config_value(
         m.string("date-modified", &display_date(s, date_style));
         m.string("date-modified-iso", s);
     }
-    if !item.categories.is_empty() {
-        m.strings("categories", &item.categories);
-    }
+    m.strings("categories", &item.categories);
 
     if let Some(s) = item.image.as_deref() {
         m.string("image", s);
@@ -567,10 +574,8 @@ mod tests {
             "subtitle",
             "description",
             "author",
-            "authors",
             "date",
             "date-iso",
-            "categories",
             "image",
             "reading-time",
             "reading-time-minutes",
@@ -586,6 +591,14 @@ mod tests {
         // Always present, so a cell can branch on them.
         for present in ["title", "description-source", "image-source", "origin"] {
             assert!(it.get(present).is_some(), "{present} should be present");
+        }
+        // Lists are present and empty, never absent.
+        for list in ["authors", "categories"] {
+            assert_eq!(
+                it.get(list).and_then(|v| v.as_array()).map(|a| a.len()),
+                Some(0),
+                "{list} should be an empty list"
+            );
         }
     }
 
