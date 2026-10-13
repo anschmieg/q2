@@ -16,9 +16,6 @@ concurrency:
 
 env:
   PANDOC_VERSION: "3.11"
-  # Deno version provisioned for the QUARTO_CI assertion test in ts_process.rs.
-  # Must provide `Deno.Command`/`Deno.stdin.isTerminal()` (available since Deno 1.40+).
-  DENO_VERSION: "2.9.0"
   # Typst — the Pandoc-hybrid typst leg's `L`-tier tests (typst_compile.rs)
   # require a real `typst` binary on PATH (TYPST_VERSION_FLOOR is 0.8+).
   TYPST_VERSION: "0.15.1"
@@ -140,20 +137,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install minisign
 
-      # Deno — required for ts_process.rs engine tests and the deno_available_when_quarto_ci
-      # assertion.  Plain install (curl + $GITHUB_PATH on Linux; brew on macOS) avoids
-      # /opt/hostedtoolcache/ so the "Free disk space" invariant below is not broken.
-      - name: Set up Deno (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          curl -fsSL https://deno.land/install.sh | sh -s -- v${DENO_VERSION}
-          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
-
-      - name: Set up Deno (macOS)
-        if: runner.os == 'macOS'
-        run: brew install deno
-
       # Free disk space on Linux runners (14 GB SSD is tight for Rust monorepo).
       # `remove_tool_cache: true` is safe — no step in this job uses /opt/hostedtoolcache/
       # (setup-node runs after this step). See claude-notes/2026-04-28-ci-disk-space-and-profile-ci.md.
@@ -229,8 +212,9 @@ jobs:
         run: cargo nextest run --tests --cargo-profile ci
         env:
           RUSTFLAGS: "-D warnings"
-          # Turns the silent Deno-skip in deno_available_when_quarto_ci into a hard
-          # failure if the "Set up Deno" step above regresses.
+          # Turns the silent Node-skip in node_available_when_quarto_ci (and the
+          # node_available_for_tests() gates) into a hard failure if the
+          # "Set up Node" step above regresses.
           QUARTO_CI: "1"
 
       # Cross-uid UDS accept-check test (bd-m49e3s5o): the peer-uid

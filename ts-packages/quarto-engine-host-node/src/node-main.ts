@@ -1,5 +1,5 @@
 /**
- * @quarto/engine-host-deno — Node entry point (control mode only).
+ * @quarto/engine-host-node — Node entry point (control mode only).
  *
  * q2 spawns `node <bundle> --control <host:port>` and passes a one-time token
  * on stdin; the host dials back over loopback TCP and speaks the framed

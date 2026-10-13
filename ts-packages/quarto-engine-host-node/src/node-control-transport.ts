@@ -1,7 +1,7 @@
 /**
- * @quarto/engine-host-deno — control-channel dial-back over `node:net`.
+ * @quarto/engine-host-node — control-channel dial-back over `node:net`.
  *
- * Node counterpart of `control-transport.ts`. `connectControl` reads the
+ * `connectControl` reads the
  * one-time token from the FIRST LINE of stdin, parses `--control
  * <host:port>` from argv, dials that loopback address, writes the token back
  * as the first bytes on the socket, and returns the `{ reader, writer }` pair

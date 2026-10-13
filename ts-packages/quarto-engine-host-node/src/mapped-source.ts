@@ -1,11 +1,11 @@
 /**
- * @quarto/engine-host-deno — MappedString bridge across the engine-host protocol boundary.
+ * @quarto/engine-host-node — MappedString bridge across the engine-host protocol boundary.
  *
- * Seam T2 (Rust→Deno): rehydrateMappedString — build a MappedString from a wire
+ * Seam T2 (Rust→host): rehydrateMappedString — build a MappedString from a wire
  *   TsSourceMapEntry[] so engines receive a single MappedString type regardless of
  *   how it was produced.
  *
- * Seam T4 (Deno→Rust): serializeMappedString — emit TsSourceMapEntry[] from a
+ * Seam T4 (host→Rust): serializeMappedString — emit TsSourceMapEntry[] from a
  *   MappedString by walking ms.segments() (one entry per segment). If ms.segments
  *   is undefined the MappedString is opaque (provenance not provided) and returns [].
  *
@@ -33,12 +33,12 @@
  *    TsSourceMapEntry. An undefined ms.segments means "opaque" (provenance not provided),
  *    which serializes as []. A source:null segment means "known synthetic" — distinct from
  *    opaque. rehydrateMappedString exposes a segments() derived from the wire entries so
- *    that a passthrough round-trip (Rust→Deno→Rust) is faithful.
+ *    that a passthrough round-trip (Rust→host→Rust) is faithful.
  *
  * 5. SourceReader interface.  A narrow two-method interface keeps tests light: a fake
- *    Record<path,string> + vi.fn() spy replaces the full denoHost.  host.ts (later task)
+ *    Record<path,string> + vi.fn() spy replaces the full nodeHost.  host.ts (later task)
  *    adapts via:
- *      { readTextFileSync: denoHost.fs.readTextFileSync, logInfo: denoHost.log.info }
+ *      { readTextFileSync: nodeHost.fs.readTextFileSync, logInfo: nodeHost.log.info }
  *
  * Pure TypeScript — no Deno.* APIs.  All I/O goes through the injected SourceReader.
  */
@@ -51,7 +51,7 @@ import type { TsSourceMapEntry } from "./types.js";
 
 /**
  * Narrow dependency interface for filesystem reads and diagnostic logging.
- * Keeps this module testable with a tiny in-memory fake; host.ts adapts denoHost.
+ * Keeps this module testable with a tiny in-memory fake; host.ts adapts nodeHost.
  */
 export interface SourceReader {
   /** Read a text file synchronously.  Throws (e.g. ENOENT) if the file cannot be read. */
@@ -253,7 +253,7 @@ function makeMapFn(
 // ==================== rehydrateMappedString (T2) ====================
 
 /**
- * Build a MappedString from a wire value + TsSourceMapEntry[] (Rust→Deno seam T2).
+ * Build a MappedString from a wire value + TsSourceMapEntry[] (Rust→host seam T2).
  *
  * The returned object satisfies the public MappedString interface; its .map
  * implementation owns the binary-search and nearest-entry-scan logic directly
@@ -264,7 +264,7 @@ function makeMapFn(
  * per file; that file is recorded as null = unmappable).
  *
  * segments(): derived 1:1 from the wire TsSourceMapEntry[] so that serializing the
- * returned object round-trips faithfully (Rust→Deno→Rust passthrough).
+ * returned object round-trips faithfully (Rust→host→Rust passthrough).
  */
 export function rehydrateMappedString(
   value: string,
@@ -314,7 +314,7 @@ export function rehydrateMappedString(
 // ==================== serializeMappedString (T4 harness entry point) ====================
 
 /**
- * Emit TsSourceMapEntry[] from a MappedString (Deno→Rust seam T4).
+ * Emit TsSourceMapEntry[] from a MappedString (host→Rust seam T4).
  *
  * Walks ms.segments() — one TsSourceMapEntry per segment (mapped to fresh objects).
  * If ms.segments is undefined the MappedString is opaque and returns [].

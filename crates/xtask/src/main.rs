@@ -19,7 +19,7 @@
 //! - `build-trace-viewer`: Build just the trace-viewer SPA
 //! - `build-hub-client-embed`: Build the hub-client editor bundle for `q2 preview --ui editor`
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
-//! - `build-engine-host-bundle`: Build the committed engine-host-deno.js bundle
+//! - `build-engine-host-bundle`: Build the committed engine-host-node.mjs bundle
 //! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
 //! - `pull-extension-subtree`: Sync vendored extension subtrees under `resources/extension-subtrees/`
@@ -414,12 +414,12 @@ enum Command {
     /// quarto-hub-mcp / quarto-sync-client / quarto-automerge-schema.
     BuildHubMcpBundle {},
 
-    /// Build the committed engine-host-deno.js bundle (Plan 1b).
+    /// Build the committed engine-host-node.mjs bundle (Plan 1b).
     ///
-    /// Produces `ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js`
-    /// (esbuild, ESM, Deno-ready) — the artifact `quarto-core` embeds via
+    /// Produces `ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs`
+    /// (esbuild, ESM, node24) — the artifact `quarto-core` embeds via
     /// `include_str!` in `engine/ts_process.rs`. A plain `cargo build`
-    /// does NOT refresh it; run this after changing `quarto-engine-host-deno`,
+    /// does NOT refresh it; run this after changing `quarto-engine-host-node`,
     /// `@quarto/api`, or `@quarto/types` sources.
     BuildEngineHostBundle {},
 
@@ -447,7 +447,7 @@ enum Command {
     /// 4. trace-viewer build (if present; Phase 4.3+)
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
-    /// 7. engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
+    /// 7. engine-host-node bundle (quarto-core embed artifact; Plan 1b)
     /// 8. esbuild binary for q2's embed (fetch-esbuild)
     /// 9. cargo build --workspace
     BuildAll {
@@ -475,7 +475,7 @@ enum Command {
         #[arg(long)]
         skip_hub_mcp_bundle: bool,
 
-        /// Skip the engine-host-deno bundle build.
+        /// Skip the engine-host-node bundle build.
         #[arg(long)]
         skip_engine_host_bundle: bool,
 

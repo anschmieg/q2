@@ -1,30 +1,28 @@
 /**
- * Bundle the @quarto/engine-host-deno entry points into single ESM files:
+ * Bundle the @quarto/engine-host-node entry point into a single ESM file:
  *
  *   dist/
  *     engine-host-node.mjs  — the Node harness (esbuild, ESM, node24)
- *     engine-host-deno.js   — the bundled harness (esbuild, ESM, Deno-ready)
  *     build-info.json       — git commit / dirty flag stamp (NOT in the bundle)
  *
- * The output `engine-host-deno.js` is committed to the repo and embedded
- * into the `quarto-core` Rust crate via `include_str!` in
+ * `engine-host-node.mjs` is committed to the repo and embedded into the
+ * `quarto-core` Rust crate via `include_str!` in
  * `crates/quarto-core/src/engine/ts_process.rs`. Rebuild with:
  *
  *   cargo xtask build-engine-host-bundle
  *
  * or equivalently:
  *
- *   npm run bundle -w @quarto/engine-host-deno
+ *   npm run bundle -w @quarto/engine-host-node
  *
  * Design notes:
  *
- * - `platform: 'neutral'` + `format: 'esm'`: Deno runs ES modules; do NOT
- *   use `platform: 'node'` or `iife` here.
+ * - `platform: 'node'`, `format: 'esm'`, `target: 'node24'`; `.mjs` so a
+ *   project-local `"type": "commonjs"` package.json cannot change how Node
+ *   parses the bundle. The banner restores `require` for bundled CommonJS
+ *   deps (esbuild's `__require` shim otherwise throws in ESM output).
  *
- * - `external: ['jsr:*', 'node:*']`: Deno resolves these at runtime.
- *   esbuild cannot resolve `jsr:` specifiers. `node:*` (used by
- *   engine-loader.ts via `node:url`) is supported natively by Deno 2.
- *   Both are kept external so Deno provides the real implementations.
+ * - `external: ['node:*']`: Node provides the built-ins at runtime.
  *
  * - `conditions: ['source', 'import']`: makes esbuild bundle `@quarto/*`
  *   workspace deps from their TypeScript sources (the `source` export
@@ -32,10 +30,10 @@
  *   the bundle always reflects the current source state.
  *
  * - Byte-stability: `builtAt` (the wall-clock timestamp) is written ONLY
- *   to `build-info.json`, NOT into `engine-host-deno.js`. This keeps the
+ *   to `build-info.json`, NOT into `engine-host-node.mjs`. This keeps the
  *   bundle bytes deterministic across rebuilds at the same git commit, so
- *   the CI freshness diff (task 7b) is a true "edited TS, forgot to
- *   rebuild" signal rather than a constant noise diff.
+ *   the CI freshness diff is a true "edited TS, forgot to rebuild" signal
+ *   rather than a constant noise diff.
  *
  * - esbuild is pinned to an exact version in package.json (no ^ or ~) to
  *   ensure the output bytes are reproducible across machines.
@@ -55,7 +53,7 @@ const outDir = join(pkgRoot, 'dist');
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-// --- Node bundle (the host q2 will spawn after the Deno-to-Node flip) -------
+// --- Node bundle (the host q2 spawns for TS engine extensions) ---------------
 //
 // `dist/engine-host-node.mjs` is built from `src/node-main.ts` for Node >= 24.
 // `.mjs` so a project-local `"type": "commonjs"` package.json cannot change
@@ -83,33 +81,9 @@ await esbuild.build({
   logLevel: 'info',
 });
 
-await esbuild.build({
-  entryPoints: [join(pkgRoot, 'src/main.ts')],
-  bundle: true,
-  // Deno target: neutral platform (no Node shims), ESM output.
-  platform: 'neutral',
-  format: 'esm',
-  outfile: join(outDir, 'engine-host-deno.js'),
-  // Bundle @quarto/* from TS source; leave jsr: and node: to Deno.
-  conditions: ['source', 'import'],
-  external: ['jsr:*', 'node:*'],
-  // With platform:'neutral', esbuild ignores the `main` field by default.
-  // Add it back so npm-only deps like `blueimp-md5` (which have no `module`
-  // field) resolve correctly. Prefer `module` (ESM) over `main` (CJS).
-  mainFields: ['module', 'main'],
-  // Minify for size (embedded in q2 binary via include_str!).
-  minify: true,
-  keepNames: true,
-  legalComments: 'eof',
-  banner: {
-    js: '// GENERATED — do not edit. Rebuild: cargo xtask build-engine-host-bundle',
-  },
-  logLevel: 'info',
-});
-
 // --- build stamp -------------------------------------------------------
 // gitCommit + gitDirty go into build-info.json only — NOT into the
-// bundle bytes — so engine-host-deno.js stays byte-stable across
+// bundle bytes — so engine-host-node.mjs stays byte-stable across
 // rebuilds at the same git commit (builtAt is also excluded for the
 // same reason; put volatile fields here only).
 let gitCommit = 'unknown';
@@ -141,4 +115,4 @@ writeFileSync(
   ) + '\n',
 );
 
-console.log(`engine-host-deno bundle written to ${outDir}`);
+console.log(`engine-host-node bundle written to ${outDir}`);

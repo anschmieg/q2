@@ -1,8 +1,7 @@
 /**
  * T-Gate-parity — TS↔Rust wire-dual parity (Plan 2 Phase B gate).
  *
- * Run from the repo root:
- *   deno test --allow-all ts-packages/quarto-engine-host-deno/src/wire-parity.deno-test.ts
+ * Run: `npm run test -w @quarto/engine-host-node` (vitest).
  *
  * WHY THIS EXISTS (tsc's blind spot):
  *   A green `tsc` proves TS-internal coherence only. It cannot see a Rust
@@ -32,32 +31,31 @@
  *       'test(ts_protocol::tests::test_ts_wire_parity_fixture)'
  *   and update the matching TS type + KEYS list in ./types.ts.
  *
- * This file is excluded from the tsc/vitest graph:
- * - tsconfig.json: exclude "src/**\/*.deno-test.ts"
- * - vitest.config.ts: exclude "**\/*.deno-test.ts"
- * The `satisfies`/`_Exhaustive` compile guards are instead checked by
- * `deno test`'s own type-checker (and are documented for the CI step).
+ * The `satisfies`/`_Exhaustive` compile guards are checked by `tsc --noEmit`
+ * (this file is part of the package's tsc graph).
  */
-import { assert, assertEquals } from "jsr:@std/assert";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { assert, describe, expect, it } from "vitest";
 import type {
   EngineProjectContext,
   HostGlobalConfig,
   TsLanguageClaim,
   TsPandocIncludes,
-} from "./types.ts";
+} from "./types.js";
 
 // ─── fixture ─────────────────────────────────────────────────────────────────
 
 // Resolve the committed Rust-serialized fixture relative to THIS file (cwd
 // independent). From src/ up to the repo root is three levels
-// (src → quarto-engine-host-deno → ts-packages → repo root), hence three `../`.
+// (src → quarto-engine-host-node → ts-packages → repo root), hence three `../`.
 const FIXTURE_URL = new URL(
   "../../../crates/quarto-core/tests/fixtures/ts_wire_parity.json",
   import.meta.url,
 );
 
 type Fixture = Record<string, Record<string, unknown>>;
-const fixture: Fixture = JSON.parse(await Deno.readTextFile(FIXTURE_URL));
+const fixture: Fixture = JSON.parse(readFileSync(fileURLToPath(FIXTURE_URL), "utf8"));
 
 // ─── type-pinned KEYS lists ──────────────────────────────────────────────────
 //
@@ -138,13 +136,12 @@ function assertSetEqual(
   const expectedSet = new Set(expected);
   const missingFromActual = [...expectedSet].filter((k) => !actualSet.has(k)).sort();
   const extraInActual = [...actualSet].filter((k) => !expectedSet.has(k)).sort();
-  assertEquals(
+  expect(
     { missingFromActual, extraInActual },
-    { missingFromActual: [], extraInActual: [] },
     `${label}: wire key-set mismatch. ` +
       `Rust-fixture-only keys (missing from TS KEYS): [${extraInActual.join(", ")}]; ` +
       `TS-KEYS-only keys (missing from Rust fixture): [${missingFromActual.join(", ")}].`,
-  );
+  ).toEqual({ missingFromActual: [], extraInActual: [] });
 }
 
 /** Fetch a fixture instance, failing loudly if the Rust side didn't emit it. */
@@ -160,34 +157,36 @@ function instance(typeName: string): Record<string, unknown> {
 
 // ─── tests ───────────────────────────────────────────────────────────────────
 
-Deno.test("wire-parity: HostGlobalConfig keys match Rust fixture", () => {
-  assertSetEqual(
-    Object.keys(instance("HostGlobalConfig")),
-    HOST_GLOBAL_CONFIG_KEYS,
-    "HostGlobalConfig",
-  );
-});
+describe("wire-parity", () => {
+  it("HostGlobalConfig keys match Rust fixture", () => {
+    assertSetEqual(
+      Object.keys(instance("HostGlobalConfig")),
+      HOST_GLOBAL_CONFIG_KEYS,
+      "HostGlobalConfig",
+    );
+  });
 
-Deno.test("wire-parity: TsPandocIncludes keys match Rust fixture", () => {
-  assertSetEqual(
-    Object.keys(instance("TsPandocIncludes")),
-    TS_PANDOC_INCLUDES_KEYS,
-    "TsPandocIncludes",
-  );
-});
+  it("TsPandocIncludes keys match Rust fixture", () => {
+    assertSetEqual(
+      Object.keys(instance("TsPandocIncludes")),
+      TS_PANDOC_INCLUDES_KEYS,
+      "TsPandocIncludes",
+    );
+  });
 
-Deno.test("wire-parity: EngineProjectContext keys match Rust fixture", () => {
-  assertSetEqual(
-    Object.keys(instance("EngineProjectContext")),
-    ENGINE_PROJECT_CONTEXT_KEYS,
-    "EngineProjectContext",
-  );
-});
+  it("EngineProjectContext keys match Rust fixture", () => {
+    assertSetEqual(
+      Object.keys(instance("EngineProjectContext")),
+      ENGINE_PROJECT_CONTEXT_KEYS,
+      "EngineProjectContext",
+    );
+  });
 
-Deno.test("wire-parity: TsLanguageClaim keys match Rust fixture", () => {
-  assertSetEqual(
-    Object.keys(instance("TsLanguageClaim")),
-    TS_LANGUAGE_CLAIM_KEYS,
-    "TsLanguageClaim",
-  );
+  it("TsLanguageClaim keys match Rust fixture", () => {
+    assertSetEqual(
+      Object.keys(instance("TsLanguageClaim")),
+      TS_LANGUAGE_CLAIM_KEYS,
+      "TsLanguageClaim",
+    );
+  });
 });

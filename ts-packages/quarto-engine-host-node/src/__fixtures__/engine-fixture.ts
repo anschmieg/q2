@@ -16,7 +16,7 @@
  *     members typecheck-compiles cleanly.
  *
  * NOT a runtime test — never run, never imported by vitest. Typecheck-only.
- * Covered by `( cd ts-packages/quarto-engine-host-deno && npx tsc --noEmit )`.
+ * Covered by `( cd ts-packages/quarto-engine-host-node && npx tsc --noEmit )`.
  *
  * See also: src/__type-tests__/b2-conformance.type-test.ts (producer side).
  */

@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { nodeHost } from "./node-host.js";
 
@@ -54,7 +54,12 @@ describe("fs", () => {
     expect(dirname(made)).toBe(parent);
     expect(basename(made).startsWith("pre-")).toBe(true);
     expect(statSync(made).isDirectory()).toBe(true);
-    expect(statSync(nodeHost.fs.makeTempDir()).isDirectory()).toBe(true);
+    // With no options the directory must land INSIDE the temp dir, not beside
+    // it (`mkdtemp("/tmp")` would create `/tmpXXXXXX`; macOS hid that because
+    // its `tmpdir()` ends in a slash).
+    const dflt = nodeHost.fs.makeTempDir();
+    expect(statSync(dflt).isDirectory()).toBe(true);
+    expect(dirname(dflt)).toBe(resolve(tmpdir()));
   });
 
   it("makeTempFile honours prefix and suffix and creates distinct files", () => {

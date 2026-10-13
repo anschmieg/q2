@@ -1,5 +1,5 @@
 /**
- * @quarto/engine-host-deno — JSON wire protocol types
+ * @quarto/engine-host-node — JSON wire protocol types
  *
  * Source of truth: `crates/quarto-core/src/engine/ts_protocol.rs`
  *
@@ -36,7 +36,7 @@ export interface Response {
 
 // ==================== Message enums ====================
 
-/** Messages from Rust (q2) → Deno engine host. */
+/** Messages from Rust (q2) → Node engine host. */
 export type ToEngine =
   | { type: "init"; global: HostGlobalConfig }
   | { type: "loadEngine"; enginePath: string }
@@ -50,7 +50,7 @@ export type ToEngine =
   | { type: "dependencies"; engine: string; options: TsDependenciesOptions }
   | { type: "cancel"; target: number };
 
-/** Messages from Deno engine host → Rust (q2). */
+/** Messages from Node engine host → Rust (q2). */
 export type FromEngine =
   | { type: "loaded"; discovery: LoadEngineResult }
   | { type: "launched"; instance: LaunchEngineResult }

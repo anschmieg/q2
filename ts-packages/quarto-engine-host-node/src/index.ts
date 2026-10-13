@@ -1,4 +1,4 @@
-// @quarto/engine-host-deno — public API barrel
+// @quarto/engine-host-node — public API barrel
 // Re-exports grow as behavioral modules land in later plan phases.
 export * from "./types.js";
 export * from "./framing.js";

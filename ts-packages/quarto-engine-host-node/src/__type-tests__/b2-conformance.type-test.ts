@@ -2,7 +2,7 @@
  * B2 — QuartoAPI conformance type-level tests (Plan 2 B2).
  *
  * These are compile-time assertions, not runtime tests: they are covered by
- * `( cd ts-packages/quarto-engine-host-deno && npx tsc --noEmit )`. The file is
+ * `( cd ts-packages/quarto-engine-host-node && npx tsc --noEmit )`. The file is
  * NOT matched by vitest's `src/**\/*.test.ts` include (it is a `.type-test.ts`),
  * so it never runs — it only has to typecheck.
  *

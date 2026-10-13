@@ -8,7 +8,7 @@
  *
  * `build_bundle`/`ensure_bundle` call `quarto_core::extension::build::build_ts_extension`
  * in-process (no subprocess to `q2`, no `CARGO_BIN_EXE`) against the workspace
- * `deno.workspace.json` import map, so the 10 `HERMETIC_FIXTURES` (pure/
+ * esbuild alias config, so the 10 `HERMETIC_FIXTURES` (pure/
  * type-only imports) can regenerate their `dist` bundle at test time
  * instead of being committed to git.
  *
@@ -36,13 +36,6 @@ pub const HERMETIC_FIXTURES: &[&str] = &[
     "echo-legacy",
     "synth-echo",
 ];
-
-pub fn deno_available() -> bool {
-    std::process::Command::new("deno")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
 
 /// Build `<ext_dir>/dist/<name>.js` in place with the workspace aliases.
 /// Hermetic (no network): uses the `node_modules/@esbuild` binary from `npm ci`.
@@ -104,10 +97,6 @@ fn copy_dir(src: &Path, dst: &Path) {
 /// `build_bundle` regenerates `dist/alpha.js` from source.
 #[test]
 fn build_helper_produces_bundle() {
-    if !deno_available() {
-        eprintln!("SKIP: no deno");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let dst = tmp.path().join("alpha");
     let src = fixture_ext_dir("alpha");

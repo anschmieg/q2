@@ -11,7 +11,7 @@
 //! 4. Build trace-viewer (if present; Phase 4.3+)
 //! 5. Build q2-preview-spa (if present; q2-preview Phase A.4 / bd-501n)
 //! 6. Build the hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
-//! 7. Build the engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
+//! 7. Build the engine-host-node bundle (quarto-core embed artifact; Plan 1b)
 //! 8. Stage the esbuild binary `q2` embeds (`cargo xtask fetch-esbuild`)
 //! 9. Build the Rust workspace (`cargo build --workspace`)
 //! 10. Stage the docs embed for `q2 docs llms` and re-embed it into the
@@ -44,7 +44,7 @@ pub struct BuildAllConfig {
     pub skip_trace_viewer_build: bool,
     /// Skip the hub MCP bundle build step (q2-mcp embed artifact).
     pub skip_hub_mcp_bundle: bool,
-    /// Skip the engine-host-deno bundle build step (quarto-core embed artifact).
+    /// Skip the engine-host-node bundle build step (quarto-core embed artifact).
     pub skip_engine_host_bundle: bool,
     /// Skip staging the esbuild binary `q2` embeds for `call build-ts-extension`.
     pub skip_esbuild_embed: bool,
@@ -86,7 +86,7 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
             !config.skip_hub_mcp_bundle && hub_mcp_exists(&project_root),
         ),
         (
-            "engine-host-deno bundle build",
+            "engine-host-node bundle build",
             !config.skip_engine_host_bundle && engine_host_exists(&project_root),
         ),
         (
@@ -202,20 +202,20 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
         println!("✓ hub MCP bundle complete");
     }
 
-    // Step: engine-host-deno bundle (Plan 1b) — the artifact `quarto-core`
+    // Step: engine-host-node bundle (Plan 1b) — the artifact `quarto-core`
     // embeds via `include_str!`; must exist before the Rust build.
     if !config.skip_engine_host_bundle && engine_host_exists(&project_root) {
         step_idx += 1;
-        banner(step_idx, total, "Building engine-host-deno bundle");
-        let pkg_dir = project_root.join("ts-packages/quarto-engine-host-deno");
+        banner(step_idx, total, "Building engine-host-node bundle");
+        let pkg_dir = project_root.join("ts-packages/quarto-engine-host-node");
         run_command(
             "npm",
             &["run", "bundle"],
             &pkg_dir,
             None,
-            "engine-host-deno bundle build failed",
+            "engine-host-node bundle build failed",
         )?;
-        println!("✓ engine-host-deno bundle complete");
+        println!("✓ engine-host-node bundle complete");
     }
 
     // Step: esbuild embed — `quarto-esbuild-embed` includes the binary staged
@@ -304,7 +304,7 @@ fn hub_mcp_exists(project_root: &Path) -> bool {
 
 fn engine_host_exists(project_root: &Path) -> bool {
     project_root
-        .join("ts-packages/quarto-engine-host-deno")
+        .join("ts-packages/quarto-engine-host-node")
         .join("package.json")
         .is_file()
 }

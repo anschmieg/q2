@@ -6322,6 +6322,7 @@ dependencies = [
  "quarto-highlight",
  "quarto-math",
  "quarto-navigation",
+ "quarto-node-discovery",
  "quarto-output-extract",
  "quarto-pandoc-types",
  "quarto-sass",
@@ -6616,6 +6617,7 @@ dependencies = [
  "fs2",
  "include_dir",
  "libc",
+ "quarto-node-discovery",
  "quarto-wasm-embed",
  "serde",
  "serde_json",
@@ -6633,6 +6635,15 @@ dependencies = [
  "quarto-source-map",
  "quarto-util",
  "yaml-rust2",
+]
+
+[[package]]
+name = "quarto-node-discovery"
+version = "0.32.0"
+dependencies = [
+ "dirs",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

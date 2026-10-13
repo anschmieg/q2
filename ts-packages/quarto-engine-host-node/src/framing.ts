@@ -1,5 +1,5 @@
 /**
- * @quarto/engine-host-deno — newline-framed JSON channel plumbing
+ * @quarto/engine-host-node — newline-framed JSON channel plumbing
  *
  * Implements the v1 wire protocol: one `Request` per newline-terminated UTF-8
  * JSON line in, one `Response` per newline-terminated UTF-8 JSON line out.

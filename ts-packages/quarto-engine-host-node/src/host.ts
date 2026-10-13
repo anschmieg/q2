@@ -1,5 +1,5 @@
 /**
- * @quarto/engine-host-deno — runHost dispatch loop (Parts 1 and 2 of 3).
+ * @quarto/engine-host-node — runHost dispatch loop (Parts 1 and 2 of 3).
  *
  * Implements the stream-injected, non-blocking, multiplexed runHost function
  * plus all discovery/instance handlers (loadEngine, launchEngine, claimsLanguage,
@@ -13,8 +13,8 @@
  *
  * cancel is STUBBED here — 6c fills it in.
  *
- * IMPORTANT: NO Deno.* APIs anywhere in this file. The Deno entry lives in
- * src/main.ts (excluded from tsconfig via the exclude list).
+ * IMPORTANT: runtime-neutral — no `Deno.*` or `node:*` I/O in this file; the
+ * Node entry (src/node-main.ts) supplies the `PlatformHost`.
  */
 
 import type {
@@ -249,7 +249,7 @@ function reconstructRichProject(
  *     registered SYNCHRONOUSLY (before the first await) so K concurrent same-path
  *     loadEngine (or same-name launchEngine) frames import/launch exactly once.
  *
- * NO Deno.* references in this file. The Deno entry (main.ts) is excluded from tsc.
+ * Runtime-neutral: the Node entry (node-main.ts) supplies the platform.
  */
 export async function runHost(
   reader: ReadableStream<Uint8Array>,

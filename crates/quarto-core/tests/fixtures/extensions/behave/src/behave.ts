@@ -50,7 +50,7 @@ let _quarto: QuartoAPI | undefined;
 // Plan 4b Phase 4b-F (F-relaunch, F3/F4): module-level launch counter.
 // `launch()` is called once per `LaunchEngine` verb the harness actually
 // executes (i.e. NOT on a `launchedByName` cache hit on the TS side — see
-// `@quarto/engine-host-deno/src/host.ts`'s `launchEngine` case). Logging the
+// `@quarto/engine-host-node/src/host.ts`'s `launchEngine` case). Logging the
 // post-increment value to stderr on every real call gives the Rust-side E2E
 // tests a relaunch WITNESS that requires no production-code change: stderr
 // lines already forward to the `tracing` target `"engine_host"` via
@@ -160,7 +160,7 @@ const behaveEngine: ExecutionEngineDiscovery = {
         // (resolve after N ms OR reject on abort) rather than a busy poll.
         // `ExecuteOptions` (@quarto/types) declares no `signal` field; the
         // host splices a live `AbortSignal` onto the options at runtime via
-        // `Object.assign` (`@quarto/engine-host-deno/src/host.ts`, "q2
+        // `Object.assign` (`@quarto/engine-host-node/src/host.ts`, "q2
         // extension: attach signal for cooperative cancellation"), so it's
         // read defensively via a cast.
         if (input.includes("QUARTO_SLOW")) {

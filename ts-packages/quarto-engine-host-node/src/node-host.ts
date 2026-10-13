@@ -1,14 +1,14 @@
 /**
- * @quarto/engine-host-deno — Node-native PlatformHost implementation.
+ * @quarto/engine-host-node — Node-native PlatformHost implementation.
  *
- * Counterpart of `deno-host.ts` over `node:*` built-ins only. It is the host
+ * The `PlatformHost` over `node:*` built-ins only. It is the host
  * adapter the Node entry point (`node-main.ts`) hands to `runHost`; all
  * `@quarto/api` I/O goes through this object so namespaces stay platform
  * neutral and testable with fakes.
  *
- * Differences from Deno that this file absorbs:
- * - `child_process.spawn` replaces the child environment where
- *   `Deno.Command` merges it, so `exec` merges `process.env` explicitly.
+ * Node specifics that this file absorbs:
+ * - `child_process.spawn` replaces the child environment (it does not merge
+ *   it the way Deno's `Command` did), so `exec` merges `process.env` explicitly.
  * - `mkdtemp` cannot add a suffix, so `makeTempFile` builds its own name
  *   (marimo needs `.html`).
  * - `process.stdin` is never touched here: reading its getter puts fd 0 into
@@ -186,8 +186,11 @@ export const nodeHost: PlatformHost = {
     ensureDir: (path) => {
       mkdirSync(path, { recursive: true });
     },
+    // `mkdtemp` appends its random suffix to the *path string*, so the prefix
+    // needs a real name: with none, `join(tmpdir(), "")` is `/tmp` and the
+    // directory would land beside it as `/tmpXXXXXX` (EACCES on Linux).
     makeTempDir: (opts) =>
-      mkdtempSync(join(opts?.dir ?? tmpdir(), opts?.prefix ?? "")),
+      mkdtempSync(join(opts?.dir ?? tmpdir(), opts?.prefix ?? "tmp-")),
     makeTempFile,
     remove: (path, opts) => {
       rmSync(path, { recursive: opts?.recursive ?? false });

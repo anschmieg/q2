@@ -1,3 +1,2 @@
 dist/*
-!dist/engine-host-deno.js
 !dist/engine-host-node.mjs

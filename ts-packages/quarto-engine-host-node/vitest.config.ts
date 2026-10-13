@@ -22,7 +22,7 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.test.ts"],
-    exclude: ["dist/**", "node_modules/**", "**/*.deno-test.ts"],
+    exclude: ["dist/**", "node_modules/**"],
     passWithNoTests: true,
   },
 });

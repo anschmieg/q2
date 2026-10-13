@@ -53,15 +53,14 @@ ts-packages/*/dist/
 # esbuild binaries staged by `cargo xtask fetch-esbuild`, embedded in q2
 ts-packages/esbuild-embed/
 ts-packages/*/dist-bundle/
-# Exception: the engine-host-deno bundle is embedded into the q2 binary via
+# Exception: the engine-host-node bundle is embedded into the q2 binary via
 # include_str! (plan1a-host "Bundle embedding"), so the single bundle file must
 # be tracked even though it lives under an otherwise-ignored dist/. A committed
 # placeholder lets fresh clones compile; Plan 1b overwrites it with the real
 # esbuild output (same path, new bytes). Other dist/ artifacts stay ignored.
-!ts-packages/quarto-engine-host-deno/dist/
-ts-packages/quarto-engine-host-deno/dist/*
-!ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js
-!ts-packages/quarto-engine-host-deno/dist/engine-host-node.mjs
+!ts-packages/quarto-engine-host-node/dist/
+ts-packages/quarto-engine-host-node/dist/*
+!ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs
 ts-packages/*/*.tsbuildinfo
 q2-demos/*/dist/
 crates/wasm-quarto-hub-client/pkg/
@@ -101,7 +100,6 @@ AGENTS.local.md
 # committed stub is unaffected — a gitignore entry cannot untrack an
 # already-tracked file.
 crates/quarto-core/tests/fixtures/extensions/*/dist/
-resources/extension-build/deno.lock
 
 # Posit Assistant per-machine settings and state
 .posit/

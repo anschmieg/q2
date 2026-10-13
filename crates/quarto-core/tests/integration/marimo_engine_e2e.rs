@@ -2,10 +2,10 @@
  * tests/integration/marimo_engine_e2e.rs
  * Copyright (c) 2026 Posit, PBC
  *
- * Plan 4c (marimo validation) — Test Seam Spec SC8, the marimo+deno+uv-gated
+ * Plan 4c (marimo validation) — Test Seam Spec SC8, the marimo+node+uv-gated
  * END-TO-END row for Phase 4cB (minimal marimo render, static claims path).
  * Drives the committed marimo-engine fixture (Phase 4cA) through the REAL
- * render path — a TS engine spawning the Deno engine-host subprocess, which
+ * render path — a TS engine spawning the Node engine-host subprocess, which
  * in turn spawns marimo via `uv run` — and asserts the whole chain works:
  * discovery → static resolution (the `whenClass: marimo` `python` claim,
  * priority 2) → LoadEngine / LaunchEngine / execute → marimo's own
@@ -15,9 +15,9 @@
  * Harness mirrors `julia_engine_e2e.rs`'s J1 row, with one gating
  * difference: marimo has no daemon binary of its own (the default render
  * path shells out to `uv run --with marimo …`), so this test is gated on
- * `deno` + `uv` on PATH — NOT a `marimo` binary (there is deliberately no
+ * `node` + `uv` on PATH — NOT a `marimo` binary (there is deliberately no
  * global `marimo` install; `uv` resolves it into an ephemeral environment on
- * first run). On a machine with BOTH `deno` and `uv` present this test RUNS
+ * first run). On a machine with BOTH `node` and `uv` present this test RUNS
  * — a skip there is a signal something is wrong, not a pass (Test Seam
  * Spec, CI gating).
  *
@@ -51,13 +51,7 @@ use tempfile::TempDir;
 use quarto_core::render_to_file::{RenderToFileOptions, render_to_file};
 use quarto_system_runtime::{NativeRuntime, SystemRuntime};
 
-/// Return `true` when `deno` is on PATH (the engine-host subprocess runtime).
-fn deno_available() -> bool {
-    Command::new("deno")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
+use quarto_core::engine::ts_process::node_available_for_tests;
 
 /// Return `true` when `uv` is on PATH (marimo's default render-path
 /// resolver — there is deliberately no global `marimo` binary; `uv run
@@ -356,7 +350,7 @@ fn body_excerpt(html: &str) -> String {
 
 // ── SC8: minimal marimo render, static claims path (Phase 4cB) ────────────
 //
-// Renders the 4cB minimal doc through the full chain with real Deno + real
+// Renders the 4cB minimal doc through the full chain with real Node + real
 // `uv`/marimo (no mocks): discovery → static `Primary(2)` resolution of the
 // `whenClass: marimo` claim on `python` → LoadEngine / LaunchEngine /
 // execute → marimo's own `MarimoMdParser` runs `1 + 1` → the
@@ -410,9 +404,9 @@ fn body_excerpt(html: &str) -> String {
 // test re-confirmed GREEN against the pristine fixture immediately after.
 #[test]
 fn sc8_minimal_marimo_render_shows_marimo_signature_and_result() {
-    if !deno_available() {
+    if !node_available_for_tests() {
         eprintln!(
-            "SKIP: deno not on PATH — sc8_minimal_marimo_render_shows_marimo_signature_and_result"
+            "SKIP: node not found — sc8_minimal_marimo_render_shows_marimo_signature_and_result"
         );
         return;
     }
@@ -475,10 +469,8 @@ fn sc8_minimal_marimo_render_shows_marimo_signature_and_result() {
 // why it is NOT a committed passing test yet).
 #[test]
 fn p4cb2_dynamic_path_parity_minimal_render_matches_static() {
-    if !deno_available() {
-        eprintln!(
-            "SKIP: deno not on PATH — p4cb2_dynamic_path_parity_minimal_render_matches_static"
-        );
+    if !node_available_for_tests() {
+        eprintln!("SKIP: node not found — p4cb2_dynamic_path_parity_minimal_render_matches_static");
         return;
     }
     if !uv_available() {
@@ -558,9 +550,9 @@ fn p4cb2_dynamic_path_parity_minimal_render_matches_static() {
 // see the RED-by-revert note on the test below.
 #[test]
 fn sc9_bare_sql_interop_dynamic_path_marimo_executes_sql_cell() {
-    if !deno_available() {
+    if !node_available_for_tests() {
         eprintln!(
-            "SKIP: deno not on PATH — sc9_bare_sql_interop_dynamic_path_marimo_executes_sql_cell"
+            "SKIP: node not found — sc9_bare_sql_interop_dynamic_path_marimo_executes_sql_cell"
         );
         return;
     }
@@ -677,10 +669,8 @@ fn sc9_bare_sql_interop_dynamic_path_marimo_executes_sql_cell() {
 // consumer, plan correction 6).
 #[test]
 fn sc10_widget_render_shows_header_include_and_body_island() {
-    if !deno_available() {
-        eprintln!(
-            "SKIP: deno not on PATH — sc10_widget_render_shows_header_include_and_body_island"
-        );
+    if !node_available_for_tests() {
+        eprintln!("SKIP: node not found — sc10_widget_render_shows_header_include_and_body_island");
         return;
     }
     if !uv_available() {
@@ -797,8 +787,8 @@ fn sc10_widget_render_shows_header_include_and_body_island() {
 // adds the minimal import cell needed to actually observe execution.
 #[test]
 fn sc13_e2e_tagged_sql_self_activation_renders() {
-    if !deno_available() {
-        eprintln!("SKIP: deno not on PATH — sc13_e2e_tagged_sql_self_activation_renders");
+    if !node_available_for_tests() {
+        eprintln!("SKIP: node not found — sc13_e2e_tagged_sql_self_activation_renders");
         return;
     }
     if !uv_available() {
@@ -900,8 +890,8 @@ fn sc13_e2e_tagged_sql_self_activation_renders() {
 // extension author ships by default).
 #[test]
 fn sc14_e2e_static_sql_interop_both_execute_via_marimo() {
-    if !deno_available() {
-        eprintln!("SKIP: deno not on PATH — sc14_e2e_static_sql_interop_both_execute_via_marimo");
+    if !node_available_for_tests() {
+        eprintln!("SKIP: node not found — sc14_e2e_static_sql_interop_both_execute_via_marimo");
         return;
     }
     if !uv_available() {
@@ -1023,9 +1013,9 @@ fn sc14_e2e_static_sql_interop_both_execute_via_marimo() {
 // `[1] 2` output), with no unexecuted-fence marker for either language.
 #[test]
 fn sc16_e2e_marimo_knitr_coexistence_leaves_each_other_alone() {
-    if !deno_available() {
+    if !node_available_for_tests() {
         eprintln!(
-            "SKIP: deno not on PATH — sc16_e2e_marimo_knitr_coexistence_leaves_each_other_alone"
+            "SKIP: node not found — sc16_e2e_marimo_knitr_coexistence_leaves_each_other_alone"
         );
         return;
     }
@@ -1188,9 +1178,9 @@ fn sc16_e2e_marimo_knitr_coexistence_leaves_each_other_alone() {
 // parse errors per cell and the render succeeds with a `marimo-error` block.)
 #[test]
 fn sc18_e2e_execute_failure_fails_render_with_subprocess_message() {
-    if !deno_available() {
+    if !node_available_for_tests() {
         eprintln!(
-            "SKIP: deno not on PATH — sc18_e2e_execute_failure_fails_render_with_subprocess_message"
+            "SKIP: node not found — sc18_e2e_execute_failure_fails_render_with_subprocess_message"
         );
         return;
     }

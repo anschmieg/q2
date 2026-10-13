@@ -1,5 +1,5 @@
 {
-  "name": "@quarto/engine-host-deno",
+  "name": "@quarto/engine-host-node",
   "version": "0.1.0",
   "private": true,
   "type": "module",
