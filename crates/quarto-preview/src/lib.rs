@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{Context, Result};
 use axum::{
     Router,
+    body::Bytes,
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -362,6 +363,15 @@ where
     // Phase 4 (bd-jt1etjbn): stash the UI choice for the SPA fallback
     // handler before the server starts serving.
     let _ = PREVIEW_UI.set(config.ui);
+
+    // Fire-and-forget: warm the render WASM's runtime gzip off the
+    // serving path (see prewarm_shared_wasm_gz) so the session's first
+    // WASM fetch doesn't stall on ~36 MB of compression. Skipped under
+    // an SPA disk override, where the embedded gz is never served.
+    if !matches!(SPA_DIR_OVERRIDE.get(), Some(Some(_))) {
+        let ui = config.ui;
+        tokio::task::spawn_blocking(move || prewarm_shared_wasm_gz(ui));
+    }
 
     let storage = build_storage(&config).context("building storage manager")?;
     let hub_config = build_hub_config(&config);
@@ -870,14 +880,14 @@ async fn spa_handler(req: axum::http::Request<axum::body::Body>) -> Response {
     let ui = current_ui();
     // Try the exact path first (an asset like `assets/index-<hash>.js`).
     if let Some(file) = lookup_embedded(ui, rel) {
-        return asset_response(rel, file.to_vec(), embedded_gz(ui, rel), ctx);
+        return asset_response(rel, Bytes::from_static(file), embedded_gz(ui, rel), ctx);
     }
     // SPA fallback: any non-asset path gets `index.html` for client-
     // side routing.
     if let Some(index) = lookup_embedded(ui, "index.html") {
         return asset_response(
             "index.html",
-            index.to_vec(),
+            Bytes::from_static(index),
             embedded_gz(ui, "index.html"),
             ctx,
         );
@@ -888,12 +898,15 @@ async fn spa_handler(req: axum::http::Request<axum::body::Body>) -> Response {
 /// Runtime-generated gzip bytes for an embedded asset (bd-rem4bpee).
 /// The archive embed is identity-only — the precompressed `.gz`
 /// siblings stay out of the binary — so the first gzip-accepted
-/// request for a compressible file pays the compression (level 9,
-/// matching the precompress pass's `Z_BEST_COMPRESSION`), cached per
-/// (UI, path) thereafter. Files the precompress pass skips
-/// (already-compressed containers) report None, exactly as when the
-/// `.gz` siblings were embedded.
-fn embedded_gz(ui: PreviewUi, rel: &str) -> Option<Vec<u8>> {
+/// request for a compressible file pays the compression, cached per
+/// (UI, path) thereafter (`Bytes`, so a cache hit is a refcount bump,
+/// not a copy of the ~10 MB WASM gzip). Level 9 matches the
+/// precompress pass's `Z_BEST_COMPRESSION` — except above
+/// [`LARGE_ASSET_GZIP_THRESHOLD`], where level 6 buys back most of the
+/// CPU for a fraction of a percent of bytes. Files the precompress
+/// pass skips (already-compressed containers) report None, exactly as
+/// when the `.gz` siblings were embedded.
+fn embedded_gz(ui: PreviewUi, rel: &str) -> Option<Bytes> {
     if !gz_compressible(rel) {
         return None;
     }
@@ -903,9 +916,16 @@ fn embedded_gz(ui: PreviewUi, rel: &str) -> Option<Vec<u8>> {
     if let Some(hit) = cache.lock().expect("gz cache poisoned").get(&key) {
         return Some(hit.clone());
     }
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    let level = if identity.len() as u64 > LARGE_ASSET_GZIP_THRESHOLD {
+        // On the ~36 MB render WASM, level 9 costs ~1.7 s of CPU for
+        // bytes within 0.6% of level 6's ~0.7 s (measured 2026-10-13).
+        flate2::Compression::new(6)
+    } else {
+        flate2::Compression::best()
+    };
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), level);
     std::io::Write::write_all(&mut encoder, identity).expect("gzip encode is infallible");
-    let gz = encoder.finish().expect("gzip finish is infallible");
+    let gz = Bytes::from(encoder.finish().expect("gzip finish is infallible"));
     cache
         .lock()
         .expect("gz cache poisoned")
@@ -913,9 +933,25 @@ fn embedded_gz(ui: PreviewUi, rel: &str) -> Option<Vec<u8>> {
     Some(gz)
 }
 
+/// Above this identity size, runtime gzip uses level 6 instead of 9:
+/// the size penalty on the large assets is a fraction of a percent
+/// while the CPU saving is most of the compression time.
+const LARGE_ASSET_GZIP_THRESHOLD: u64 = 8 * 1024 * 1024;
+
+/// Prewarm the render WASM's runtime gzip so the browser's first fetch
+/// of the session doesn't stall on compressing ~36 MB (bd-rem4bpee
+/// regenerates gz responses at runtime; the `.gz` sibling is never
+/// embedded). Best-effort and off the serving path: a request that
+/// races the prewarm simply computes alongside it.
+fn prewarm_shared_wasm_gz(ui: PreviewUi) {
+    if let Some(rel) = SHARED_WASM_REL {
+        let _ = embedded_gz(ui, rel);
+    }
+}
+
 /// The runtime gzip cache: (UI, dist-relative path) → gzip bytes.
 /// Lookup-only, never iterated (the coding.md HashMap carve-out).
-static GZ_CACHE: OnceLock<Mutex<HashMap<(PreviewUi, String), Vec<u8>>>> = OnceLock::new();
+static GZ_CACHE: OnceLock<Mutex<HashMap<(PreviewUi, String), Bytes>>> = OnceLock::new();
 
 /// The gzip skip set: already-compressed containers that never got a
 /// `.gz` sibling. Parsed from `scripts/gzip-skip-extensions.txt`, the
@@ -961,7 +997,7 @@ async fn artifact_resource_handler(
         && let Some(disk) = map.get(&rest)
         && let Ok(bytes) = tokio::fs::read(disk).await
     {
-        return asset_response(&rest, bytes, disk_gz(disk).await, ctx);
+        return asset_response(&rest, Bytes::from(bytes), disk_gz(disk).await, ctx);
     }
     serve_spa_index(ctx).await
 }
@@ -978,7 +1014,7 @@ async fn serve_spa_index(ctx: AssetRequestCtx<'_>) -> Response {
     if let Some(index) = lookup_embedded(ui, "index.html") {
         return asset_response(
             "index.html",
-            index.to_vec(),
+            Bytes::from_static(index),
             embedded_gz(ui, "index.html"),
             ctx,
         );
@@ -989,12 +1025,14 @@ async fn serve_spa_index(ctx: AssetRequestCtx<'_>) -> Response {
 async fn serve_from_disk(root: &std::path::Path, rel: &str, ctx: AssetRequestCtx<'_>) -> Response {
     let abs = root.join(rel);
     match tokio::fs::read(&abs).await {
-        Ok(bytes) => asset_response(rel, bytes, disk_gz(&abs).await, ctx),
+        Ok(bytes) => asset_response(rel, Bytes::from(bytes), disk_gz(&abs).await, ctx),
         Err(_) => {
             // Fallback to index.html for client-side routing.
             let index = root.join("index.html");
             match tokio::fs::read(&index).await {
-                Ok(bytes) => asset_response("index.html", bytes, disk_gz(&index).await, ctx),
+                Ok(bytes) => {
+                    asset_response("index.html", Bytes::from(bytes), disk_gz(&index).await, ctx)
+                }
                 Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
             }
         }
@@ -1003,10 +1041,13 @@ async fn serve_from_disk(root: &std::path::Path, rel: &str, ctx: AssetRequestCtx
 
 /// The precompressed `<file>.gz` sibling of a disk-served file, when
 /// present (a dev override dir only has them after an xtask build).
-async fn disk_gz(abs: &std::path::Path) -> Option<Vec<u8>> {
+async fn disk_gz(abs: &std::path::Path) -> Option<Bytes> {
     let mut sibling = abs.as_os_str().to_os_string();
     sibling.push(".gz");
-    tokio::fs::read(PathBuf::from(sibling)).await.ok()
+    tokio::fs::read(PathBuf::from(sibling))
+        .await
+        .ok()
+        .map(Bytes::from)
 }
 
 /// Request-side context for [`asset_response`] content negotiation.
@@ -1031,7 +1072,7 @@ struct AssetRequestCtx<'a> {
 struct AssetResponseParts {
     status: StatusCode,
     headers: HeaderMap,
-    body: Vec<u8>,
+    body: Bytes,
 }
 
 /// Build the response for a served asset. Owns every header the asset
@@ -1042,8 +1083,8 @@ struct AssetResponseParts {
 /// `.gz`-only, no `.br` — maximum compatibility); and HEAD semantics.
 fn asset_response(
     rel: &str,
-    bytes: Vec<u8>,
-    gz_bytes: Option<Vec<u8>>,
+    bytes: Bytes,
+    gz_bytes: Option<Bytes>,
     ctx: AssetRequestCtx<'_>,
 ) -> Response {
     let parts = asset_response_parts(rel, bytes, gz_bytes, ctx);
@@ -1052,8 +1093,8 @@ fn asset_response(
 
 fn asset_response_parts(
     rel: &str,
-    bytes: Vec<u8>,
-    gz_bytes: Option<Vec<u8>>,
+    bytes: Bytes,
+    gz_bytes: Option<Bytes>,
     ctx: AssetRequestCtx<'_>,
 ) -> AssetResponseParts {
     let mut headers = HeaderMap::new();
@@ -1083,7 +1124,7 @@ fn asset_response_parts(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&body.len().to_string()).expect("valid Content-Length"),
     );
-    let body = if ctx.is_head { Vec::new() } else { body };
+    let body = if ctx.is_head { Bytes::new() } else { body };
     AssetResponseParts {
         status: StatusCode::OK,
         headers,
@@ -1319,6 +1360,25 @@ mod tests {
         assert!(lookup_embedded(PreviewUi::Editor, bogus).is_none());
     }
 
+    #[test]
+    fn prewarm_populates_the_wasm_gz_cache() {
+        let Some(rel) = SHARED_WASM_REL else {
+            eprintln!("placeholder or dirty tree (no single hashed wasm); skipping");
+            return;
+        };
+        quarto_wasm_embed::wasm_bytes()
+            .expect("a stripped tree implies the shared crate embedded the wasm");
+        prewarm_shared_wasm_gz(PreviewUi::Viewer);
+        let cache = GZ_CACHE.get().expect("prewarm initializes the gz cache");
+        assert!(
+            cache
+                .lock()
+                .expect("gz cache poisoned")
+                .contains_key(&(PreviewUi::Viewer, rel.to_string())),
+            "the WASM gzip must be cached after prewarm"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // tar.zst archive embed (bd-rem4bpee): the bundles embed as
     // identity-only tar.zst archives, decompressed lazily on first
@@ -1389,11 +1449,8 @@ mod tests {
             .expect("index.html is always embedded");
         let gz = embedded_gz(PreviewUi::Viewer, "index.html").expect("index.html is compressible");
         let mut decoded = Vec::new();
-        std::io::Read::read_to_end(
-            &mut flate2::read::GzDecoder::new(gz.as_slice()),
-            &mut decoded,
-        )
-        .expect("runtime-generated gz gunzips");
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz.as_ref()), &mut decoded)
+            .expect("runtime-generated gz gunzips");
         assert_eq!(
             decoded, identity,
             "runtime gz must decode to the identity bytes"
