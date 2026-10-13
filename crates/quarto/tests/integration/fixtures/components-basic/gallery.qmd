@@ -1,0 +1,12 @@
+---
+title: "A gallery"
+components:
+  - name: gallery
+    src: gallery.js
+    content: ast
+---
+
+::: {#gallery}
+- ![First](img/one.png)
+- ![Second](img/two.png)
+:::

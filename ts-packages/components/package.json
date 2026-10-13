@@ -1,0 +1,34 @@
+{
+  "name": "@quarto/components",
+  "version": "0.1.0",
+  "description": "Props contract for React components bound to Quarto document elements",
+  "license": "MIT",
+  "author": {
+    "name": "Posit PBC"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@quarto/pandoc-types": "*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "typescript": "~5.9.3"
+  }
+}

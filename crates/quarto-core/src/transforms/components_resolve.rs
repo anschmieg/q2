@@ -52,10 +52,12 @@ use quarto_source_map::SourceInfo;
 use crate::Result;
 use crate::artifact::ArtifactScope;
 use crate::ast_walk::{for_each_block_list_mut, for_each_inline_list_mut};
-use crate::components::runtime::{HEAD_SENTINEL, ManifestEntry, asset_url, head_block};
+use crate::components::runtime::{
+    HEAD_SENTINEL, ManifestEntry, asset_url, head_block, script_json,
+};
 use crate::components::{
-    COMPONENT_HOST_ATTR, COMPONENTS_KEY, ComponentDecl, ComponentSource, parse_components,
-    register_component_assets,
+    COMPONENT_HOST_ATTR, COMPONENTS_KEY, ComponentDecl, ComponentSource, ContentMode,
+    parse_components, register_component_assets,
 };
 use crate::format::PipelineProfile;
 use crate::render::{RenderContext, ResourceCopyIntent};
@@ -71,6 +73,12 @@ const ELEMENT_KEY: &str = "component";
 const ELEMENT_PROPS_KEY: &str = "component-props";
 /// The attribute the runtime reads element props from.
 const HOST_PROPS_ATTR: &str = "data-quarto-component-props";
+/// Class of the child `<script type="application/json">` that carries a
+/// bound node's AST (`content: ast`); the runtime reads and removes it.
+const AST_SCRIPT_CLASS: &str = "quarto-component-ast";
+/// Class of the props script `quarto.component` emits; left out of the
+/// serialized AST, since it is runtime plumbing rather than content.
+const PROPS_SCRIPT_CLASS: &str = "quarto-component-props";
 
 /// See module docs.
 pub struct ComponentsResolveTransform;
@@ -113,6 +121,7 @@ impl AstTransform for ComponentsResolveTransform {
             ctx.diagnostics.extend(diags);
             return Ok(());
         }
+        attach_ast_payloads(ast, &decls);
 
         // Ship: copy intents, assets, head block. Mirrors `format-css`:
         // VFS-root mode (the in-browser preview) has no output tree to
@@ -304,6 +313,98 @@ fn bind_elements(
         }
     }
     order
+}
+
+/// For every element bound to a `content: ast` declaration, prepend a
+/// `<script type="application/json" class="quarto-component-ast">` child
+/// holding the node's Pandoc JSON (source information stripped, the
+/// wire shape the preview uses), so the runtime can hand the component
+/// `node`. The element's own props script is left out of the payload.
+/// Idempotent: an element that already carries the payload is skipped.
+fn attach_ast_payloads(ast: &mut Pandoc, decls: &[ComponentDecl]) {
+    let wants_ast = |attr: &Attr| {
+        attr.2
+            .get(COMPONENT_HOST_ATTR)
+            .and_then(|name| decls.iter().find(|d| &d.name == name))
+            .is_some_and(|d| d.content == ContentMode::Ast)
+    };
+    let context = pampa::pandoc::ASTContext::default();
+
+    for_each_block_list_mut(&mut ast.blocks, &mut |list| {
+        for block in list.iter_mut() {
+            let Block::Div(div) = block else { continue };
+            if !wants_ast(&div.attr) || has_payload_block(&div.content) {
+                continue;
+            }
+            let mut node = Block::Div(div.clone());
+            if let Block::Div(d) = &mut node {
+                d.content.retain(|b| !is_props_script_block(b));
+            }
+            let json = pampa::writers::json::blocks_to_source_free_json(&[node], &context);
+            let text = ast_script(&json[0]);
+            div.content.insert(
+                0,
+                Block::RawBlock(quarto_pandoc_types::block::RawBlock {
+                    format: "html".to_string(),
+                    text,
+                    source_info: div.source_info.clone(),
+                }),
+            );
+        }
+    });
+    for_each_inline_list_mut(&mut ast.blocks, &mut |list| {
+        for inline in list.iter_mut() {
+            let Inline::Span(span) = inline else { continue };
+            if !wants_ast(&span.attr) || has_payload_inline(&span.content) {
+                continue;
+            }
+            let mut node = Inline::Span(span.clone());
+            if let Inline::Span(s) = &mut node {
+                s.content.retain(|i| !is_props_script_inline(i));
+            }
+            let json = pampa::writers::json::inlines_to_source_free_json(&vec![node], &context);
+            let text = ast_script(&json[0]);
+            span.content.insert(
+                0,
+                Inline::RawInline(quarto_pandoc_types::inline::RawInline {
+                    format: "html".to_string(),
+                    text,
+                    source_info: span.source_info.clone(),
+                }),
+            );
+        }
+    });
+}
+
+fn ast_script(node: &serde_json::Value) -> String {
+    format!(
+        "<script type=\"application/json\" class=\"{AST_SCRIPT_CLASS}\">{}</script>",
+        script_json(node)
+    )
+}
+
+fn is_script_with_class(text: &str, class: &str) -> bool {
+    text.starts_with("<script type=\"application/json\" class=\"") && text.contains(class)
+}
+
+fn has_payload_block(blocks: &[Block]) -> bool {
+    blocks.first().is_some_and(
+        |b| matches!(b, Block::RawBlock(r) if is_script_with_class(&r.text, AST_SCRIPT_CLASS)),
+    )
+}
+
+fn has_payload_inline(inlines: &[Inline]) -> bool {
+    inlines.first().is_some_and(
+        |i| matches!(i, Inline::RawInline(r) if is_script_with_class(&r.text, AST_SCRIPT_CLASS)),
+    )
+}
+
+fn is_props_script_block(b: &Block) -> bool {
+    matches!(b, Block::RawBlock(r) if is_script_with_class(&r.text, PROPS_SCRIPT_CLASS))
+}
+
+fn is_props_script_inline(i: &Inline) -> bool {
+    matches!(i, Inline::RawInline(r) if is_script_with_class(&r.text, PROPS_SCRIPT_CLASS))
 }
 
 /// `component=./x.js` declares on the spot; `component=name` refers to a
@@ -863,6 +964,98 @@ mod tests {
         };
         let r = run(ast).await;
         assert!(header_includes(&r.ast.meta)[0].contains("\"props\":{\"start\":2}"));
+    }
+
+    #[tokio::test]
+    async fn content_ast_prepends_the_node_json_without_the_props_script() {
+        let yaml = "components:\n  - name: gallery\n    src: gallery.js\n    content: ast\n";
+        let props = Block::RawBlock(quarto_pandoc_types::block::RawBlock {
+            format: "html".into(),
+            text: "<script type=\"application/json\" class=\"quarto-component-props\">{}</script>"
+                .into(),
+            source_info: SourceInfo::for_test(),
+        });
+        let ast = Pandoc {
+            meta: meta(yaml),
+            blocks: vec![
+                div("gallery", &["demo"], vec![props, para("hi")]),
+                span_para("", &["x"]),
+            ],
+        };
+        let r = run(ast).await;
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        let Block::Div(d) = &r.ast.blocks[0] else {
+            unreachable!()
+        };
+        assert_eq!(d.content.len(), 3, "payload + props script + paragraph");
+        let Block::RawBlock(raw) = &d.content[0] else {
+            panic!("payload first")
+        };
+        let json_text = raw
+            .text
+            .strip_prefix("<script type=\"application/json\" class=\"quarto-component-ast\">")
+            .and_then(|t| t.strip_suffix("</script>"))
+            .expect("payload script shape");
+        let node: serde_json::Value = serde_json::from_str(json_text).unwrap();
+        assert_eq!(node["t"], "Div");
+        assert_eq!(node["c"][0][0], "gallery");
+        assert_eq!(
+            node["c"][0][2],
+            serde_json::json!([["data-quarto-component", "gallery"]])
+        );
+        let blocks = node["c"][1].as_array().unwrap();
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the props script is not content: {blocks:?}"
+        );
+        assert_eq!(blocks[0]["t"], "Para");
+        assert!(
+            json_text.contains("\\u003c") || !json_text.contains('<'),
+            "escaped for <script>"
+        );
+        // Re-running does not add a second payload.
+        let again = run(r.ast.clone()).await;
+        let Block::Div(d) = &again.ast.blocks[0] else {
+            unreachable!()
+        };
+        assert_eq!(d.content.len(), 3);
+        // The manifest says `ast` so the runtime knows to look.
+        assert!(header_includes(&r.ast.meta)[0].contains("\"content\":\"ast\""));
+    }
+
+    #[tokio::test]
+    async fn content_ast_on_a_span_prepends_an_inline_payload() {
+        let yaml =
+            "components:\n  - name: spark\n    src: spark.js\n    bind: .spark\n    content: ast\n";
+        let ast = Pandoc {
+            meta: meta(yaml),
+            blocks: vec![span_para("", &["spark"])],
+        };
+        let r = run(ast).await;
+        let Block::Paragraph(p) = &r.ast.blocks[0] else {
+            unreachable!()
+        };
+        let Inline::Span(s) = &p.content[0] else {
+            unreachable!()
+        };
+        let Inline::RawInline(raw) = &s.content[0] else {
+            panic!("payload first")
+        };
+        assert!(raw.text.contains("\"t\":\"Span\""), "{}", raw.text);
+    }
+
+    #[tokio::test]
+    async fn content_dom_attaches_no_payload() {
+        let ast = Pandoc {
+            meta: meta(ONE),
+            blocks: vec![div("counter", &[], vec![para("hi")])],
+        };
+        let r = run(ast).await;
+        let Block::Div(d) = &r.ast.blocks[0] else {
+            unreachable!()
+        };
+        assert_eq!(d.content, vec![para("hi")]);
     }
 
     #[tokio::test]

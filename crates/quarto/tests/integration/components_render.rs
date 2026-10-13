@@ -216,6 +216,8 @@ fn markdown_output_sees_no_binding() {
 fn page_without_components_ships_nothing() {
     let dir = tempfile::TempDir::new().unwrap();
     copy_dir(&fixture(), dir.path());
+    // The fixture's gallery page binds a component of its own; this test is about a site without any.
+    std::fs::remove_file(dir.path().join("gallery.qmd")).unwrap();
     std::fs::write(
         dir.path().join("index.qmd"),
         "---\ntitle: plain\n---\n\n::: {#counter}\nJust a div.\n:::\n",
@@ -247,6 +249,8 @@ fn page_without_components_ships_nothing() {
 fn unbound_component_warns_q_25_4_and_ships_nothing() {
     let dir = tempfile::TempDir::new().unwrap();
     copy_dir(&fixture(), dir.path());
+    // The fixture's gallery page binds a component of its own; this test is about a site without any.
+    std::fs::remove_file(dir.path().join("gallery.qmd")).unwrap();
     std::fs::write(
         dir.path().join("index.qmd"),
         "---\ntitle: plain\ncomponents:\n  - name: counter\n    src: counter.js\n---\n\nNo host here.\n",
@@ -359,4 +363,42 @@ fn lmd_listing_component_ships_props_and_fallback() {
             .join("_site/site_libs/quarto-components/filter-table.js")
             .is_file()
     );
+}
+
+/// S3: `content: ast` ships the node's Pandoc JSON as a child script,
+/// with image targets already rewritten to page-relative output paths,
+/// and the runtime hands it to the component as `node`.
+#[test]
+fn content_ast_ships_the_node_json_as_a_child_script() {
+    let r = render(&[]);
+    let html = r.read("gallery.html");
+    let host = between(&html, "<div id=\"gallery\"", "</ul>");
+    assert!(
+        host.starts_with("<div id=\"gallery\" data-quarto-component=\"gallery\">"),
+        "{host}"
+    );
+    let script = between(
+        host,
+        "<script type=\"application/json\" class=\"quarto-component-ast\">",
+        "</script>",
+    );
+    let node: serde_json::Value = serde_json::from_str(
+        script
+            .trim_start_matches("<script type=\"application/json\" class=\"quarto-component-ast\">")
+            .trim_end_matches("</script>"),
+    )
+    .expect("AST payload is JSON");
+    assert_eq!(node["t"], "Div");
+    let text = node.to_string();
+    assert!(text.contains("\"t\":\"Image\""), "{text}");
+    assert!(text.contains("img/one.png"), "{text}");
+    assert!(!text.contains("\"s\":"), "source info is stripped: {text}");
+    // The static list follows the payload.
+    assert!(host.contains("<img src=\"img/one.png\""), "{host}");
+    assert!(
+        r.site().join("img/one.png").is_file(),
+        "images inside a bound subtree are still collected"
+    );
+    let head = between(&html, "<head>", "</head>");
+    assert!(head.contains("\"gallery\":{\"content\":\"ast\""), "{head}");
 }
