@@ -33,6 +33,7 @@ import { setSyncLogger } from '@quarto/quarto-sync-client';
 
 import { ConnectionManager } from './connection-manager.js';
 import { registerTools } from './tools.js';
+import { registerPrompts } from './prompts.js';
 import { AuthToolsState } from './auth/auth-tools.js';
 import { CredentialStore } from './auth/credential-store.js';
 import {
@@ -268,6 +269,9 @@ async function main(): Promise<void> {
     {
       capabilities: {
         tools: {},
+        // fix_errors drives the write tools, so read-only mode neither
+        // registers the prompt nor advertises the capability.
+        ...(readOnly ? {} : { prompts: {} }),
       },
       instructions:
         'Tools operate on a project identified by its automerge index document ID. ' +
@@ -298,6 +302,9 @@ async function main(): Promise<void> {
       : undefined;
 
   registerTools(server, manager, readOnly, authToolsState);
+  if (!readOnly) {
+    registerPrompts(server);
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

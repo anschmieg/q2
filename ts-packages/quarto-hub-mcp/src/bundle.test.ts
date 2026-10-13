@@ -12,12 +12,14 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpTestClient } from './mcp-test-client.js';
 import { startTestHub, type TestHub } from './test-hub.js';
+import { wasmPkgAvailable } from './test-wasm-host.js';
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,6 +28,10 @@ let bundleEntry: string;
 let hub: TestHub;
 
 beforeAll(async () => {
+  // The bundle build refuses to run without the Rust WASM artifacts
+  // (a stub must never ship), so this whole suite is a no-op in the
+  // no-Rust/no-WASM CI leg.
+  if (!wasmPkgAvailable()) return;
   execFileSync('node', [path.join(pkgRoot, 'scripts/bundle.mjs')], {
     stdio: 'pipe',
   });
@@ -44,14 +50,31 @@ afterAll(async () => {
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('bundle smoke', () => {
+describe.skipIf(!wasmPkgAvailable())('bundle smoke', () => {
   it('ships the expected artifacts', () => {
     const bundleDir = path.join(tmpDir, 'bundle');
     expect(fs.existsSync(path.join(bundleDir, 'index.mjs'))).toBe(true);
+    // get_errors local validation: the WASM host + binary must ride in
+    // the bundle (index.mjs dynamic-imports ./wasm-host.mjs at first use).
+    expect(fs.existsSync(path.join(bundleDir, 'wasm-host.mjs'))).toBe(true);
+    const wasm = path.join(bundleDir, 'wasm_quarto_hub_client_bg.wasm');
+    expect(fs.existsSync(wasm)).toBe(true);
+    expect(fs.statSync(wasm).size).toBeGreaterThan(10_000_000);
     const info = JSON.parse(
       fs.readFileSync(path.join(bundleDir, 'build-info.json'), 'utf8'),
-    ) as { gitCommit: string; nodeTarget: string; keyringPackages: string[] };
+    ) as {
+      gitCommit: string;
+      nodeTarget: string;
+      wasmSha256?: string;
+      keyringPackages: string[];
+    };
     expect(info.nodeTarget).toBe('node24');
+    // The dedupe marker q2's launcher keys the embed strip on: it must
+    // record the shipped WASM's actual sha256.
+    const actualSha = createHash('sha256')
+      .update(fs.readFileSync(wasm))
+      .digest('hex');
+    expect(info.wasmSha256).toBe(actualSha);
     expect(info.keyringPackages).toContain('keyring');
     expect(info.keyringPackages.length).toBeGreaterThanOrEqual(2);
     // the keyring loader package plus at least one platform addon

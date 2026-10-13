@@ -34,6 +34,7 @@ quarto-pandoc-types.workspace = true
 quarto-source-map.workspace = true
 quarto-system-runtime.workspace = true
 quarto-trace.workspace = true
+quarto-wasm-embed.workspace = true
 spa-manifest.workspace = true
 # The embed format: identity-only tar.zst archives, decoded lazily at
 # runtime (bd-rem4bpee). flate2 (above) regenerates gzip responses.

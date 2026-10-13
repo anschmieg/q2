@@ -22,7 +22,9 @@ mod defaults;
 mod delegate;
 mod node;
 
-pub use bundle::{BundleFile, content_hash, embedded_files, is_placeholder};
+pub use bundle::{
+    BundleContents, BundleFile, LazyBytes, content_hash, embedded_files, is_placeholder,
+};
 pub use cache::{
     DEFAULT_MAX_AGE, ExtractedBundle, LAST_USED_FILE, LOCK_FILE, default_cache_root,
     extract_and_lock, gc,
@@ -31,7 +33,7 @@ pub use defaults::{BundledDefault, Source, bundled_defaults, classify, injection
 pub use node::{Discovery, MIN_NODE_MAJOR, NodeError, NodeInfo, find_node, parse_version};
 
 use anyhow::{Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What `run` should do with the args, decided up front by
 /// [`classify_args`] before any I/O. `q2 mcp` is a verbatim passthrough
@@ -141,7 +143,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         );
     }
 
-    let files = bundle::embedded_files();
+    let files = extraction_files(bundle::embedded_files(), shared_wasm_lazy())?;
     let hash = bundle::content_hash(&files);
     let cache_root = cache_root()?;
 
@@ -161,6 +163,81 @@ pub fn run(args: &[String]) -> Result<i32> {
         &extra_env,
         extracted.lock,
     )
+}
+
+/// The shared render WASM as a lazy extraction-set entry, when this
+/// binary embeds one. `quarto-wasm-embed`'s build.rs stamps the digest
+/// and length from the very bytes it compresses, so stamp and payload
+/// agree by construction (pinned by that crate's own tests).
+fn shared_wasm_lazy() -> Option<LazyBytes> {
+    Some(LazyBytes {
+        sha256: quarto_wasm_embed::WASM_SHA256?,
+        len: quarto_wasm_embed::WASM_LEN?,
+        get: quarto_wasm_embed::wasm_bytes,
+    })
+}
+
+/// The extraction set: the embedded bundle files, plus the shared
+/// render WASM as a lazy entry under the fixed sibling name
+/// `wasm-host.mjs` reads (`new URL('./wasm_quarto_hub_client_bg.wasm',
+/// import.meta.url)`) when the embed carries no WASM of its own — the
+/// dedupe case (`build.rs` strips it; plan
+/// `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`). The lazy
+/// entry keys the content hash by its build-time stamped digest, so a
+/// warm-cache launch never decodes or hashes the ~36 MB payload; only
+/// a cold extraction materializes it. A pre-dedupe bundle still embeds
+/// its WASM and is extracted as-is. A stripped bundle with no shared
+/// WASM embedded is a build-time inconsistency; the error names the
+/// fix.
+fn extraction_files(
+    mut files: Vec<BundleFile>,
+    shared_wasm: Option<LazyBytes>,
+) -> Result<Vec<BundleFile>> {
+    let has_wasm = files
+        .iter()
+        .any(|(path, _)| path == Path::new(quarto_wasm_embed::WASM_FILENAME));
+    if has_wasm {
+        return Ok(files);
+    }
+    let Some(lazy) = shared_wasm else {
+        bail!(
+            "this q2 binary embeds an MCP bundle without its render WASM, and no\n\
+             shared WASM was embedded either. Run `cargo xtask build-q2-preview-spa`\n\
+             (or rebuild the bundle with `cargo xtask build-hub-mcp-bundle`), then\n\
+             rebuild the q2 binary (`cargo build --bin q2`)."
+        );
+    };
+    if let Some(warning) =
+        wasm_mismatch_warning(bundle::embedded_wasm_sha256().as_deref(), lazy.sha256)
+    {
+        // stderr only: stdout belongs to the MCP protocol, and the
+        // launch itself must go on (most tools never render).
+        eprintln!("{warning}");
+    }
+    files.push((
+        PathBuf::from(quarto_wasm_embed::WASM_FILENAME),
+        BundleContents::Lazy(lazy),
+    ));
+    Ok(files)
+}
+
+/// The stderr tripwire for a dev-time staleness state: the bundle's
+/// glue was built against the WASM its `build-info.json` records; the
+/// shared embed's build-time stamped sha256 names whatever WASM source
+/// its build.rs found at q2-build time. A mismatch means the two
+/// payloads came from different WASM generations. Never fatal — a
+/// genuinely incompatible glue fails loudly at init on its own.
+fn wasm_mismatch_warning(recorded_sha: Option<&str>, shared_sha256: &str) -> Option<String> {
+    let recorded = recorded_sha?;
+    if recorded == shared_sha256 {
+        return None;
+    }
+    Some(format!(
+        "q2 mcp: warning: the embedded MCP bundle was built against render WASM\n\
+         {recorded}, but this binary embeds {shared_sha256};\n\
+         get_errors may fail at init. Run `cargo xtask build-hub-mcp-bundle` and\n\
+         `cargo xtask build-q2-preview-spa`, then rebuild q2."
+    ))
 }
 
 fn cache_root() -> Result<PathBuf> {
@@ -189,8 +266,28 @@ fn launcher_info() -> Result<String> {
         return Ok(out);
     }
     let files = bundle::embedded_files();
-    out.push_str(&format!("bundle-hash: {}\n", bundle::content_hash(&files)));
-    out.push_str(&format!("bundle-files: {}\n", files.len()));
+    let embeds_own_wasm = files
+        .iter()
+        .any(|(path, _)| path == Path::new(quarto_wasm_embed::WASM_FILENAME));
+    let shared = shared_wasm_lazy();
+    match extraction_files(files, shared) {
+        Ok(files) => {
+            out.push_str(&format!("bundle-hash: {}\n", bundle::content_hash(&files)));
+            out.push_str(&format!("bundle-files: {}\n", files.len()));
+        }
+        Err(e) => out.push_str(&format!("bundle-hash: UNAVAILABLE ({e})\n")),
+    }
+    if embeds_own_wasm {
+        out.push_str("render-wasm: embedded-in-bundle (pre-dedupe bundle)\n");
+    } else if let Some(lazy) = shared {
+        out.push_str(&format!(
+            "render-wasm: shared ({} bytes, sha256 {})\n",
+            lazy.len,
+            lazy.sha256.get(..12).unwrap_or(lazy.sha256)
+        ));
+    } else {
+        out.push_str("render-wasm: MISSING (run `cargo xtask build-q2-preview-spa` and rebuild)\n");
+    }
     if let Some(info) = bundle::build_info_json() {
         out.push_str("build-info: ");
         out.push_str(info.trim());
@@ -208,4 +305,100 @@ fn launcher_info() -> Result<String> {
         Err(e) => out.push_str(&format!("node: NOT FOUND — {}\n", e)),
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    fn file(path: &str, contents: &[u8]) -> BundleFile {
+        (
+            PathBuf::from(path),
+            BundleContents::Bytes(Cow::Owned(contents.to_vec())),
+        )
+    }
+
+    /// A shared-WASM stand-in whose provider panics: the extraction-set
+    /// code must key on the stamped identity and never materialize the
+    /// ~36 MB payload (that happens only when extraction writes files).
+    fn lazy(sha256: &'static str) -> LazyBytes {
+        fn unused() -> Option<&'static [u8]> {
+            panic!("the extraction set must not materialize the shared WASM");
+        }
+        LazyBytes {
+            sha256,
+            len: 12,
+            get: unused,
+        }
+    }
+
+    /// A pre-dedupe bundle (its own WASM inside) extracts as-is, even
+    /// when a shared WASM exists.
+    #[test]
+    fn extraction_keeps_bundle_embedded_wasm_as_is() {
+        let files = vec![
+            file("index.mjs", b"mjs"),
+            file(quarto_wasm_embed::WASM_FILENAME, b"wasm"),
+        ];
+        let out =
+            extraction_files(files.clone(), Some(lazy("cafe"))).expect("self-contained bundle");
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            bundle::content_hash(&out),
+            bundle::content_hash(&files),
+            "no shared append, no hash change"
+        );
+    }
+
+    /// A dedupe-stripped bundle gets the shared WASM appended as a lazy
+    /// entry under the fixed sibling name, and the hash tracks the
+    /// stamped WASM identity without touching the bytes.
+    #[test]
+    fn extraction_appends_shared_wasm_under_the_fixed_name() {
+        let files = vec![file("index.mjs", b"mjs")];
+        let out =
+            extraction_files(files.clone(), Some(lazy("cafe01"))).expect("shared wasm present");
+        assert_eq!(out.len(), 2);
+        let (path, contents) = &out[1];
+        assert_eq!(path, Path::new(quarto_wasm_embed::WASM_FILENAME));
+        let BundleContents::Lazy(appended) = contents else {
+            panic!("the shared WASM rides as a lazy entry");
+        };
+        assert_eq!(appended.sha256, "cafe01");
+        assert_ne!(
+            bundle::content_hash(&out),
+            bundle::content_hash(&files),
+            "the cache key must track the WASM identity"
+        );
+        let out_other = extraction_files(files.clone(), Some(lazy("deadbeef"))).unwrap();
+        assert_ne!(
+            bundle::content_hash(&out),
+            bundle::content_hash(&out_other),
+            "different shared WASM, different cache key"
+        );
+    }
+
+    /// A stripped bundle with no shared WASM anywhere is a build-time
+    /// inconsistency; the error must name the fix.
+    #[test]
+    fn extraction_without_any_wasm_names_the_rebuild() {
+        let files = vec![file("index.mjs", b"mjs")];
+        let err = extraction_files(files, None).expect_err("no WASM anywhere");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("build-q2-preview-spa"),
+            "error must point at the rebuild path: {msg}"
+        );
+    }
+
+    #[test]
+    fn mismatch_warning_fires_only_on_real_mismatch() {
+        assert!(wasm_mismatch_warning(None, "aaaa").is_none());
+        assert!(wasm_mismatch_warning(Some("aaaa"), "aaaa").is_none());
+        let warning = wasm_mismatch_warning(Some("deadbeef"), "cafe00").expect("mismatch warns");
+        assert!(warning.contains("deadbeef"));
+        assert!(warning.contains("cafe00"));
+        assert!(warning.contains("build-hub-mcp-bundle"));
+    }
 }

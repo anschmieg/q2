@@ -41,6 +41,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::http::HeaderValue;
 use quarto_p2p::{TunnelConnection, TunnelError, TunnelStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -428,14 +429,16 @@ async fn serve_local(
     };
     let parts = asset_response_parts(
         rel,
-        file.to_vec(),
+        Bytes::from_static(file),
         embedded_gz(ui, rel),
         AssetRequestCtx {
             accept_encoding: accept_encoding.as_ref(),
             is_head,
         },
     );
-    let mut out = Vec::with_capacity(parts.body.len() + 512);
+    // Head into a small buffer; the body writes straight from its
+    // (zero-copy) Bytes — no ~36 MB copy for the render WASM.
+    let mut out = Vec::with_capacity(512);
     out.extend_from_slice(
         format!(
             "HTTP/1.1 {} {}\r\n",
@@ -451,8 +454,8 @@ async fn serve_local(
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"connection: close\r\n\r\n");
-    out.extend_from_slice(&parts.body);
     let _ = tcp.write_all(&out).await;
+    let _ = tcp.write_all(&parts.body).await;
     tracing::trace!(rel, "join frontend: served locally");
 }
 

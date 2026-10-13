@@ -4,27 +4,30 @@
 //! release locks automatically, and corrupted/raced cache states heal.
 
 use fs2::FileExt;
-use quarto_mcp_launcher::{DEFAULT_MAX_AGE, LAST_USED_FILE, LOCK_FILE, extract_and_lock, gc};
+use quarto_mcp_launcher::{
+    BundleContents, BundleFile, DEFAULT_MAX_AGE, LAST_USED_FILE, LOCK_FILE, LazyBytes,
+    extract_and_lock, gc,
+};
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
-type BundleFile = (PathBuf, Cow<'static, [u8]>);
+fn bytes_file(path: &str, contents: &'static [u8]) -> BundleFile {
+    (
+        PathBuf::from(path),
+        BundleContents::Bytes(Cow::Borrowed(contents)),
+    )
+}
 
 fn test_bundle() -> Vec<BundleFile> {
     vec![
-        (
-            PathBuf::from("index.mjs"),
-            Cow::Borrowed(b"// fake bundle entry\n".as_slice()),
-        ),
-        (
-            PathBuf::from("build-info.json"),
-            Cow::Borrowed(b"{}\n".as_slice()),
-        ),
-        (
-            PathBuf::from("node_modules/@napi-rs/keyring/index.js"),
-            Cow::Borrowed(b"// fake addon loader\n".as_slice()),
+        bytes_file("index.mjs", b"// fake bundle entry\n"),
+        bytes_file("build-info.json", b"{}\n"),
+        bytes_file(
+            "node_modules/@napi-rs/keyring/index.js",
+            b"// fake addon loader\n",
         ),
     ]
 }
@@ -261,4 +264,87 @@ fn launch_after_gc_re_extracts() {
     // Next launch simply re-extracts.
     let again = extract_and_lock(cache.path(), &test_bundle(), HASH).unwrap();
     assert!(again.dir.join("index.mjs").is_file());
+}
+
+static MATERIALIZATIONS: AtomicU32 = AtomicU32::new(0);
+static PAYLOAD: &[u8] = b"lazy wasm stand-in";
+
+fn counting_provider() -> Option<&'static [u8]> {
+    MATERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
+    Some(PAYLOAD)
+}
+
+fn lazy_bundle() -> Vec<BundleFile> {
+    let mut bundle = test_bundle();
+    bundle.push((
+        PathBuf::from("wasm_quarto_hub_client_bg.wasm"),
+        BundleContents::Lazy(LazyBytes {
+            sha256: "cafe",
+            len: PAYLOAD.len() as u64,
+            get: counting_provider,
+        }),
+    ));
+    bundle
+}
+
+/// The shared render WASM rides the extraction set as a lazy entry:
+/// a cold extraction materializes and writes it exactly once, and a
+/// warm relaunch — the common case — never touches the payload at all
+/// (no decode, no hash of its ~36 MB).
+#[test]
+fn lazy_payload_materializes_on_cold_extraction_only() {
+    let cache = tempfile::tempdir().unwrap();
+    let before = MATERIALIZATIONS.load(Ordering::Relaxed);
+
+    let first = extract_and_lock(cache.path(), &lazy_bundle(), HASH).unwrap();
+    assert_eq!(
+        fs::read(first.dir.join("wasm_quarto_hub_client_bg.wasm")).unwrap(),
+        PAYLOAD,
+        "cold extraction writes the materialized payload"
+    );
+    assert_eq!(
+        MATERIALIZATIONS.load(Ordering::Relaxed),
+        before + 1,
+        "cold extraction materializes exactly once"
+    );
+    drop(first);
+
+    let second = extract_and_lock(cache.path(), &lazy_bundle(), HASH).unwrap();
+    assert!(
+        second.dir.join("wasm_quarto_hub_client_bg.wasm").is_file(),
+        "warm relaunch serves the already-extracted payload"
+    );
+    assert_eq!(
+        MATERIALIZATIONS.load(Ordering::Relaxed),
+        before + 1,
+        "warm relaunch must not materialize the payload"
+    );
+    drop(second);
+}
+
+/// A Lazy entry whose payload is absent (a build broken past the
+/// launcher's up-front validation) fails the extraction naming the
+/// file — it must never silently write an empty or partial bundle.
+#[test]
+fn missing_lazy_payload_fails_extraction_naming_the_file() {
+    fn absent() -> Option<&'static [u8]> {
+        None
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let mut bundle = test_bundle();
+    bundle.push((
+        PathBuf::from("w.wasm"),
+        BundleContents::Lazy(LazyBytes {
+            sha256: "x",
+            len: 1,
+            get: absent,
+        }),
+    ));
+    let err = extract_and_lock(cache.path(), &bundle, HASH)
+        .err()
+        .expect("extraction must fail");
+    assert!(
+        format!("{err:?}").contains("w.wasm"),
+        "the error names the file: {err:?}"
+    );
 }

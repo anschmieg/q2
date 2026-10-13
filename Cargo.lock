@@ -6603,6 +6603,7 @@ dependencies = [
  "fs2",
  "include_dir",
  "libc",
+ "quarto-wasm-embed",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6711,6 +6712,7 @@ dependencies = [
  "quarto-source-map",
  "quarto-system-runtime",
  "quarto-trace",
+ "quarto-wasm-embed",
  "reqwest 0.12.28",
  "samod",
  "serde",
@@ -6900,6 +6902,14 @@ dependencies = [
  "dirs",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "quarto-wasm-embed"
+version = "0.32.0"
+dependencies = [
+ "sha2 0.11.0",
+ "zstd",
 ]
 
 [[package]]
