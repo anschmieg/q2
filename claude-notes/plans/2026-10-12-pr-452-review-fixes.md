@@ -24,7 +24,7 @@ against main's CI topology (the `workspace-ts-suites` job from GH #250).
 - [x] sass comments: `wasm-host-entry.mjs` + v2 plan doc contradict the build script (sass is bundled)
 - [x] `get_errors` description: note large-project latency vs client timeout
 - [ ] Braid strand for the embedded-WASM dedupe follow-up — DEFERRED, braid publishes on create; do after approval
-- [ ] Verify: `npm run build` + `npm test` (quarto-hub-mcp), no-WASM worktree run, `cargo xtask lint`, dist smoke check
+- [x] Verify: `npm run build` + `npm test` (quarto-hub-mcp), no-WASM worktree run, `cargo xtask lint`, dist smoke check
 
 ## Out of scope (author's call after the review lands)
 
