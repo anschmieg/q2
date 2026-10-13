@@ -2,7 +2,7 @@
 title: 'React components bound to document elements in `format: html` (bd-react-components-a8flgldm)'
 date: 2026-10-13
 description: 'Assessment and design for letting a .qmd bind React components to elements of its HTML output: the pandoc-rendered markup is the no-script version, a small ESM runtime mounts the component over it, components come from project files or npm, and the binding is declared in metadata or on the element. Designed to compose with lmd and type: metadata listings and to share one component contract with the q2 preview renderer.'
-status: in-progress  # S1 to S4 landed 2026-10-13; S5 (docs) next
+status: done  # S1 to S5 landed 2026-10-13 on the topic branch; follow-ups filed (see Spikes)
 braid:
   strand: bd-react-components-a8flgldm
 ---
@@ -252,14 +252,15 @@ Each spike is one commit with its tests and ends with this plan updated. S1 is t
 
 - [x] **S4. `.tsx` decision (oxc spike).** Done 2026-10-13; option B (transpile in Rust) is the default and option A was not built. New crate `crates/quarto-transpile` wraps `oxc_parser`, `oxc_semantic`, `oxc_transformer` and `oxc_codegen` (0.154, source maps off): `transpile(source, file_name)` strips types, compiles JSX through the automatic runtime from `react`, rewrites relative `.ts`/`.tsx` import specifiers to `.js`, and reports oxc's diagnostics with line and column; `relative_imports_of` lists a module's relative imports without transforming it. The transform ships a bound component's whole module graph within the project: TypeScript and JSX files become artifacts under `site_libs/quarto-components/<path>.js`, plain JavaScript is copied, each file once per page, with the `./x.js`-for-`x.ts` convention accepted. New code Q-25-9 (module could not be prepared: a syntax error with its position, an unreadable file, an import that names no file). Measurements: the oxc dependency set adds about 18 s of wall-clock debug compile time (parallel, cold) natively and about 11 s for wasm32; the debug `q2` binary grows by 5.0 MB (2.7%); the crate builds for `wasm32-unknown-unknown` under the workspace's `panic=unwind` flags once `oxc_codegen`\'s source-map feature is off. Fixture: `typed.qmd` in `components-basic`, a `.tsx` component importing a typed helper from `lib/pad.ts`. Tests: 6 in the crate, 5 transform tests on a real on-disk project (TSX entry with TS and JS imports, JS entry with shared helper shipped once, transpile error, missing import, import outside the project), 1 end-to-end pin; verified by hand in Chromium (the transpiled module and its helper load, state updates).
 
-- [ ] **S5. Docs and diagnostics.** `docs/guides/authoring/components.qmd` (or a section of `extensions.qmd`), the `Q-` error pages, a line in the listings guide's "Listings as data" pointing at D9, the `render-components:` versus `components:` distinction in the preview docs, and a short "when to use `content: ast`" note aimed at authors who want the same component in the preview.
+- [x] **S5. Docs and diagnostics.** Done 2026-10-13. `docs/guides/authoring/components.qmd` (declaring, binding on the element, the props contract, `content: ast`, building the element from Lua with the listing example, failure behaviour, the preview status), registered in the authoring sidebar; the listings guide points at it from "Listings as data"; the nine `Q-25-*` error pages landed with their spikes. The `render-components:` versus `components:` distinction is one sentence in the guide, since the preview has no user docs for `render-components:` to extend.
 
 Rough size: S1 two to three days (the vendoring xtask and the runtime are new ground); S2 one day; S3 one day; S4 one to two days including the measurement; S5 one day.
 
-**Filed outside this strand** (to be created when S1 lands, so they can reference the real module layout):
+**Filed outside this strand** (2026-10-13, after S4):
 
-- *`npm:` sources through the import map* (D6, deferred by decision 5): esm.sh with `external=react,react-dom`, version required, plus the vendoring command. Until then an `npm:` `src` is a diagnostic naming the follow-up.
-- *Preview half* (D8, sibling strand under bd-j3764r9a by decision 6): name-keyed registry and attribute dispatch in `preview-renderer`, import-map shim for `react` in the preview iframe, module serving from the VFS/SPA, the S1 and S3 fixtures in the q2-preview Playwright harness, DOM-parity opt-in once the Div attribute parity child is fixed.
+- bd-1qtykde1: *`npm:` sources through the import map* (D6, deferred by decision 5): esm.sh with `external=react,react-dom`, version required, plus the vendoring command. Until then an `npm:` `src` is Q-25-3.
+- bd-s73m7at2: *the preview half* (D8, sibling strand under bd-j3764r9a by decision 6): name-keyed registry and attribute dispatch in `preview-renderer`, import-map shim for `react` in the preview iframe, module serving from the VFS/SPA, `quarto-transpile` in the hub-client WASM in place of Babel, the fixtures in the q2-preview Playwright harness, DOM-parity opt-in once the Div attribute parity child is fixed.
+- bd-3swqhbsa: *a browser smoke harness for rendered output* (S1 finding 4): Playwright over `q2 preview --static` on the components fixtures.
 
 ## S1 findings (2026-10-13)
 
