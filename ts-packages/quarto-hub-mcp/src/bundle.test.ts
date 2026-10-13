@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -61,8 +62,19 @@ describe.skipIf(!wasmPkgAvailable())('bundle smoke', () => {
     expect(fs.statSync(wasm).size).toBeGreaterThan(10_000_000);
     const info = JSON.parse(
       fs.readFileSync(path.join(bundleDir, 'build-info.json'), 'utf8'),
-    ) as { gitCommit: string; nodeTarget: string; keyringPackages: string[] };
+    ) as {
+      gitCommit: string;
+      nodeTarget: string;
+      wasmSha256?: string;
+      keyringPackages: string[];
+    };
     expect(info.nodeTarget).toBe('node24');
+    // The dedupe marker q2's launcher keys the embed strip on: it must
+    // record the shipped WASM's actual sha256.
+    const actualSha = createHash('sha256')
+      .update(fs.readFileSync(wasm))
+      .digest('hex');
+    expect(info.wasmSha256).toBe(actualSha);
     expect(info.keyringPackages).toContain('keyring');
     expect(info.keyringPackages.length).toBeGreaterThanOrEqual(2);
     // the keyring loader package plus at least one platform addon

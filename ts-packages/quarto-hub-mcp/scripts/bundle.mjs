@@ -37,7 +37,8 @@
 
 import * as esbuild from 'esbuild';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,6 +134,25 @@ await esbuild.build({
 // artifacts must fail the build.
 await buildWasmHost({ outDir });
 
+// The q2-embed dedupe contract (plan
+// claude-notes/plans/2026-10-13-wasm-embed-dedupe.md): recording the
+// shipped WASM's sha256 here tells q2's launcher it may strip the
+// .wasm from the *q2 embed* (the q2 binary embeds the WASM once, via
+// quarto-wasm-embed) and restore it at extraction time, warning if the
+// shared copy's sha differs from this one. The bundle itself always
+// ships the WASM — the standalone tarball / npx channel has no shared
+// crate to draw from. Pre-dedupe launchers ignore the field.
+let wasmSha256;
+try {
+  wasmSha256 = createHash('sha256')
+    .update(readFileSync(join(outDir, 'wasm_quarto_hub_client_bg.wasm')))
+    .digest('hex');
+} catch {
+  // buildWasmHost above already refused to ship without the WASM, so
+  // this is unreachable; the stamp must never be what fails a build.
+  wasmSha256 = undefined;
+}
+
 // --- ship the keyring addon as a mini node_modules ---------------------
 // The staged platform packages must match the **release target's**
 // users, not the build host: release jobs request explicit platforms
@@ -177,6 +197,7 @@ writeFileSync(
       gitDirty,
       builtAt: new Date().toISOString(),
       nodeTarget: NODE_TARGET,
+      ...(wasmSha256 ? { wasmSha256 } : {}),
       keyringPackages: copied.sort(),
     },
     null,

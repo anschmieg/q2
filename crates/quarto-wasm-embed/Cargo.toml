@@ -1,0 +1,16 @@
+[package]
+name = "quarto-wasm-embed"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embeds the wasm-quarto-hub-client render WASM exactly once into the q2 binary; quarto-preview serves it over HTTP and quarto-mcp-launcher extracts it next to wasm-host.mjs."
+
+[dependencies]
+zstd.workspace = true
+
+[build-dependencies]
+zstd.workspace = true
+
+[lints]
+workspace = true

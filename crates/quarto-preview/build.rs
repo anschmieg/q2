@@ -27,6 +27,17 @@
 //! the binary; the runtime regenerates gzip responses lazily) and
 //! exposed via `cargo:rustc-env`, consumed by `src/lib.rs` through
 //! `include_bytes!(env!("$VAR"))`.
+//!
+//! One file is excluded from the viewer archive: the Vite-hashed
+//! ~36 MB `wasm_quarto_hub_client_bg-*.wasm`. It rides the binary
+//! exactly once via the `quarto-wasm-embed` crate (shared with
+//! `q2 mcp`'s launcher; plan
+//! `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`), and the
+//! runtime lookup serves the shared bytes at the path recorded in
+//! `QUARTO_PREVIEW_SHARED_WASM_REL`. The scan rule must match
+//! quarto-wasm-embed's build.rs exactly — that crate embeds the very
+//! file this script strips, so the served bytes are what Vite
+//! content-hashed, by construction.
 
 use std::path::{Path, PathBuf};
 
@@ -68,15 +79,34 @@ fn main() {
         watch_recursive(&editor_dist);
     }
 
+    // WASM dedupe (plan 2026-10-13): strip the Vite-hashed render WASM
+    // from the viewer archive — quarto-wasm-embed carries it instead,
+    // and `lookup_embedded` serves the shared bytes at this path. A
+    // placeholder dist, or a dirty one (zero or several matches),
+    // disables the strip: the archive then carries whatever the embed
+    // dir carries, exactly as before the dedupe.
+    let shared_wasm_rel = if viewer_is_real {
+        find_hashed_wasm(&real_dist)
+    } else {
+        None
+    };
+    if let Some(rel) = &shared_wasm_rel {
+        println!("cargo:rustc-env=QUARTO_PREVIEW_SHARED_WASM_REL={rel}");
+    }
+
     // Archive both embed dirs as deterministic identity-only tar.zst
     // (bd-rem4bpee) — after the editor manifest write above, so
     // `spa-manifest.json` rides inside the editor archive.
-    let viewer_archive = archive_embed_dir(&embed_dir, "viewer-embed.tar.zst");
+    let viewer_archive = archive_embed_dir(
+        &embed_dir,
+        "viewer-embed.tar.zst",
+        shared_wasm_rel.as_deref(),
+    );
     println!(
         "cargo:rustc-env=QUARTO_PREVIEW_EMBED_ARCHIVE={}",
         viewer_archive.display()
     );
-    let editor_archive = archive_embed_dir(&editor_embed_dir, "editor-embed.tar.zst");
+    let editor_archive = archive_embed_dir(&editor_embed_dir, "editor-embed.tar.zst", None);
     println!(
         "cargo:rustc-env=QUARTO_HUB_CLIENT_EMBED_ARCHIVE={}",
         editor_archive.display()
@@ -86,14 +116,19 @@ fn main() {
 /// Archive an embed dir as a deterministic tar.zst in `OUT_DIR`
 /// (bd-rem4bpee). Identity files only: the `.gz` precompression
 /// siblings are incompressible and stay out of the binary — the
-/// runtime regenerates gzip responses lazily. Deterministic for
-/// reproducible builds: entries sorted by relative path, forward-slash
-/// normalized, mtime 0, fixed mode.
-fn archive_embed_dir(dir: &Path, archive_name: &str) -> PathBuf {
+/// runtime regenerates gzip responses lazily. `exclude` (a
+/// dist-relative, forward-slash path) drops one file from the archive
+/// — the render-WASM strip, served from the shared embed instead.
+/// Deterministic for reproducible builds: entries sorted by relative
+/// path, forward-slash normalized, mtime 0, fixed mode.
+fn archive_embed_dir(dir: &Path, archive_name: &str, exclude: Option<&str>) -> PathBuf {
     use std::io::Write;
 
     let mut rels = Vec::new();
     collect_identity_files(dir, dir, &mut rels);
+    if let Some(excluded) = exclude {
+        rels.retain(|rel| rel != Path::new(excluded));
+    }
     rels.sort();
 
     let mut builder = tar::Builder::new(Vec::new());
@@ -148,6 +183,23 @@ fn collect_identity_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
                 .to_path_buf(),
         );
     }
+}
+
+/// The dist-relative (`assets/…`) path of the Vite-hashed render WASM
+/// when `dist` carries exactly one — the shared-embed strip target
+/// (plan 2026-10-13). Zero (unbuilt/odd dist) or several (dirty dist)
+/// matches disable the strip. The rule must match quarto-wasm-embed's
+/// build.rs: that crate embeds the very file stripped here.
+fn find_hashed_wasm(dist: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dist.join("assets")).ok()?;
+    let mut matches: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with("wasm_quarto_hub_client_bg-") && name.ends_with(".wasm"))
+        .collect();
+    matches.sort();
+    (matches.len() == 1).then(|| format!("assets/{}", matches[0]))
 }
 
 fn watch_recursive(root: &Path) {

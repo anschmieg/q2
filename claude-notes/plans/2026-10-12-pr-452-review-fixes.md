@@ -62,8 +62,13 @@ skips; bundle.test.ts green (release path, real WASM);
   fix remains in the PR's original commits on origin; the user will
   file it as a separate PR (2026-10-13).
 - Docs check: no user-facing source page for the MCP tools exists on
-  main (only stale _site output) — nothing small to fix; a tools guide
+  main (only stale `_site` output) — nothing small to fix; a tools guide
   is a follow-up candidate.
 - Braid strand for the WASM dedupe follow-up: dropped (user decision
   2026-10-13) — the follow-up is already public in the PR description
   and in the v2 plan's backlog, so a strand would be bookkeeping only.
+- WASM dedupe: implemented on this branch (user request 2026-10-13) —
+  plan `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`. Also fixes
+  the latent release-pipeline gap found while scoping it (the per-target
+  `build` legs and the `hub-mcp-bundle` job run `npm run bundle` without
+  the wasm-pack artifacts; `web-payloads` now uploads them).

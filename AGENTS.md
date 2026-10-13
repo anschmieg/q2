@@ -270,6 +270,7 @@ When fixing ANY bug:
 - `quarto-core`: core rendering infrastructure for Quarto
 - `quarto-util`: shared utilities for Quarto crates
 - `quarto-error-catalog`: Quarto's `Q-*` error-code catalog data + the `CatalogProvider` it installs into `quarto-error-reporting`
+- `quarto-wasm-embed`: embeds the `wasm-quarto-hub-client` render WASM exactly once into the `q2` binary (zstd-compressed, lazily decoded); `q2 preview` serves it over HTTP and `q2 mcp`'s launcher extracts it next to `wasm-host.mjs`. See `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`.
 
 **Externalized foundation crates** (published to crates.io from their own `posit-dev/` repos; consumed here as version deps, no longer in `crates/`):
 - `quarto-error-reporting`: uniform, helpful, beautiful error messages — now **catalog-agnostic** (the `Q-*` data lives in the in-tree `quarto-error-catalog`). Repo: `posit-dev/quarto-error-reporting`. The `json` wire shape is behind a default-off `json` feature; q2's wire-shape consumers enable it.
@@ -455,6 +456,13 @@ cargo xtask build-q2-preview-spa      # bundle WASM into q2-preview-spa/dist/
 cargo build --bin q2                  # re-embed dist/ via include_dir!
 ```
 
+Note: the ~36 MB `wasm_quarto_hub_client_bg-*.wasm` is no longer part
+of the preview's embedded archive itself — `quarto-preview`'s build.rs
+strips it and the server reads the bytes from the `quarto-wasm-embed`
+crate, which embeds the SPA dist's copy (so the chain above still
+refreshes it; `q2 mcp` draws from the same crate). The served bytes,
+hashed URL, and gzip behavior are unchanged.
+
 `cargo xtask verify` (without `--skip-hub-build`) runs steps 1 and 2
 as part of the hub-build leg; after it finishes you still need step 3
 manually if you want the next `q2 preview` invocation to be fresh.
@@ -475,6 +483,17 @@ whatever bundle was last built — after changing `quarto-hub-mcp`,
 cargo xtask build-hub-mcp-bundle      # rebuild dist-bundle/ from TS sources
 cargo build --bin q2                  # re-embed via include_dir!
 ```
+
+One file is NOT re-embedded from the bundle: when `build-info.json`
+carries `wasmSha256` (every fresh bundle does), the launcher strips
+`wasm_quarto_hub_client_bg.wasm` from its embed and extracts the
+`quarto-wasm-embed` crate's copy instead — the q2 binary carries the
+render WASM exactly once. After changing Rust code that flows into
+the WASM, rebuild BOTH payloads (`cargo xtask build-hub-mcp-bundle`
+for the bundle's glue + sha stamp, `cargo xtask build-q2-preview-spa`
+for the shared embed source) before `cargo build --bin q2`; a
+generation mismatch prints a stderr warning at `q2 mcp` launch naming
+both commands.
 
 `cargo xtask build-all` includes the bundle step (ordered before the
 Rust build). Diagnose staleness with `q2 mcp --launcher-info`, which

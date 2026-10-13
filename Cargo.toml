@@ -130,6 +130,9 @@ path = "./crates/quarto-util"
 [workspace.dependencies.spa-manifest]
 path = "./crates/spa-manifest"
 
+[workspace.dependencies.quarto-wasm-embed]
+path = "./crates/quarto-wasm-embed"
+
 [workspace.dependencies.quarto-yaml]
 version = "0.5.0"
 

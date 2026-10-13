@@ -44,7 +44,9 @@ pub use config::EnginePolicy;
 /// The SPA bundle embedded at build time as an identity-only tar.zst
 /// archive (bd-rem4bpee). See `build.rs` for how the source directory
 /// is chosen (real `q2-preview-spa/dist/` if present, else a
-/// placeholder) and archived.
+/// placeholder) and archived. One file is NOT in here: the Vite-hashed
+/// ~36 MB render WASM, stripped at build time so it rides the binary
+/// exactly once via [`SHARED_WASM_REL`].
 static EMBEDDED_SPA: EmbeddedBundle =
     EmbeddedBundle::new(include_bytes!(env!("QUARTO_PREVIEW_EMBED_ARCHIVE")));
 
@@ -797,19 +799,39 @@ fn current_ui() -> PreviewUi {
     PREVIEW_UI.get().copied().unwrap_or_default()
 }
 
+/// The dist-relative path of the Vite-hashed render WASM when the
+/// build embedded a real dist carrying exactly one (recorded by
+/// `build.rs`; plan `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`).
+/// That file is NOT in [`EMBEDDED_SPA`]'s archive — `build.rs` strips
+/// it so the ~36 MB WASM rides the q2 binary exactly once, embedded by
+/// the `quarto-wasm-embed` crate (shared with `q2 mcp`'s launcher).
+/// [`lookup_embedded`] serves the shared bytes at exactly this path.
+const SHARED_WASM_REL: Option<&str> = option_env!("QUARTO_PREVIEW_SHARED_WASM_REL");
+
 /// Resolve `rel` against the embedded bundles for the given UI mode.
 ///
 /// Editor mode looks in the editor embed first, then falls back to the
 /// viewer embed — the dedupe seam (Phase 4, bd-jt1etjbn): `build.rs`
 /// strips editor-dist files byte-identical to the viewer dist, so
-/// shared content-hashed assets (most notably the ~42 MB
-/// `wasm_quarto_hub_client_bg-*.wasm`) are embedded once, in the viewer
+/// shared content-hashed assets are embedded once, in the viewer
 /// bundle. Viewer mode never reads the editor embed.
+///
+/// The final fallback is the shared render-WASM embed
+/// ([`SHARED_WASM_REL`]): the hashed WASM path resolves to
+/// `quarto-wasm-embed`'s bytes in both UI modes, while any other
+/// (e.g. stale-hash) WASM path misses as before.
 fn lookup_embedded(ui: PreviewUi, rel: &str) -> Option<&'static [u8]> {
     match ui {
         PreviewUi::Viewer => EMBEDDED_SPA.get(rel),
         PreviewUi::Editor => EMBEDDED_EDITOR.get(rel).or_else(|| EMBEDDED_SPA.get(rel)),
     }
+    .or_else(|| {
+        if SHARED_WASM_REL == Some(rel) {
+            quarto_wasm_embed::wasm_bytes()
+        } else {
+            None
+        }
+    })
 }
 
 /// The editor embed's `index.html`, when present (real dist or
@@ -1257,6 +1279,44 @@ mod tests {
                 "fallback for {rel} must serve the viewer's bytes"
             );
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Shared render-WASM embed (plan 2026-10-13): the ~36 MB
+    // `wasm_quarto_hub_client_bg-*.wasm` is stripped from the viewer
+    // archive and served from quarto-wasm-embed, so the q2 binary
+    // carries the WASM exactly once (q2 mcp's launcher shares it).
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stripped_wasm_path_resolves_to_the_shared_embed() {
+        let Some(rel) = SHARED_WASM_REL else {
+            eprintln!("placeholder or dirty tree (no single hashed wasm); skipping");
+            return;
+        };
+        let shared = quarto_wasm_embed::wasm_bytes()
+            .expect("a stripped tree implies the shared crate embedded the wasm");
+        assert!(
+            EMBEDDED_SPA.get(rel).is_none(),
+            "{rel} must be stripped from the viewer archive — one copy in the binary"
+        );
+        for ui in [PreviewUi::Viewer, PreviewUi::Editor] {
+            let served = lookup_embedded(ui, rel)
+                .unwrap_or_else(|| panic!("{ui:?} must resolve the stripped wasm path"));
+            assert_eq!(served, shared, "{ui:?} must serve the shared embed bytes");
+        }
+    }
+
+    #[test]
+    fn stale_hashed_wasm_path_still_misses() {
+        // A URL hashed by an earlier build must not resolve to the
+        // current wasm — content-addressed caching depends on the miss.
+        let bogus = "assets/wasm_quarto_hub_client_bg-DEADbeef00.wasm";
+        if SHARED_WASM_REL == Some(bogus) {
+            return; // cannot happen (not a real hash); keeps the intent honest
+        }
+        assert!(lookup_embedded(PreviewUi::Viewer, bogus).is_none());
+        assert!(lookup_embedded(PreviewUi::Editor, bogus).is_none());
     }
 
     // ──────────────────────────────────────────────────────────────

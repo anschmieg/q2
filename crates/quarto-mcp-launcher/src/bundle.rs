@@ -76,6 +76,30 @@ pub fn build_info_json() -> Option<&'static str> {
         .and_then(|f| f.contents_utf8())
 }
 
+/// The `wasmSha256` field of the embedded `build-info.json` — the
+/// dedupe marker (plan
+/// `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`): bundles that
+/// record it ship WITHOUT the render WASM in the q2 embed (build.rs
+/// strips it) and the launcher restores it from `quarto-wasm-embed` at
+/// extraction time. `None` for placeholder builds and pre-dedupe
+/// bundles (which keep their own WASM in the embed).
+pub fn embedded_wasm_sha256() -> Option<String> {
+    build_info_json().and_then(parse_wasm_sha256)
+}
+
+/// Parse the `wasmSha256` field out of a raw `build-info.json` blob.
+fn parse_wasm_sha256(build_info: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(build_info).ok()?;
+    Some(value.get("wasmSha256")?.as_str()?.to_string())
+}
+
+/// Lowercase-hex SHA-256 of `bytes` (used to compare the shared render
+/// WASM against the bundle's recorded `wasmSha256`).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +135,29 @@ mod tests {
         let h = content_hash(&[file("x", b"y")]);
         assert_eq!(h.len(), 16);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_wasm_sha256_reads_the_field() {
+        let info = "{\n  \"gitCommit\": \"abc\",\n  \"wasmSha256\": \"deadbeef00\",\n  \"keyringPackages\": []\n}\n";
+        assert_eq!(parse_wasm_sha256(info).as_deref(), Some("deadbeef00"));
+    }
+
+    #[test]
+    fn parse_wasm_sha256_absent_on_pre_dedupe_and_garbage() {
+        // Pre-dedupe bundle: no field at all.
+        assert_eq!(parse_wasm_sha256("{\"gitCommit\": \"abc\"}"), None);
+        // Not JSON, or the field of the wrong shape: no marker.
+        assert_eq!(parse_wasm_sha256("not json"), None);
+        assert_eq!(parse_wasm_sha256("{\"wasmSha256\": 42}"), None);
+    }
+
+    #[test]
+    fn sha256_hex_is_lowercase_hex_of_the_bytes() {
+        // SHA-256 of the empty input, a well-known constant.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

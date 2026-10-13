@@ -61,7 +61,7 @@ Bundling (two consumers):
   `hub-client/wasm-quarto-hub-client/` via an env override
   (`QUARTO_HUB_MCP_WASM_DIR`) falling back to a path probe.
 - esbuild bundle (`dist-bundle/`, embedded in `q2 mcp`): extend
-  `crates/xtask`'s build-hub-mcp-bundle with the three bridge aliases +
+  `crates/xtask`\'s build-hub-mcp-bundle with the three bridge aliases +
   `sass` external, and copy `wasm_quarto_hub_client_bg.wasm` (~38 MB) into
   `dist-bundle/`. Note: the q2 binary already embeds a second copy of this
   WASM for the preview SPA — dedupe is a follow-up, not v1.
@@ -158,11 +158,13 @@ branch commit.
   2. deleteFile/renameFile leave stale `captures` sidecar entries
   3. preview red-bars `date-modified: last-modified` (keyword unresolvable
      in browser VFS) as if it were a document error
-  4. dedupe the two embedded copies of wasm_quarto_hub_client_bg.wasm in q2
+  4. ~~dedupe the two embedded copies of wasm_quarto_hub_client_bg.wasm in q2~~
+     DONE (2026-10-13, on `pr-452-fixes`): plan
+     `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`
 
 ## v1 disposition
 `feature/hub-mcp-get-errors` (sidecar publish/read, fully implemented and
-tested) is preserved as a branch. If a human-facing "see collaborators'
+tested) is preserved as a branch. If a human-facing "see collaborators\'
 preview state" feature is ever wanted, that work is a starting point — but
 it is intentionally NOT part of this PR.
 
@@ -171,7 +173,7 @@ it is intentionally NOT part of this PR.
 - The spike and Phase 3 above say "`sass` external (never needed for
   diagnostics)". That did not survive contact with the real render: the
   html pipeline compiles themes even for a diagnostics-only run, so the
-  shipped host bundles dart-sass in. `wasm-host-entry.mjs`'s header
+  shipped host bundles dart-sass in. `wasm-host-entry.mjs`\'s header
   comment repeated the stale claim; corrected in the fixes branch.
 - Review follow-ups landed in `pr-452-fixes` (plan
   `claude-notes/plans/2026-10-12-pr-452-review-fixes.md`): stub host for
