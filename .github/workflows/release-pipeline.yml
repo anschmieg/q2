@@ -284,6 +284,12 @@ jobs:
             trace-viewer/dist
             q2-preview-spa/dist
             agents-docs-dist
+            # The wasm-pack artifacts (glue JS + .wasm) themselves: the
+            # per-target build legs and the hub-mcp-bundle job run
+            # `npm run bundle`, whose buildWasmHost refuses to bundle
+            # without them — and rebuilding them here would mean the
+            # whole wasm32/wasm-bindgen/binaryen toolchain on every leg.
+            hub-client/wasm-quarto-hub-client
           retention-days: 7
           if-no-files-found: error
 
@@ -308,7 +314,9 @@ jobs:
   # build already relies on — see stage-keyring.mjs).
   hub-mcp-bundle:
     name: Build standalone hub MCP bundle
-    needs: check-inputs
+    # web-payloads: the bundle build needs the wasm-pack artifacts
+    # (hub-client/wasm-quarto-hub-client/) for the WASM render host.
+    needs: [check-inputs, web-payloads]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -330,6 +338,15 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      # Target-independent payloads from the web-payloads job, placed
+      # where the bundle build looks for them — the wasm-pack artifacts
+      # (hub-client/wasm-quarto-hub-client/) are required: buildWasmHost
+      # refuses to ship a stub host.
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-payloads
+          path: .
+
       # esbuild compiles the @quarto/* workspace deps from TS source (the
       # `source` condition in scripts/bundle.mjs), so no prior workspace
       # build is needed here.
@@ -343,7 +360,9 @@ jobs:
         shell: bash
         run: |
           DIR=ts-packages/quarto-hub-mcp/dist-bundle
-          for f in index.mjs build-info.json; do
+          # wasm-host.mjs + the .wasm: the standalone bundle has no
+          # shared crate to draw the render WASM from, so it must ship.
+          for f in index.mjs build-info.json wasm-host.mjs wasm_quarto_hub_client_bg.wasm; do
             test -f "$DIR/$f" || { echo "::error::$DIR/$f missing"; exit 1; }
           done
           IFS=',' read -ra PLATFORMS <<< "$KEYRING_PLATFORMS"
