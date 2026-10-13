@@ -63,5 +63,6 @@ skips; bundle.test.ts green (release path, real WASM);
 - Docs check: no user-facing source page for the MCP tools exists on
   main (only stale _site output) — nothing small to fix; a tools guide
   is a follow-up candidate.
-- Braid strand for the WASM dedupe follow-up: still deferred (braid
-  publishes on create).
+- Braid strand for the WASM dedupe follow-up: dropped (user decision
+  2026-10-13) — the follow-up is already public in the PR description
+  and in the v2 plan's backlog, so a strand would be bookkeeping only.
