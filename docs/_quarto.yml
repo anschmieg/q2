@@ -430,6 +430,14 @@ website:
             - errors/import/Q-24-12.qmd
             - errors/import/Q-24-13.qmd
             - errors/import/Q-24-14.qmd
+        - section: "components"
+          contents:
+            - errors/components/Q-25-1.qmd
+            - errors/components/Q-25-2.qmd
+            - errors/components/Q-25-3.qmd
+            - errors/components/Q-25-4.qmd
+            - errors/components/Q-25-5.qmd
+            - errors/components/Q-25-6.qmd
 
 format:
   html:

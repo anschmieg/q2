@@ -42,6 +42,7 @@ pub mod ast_walk;
 pub mod attribution;
 pub mod brand_fonts;
 pub mod cell_options;
+pub mod components;
 pub mod config_sources;
 pub mod crossref;
 pub mod dates;

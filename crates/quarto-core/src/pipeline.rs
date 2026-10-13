@@ -2093,6 +2093,9 @@ fn capture_untransformed_ast_json(content: &[u8], source_name: &str) -> Option<S
 ///     numbers/targets from the project-wide registry (book-projects P5;
 ///     no-op without the registry)
 /// 20. `CrossrefRenderTransform` - Resolve crossref custom nodes to final HTML structure
+/// 20a. `ComponentsResolveTransform` - Bind `components:` declarations to their
+///     Divs/Spans and ship the component modules, vendored React and the client
+///     runtime (bd-react-components-a8flgldm; HTML render only)
 /// 21. `ResourceCollectorTransform` - Collect image dependencies
 /// Select the format-specific footer-render stage.
 ///
@@ -2529,6 +2532,18 @@ pub fn build_transform_pipeline(
     // profile; bucket B3, registered for every profile and excluded for none. After every
     // content transform that survives the Pandoc cut, so the whole tree it sees is final.
     pipeline.push(Box::new(EditorialMarksOoxmlTransform::new()));
+    // bd-react-components-a8flgldm: bind `components:` declarations to
+    // their Divs/Spans (`data-quarto-component`), copy the modules under
+    // `site_libs/quarto-components/`, register the vendored React ESM +
+    // runtime artifacts and put the import map / manifest / module tag
+    // in the header slot. After every content transform (the marked
+    // element is final) and before `resource-collector` (a bound
+    // subtree's images are still collected). `HtmlRender` only;
+    // excluded from q2-preview via `Q2_PREVIEW_TRANSFORM_EXCLUDED`, the
+    // preview owns its own component loading (plan D8).
+    pipeline.push(Box::new(
+        crate::transforms::ComponentsResolveTransform::new(),
+    ));
     pipeline.push(Box::new(ResourceCollectorTransform::new()));
     // bd-3qych45b: render hephaestus plot documents (`![](plot.hep)`)
     // to SVG artifacts under `figure-html/` and point the image at
@@ -2707,6 +2722,13 @@ const Q2_PREVIEW_TRANSFORM_EXCLUDED: &[&str] = &[
     // the proper preview story — tracked as a follow-up strand.
     "panel-tabset",
     "panel-tabset-resolve",
+    // `components-resolve` marks bound elements, copies modules into the
+    // output tree and injects an import map + module script for the
+    // static page. The preview renders the AST itself and will load
+    // components through its own registry (plan
+    // `2026-10-13-react-components.md` D8, sibling strand); until then
+    // the preview shows the no-script content, which is the contract.
+    "components-resolve",
 ];
 
 /// Names of transforms in [`build_transform_pipeline`] that a Pandoc-writer
@@ -2741,6 +2763,7 @@ const PANDOC_TRANSFORM_EXCLUDED: &[&str] = &[
     "mermaid-render",
     "code-block-render",
     "table-bootstrap-class",
+    "components-resolve",
     // B2: HTML scaffolding / website chrome producers with no Pandoc-writer
     // analog.
     "title-block",
@@ -2981,6 +3004,11 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     ("mermaid-render", Bucket::B4),
     ("code-block-render", Bucket::B4),
     ("table-bootstrap-class", Bucket::B4),
+    // Marks bound Divs/Spans with `data-quarto-component`, ships the
+    // component modules + vendored React + runtime and injects the head
+    // block (bd-react-components-a8flgldm). Pure HTML presentation; the
+    // transform also self-gates on `PipelineProfile::HtmlRender`.
+    ("components-resolve", Bucket::B4),
     // Swaps a `.hep` plot-document reference for a rendered SVG artifact —
     // an HTML-only presentation decision (sibling of `responsive-image`,
     // which it runs immediately before). No Pandoc-writer analog exists yet.
@@ -6429,6 +6457,7 @@ mod tests {
                 "mermaid-render",
                 "code-block-render",
                 "editorial-marks-ooxml",
+                "components-resolve",
                 "resource-collector",
                 "hephaestus-render",
                 "table-bootstrap-class",
@@ -6521,6 +6550,7 @@ mod tests {
                 "mermaid-render",
                 "code-block-render",
                 "editorial-marks-ooxml",
+                "components-resolve",
                 "resource-collector",
                 "hephaestus-render",
                 "table-bootstrap-class",

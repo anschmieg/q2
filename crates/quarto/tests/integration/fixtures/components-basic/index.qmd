@@ -1,0 +1,14 @@
+---
+title: "A counter"
+components:
+  - name: counter
+    src: counter.js
+---
+
+Before the component.
+
+::: {#counter .demo}
+This is the **no-script** content: a count of `0`.
+:::
+
+After the component.

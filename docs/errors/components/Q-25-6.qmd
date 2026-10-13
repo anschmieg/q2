@@ -1,0 +1,42 @@
+---
+title: "Invalid component option value"
+description: "A component's `bind` is not `#id` or `.class`, or its `content` is not `dom`, `ast` or `none`. The entry is skipped."
+code: Q-25-6
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-6` — Invalid component option value
+
+> A component's `bind` is not `#id` or `.class`, or its `content` is not `dom`, `ast` or `none`. The entry is skipped.
+
+## What this means
+
+Two options take a fixed vocabulary. `bind` is a selector of exactly one
+of two forms, `#id` or `.class`; `content` chooses how the element's
+content reaches the component: `dom` (the default: the rendered markup is
+handed back as `children`), `ast` (the node's Pandoc AST is attached as
+JSON and arrives as `node`), or `none`. Any other value is this warning,
+and the entry is skipped.
+
+## Why this happens
+
+- `bind:` is a general CSS selector (`div.card`, `#a > p`), which is not
+  supported: bindings are resolved on the document tree at render time,
+  where only ids and classes are known.
+- `bind:` has a space or a second `#`/`.` in it.
+- `content:` is misspelled or capitalized.
+
+## How to fix
+
+Write `bind: "#some-id"` (quoted, since `#` starts a YAML comment) or
+`bind: .some-class`, and one of `content: dom`, `content: ast`,
+`content: none`.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.
