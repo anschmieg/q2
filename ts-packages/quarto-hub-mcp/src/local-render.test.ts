@@ -173,3 +173,78 @@ export async function render_page_in_project() {
     }
   });
 });
+
+describe('incremental VFS fill', () => {
+  it('re-adds only changed files between renders (payload identity)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'rec-host-'));
+    const hostPath = path.join(dir, 'rec-host.mjs');
+    await writeFile(
+      hostPath,
+      `globalThis.__vfsCalls = [];
+export async function ensureInit() {}
+export function vfs_clear() { globalThis.__vfsCalls.push(['clear']); }
+export function vfs_add_file(p) { globalThis.__vfsCalls.push(['add', p]); }
+export function vfs_add_binary_file(p) { globalThis.__vfsCalls.push(['addbin', p]); }
+export function vfs_remove_file(p) { globalThis.__vfsCalls.push(['rm', p]); }
+export async function render_page_in_project() {
+  return JSON.stringify({ success: true, diagnostics: [], warnings: [] });
+}
+`,
+    );
+    const calls = (): string[][] => (globalThis as Record<string, string[][]>).__vfsCalls;
+    const prev = process.env['QUARTO_HUB_MCP_WASM_HOST'];
+    process.env['QUARTO_HUB_MCP_WASM_HOST'] = pathToFileURL(hostPath).href;
+    try {
+      vi.resetModules();
+      const mod = await import('./local-render.js');
+      const bqmd: FilePayload = { type: 'text', text: 'b' };
+      await mod.renderDiagnostics(
+        new Map<string, FilePayload>([
+          ['a.qmd', { type: 'text', text: 'a1' }],
+          ['b.qmd', bqmd],
+        ]),
+        'a.qmd',
+      );
+      // First render: one clear, then every file added.
+      expect(calls()).toEqual([
+        ['clear'],
+        ['add', '/project/a.qmd'],
+        ['add', '/project/b.qmd'],
+      ]);
+
+      // Second render: a.qmd changed (new object), b.qmd identical
+      // (same object) — only a.qmd is rewritten, no clear.
+      const mark = calls().length;
+      await mod.renderDiagnostics(
+        new Map<string, FilePayload>([
+          ['a.qmd', { type: 'text', text: 'a2' }],
+          ['b.qmd', bqmd],
+        ]),
+        'a.qmd',
+      );
+      expect(calls().slice(mark)).toEqual([
+        ['rm', '/project/a.qmd'],
+        ['add', '/project/a.qmd'],
+      ]);
+
+      // Third render: b.qmd deleted from the project — removed from the
+      // VFS, nothing re-added.
+      const mark2 = calls().length;
+      await mod.renderDiagnostics(
+        new Map<string, FilePayload>([['a.qmd', { type: 'text', text: 'a2' }]]),
+        'a.qmd',
+      );
+      // a.qmd here is a NEW object (this is how the write tools stage
+      // content), so it is rewritten; b.qmd is removed.
+      expect(calls().slice(mark2)).toEqual([
+        ['rm', '/project/b.qmd'],
+        ['rm', '/project/a.qmd'],
+        ['add', '/project/a.qmd'],
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env['QUARTO_HUB_MCP_WASM_HOST'];
+      else process.env['QUARTO_HUB_MCP_WASM_HOST'] = prev;
+      vi.resetModules();
+    }
+  });
+});

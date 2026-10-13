@@ -51,6 +51,7 @@ interface WasmHost {
   vfs_clear(): string;
   vfs_add_file(path: string, content: string): string;
   vfs_add_binary_file(path: string, content: Uint8Array): string;
+  vfs_remove_file(path: string): string;
   render_page_in_project(path: string): Promise<string>;
 }
 
@@ -79,6 +80,10 @@ function loadHost(): Promise<WasmHost> {
       return host;
     })();
     hostPromise = p;
+    // A fresh init attempt can produce a fresh VFS — the fill belief no
+    // longer describes it.
+    vfsBelief = null;
+    vfsBeliefHost = null;
     // A failed init (stub host, OOM, ...) must not wedge the server for
     // the rest of the process: clear the cache so the next render's
     // loadHost() tries again.
@@ -105,6 +110,16 @@ function normalizeProjectPath(p: string): string {
 let renderChain: Promise<unknown> = Promise.resolve();
 
 /**
+ * What we believe the VFS holds under `/project/`, keyed by project
+ * path. Only this module touches the VFS in this process and renders
+ * are serialized on renderChain, so the belief stays accurate between
+ * renders. Reset whenever that can stop holding: a fresh host init, or
+ * any render failure.
+ */
+let vfsBelief: Map<string, FilePayload> | null = null;
+let vfsBeliefHost: WasmHost | null = null;
+
+/**
  * Render `path` against a VFS filled with `files` and return the
  * structured diagnostics the render produced. Throws only on host
  * failures; render errors come back as diagnostics.
@@ -121,13 +136,34 @@ export function renderDiagnostics(
       throw new Error(`Not a text file in this project: ${path}`);
     }
 
-    host.vfs_clear();
+    // Incremental VFS fill: only write what changed since the last
+    // render, instead of clearing and re-copying every file (large
+    // binaries included) on every render. Payload object identity is
+    // the change signal — the sync client hands a fresh payload object
+    // per changed file, and the write tools stage a fresh object for
+    // the edited file — so unchanged files are not re-copied. A bare
+    // get_errors over N documents now pays one full fill, not N.
+    if (vfsBelief === null || vfsBeliefHost !== host) {
+      host.vfs_clear();
+      vfsBelief = new Map();
+      vfsBeliefHost = host;
+    }
+    const belief = vfsBelief;
+    for (const p of [...belief.keys()]) {
+      if (!files.has(p)) {
+        host.vfs_remove_file(`/project/${p}`);
+        belief.delete(p);
+      }
+    }
     for (const [p, payload] of files) {
+      if (belief.get(p) === payload) continue;
+      if (belief.has(p)) host.vfs_remove_file(`/project/${p}`);
       if (payload.type === 'text') {
         host.vfs_add_file(`/project/${p}`, payload.text);
       } else {
         host.vfs_add_binary_file(`/project/${p}`, payload.data);
       }
+      belief.set(p, payload);
     }
 
     const response = JSON.parse(await host.render_page_in_project(path)) as WasmRenderResponse;
@@ -195,7 +231,12 @@ export function renderDiagnostics(
       pass1Failures,
     };
   });
-  // Keep the chain alive whether or not this render succeeded.
-  renderChain = run.catch(() => undefined);
+  // Keep the chain alive whether or not this render succeeded. A failed
+  // render can leave the VFS inconsistent with the belief — reset it so
+  // the next render falls back to a full clear+refill.
+  renderChain = run.catch(() => {
+    vfsBelief = null;
+    vfsBeliefHost = null;
+  });
   return run;
 }
