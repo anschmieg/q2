@@ -51,3 +51,17 @@ current main it did not. Three breakages, all fixed here:
 Verification record: full package suite 291 passed / 3 platform
 skips; bundle.test.ts green (release path, real WASM);
 `cargo xtask lint` green; plain-Node double-render repro clean.
+
+## Additional points (2026-10-13)
+
+- Incremental VFS fill: implemented (payload-identity diff; one full
+  fill per project state instead of one per render).
+- local-prod-server.mjs drive-by: DROPPED from this branch (user
+  decision 2026-10-13 — no behavior regression: the branch never
+  touches the local-dev proxy, and main behaves this way today). The
+  fix remains in the PR's original commits on origin if wanted later.
+- Docs check: no user-facing source page for the MCP tools exists on
+  main (only stale _site output) — nothing small to fix; a tools guide
+  is a follow-up candidate.
+- Braid strand for the WASM dedupe follow-up: still deferred (braid
+  publishes on create).
