@@ -44,19 +44,28 @@ pub fn deno_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Build `<ext_dir>/dist/<name>.js` in place via the workspace import map.
-/// Hermetic (no network/lock). Caller gates on `deno_available()`.
+/// Build `<ext_dir>/dist/<name>.js` in place with the workspace aliases.
+/// Hermetic (no network): uses the `node_modules/@esbuild` binary from `npm ci`.
 pub fn build_bundle(ext_dir: &Path) {
-    let cfg = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/extension-build/deno.workspace.json");
     quarto_core::extension::build::build_ts_extension(
         quarto_core::extension::build::BuildOptions {
             ext_dir: Some(ext_dir.to_path_buf()),
-            config: Some(cfg),
+            config: None,
             workspace: false,
+            workspace_root: Some(workspace_root()),
+            esbuild_binary: None,
+            embedded_esbuild: None,
         },
     )
     .expect("build fixture bundle");
+}
+
+/// The q2 workspace root (two levels above this crate).
+pub fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
 }
 
 /// Build only if `name` is hermetic; else no-op (committed bundle used as-is).

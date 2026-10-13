@@ -50,6 +50,8 @@ node_modules/
 # Hub server secret — never commit this (matches any project subdirectory)
 **/.quarto/hub/hub.json
 ts-packages/*/dist/
+# esbuild binaries staged by `cargo xtask fetch-esbuild`, embedded in q2
+ts-packages/esbuild-embed/
 ts-packages/*/dist-bundle/
 # Exception: the engine-host-deno bundle is embedded into the q2 binary via
 # include_str! (plan1a-host "Bundle embedding"), so the single bundle file must

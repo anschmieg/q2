@@ -12,8 +12,9 @@
 //! 5. Build q2-preview-spa (if present; q2-preview Phase A.4 / bd-501n)
 //! 6. Build the hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
 //! 7. Build the engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
-//! 8. Build the Rust workspace (`cargo build --workspace`)
-//! 9. Stage the docs embed for `q2 docs llms` and re-embed it into the
+//! 8. Stage the esbuild binary `q2` embeds (`cargo xtask fetch-esbuild`)
+//! 9. Build the Rust workspace (`cargo build --workspace`)
+//! 10. Stage the docs embed for `q2 docs llms` and re-embed it into the
 //!    `q2` binary (bd-hwop1zii)
 //!
 //! Both SPAs (trace-viewer + q2-preview-spa) must build *before* the
@@ -45,6 +46,8 @@ pub struct BuildAllConfig {
     pub skip_hub_mcp_bundle: bool,
     /// Skip the engine-host-deno bundle build step (quarto-core embed artifact).
     pub skip_engine_host_bundle: bool,
+    /// Skip staging the esbuild binary `q2` embeds for `call build-ts-extension`.
+    pub skip_esbuild_embed: bool,
     /// Skip the q2-preview-spa build step. No-op when the SPA dir is
     /// absent (e.g. branches before bd-hfjj Phase 6).
     pub skip_q2_preview_spa_build: bool,
@@ -85,6 +88,10 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
         (
             "engine-host-deno bundle build",
             !config.skip_engine_host_bundle && engine_host_exists(&project_root),
+        ),
+        (
+            "esbuild embed (q2 call build-ts-extension)",
+            !config.skip_esbuild_embed && !config.skip_rust_build,
         ),
         ("Rust workspace build", !config.skip_rust_build),
         (
@@ -209,6 +216,15 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
             "engine-host-deno bundle build failed",
         )?;
         println!("✓ engine-host-deno bundle complete");
+    }
+
+    // Step: esbuild embed — `quarto-esbuild-embed` includes the binary staged
+    // here, so it must exist before the Rust build. Needs the npm install above
+    // only for `npm pack` (no node_modules involved).
+    if !config.skip_esbuild_embed && !config.skip_rust_build {
+        step_idx += 1;
+        banner(step_idx, total, "Staging esbuild for embedding in q2");
+        crate::fetch_esbuild::run(crate::fetch_esbuild::Args { target: None })?;
     }
 
     // Step: Rust workspace build

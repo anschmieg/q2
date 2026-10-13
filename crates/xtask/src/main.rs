@@ -37,6 +37,7 @@ mod capture_pandoc_goldens;
 mod capture_pandoc_recordings;
 mod create_worktree;
 mod dev_setup;
+mod fetch_esbuild;
 mod gen_math_spec;
 mod lint;
 mod node_version;
@@ -422,6 +423,19 @@ enum Command {
     /// `@quarto/api`, or `@quarto/types` sources.
     BuildEngineHostBundle {},
 
+    /// Stage the esbuild binary `q2` embeds for `q2 call build-ts-extension`.
+    ///
+    /// Downloads `@esbuild/<platform>` for `--target` (default: the host),
+    /// verifies it against `package-lock.json`, and writes
+    /// `ts-packages/esbuild-embed/<triple>/esbuild`. Rebuild `q2` afterwards
+    /// to embed it; without it `q2` embeds a placeholder and falls back to
+    /// `ESBUILD_BINARY_PATH` / `node_modules/@esbuild`.
+    FetchEsbuild {
+        /// Rust target triple (default: host).
+        #[arg(long)]
+        target: Option<String>,
+    },
+
     /// Fresh-clone build orchestration.
     ///
     /// Runs the full build sequence in dependency order, serving as the source
@@ -434,7 +448,8 @@ enum Command {
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
     /// 7. engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
-    /// 8. cargo build --workspace
+    /// 8. esbuild binary for q2's embed (fetch-esbuild)
+    /// 9. cargo build --workspace
     BuildAll {
         /// Skip `npm install`.
         #[arg(long)]
@@ -463,6 +478,10 @@ enum Command {
         /// Skip the engine-host-deno bundle build.
         #[arg(long)]
         skip_engine_host_bundle: bool,
+
+        /// Skip staging the esbuild binary q2 embeds.
+        #[arg(long)]
+        skip_esbuild_embed: bool,
 
         /// Skip the Rust workspace build.
         #[arg(long)]
@@ -578,6 +597,7 @@ fn main() -> Result<()> {
         Command::BuildHubClientEmbed {} => build_hub_client_embed::run(),
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
         Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
+        Command::FetchEsbuild { target } => fetch_esbuild::run(fetch_esbuild::Args { target }),
         Command::BuildAll {
             skip_npm_install,
             skip_ts_packages_build,
@@ -586,6 +606,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_bundle,
             skip_engine_host_bundle,
+            skip_esbuild_embed,
             skip_rust_build,
             skip_agents_docs,
             release,
@@ -599,6 +620,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_bundle,
                 skip_engine_host_bundle,
+                skip_esbuild_embed,
                 skip_rust_build,
                 release,
             };
