@@ -46,13 +46,17 @@
 //!
 //! ## WASM exclusion
 //!
-//! This module is gated `#[cfg(not(target_arch = "wasm32"))]`. The hub-
-//! client preview reinitializes its iframe on every render tick, which
-//! blows away any state held by Bootstrap components (open modals,
-//! expanded collapses, active tabs). Until the hub-client has a non-iframe
-//! renderer, shipping Bootstrap JS to the browser would be at best
-//! useless and at worst confusing. The cfg gate also keeps the 80KB
-//! payload out of the WASM bundle.
+//! This module is gated `#[cfg(not(target_arch = "wasm32"))]`, but NOT
+//! for the reason it originally was. The preview iframe is persistent
+//! (it re-renders its body via React on each `UPDATE_AST` and never
+//! reloads — `Q2PreviewIframe.tsx`), and it DOES run Bootstrap JS:
+//! Phase F.1 (bd-kw93.14) injects the same vendored bundle at
+//! `ts-packages/preview-renderer/src/q2-preview/entry.tsx` module top.
+//! The gate stays because the q2-preview pipeline excludes
+//! `ApplyTemplateStage`, so a `js:*` artifact registered under WASM
+//! would never become a `<script>` tag — chrome JS is iframe-template
+//! responsibility there, not document-render responsibility — and the
+//! cfg keeps the 80KB payload out of the WASM bundle.
 
 use std::path::PathBuf;
 
@@ -150,7 +154,10 @@ impl PipelineStage for BootstrapJsStage {
         //   `ApplyTemplateStage` uses to pick the minimal template
         //   that has no Bootstrap-aware `<head>` to inject into.
         let suppress_by_theme = match ThemeConfig::from_config_value(&doc.ast.meta) {
-            Ok(c) => c.suppress_bootstrap,
+            // Per-variant since bd-0pic6 A2: `{light: none, dark:
+            // darkly}` still compiles a Bootstrap-based dark variant,
+            // so JS ships iff ANY variant ships Bootstrap.
+            Ok(c) => !c.ships_bootstrap(),
             Err(e) => {
                 trace_event!(
                     ctx,
@@ -215,6 +222,8 @@ mod tests {
             is_single_file,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::html();
@@ -232,6 +241,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -245,7 +255,7 @@ mod tests {
 
     fn meta_with_theme(theme: &str) -> ConfigValue {
         let theme_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String(theme.to_string())),
+            value: ConfigValueKind::scalar(Yaml::String(theme.to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -260,9 +270,37 @@ mod tests {
         }
     }
 
+    /// Metadata with the Q1 light/dark map form:
+    /// `theme: {light: <light>, dark: <dark>}` (bd-o76p01wb).
+    fn meta_with_light_dark_theme(light: &str, dark: &str) -> ConfigValue {
+        let scalar = |s: &str| ConfigValue {
+            value: ConfigValueKind::scalar(Yaml::String(s.to_string())),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        let entry = |key: &str, value: ConfigValue| ConfigMapEntry {
+            key: key.to_string(),
+            key_source: SourceInfo::for_test(),
+            value,
+        };
+        let theme_value = ConfigValue {
+            value: ConfigValueKind::Map(vec![
+                entry("light", scalar(light)),
+                entry("dark", scalar(dark)),
+            ]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        ConfigValue {
+            value: ConfigValueKind::Map(vec![entry("theme", theme_value)]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        }
+    }
+
     fn meta_with_minimal(value: bool) -> ConfigValue {
         let v = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::Boolean(value)),
+            value: ConfigValueKind::scalar(Yaml::Boolean(value)),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -483,6 +521,73 @@ mod tests {
             "theme: none must not register Bootstrap JS"
         );
         assert!(ctx.artifacts.get_by_prefix("js:").is_empty());
+    }
+
+    /// `theme: {light: cosmo, dark: darkly}` → Bootstrap (light half)
+    /// is in use, so JS must be registered. Guards against the
+    /// pre-bd-o76p01wb behavior where the map form failed theme
+    /// parsing and this stage silently treated the failure as
+    /// `suppress_bootstrap`, shipping themed CSS without its JS.
+    #[tokio::test]
+    async fn light_dark_theme_map_registers_bootstrap_js() {
+        let runtime = Arc::new(MockRuntime);
+        let mut ctx = make_stage_context(runtime, true);
+
+        let stage = BootstrapJsStage::new();
+        stage
+            .run(
+                make_doc_ast(meta_with_light_dark_theme("cosmo", "darkly")),
+                &mut ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.artifacts.contains("js:bootstrap"),
+            "light/dark map form must not suppress Bootstrap JS"
+        );
+    }
+
+    /// `theme: {light: none, dark: darkly}` → the dark variant uses
+    /// Bootstrap even though the light variant opted out, so JS must
+    /// ship (bd-0pic6 A2: suppression is per-variant; JS ships iff
+    /// any variant ships Bootstrap).
+    #[tokio::test]
+    async fn light_none_dark_theme_still_registers_bootstrap_js() {
+        let runtime = Arc::new(MockRuntime);
+        let mut ctx = make_stage_context(runtime, true);
+
+        let stage = BootstrapJsStage::new();
+        stage
+            .run(
+                make_doc_ast(meta_with_light_dark_theme("none", "darkly")),
+                &mut ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.artifacts.contains("js:bootstrap"),
+            "a Bootstrap-using dark variant must ship Bootstrap JS even when light: none"
+        );
+    }
+
+    /// `theme: {light: none, dark: none}` → no variant uses Bootstrap.
+    #[tokio::test]
+    async fn both_variants_none_skip_bootstrap_js() {
+        let runtime = Arc::new(MockRuntime);
+        let mut ctx = make_stage_context(runtime, true);
+
+        let stage = BootstrapJsStage::new();
+        stage
+            .run(
+                make_doc_ast(meta_with_light_dark_theme("none", "none")),
+                &mut ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!ctx.artifacts.contains("js:bootstrap"));
     }
 
     /// `theme: pandoc` → user wants raw Pandoc HTML; no Bootstrap JS.

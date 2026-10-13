@@ -1,4 +1,8 @@
-# Default-project theme artifacts not flushed in hub-client
+---
+title: 'Default-project theme artifacts not flushed in hub-client'
+date: 2026-05-01
+description: 'Fixes hub-client so default projects flush their theme and other project-scope artifacts to the virtual file system, so themes appear on first render instead of only when cached from an earlier website render.'
+---
 
 ## Status
 
@@ -72,7 +76,7 @@ silently ignores the link.
 The trait doc (`orchestrator.rs:142-145`) explains the original
 intent:
 
-> Default projects ignore [project_artifacts] (single-doc renders
+> Default projects ignore \[project_artifacts\] (single-doc renders
 > flush per-doc inside `render_document_to_file` when no
 > orchestrator is involved).
 
@@ -84,7 +88,7 @@ per-doc fallback. WASM dropped it.
 
 ### Why the cross-render persistence makes the bug intermittent
 
-Per `crates/wasm-quarto-hub-client/CLAUDE.md`, the synthetic VFS
+Per `crates/wasm-quarto-hub-client/AGENTS.md`, the synthetic VFS
 at `/.quarto/project-artifacts/...` is "load-bearing across renders"
 — `flush_site_libs` writes there, the iframe post-processor reads
 from there, and `vfs_clear` is explicitly **not** called between
@@ -233,7 +237,7 @@ clean follow-up if we want to dedupe later.
       `<link>` to
       `…/.quarto/project-artifacts/quarto/quarto-theme-3a8b4a76bcc824ec.css`
       but no file exists at that path.
-- [~] §Test plan #2 (WASM-side test) — **subsumed** by §Test plan #1.
+- \[\~\] §Test plan #2 (WASM-side test) — **subsumed** by §Test plan #1.
       Per the comment at `crates/quarto-core/tests/render_page_in_project.rs:5-9`,
       that test file already exercises the *exact* code path the
       WASM `render_page_in_project` entry point drives

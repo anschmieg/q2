@@ -1,13 +1,14 @@
 import { defineConfig } from 'vite'
-import type { Plugin } from 'vite'
+import type { Plugin, ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import wasm from 'vite-plugin-wasm'
 import compression from 'compression'
 import { VitePWA } from 'vite-plugin-pwa'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import path from 'path'
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { execSync } from 'child_process'
+import { resolvePandocFlag } from './src/pandoc/buildFlag.ts'
 
 function getGitInfo() {
   try {
@@ -54,8 +55,39 @@ function attributionViewerCssPlugin(): Plugin {
 /** Hub server URL. Override with VITE_HUB_SERVER env var. */
 const hubTarget = process.env.VITE_HUB_SERVER || 'http://localhost:3000';
 
+/**
+ * Drop the /auth and /ws proxy entries entirely. The dev-harness
+ * Playwright suite (playwright.harness.config.ts) boots `vite dev` with
+ * no hub server at all; proxying at a dead target turns the app's auth
+ * keepalive probes into hundreds of ECONNREFUSED proxy errors per run
+ * (bd-a1cwdir9). Without a proxy those requests get a fast local 404.
+ */
+const disableHubProxy = process.env.VITE_DISABLE_HUB_PROXY === '1';
+
 /** Disable service worker in E2E tests to avoid caching interference */
 const isE2E = process.env.VITE_E2E === '1';
+
+/**
+ * Disable the PWA service worker entirely (`build:preview-embed`).
+ * The q2-preview embed serves this app from an ephemeral localhost
+ * origin per `q2 preview` session; a service worker would fill Cache
+ * Storage (precache + runtime-cached WASM) for every random port.
+ * The plugin stays registered with `disable: true` (rather than being
+ * omitted) so the `virtual:pwa-register` import in `src/main.tsx`
+ * resolves to a no-op stub in these builds.
+ */
+const disablePwa = process.env.VITE_DISABLE_PWA === '1';
+
+/**
+ * pandoc.wasm feature flag (H4): off when the asset was not fetched or
+ * `VITE_PANDOC_WASM=0` (the preview embed). Evaluated once per config load,
+ * so `vite dev` needs a restart after fetching the asset.
+ */
+const pandocFlag = resolvePandocFlag({
+  env: process.env,
+  assetExists: existsSync(path.resolve(__dirname, 'public/pandoc/pandoc.wasm.gz')),
+});
+if (pandocFlag.warning) console.warn(`[pandoc] ${pandocFlag.warning}`);
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -94,8 +126,12 @@ export default defineConfig({
         server.middlewares.use(middleware as any);
       },
     },
-    // Disable PWA service worker in E2E tests to avoid caching interference
-    ...(!isE2E ? [VitePWA({
+    // The plugin is always present so `virtual:pwa-register` resolves in
+    // every build (a no-op stub when disabled). `disable` covers E2E
+    // (caching interference) and the preview-embed build (ephemeral
+    // origins); neither generates a service worker.
+    VitePWA({
+      disable: isE2E || disablePwa,
       registerType: 'autoUpdate',
       includeAssets: ['quarto-icon.svg'],
       manifest: {
@@ -112,17 +148,66 @@ export default defineConfig({
         ]
       },
       workbox: {
-        // Precache all static assets including JS/CSS bundles and WASM
-        globPatterns: ['**/*.{html,js,css,svg,woff,woff2,wasm}'],
-        // Increase limit to include WASM files (largest is ~37MB and growing).
-        // Keep generous headroom: when a globbed asset exceeds this limit
-        // workbox emits a warning that vite-plugin-pwa throws as a fatal
-        // build error, so a too-tight ceiling breaks CI the moment the WASM
-        // creeps past it (see the 35MB ceiling that broke main after #379).
-        maximumFileSizeToCacheInBytes: 64 * 1024 * 1024,
+        // Precache the app shell only: HTML, JS/CSS bundles, fonts, icons.
+        // WASM and the on-demand chunks below are runtime-cached instead —
+        // an all-or-nothing ~56 MB precache meant one flaky fetch discarded
+        // the new SW and the old one kept serving (GH #447).
+        globPatterns: ['**/*.{html,js,css,svg,woff,woff2}'],
+        // Monaco workers (~9 MB) and the sass chunk (~3.2 MB) load on
+        // demand; they are content-hashed, so CacheFirst at runtime is
+        // correct and keeps them out of the atomic install.
+        // The pdf.js viewer (public/pdfjs/, ~10 MB incl. html/css/svg) is fetched on the first
+        // PDF view; `scripts/check-sw-precache.mjs` fails the build if any of it lands here.
+        globIgnores: ['**/*.worker-*.js', '**/sass.default-*.js', 'pdfjs/**'],
+        // The viewer is loaded in an iframe, which is a navigation request: without this the
+        // SPA fallback answers it with index.html and the viewer never starts (Chrome only;
+        // it is not precached, so nothing else would serve it from the SW).
+        navigateFallbackDenylist: [/\/pdfjs\//],
+        // Largest remaining precached file is main.js (~7.5 MB); 16 MB
+        // lets it more than double before tripping. Past the limit workbox
+        // warns and vite-plugin-pwa escalates to a fatal build error, so
+        // the ceiling guards against accidental re-inclusion of a large
+        // asset (silent precache re-bloat → install failures → #447) with
+        // a loud red CI instead. The override is required regardless:
+        // workbox's 2 MB default is already exceeded by main.js.
+        maximumFileSizeToCacheInBytes: 16 * 1024 * 1024,
         // Don't warn about large files - we know they're big
         dontCacheBustURLsMatching: /\.[0-9a-f]{8}\./,
         runtimeCaching: [
+          {
+            // Content-hashed WASM (quarto parser ~26 MB, automerge ~3.5 MB,
+            // tree-sitter). CacheFirst is correct: the URL changes when the
+            // bytes change.
+            urlPattern: /\/assets\/.*\.wasm$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'wasm-cache',
+              expiration: {
+                // Hashed URLs accumulate across deploys and runtime caches
+                // have no automatic old-revision cleanup — cap them.
+                maxEntries: 8,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
+              },
+              cacheableResponse: {
+                statuses: [200]
+              }
+            }
+          },
+          {
+            // Monaco workers + sass chunk: loaded on demand, content-hashed.
+            urlPattern: /\/assets\/(.*\.worker-.*|sass\.default-.*)\.js$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'ondemand-assets',
+              expiration: {
+                maxEntries: 12,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
+              },
+              cacheableResponse: {
+                statuses: [200]
+              }
+            }
+          },
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
             handler: 'CacheFirst',
@@ -153,12 +238,19 @@ export default defineConfig({
           }
         ]
       }
-    })] : [])
+    })
   ],
+  worker: {
+    // typst.ts (typst.worker.ts) imports its wasm wrapper dynamically, and the default IIFE worker
+    // format cannot code-split, so the chunk is inlined into the worker bundle. The compiler wasm
+    // itself is not bundled: the worker is handed a compiled Module (src/typst/typstAssets.ts).
+    rollupOptions: { output: { inlineDynamicImports: true } },
+  },
   define: {
     __GIT_COMMIT_HASH__: JSON.stringify(gitInfo.commitHash),
     __GIT_COMMIT_DATE__: JSON.stringify(gitInfo.commitDate),
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+    __PANDOC_WASM_ENABLED__: JSON.stringify(pandocFlag.enabled),
   },
   resolve: {
     // Prefer 'source' condition for workspace packages - allows Vite to transpile
@@ -176,7 +268,11 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['wasm-quarto-hub-client', '@automerge/automerge'],
+    // hephaestus-svg-wasm: the wasm-bindgen glue locates its .wasm and
+    // font files with `new URL(..., import.meta.url)`; esbuild
+    // pre-bundling would relocate the JS to node_modules/.vite/deps and
+    // break those relative lookups in dev (bd-sxiv2tio).
+    exclude: ['wasm-quarto-hub-client', '@automerge/automerge', 'hephaestus-svg-wasm'],
   },
   build: {
     target: 'esnext',
@@ -212,7 +308,8 @@ export default defineConfig({
   },
 })
 
-function proxyConfig() {
+function proxyConfig(): Record<string, string | ProxyOptions> {
+  if (disableHubProxy) return {};
   return {
     // Forward /auth/* to the hub server (JWT validation, cookies, OAuth callback).
     '/auth': {

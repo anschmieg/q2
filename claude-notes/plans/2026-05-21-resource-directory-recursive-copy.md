@@ -1,4 +1,11 @@
-# Directory resources should expand to recursive file copies (bd-47w7o)
+---
+title: 'Directory resources should expand to recursive file copies (bd-47w7o)'
+date: 2026-05-21
+description: 'Makes a literal directory listed as a project resource expand into a recursive copy of its files, matching TS Quarto, instead of failing with an I/O error.'
+braid:
+  strand: bd-47w7o
+  priority: P2
+---
 
 ## Overview
 
@@ -52,10 +59,10 @@ glob `dir/**/*`. The quarto-web entry hits the second branch
 
 `crates/quarto-core/src/project_resources.rs`:
 
-- **Glob branch (`expand_one`, ~line 196)**: already filters
+- **Glob branch (`expand_one`, \~line 196)**: already filters
   `path.is_dir() { continue; }` — only files come through. A
   user-written `/data/**/*` works correctly today.
-- **Literal branch (`expand_one`, ~line 230)**: resolves the path,
+- **Literal branch (`expand_one`, \~line 230)**: resolves the path,
   validates project-containment, and returns a single PathBuf. No
   `is_dir` check; downstream `file_copy` fails.
 

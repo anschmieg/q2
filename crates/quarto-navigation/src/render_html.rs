@@ -25,9 +25,9 @@ use quarto_source_map::{By, SourceInfo};
 
 use crate::footer::{FooterBorder, FooterRegion, PageFooter};
 use crate::item::NavigationItem;
-use crate::navbar::{Navbar, NavbarTitle};
+use crate::navbar::{LogoVariant, Navbar, NavbarTitle};
 use crate::page_nav::PageNavigation;
-use crate::sidebar::{Sidebar, SidebarEntry, SidebarStyle, SidebarTitle};
+use crate::sidebar::{Crumb, Sidebar, SidebarEntry, SidebarStyle, SidebarTitle};
 
 /// Render a complete navbar element.
 ///
@@ -43,7 +43,7 @@ use crate::sidebar::{Sidebar, SidebarEntry, SidebarStyle, SidebarTitle};
 /// pass `"./"` in unit tests / single-doc fallbacks. See bd-jgeu.
 pub fn navbar_to_html(
     navbar: &Navbar,
-    document_title_fallback: Option<&str>,
+    document_title_fallback: Option<&ConfigValue>,
     home_url: &str,
 ) -> String {
     let mut html = String::new();
@@ -81,7 +81,10 @@ pub fn navbar_to_html(
     }
     html.push_str(">\n");
 
-    html.push_str("  <div class=\"container-fluid\">\n");
+    // `navbar-container` is a Q1 hook class (quarto-nav.scss sizes it
+    // and user CSS keys on it); `container-fluid` supplies Bootstrap's
+    // gutter padding.
+    html.push_str("  <div class=\"navbar-container container-fluid\">\n");
 
     // Brand (title + logo).
     if let Some(brand_html) = render_brand(navbar, document_title_fallback, home_url) {
@@ -96,10 +99,14 @@ pub fn navbar_to_html(
             crate::navbar::TogglePosition::Left => "navbar-toggler",
             crate::navbar::TogglePosition::Right => "navbar-toggler ms-auto",
         };
+        // `onclick` freezes headroom while the collapse menu is open, so
+        // the header can't scroll away from under it (Q1 `navtoggle.ejs:3`,
+        // bd-ersobfbt). Guarded: inert when headroom.min.js isn't shipped.
         html.push_str(&format!(
             "    <button class=\"{}\" type=\"button\" data-bs-toggle=\"collapse\" \
              data-bs-target=\"#navbarCollapse\" aria-controls=\"navbarCollapse\" \
-             aria-expanded=\"false\" aria-label=\"Toggle navigation\">\n      \
+             aria-expanded=\"false\" aria-label=\"Toggle navigation\" \
+             onclick=\"if (window.quartoToggleHeadroom) {{ window.quartoToggleHeadroom(); }}\">\n      \
              <span class=\"navbar-toggler-icon\"></span>\n    </button>\n",
             toggler_classes
         ));
@@ -128,6 +135,22 @@ pub fn navbar_to_html(
             html.push_str(&render_navbar_item(item, 4));
         }
         html.push_str("      </ul>\n");
+    }
+
+    // Navbar tools slot (Q1's `quarto-navbar-tools`). Today it holds
+    // only the dark-mode toggle, emitted when the format has a dark
+    // theme variant (bd-0pic6 A4); general `tools:` support folds in
+    // here later (bd-fod3 / bd-ld-toggle-into-tools-hpae7m9r). Markup
+    // mirrors Q1's `navdarktoggle.ejs`: the `.alternate` class (synced
+    // by the color-mode runtime) drives the on/off icon via CSS.
+    if navbar.dark_mode_toggle {
+        html.push_str("      <div class=\"quarto-navbar-tools\">\n");
+        html.push_str(
+            "        <a href=\"\" class=\"quarto-color-scheme-toggle quarto-navigation-tool px-1\" \
+             onclick=\"window.quartoToggleColorScheme(); return false;\" \
+             title=\"Toggle dark mode\"><i class=\"bi\"></i></a>\n",
+        );
+        html.push_str("      </div>\n");
     }
     html.push_str("    </div>\n");
 
@@ -167,9 +190,14 @@ pub fn page_footer_to_html(footer: &PageFooter) -> String {
     html.push_str("  <div class=\"container-fluid\">\n");
     html.push_str("    <div class=\"nav-footer\">\n");
 
-    render_footer_region(&mut html, "nav-footer-left", &footer.left);
-    render_footer_region(&mut html, "nav-footer-center", &footer.center);
-    render_footer_region(&mut html, "nav-footer-right", &footer.right);
+    render_footer_region(&mut html, "nav-footer-left", &footer.left, None);
+    render_footer_region(
+        &mut html,
+        "nav-footer-center",
+        &footer.center,
+        footer.center_append.as_deref(),
+    );
+    render_footer_region(&mut html, "nav-footer-right", &footer.right, None);
 
     html.push_str("    </div>\n");
     html.push_str("  </div>\n");
@@ -199,7 +227,196 @@ pub fn page_footer_to_html(footer: &PageFooter) -> String {
 /// Phase 2 emits structurally-correct collapse markup (`data-bs-*`
 /// attributes, `aria-expanded`), but the actual JS glue lives in
 /// Phase 5 (`site_libs/`); until then the chevrons are inert.
+/// Render a breadcrumb trail — Q1's `.quarto-page-breadcrumbs` markup
+/// (bd-breadcrumbs-missing-1vpuqh34):
+///
+/// ```html
+/// <nav class="quarto-page-breadcrumbs …" aria-label="breadcrumb">
+///   <ol class="breadcrumb">
+///     <li class="breadcrumb-item"><a href="…">Text</a></li>
+///     …
+///   </ol>
+/// </nav>
+/// ```
+///
+/// `extra_classes` tags the placement variant — the title-block
+/// instance carries `quarto-title-breadcrumbs d-none d-lg-block`; the
+/// (future) secondary-nav instance carries none. Crumbs without text
+/// are skipped (Q1's `item.text || item.icon` filter, minus icons —
+/// q2 crumbs have no icon field yet); crumbs without an href render
+/// as unlinked text. Pure and resolver-free like its siblings —
+/// callers resolve crumb hrefs before rendering.
+pub fn breadcrumbs_to_html(crumbs: &[Crumb], extra_classes: &[&str]) -> String {
+    let mut classes = String::from("quarto-page-breadcrumbs");
+    for cls in extra_classes {
+        classes.push(' ');
+        classes.push_str(cls);
+    }
+    let mut html = format!(
+        "<nav class=\"{}\" aria-label=\"breadcrumb\"><ol class=\"breadcrumb\">",
+        classes
+    );
+    for crumb in crumbs {
+        let Some(text_cv) = &crumb.text else {
+            continue;
+        };
+        let text = render_text(text_cv);
+        html.push_str("<li class=\"breadcrumb-item\">");
+        match &crumb.href {
+            Some(href) => {
+                html.push_str("<a href=\"");
+                html.push_str(&escape_attr(href));
+                html.push_str("\">");
+                html.push_str(&text);
+                html.push_str("</a>");
+            }
+            None => html.push_str(&text),
+        }
+        html.push_str("</li>");
+    }
+    html.push_str("</ol></nav>");
+    html
+}
+
+/// What the narrow-viewport bar shows between the sidebar toggle and
+/// the right edge — Q1's two `nav-before-body.ejs` branches.
+pub enum SecondaryNavContent<'a> {
+    /// `bread-crumbs` enabled: already-rendered `nav.quarto-page-breadcrumbs`
+    /// markup. The mobile instance takes **no** extra classes (the
+    /// title-block instance is the one carrying `quarto-title-breadcrumbs
+    /// d-none d-lg-block`).
+    Breadcrumbs(&'a str),
+    /// `bread-crumbs: false`: the page title, collapsed into the bar.
+    CollapsedTitle(&'a ConfigValue),
+}
+
+/// Render `nav.quarto-secondary-nav` — the whole narrow-viewport
+/// navigation bar (bd-26bf3j1y). Hidden at `lg`+ by SCSS.
+///
+/// Ported from Q1 `nav-before-body.ejs:64-93`, checked against the
+/// rendered output of a Q1 site rather than the template alone. Two
+/// deliberate differences, each recorded in the plan (the third — no
+/// `quartoToggleHeadroom` onclick hooks — was closed by bd-ersobfbt,
+/// which ships headroom):
+///
+/// - **No search button.** Q1's calls `window.quartoOpenSearch()`
+///   unguarded; q2 has no search yet (bd-6cme), so the button would
+///   throw on click.
+/// - **`role="navigation"` only.** Q1's template sets both
+///   `role="navigation"` and `role="link"` on the same anchor; its own
+///   DOM postprocessor drops the duplicate, so one attribute is
+///   byte-parity with Q1's *output*.
+///
+/// The toggle targets `.quarto-sidebar-collapse-item`, which
+/// [`sidebar_to_html`] puts on `nav#quarto-sidebar` and on the glass
+/// pane beside it. Both halves must ship together — a toggle pointed at
+/// markup that doesn't exist is why this work was split out of
+/// bd-breadcrumbs-missing-1vpuqh34 in the first place.
+pub fn secondary_nav_to_html(content: SecondaryNavContent<'_>, toggle_label: &str) -> String {
+    let label = escape_attr(toggle_label);
+    // Shared by the button and the click-anywhere link: both open the
+    // same Bootstrap collapse target, and both freeze headroom while the
+    // sidebar drawer is open so the header can't slide away from under
+    // it (Q1 `nav-before-body.ejs:66-84`, bd-ersobfbt). The `onclick` is
+    // guarded — inert when headroom.min.js isn't shipped (`pinned:`).
+    let collapse_attrs = format!(
+        "data-bs-toggle=\"collapse\" data-bs-target=\".quarto-sidebar-collapse-item\" \
+         aria-controls=\"quarto-sidebar\" aria-expanded=\"false\" aria-label=\"{label}\" \
+         onclick=\"if (window.quartoToggleHeadroom) {{ window.quartoToggleHeadroom(); }}\""
+    );
+
+    let mut html = String::from("<nav class=\"quarto-secondary-nav\">\n");
+    html.push_str("  <div class=\"container-fluid d-flex\">\n");
+    html.push_str(&format!(
+        "    <button type=\"button\" class=\"quarto-btn-toggle btn\" role=\"button\" {collapse_attrs}>\n      \
+         <i class=\"bi bi-layout-text-sidebar-reverse\"></i>\n    </button>\n"
+    ));
+
+    match content {
+        SecondaryNavContent::Breadcrumbs(breadcrumbs_html) => {
+            html.push_str("    ");
+            html.push_str(breadcrumbs_html);
+            html.push('\n');
+            // Q1 follows the trail with a full-width link so tapping
+            // the empty space in the bar also opens the sidebar.
+            html.push_str(&format!(
+                "    <a class=\"flex-grow-1\" role=\"navigation\" {collapse_attrs}></a>\n"
+            ));
+        }
+        SecondaryNavContent::CollapsedTitle(title) => {
+            html.push_str(&format!(
+                "    <a class=\"flex-grow-1 no-decor\" role=\"navigation\" {collapse_attrs}>\n      \
+                 <h1 class=\"quarto-secondary-nav-title\">{}</h1>\n    </a>\n",
+                render_text(title)
+            ));
+        }
+    }
+
+    html.push_str("  </div>\n");
+    html.push_str("</nav>\n");
+    html
+}
+
+/// Render a sidebar **as if the page has no navbar**.
+///
+/// This convenience wrapper hardcodes
+/// [`SidebarRenderOptions::has_navbar`]` = false`, which is not a
+/// neutral default: it is the branch that *emits* the sidebar's own
+/// `sidebar-header`/`sidebar-title` block. The gate lives at the
+/// `SidebarTitle::Text(..) && !opts.has_navbar` condition in
+/// [`sidebar_to_html_with_options`] — read the comment there (and its
+/// FORWARD NOTE about a future `logo` field) before relying on this.
+///
+/// **Production code rendering a page sidebar must not call this.** Call
+/// [`sidebar_to_html_with_options`] with the real `has_navbar`, obtained
+/// from `page_has_navbar` in quarto-core's `transforms::config`, so the
+/// title is suppressed on navbar pages for Q1 parity
+/// (bd-sidebar-title-with-navbar-82wxow6m).
+///
+/// As of that change this wrapper has **no production callers** — every
+/// caller is a test in this file that wants the navbar-free rendering.
 pub fn sidebar_to_html(sidebar: &Sidebar, home_url: &str) -> String {
+    sidebar_to_html_with_options(
+        sidebar,
+        &SidebarRenderOptions {
+            home_url,
+            appended_html: None,
+            has_navbar: false,
+        },
+    )
+}
+
+/// Page-context options for [`sidebar_to_html_with_options`].
+///
+/// The Rust twin of the param bag `nav-before-body.ejs` hands to Q1's
+/// `sidebar.ejs` partial (`{ sidebar, sidebarStyle, navbar, toc,
+/// language, draftMode }`) — page context the sidebar renderer needs
+/// beyond the `Sidebar` data itself is passed as named fields here
+/// rather than accumulating positional parameters.
+pub struct SidebarRenderOptions<'a> {
+    /// Page-relative URL of the site root, used for the sidebar
+    /// title's home link.
+    pub home_url: &'a str,
+    /// Extra HTML fragment appended inside the `nav#quarto-sidebar`
+    /// element, after the menu — the seam for `toc-location: left`
+    /// (bd-e2kpwy7n): quarto-core's `SidebarRenderTransform` passes
+    /// the rendered `nav#TOC` block here so it lands after the nav
+    /// items, matching Q1's `sidebar.ejs` merge order (items first,
+    /// TOC target last).
+    pub appended_html: Option<&'a str>,
+    /// Whether the page also renders a navbar. When true, the
+    /// sidebar's own title is suppressed — Q1's `sidebar.ejs:51` gates
+    /// the title block on `!navbar`
+    /// (bd-sidebar-title-with-navbar-82wxow6m). See the comment at the
+    /// gate for why, and for what changes if `Sidebar` ever gains a
+    /// `logo` field.
+    pub has_navbar: bool,
+}
+
+/// [`sidebar_to_html`] with page context passed via [`SidebarRenderOptions`].
+pub fn sidebar_to_html_with_options(sidebar: &Sidebar, opts: &SidebarRenderOptions) -> String {
+    let home_url = opts.home_url;
+    let appended_html = opts.appended_html;
     let mut html = String::new();
 
     let style_class = match sidebar.style {
@@ -207,20 +424,63 @@ pub fn sidebar_to_html(sidebar: &Sidebar, home_url: &str) -> String {
         SidebarStyle::Floating => "sidebar-floating",
     };
 
+    // `collapse collapse-horizontal quarto-sidebar-collapse-item` make
+    // this a Bootstrap collapse target for the narrow-viewport toggle in
+    // `secondary_nav_to_html` (bd-26bf3j1y); `overflow-auto` lets a long
+    // menu scroll inside the drawer. Class order follows Q1's
+    // `sidebar.ejs:1`.
+    //
+    // NOTE: `collapse` alone would hide the sidebar at EVERY width —
+    // Bootstrap ships `.collapse:not(.show) { display: none }`. What
+    // keeps it visible on desktop is the `media-breakpoint-up(lg)`
+    // `#quarto-sidebar` display override in `_bootstrap-rules.scss`.
+    // The two must stay together; `test_sidebar_stays_visible_at_lg_
+    // despite_collapse_class` in quarto-sass guards the pairing,
+    // because no markup assertion can see it.
     html.push_str(&format!(
-        "<nav id=\"quarto-sidebar\" class=\"sidebar sidebar-navigation {}\" \
+        "<nav id=\"quarto-sidebar\" class=\"sidebar collapse collapse-horizontal \
+         quarto-sidebar-collapse-item sidebar-navigation {} overflow-auto\" \
          role=\"doc-toc\">\n",
         style_class
     ));
 
     // Title header — emitted only when the title resolved to a concrete
-    // value (`Text`). `Default` reaching the renderer means the resolver
-    // had nothing to substitute (no `website.title`); `Hidden` is an
-    // explicit `title: false`. Either way, no header. The Bootstrap
-    // utility classes match Q1's spacing/alignment for visual parity;
-    // they live here, not in the data model, so we can swap them out
-    // when SCSS evolves. Subtitle is parsed but not rendered yet.
-    if let SidebarTitle::Text(ref title_cv) = sidebar.title {
+    // value (`Text`) AND the page has no navbar. `Default` reaching the
+    // renderer means the resolver had nothing to substitute (no
+    // `website.title`); `Hidden` is an explicit `title: false`. Either
+    // way, no header. The Bootstrap utility classes match Q1's
+    // spacing/alignment for visual parity; they live here, not in the
+    // data model, so we can swap them out when SCSS evolves. Subtitle is
+    // parsed but not rendered yet.
+    //
+    // The `!opts.has_navbar` half is Q1's `sidebar.ejs:51` gate, dropped
+    // when the markup was ported (bd-sidebar-title-with-navbar-82wxow6m).
+    // The rationale is **navbar-item duplication**, not string
+    // duplication: a sidebar whose section has a navbar item sees that
+    // item render *active* on every page the sidebar covers
+    // (`navbar_generate.rs` `mark_active` → `nav-link active` below), so
+    // the navbar already tells the reader which section they are in and
+    // a banner atop the sidebar merely restates it. The markup confirms
+    // the intent — the element is an `<a href="/">` home link, and the
+    // title defaults to `website.title`: it is site/section branding for
+    // when no navbar carries it, not a heading for the sidebar's
+    // contents. Verified against Q1 as a matrix: the suppression holds
+    // even when the sidebar title and the site title are different
+    // strings, and even when the navbar carries no brand text at all —
+    // so this must NOT be narrowed into an equality check. Only the
+    // sidebar's own `title:` is affected; `- section:` labels inside
+    // `contents:` render normally.
+    //
+    // FORWARD NOTE: Q1 actually has *two* gates — an outer wrapper on
+    // `sidebar.logo || (sidebar.title && !navbar)` and an inner title
+    // block on `!navbar && sidebar.title`. They collapse into this one
+    // only because `Sidebar` has no `logo` field. When a `logo` lands,
+    // split them back apart so a logo still emits `sidebar-header`
+    // (plus `sidebar-header-stacked` when both are configured) under a
+    // navbar, while the title stays suppressed.
+    if let SidebarTitle::Text(ref title_cv) = sidebar.title
+        && !opts.has_navbar
+    {
         html.push_str("  <div class=\"sidebar-header pt-lg-2 mt-2 text-left\">\n");
         html.push_str(&format!(
             "    <div class=\"sidebar-title mb-0 py-0\"><a href=\"{}\">{}</a></div>\n",
@@ -240,7 +500,19 @@ pub fn sidebar_to_html(sidebar: &Sidebar, home_url: &str) -> String {
         html.push_str("  </div>\n");
     }
 
+    if let Some(extra) = appended_html {
+        html.push_str(extra);
+    }
     html.push_str("</nav>\n");
+    // Click-catching glass pane, a SIBLING of the sidebar (Q1
+    // `sidebar.ejs:100`). It shares the collapse-item class, so tapping
+    // the dimmed area outside an open drawer closes it — the only way
+    // out on a phone besides the toggle. SCSS gives it a z-index and a
+    // tint only below `lg`; at `lg`+ it is `display: none`.
+    html.push_str(
+        "<div id=\"quarto-sidebar-glass\" class=\"quarto-sidebar-collapse-item\" \
+         data-bs-toggle=\"collapse\" data-bs-target=\".quarto-sidebar-collapse-item\"></div>\n",
+    );
     html
 }
 
@@ -265,6 +537,59 @@ pub fn page_navigation_to_html(page_nav: &PageNavigation) -> String {
     render_page_nav_side(&mut html, "previous", page_nav.prev.as_ref());
     render_page_nav_side(&mut html, "next", page_nav.next.as_ref());
     html.push_str("</nav>\n");
+    html
+}
+
+/// Render the repository-action links as Q1's `.toc-actions` block.
+///
+/// `extra_classes` are appended to the wrapper's class list — the
+/// footer copy carries `d-sm-block d-md-none` so it is the
+/// small-screen fallback for the TOC copy.
+///
+/// Link text is emitted **unescaped**: it comes from the language
+/// terms, and Q1 assigns it via `a.innerHTML`. q2's own
+/// `toc_block_html` interpolates the `toc-title` term the same way.
+/// URLs and classes are escaped.
+///
+/// Returns an empty string for an empty link list, so callers can
+/// store the result unconditionally and gate on emptiness.
+pub fn repo_actions_to_html(
+    links: &[crate::repo_actions::RepoActionLink],
+    extra_classes: &[&str],
+    link_target: Option<&str>,
+    link_rel: Option<&str>,
+) -> String {
+    if links.is_empty() {
+        return String::new();
+    }
+
+    let mut class = String::from("toc-actions");
+    for extra in extra_classes {
+        class.push(' ');
+        class.push_str(extra);
+    }
+
+    let mut html = format!("<div class=\"{}\"><ul>", escape_attr(&class));
+    for link in links {
+        html.push_str("<li><a href=\"");
+        html.push_str(&escape_attr(&link.url));
+        html.push('"');
+        if let Some(target) = link_target {
+            html.push_str(&format!(" target=\"{}\"", escape_attr(target)));
+        }
+        if let Some(rel) = link_rel {
+            html.push_str(&format!(" rel=\"{}\"", escape_attr(rel)));
+        }
+        html.push_str(" class=\"toc-action\"><i class=\"bi ");
+        match link.icon.as_deref() {
+            Some(icon) => html.push_str(&format!("bi-{icon}")),
+            None => html.push_str("empty"),
+        }
+        html.push_str("\"></i>");
+        html.push_str(&link.text);
+        html.push_str("</a></li>");
+    }
+    html.push_str("</ul></div>");
     html
 }
 
@@ -309,46 +634,77 @@ fn render_page_nav_side(html: &mut String, side: &str, item: Option<&NavigationI
 
 // --- Private helpers ---------------------------------------------------------
 
-fn render_brand(navbar: &Navbar, fallback: Option<&str>, home_url: &str) -> Option<String> {
-    let href = navbar.logo_href.as_deref().unwrap_or(home_url);
-    let logo_img = navbar.logo.as_deref().map(|logo| {
-        let alt = navbar
-            .logo_alt
-            .as_deref()
-            .map(escape_attr)
-            .unwrap_or_default();
+/// Render the navbar brand in Q1's `navbrand.ejs` shape
+/// (bd-navbar-logo-unstyled-gbzd8vcu): a `.navbar-brand-container`
+/// div wrapping a `.navbar-brand.navbar-brand-logo` anchor for the
+/// logo and a separate `.navbar-brand` anchor with a `.navbar-title`
+/// span — the hooks Q1-documented user CSS keys on. Both anchors use
+/// `logo_href || home_url` (Q2 keeps the relative fallback instead of
+/// Q1's absolute `/index.html` — bd-root-relative-paths-design).
+///
+/// Deliberate deviation from Q1: a single logo (identical normalized
+/// halves) emits ONE unclassed `<img class="navbar-logo">` where Q1
+/// duplicates it as `light-content` + `dark-content`; distinct
+/// variants emit the classed pair, toggled by `_light-dark.scss`'s
+/// `body.quarto-light`/`body.quarto-dark` rules.
+fn render_brand(navbar: &Navbar, fallback: Option<&ConfigValue>, home_url: &str) -> Option<String> {
+    let href = escape_attr(navbar.logo_href.as_deref().unwrap_or(home_url));
+
+    let logo_anchor = navbar.logo.as_ref().map(|logo| {
+        let img = |variant: &LogoVariant, class: &str| {
+            format!(
+                "<img src=\"{}\" alt=\"{}\" class=\"{}\">",
+                escape_attr(&variant.path),
+                variant.alt.as_deref().map(escape_attr).unwrap_or_default(),
+                class
+            )
+        };
+        let imgs = if logo.is_single() {
+            img(&logo.light, "navbar-logo")
+        } else {
+            format!(
+                "{}{}",
+                img(&logo.light, "navbar-logo light-content"),
+                img(&logo.dark, "navbar-logo dark-content")
+            )
+        };
         format!(
-            "<img src=\"{}\" alt=\"{}\" class=\"navbar-logo\">",
-            escape_attr(logo),
-            alt
+            "<a href=\"{}\" class=\"navbar-brand navbar-brand-logo\">{}</a>",
+            href, imgs
         )
     });
 
-    let title_html = match &navbar.title {
+    let title_anchor = match &navbar.title {
         NavbarTitle::Hidden => None,
         NavbarTitle::Text(cv) => Some(render_text(cv)),
-        NavbarTitle::Default => fallback.map(escape_html),
-    };
+        // The fallback (`website.title` → document `title`) is a
+        // ConfigValue so PandocInlines-shaped titles — the common form
+        // once ConfigMarkdownTransform has run — render as inlines
+        // (raw HTML honored) instead of being flattened and escaped.
+        NavbarTitle::Default => fallback.map(render_text),
+    }
+    .map(|title_html| {
+        format!(
+            "<a class=\"navbar-brand\" href=\"{}\"><span class=\"navbar-title\">{}</span></a>",
+            href, title_html
+        )
+    });
 
     // Nothing to show? Skip brand entirely.
-    if logo_img.is_none() && title_html.is_none() {
+    if logo_anchor.is_none() && title_anchor.is_none() {
         return None;
     }
 
     let mut inner = String::new();
-    if let Some(l) = logo_img {
+    if let Some(l) = logo_anchor {
         inner.push_str(&l);
     }
-    if let Some(t) = title_html {
-        if !inner.is_empty() {
-            inner.push(' ');
-        }
+    if let Some(t) = title_anchor {
         inner.push_str(&t);
     }
 
     Some(format!(
-        "<a class=\"navbar-brand\" href=\"{}\">{}</a>",
-        escape_attr(href),
+        "<div class=\"navbar-brand-container mx-auto\">{}</div>",
         inner
     ))
 }
@@ -641,41 +997,51 @@ fn link_attrs(item: &NavigationItem) -> Vec<String> {
     attrs
 }
 
-fn render_footer_region(html: &mut String, class: &str, region: &FooterRegion) {
-    match region {
-        FooterRegion::Empty => {
-            // Emit an empty div so flex positioning stays consistent with
-            // themes that expect three regions.
-            html.push_str(&format!("    <div class=\"{}\"></div>\n", class));
-        }
-        FooterRegion::Text(cv) => {
-            html.push_str(&format!(
-                "    <div class=\"{}\">{}</div>\n",
-                class,
-                render_text(cv)
-            ));
-        }
+fn render_footer_region(
+    html: &mut String,
+    class: &str,
+    region: &FooterRegion,
+    append: Option<&str>,
+) {
+    let inner = match region {
+        FooterRegion::Empty => String::new(),
+        FooterRegion::Text(cv) => render_text(cv),
         FooterRegion::Items(items) => {
             // `.footer-items` is the class Quarto 1's SCSS targets for
-            // inline-flex alignment of links within a region. Including it
-            // on the `ul` keeps us compatible with that styling without
-            // wrapping the items in an extra element.
-            html.push_str(&format!("    <div class=\"{}\">\n", class));
-            html.push_str("      <ul class=\"nav footer-items\">\n");
+            // inline-flex alignment of links within a region.
+            let mut s = String::from("\n      <ul class=\"nav footer-items\">\n");
             for item in items {
-                html.push_str(&render_footer_item(item, 8));
+                s.push_str(&render_footer_item(item, 8));
             }
-            html.push_str("      </ul>\n");
-            html.push_str("    </div>\n");
+            s.push_str("      </ul>\n    ");
+            s
         }
-    }
+    };
+    html.push_str(&format!(
+        "    <div class=\"{}\">{}{}</div>\n",
+        class,
+        inner,
+        append.unwrap_or("")
+    ));
 }
 
 fn render_footer_item(item: &NavigationItem, indent: usize) -> String {
     let pad = " ".repeat(indent);
-    let mut attrs = link_attrs(item);
     let label = render_item_label(item);
-    let href = item.href.as_deref().unwrap_or("#");
+
+    // No href: emit the label directly in the `<li>`, with no wrapping
+    // anchor (bd-page-footer-items-f4th80mj, defect 5). Q1 does the same,
+    // and the sidebar already takes this shape for `SidebarEntry::Heading`.
+    //
+    // This is not cosmetic: item `text:` is markdown now, so a label
+    // carrying its own `<a>` — the common cookie-preferences pattern —
+    // would otherwise land *inside* this anchor and produce nested
+    // anchors, which is invalid HTML.
+    let Some(href) = item.href.as_deref() else {
+        return format!("{}<li class=\"nav-item\">{}</li>\n", pad, label);
+    };
+
+    let mut attrs = link_attrs(item);
     attrs.insert(0, format!("href=\"{}\"", escape_attr(href)));
     attrs.insert(1, "class=\"nav-link\"".to_string());
     format!(
@@ -695,17 +1061,30 @@ fn render_text(cv: &ConfigValue) -> String {
             // Footers written as `!md "multi-paragraph"` arrive as blocks.
             // For our single-line regions, concatenate block text as HTML.
             let mut out = String::new();
-            for block in blocks {
-                if let Some(inlines) = block_inlines(block) {
-                    out.push_str(&inlines_to_html(inlines));
-                }
-            }
+            push_blocks_text(&mut out, blocks);
             out
         }
         _ => cv
             .as_plain_text()
             .map(|s| escape_html(&s))
             .unwrap_or_default(),
+    }
+}
+
+/// Concatenate the inline HTML of a block sequence for single-line
+/// nav regions. Inline-bearing blocks contribute their inlines; a
+/// `Figure` contributes its *content* — the image — and drops the
+/// caption, because a figcaption has no place in a one-line footer
+/// (bd-page-footer-image-items-stmpikgo, Phase 3; an `!md` lone image
+/// parses to a persisted Figure). Other block shapes are skipped.
+fn push_blocks_text(out: &mut String, blocks: &[quarto_pandoc_types::block::Block]) {
+    use quarto_pandoc_types::block::Block;
+    for block in blocks {
+        if let Block::Figure(figure) = block {
+            push_blocks_text(out, &figure.content);
+        } else if let Some(inlines) = block_inlines(block) {
+            out.push_str(&inlines_to_html(inlines));
+        }
     }
 }
 
@@ -725,6 +1104,38 @@ fn inlines_to_html(inlines: &[Inline]) -> String {
         push_inline(&mut out, inline);
     }
     out
+}
+
+/// Emit an `Attr`'s id/class/kv attributes, each preceded by a space.
+/// `suppress_title_kv` skips a `title` kv when the caller already
+/// emitted the target's title — the target title wins (pandoc parity)
+/// and the element never carries a duplicate `title=` attribute.
+fn push_attr_html(
+    out: &mut String,
+    attr: &quarto_pandoc_types::attr::Attr,
+    suppress_title_kv: bool,
+) {
+    let (id, classes, kvs) = attr;
+    if !id.is_empty() {
+        out.push_str(" id=\"");
+        out.push_str(&escape_attr(id));
+        out.push('"');
+    }
+    if !classes.is_empty() {
+        out.push_str(" class=\"");
+        out.push_str(&escape_attr(&classes.join(" ")));
+        out.push('"');
+    }
+    for (k, v) in kvs {
+        if suppress_title_kv && k == "title" {
+            continue;
+        }
+        out.push(' ');
+        out.push_str(&escape_attr(k));
+        out.push_str("=\"");
+        out.push_str(&escape_attr(v));
+        out.push('"');
+    }
 }
 
 fn push_inline(out: &mut String, inline: &Inline) {
@@ -768,7 +1179,9 @@ fn push_inline(out: &mut String, inline: &Inline) {
             out.push_str("</span>");
         }
         Inline::Code(c) => {
-            out.push_str("<code>");
+            out.push_str("<code");
+            push_attr_html(out, &c.attr, false);
+            out.push('>');
             out.push_str(&escape_html(&c.text));
             out.push_str("</code>");
         }
@@ -782,13 +1195,25 @@ fn push_inline(out: &mut String, inline: &Inline) {
                 out.push_str(&escape_attr(title));
                 out.push('"');
             }
+            push_attr_html(out, &l.attr, !title.is_empty());
             out.push('>');
             out.push_str(&inlines_to_html(&l.content));
             out.push_str("</a>");
         }
         Inline::Span(s) => {
-            // Drop attributes for simplicity; render content.
-            out.push_str(&inlines_to_html(&s.content));
+            // Attr-less spans stay unwrapped — nav surfaces render
+            // minimal markup. An attributed span keeps its wrapper: the
+            // id/class may be what page JS or CSS hooks on (e.g. the
+            // Connect docs' cookie-preferences footer control).
+            if quarto_pandoc_types::attr::is_empty_attr(&s.attr) {
+                out.push_str(&inlines_to_html(&s.content));
+            } else {
+                out.push_str("<span");
+                push_attr_html(out, &s.attr, false);
+                out.push('>');
+                out.push_str(&inlines_to_html(&s.content));
+                out.push_str("</span>");
+            }
         }
         Inline::Quoted(q) => {
             use quarto_pandoc_types::inline::QuoteType;
@@ -806,8 +1231,40 @@ fn push_inline(out: &mut String, inline: &Inline) {
                 out.push_str(&r.text);
             }
         }
-        // The remaining variants (Cite, Math, Image, Note, NoteReference,
-        // Shortcode, Attr, Insert, Delete, Highlight, EditComment, Custom)
+        // Markdown images are first-class in nav/footer text regions
+        // (bd-root-relative-paths-design-fc5pvkcv, Case C): without
+        // this arm they flattened to alt text, which pushed authors
+        // into raw `<img>`{=html} — the one form whose paths cannot
+        // be rebased. The src is emitted verbatim; page-relative
+        // resolution happens upstream in quarto-core's render
+        // transforms, keeping this module resolver-free.
+        Inline::Image(img) => {
+            out.push_str("<img src=\"");
+            out.push_str(&escape_attr(&img.target.0));
+            out.push_str("\" alt=\"");
+            out.push_str(&escape_attr(
+                &inlines_plain_text(&img.content).unwrap_or_default(),
+            ));
+            out.push('"');
+            if !img.target.1.is_empty() {
+                out.push_str(" title=\"");
+                out.push_str(&escape_attr(&img.target.1));
+                out.push('"');
+            }
+            push_attr_html(out, &img.attr, !img.target.1.is_empty());
+            out.push('>');
+        }
+        // An unresolved shortcode reaching the renderer means it was
+        // never visited by ShortcodeResolveTransform's metadata walk
+        // (resolved ones are Str/error-marker nodes by now). Render the
+        // body-text-policy marker instead of silently dropping it.
+        Inline::Shortcode(sc) => {
+            out.push_str("<strong>");
+            out.push_str(&escape_html(&format!("?{}", sc.name)));
+            out.push_str("</strong>");
+        }
+        // The remaining variants (Cite, Math, Note, NoteReference,
+        // Attr, Insert, Delete, Highlight, EditComment, Custom)
         // are not expected in navbar/footer text. Fall back to plain text.
         other => {
             if let Some(content) = inline_plain_fallback(other) {
@@ -819,9 +1276,14 @@ fn push_inline(out: &mut String, inline: &Inline) {
 
 fn inline_plain_fallback(inline: &Inline) -> Option<String> {
     // Best-effort flattening for unsupported inline kinds.
+    inlines_plain_text(std::slice::from_ref(inline))
+}
+
+/// Flatten inlines to their plain text (used for `<img alt>` and the
+/// unsupported-inline fallback).
+fn inlines_plain_text(inlines: &[Inline]) -> Option<String> {
     use quarto_pandoc_types::config_value::ConfigValue;
     use quarto_pandoc_types::config_value::ConfigValueKind;
-    let inlines = std::slice::from_ref(inline);
     let cv = ConfigValue {
         value: ConfigValueKind::PandocInlines(inlines.to_vec()),
         source_info: SourceInfo::generated(By::programmatic_config()),
@@ -884,7 +1346,7 @@ mod tests {
     use super::*;
     use crate::footer::PageFooter;
     use crate::item::NavigationItem;
-    use crate::navbar::{CollapseBelow, Navbar, TogglePosition};
+    use crate::navbar::{CollapseBelow, LogoVariant, Navbar, NavbarLogo, TogglePosition};
     use quarto_pandoc_types::config_value::ConfigValue;
     use quarto_pandoc_types::inline::{Inline, Str, Strong};
     use quarto_source_map::SourceInfo;
@@ -898,6 +1360,170 @@ mod tests {
             text: text.to_string(),
             source_info: SourceInfo::for_test(),
         })
+    }
+
+    /// `render_text` on `PandocBlocks` renders a `Figure`'s image
+    /// (bd-page-footer-image-items-stmpikgo, Phase 3): an `!md` lone
+    /// image parses to a persisted Figure, and nav regions are
+    /// single-line inline contexts, so the figure contributes its
+    /// image — the caption stays out of the footer.
+    #[test]
+    fn render_text_blocks_renders_figure_image() {
+        use quarto_pandoc_types::Caption;
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        use quarto_pandoc_types::block::{Block, Figure, Plain};
+        use quarto_pandoc_types::config_value::ConfigValueKind;
+        use quarto_pandoc_types::inline::Image;
+
+        let image = Inline::Image(Image {
+            attr: Default::default(),
+            content: vec![str_inline("cap")],
+            target: ("images/logo.svg".to_string(), String::new()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        });
+        let cv = ConfigValue {
+            value: ConfigValueKind::PandocBlocks(vec![Block::Figure(Figure {
+                attr: Default::default(),
+                caption: Caption {
+                    short: None,
+                    long: Some(vec![Block::Plain(Plain {
+                        content: vec![str_inline("cap")],
+                        source_info: SourceInfo::for_test(),
+                    })]),
+                    source_info: SourceInfo::for_test(),
+                },
+                content: vec![Block::Plain(Plain {
+                    content: vec![image],
+                    source_info: SourceInfo::for_test(),
+                })],
+                source_info: SourceInfo::for_test(),
+                attr_source: AttrSourceInfo::empty(),
+            })]),
+            source_info: SourceInfo::for_test(),
+            merge_op: Default::default(),
+        };
+        let html = render_text(&cv);
+        assert_eq!(
+            html, "<img src=\"images/logo.svg\" alt=\"cap\">",
+            "exactly the figure's image — no figcaption text, no wrapper"
+        );
+    }
+
+    fn test_attr(
+        id: &str,
+        classes: &[&str],
+        kvs: &[(&str, &str)],
+    ) -> quarto_pandoc_types::attr::Attr {
+        (
+            id.to_string(),
+            classes.iter().map(|c| c.to_string()).collect(),
+            kvs.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    fn link_inline(
+        attr: quarto_pandoc_types::attr::Attr,
+        url: &str,
+        target_title: &str,
+        text: &str,
+    ) -> Inline {
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        use quarto_pandoc_types::inline::Link;
+        Inline::Link(Link {
+            attr,
+            content: vec![str_inline(text)],
+            target: (url.to_string(), target_title.to_string()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        })
+    }
+
+    /// A link's id/class/kv attributes reach the emitted `<a>`
+    /// (bd-footer-link-attrs-dropped-1axx82op): the Connect docs'
+    /// cookie-preferences control depends on `#open_preferences_center`
+    /// surviving into the footer HTML.
+    #[test]
+    fn link_attrs_survive_to_anchor() {
+        let html = inlines_to_html(&[link_inline(
+            test_attr(
+                "open_prefs",
+                &["flink", "x"],
+                &[("data-x", "1"), ("title", "KV")],
+            ),
+            "https://example.com/",
+            "",
+            "prefs",
+        )]);
+        assert_eq!(
+            html,
+            "<a href=\"https://example.com/\" id=\"open_prefs\" class=\"flink x\" data-x=\"1\" title=\"KV\">prefs</a>"
+        );
+    }
+
+    /// Target title wins over a `title` kv attr — the kv is suppressed
+    /// so the anchor never carries a duplicate `title=` (pandoc parity;
+    /// see bd-nkk2z7on for the body writer's variant of this).
+    #[test]
+    fn link_target_title_suppresses_title_kv() {
+        let html = inlines_to_html(&[link_inline(
+            test_attr("", &[], &[("title", "KV")]),
+            "u",
+            "TT",
+            "l",
+        )]);
+        assert_eq!(html, "<a href=\"u\" title=\"TT\">l</a>");
+    }
+
+    /// An attributed span keeps its wrapper and attributes; an
+    /// attr-less span stays unwrapped (nav surfaces render minimal
+    /// markup — bd-footer-link-attrs-dropped-1axx82op).
+    #[test]
+    fn attributed_span_keeps_wrapper_attrless_span_unwrapped() {
+        use quarto_pandoc_types::attr::AttrSourceInfo;
+        use quarto_pandoc_types::inline::Span;
+        let attributed = inlines_to_html(&[Inline::Span(Span {
+            attr: test_attr("spid", &["scls"], &[]),
+            content: vec![str_inline("sp")],
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+        })]);
+        assert_eq!(attributed, "<span id=\"spid\" class=\"scls\">sp</span>");
+
+        let attrless = inlines_to_html(&[Inline::Span(Span {
+            attr: Default::default(),
+            content: vec![str_inline("plain")],
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+        })]);
+        assert_eq!(attrless, "plain");
+    }
+
+    /// Inline code keeps its attributes; attr-less code is unchanged.
+    #[test]
+    fn code_attrs_survive_to_code_tag() {
+        use quarto_pandoc_types::attr::AttrSourceInfo;
+        use quarto_pandoc_types::inline::Code;
+        let code = |attr| {
+            Inline::Code(Code {
+                attr,
+                text: "x".to_string(),
+                source_info: SourceInfo::for_test(),
+                attr_source: AttrSourceInfo::empty(),
+            })
+        };
+        assert_eq!(
+            inlines_to_html(&[code(test_attr("", &["numberLines"], &[]))]),
+            "<code class=\"numberLines\">x</code>"
+        );
+        assert_eq!(
+            inlines_to_html(&[code(Default::default())]),
+            "<code>x</code>"
+        );
     }
 
     #[test]
@@ -916,7 +1542,9 @@ mod tests {
         assert!(html.contains("<nav class=\"navbar navbar-expand-lg bg-primary\""));
         assert!(html.contains("data-bs-theme=\"dark\""));
         // Brand href falls back to the supplied home_url when no logo_href.
-        assert!(html.contains("<a class=\"navbar-brand\" href=\"./\">My Site</a>"));
+        assert!(html.contains(
+            "<a class=\"navbar-brand\" href=\"./\"><span class=\"navbar-title\">My Site</span></a>"
+        ));
         assert!(html.contains("href=\"index.qmd\""));
         assert!(html.contains("Home"));
     }
@@ -924,7 +1552,7 @@ mod tests {
     #[test]
     fn navbar_falls_back_to_document_title() {
         let navbar = Navbar::with_defaults();
-        let html = navbar_to_html(&navbar, Some("Doc Title"), "./");
+        let html = navbar_to_html(&navbar, Some(&s("Doc Title")), "./");
         assert!(html.contains("Doc Title"));
         assert!(html.contains("navbar-brand"));
     }
@@ -935,7 +1563,7 @@ mod tests {
             title: NavbarTitle::Hidden,
             ..Navbar::with_defaults()
         };
-        let html = navbar_to_html(&navbar, Some("Doc Title"), "./");
+        let html = navbar_to_html(&navbar, Some(&s("Doc Title")), "./");
         assert!(!html.contains("Doc Title"));
         assert!(!html.contains("navbar-brand"));
     }
@@ -981,6 +1609,176 @@ mod tests {
         assert!(
             !html.contains("href=\"../\""),
             "home_url must not be used when logo_href is set; html: {}",
+            html
+        );
+    }
+
+    // === Brand structure (bd-navbar-logo-unstyled-gbzd8vcu) =============
+    //
+    // Q1's `navbrand.ejs` shape: a `.navbar-brand-container` div
+    // wrapping a `.navbar-brand.navbar-brand-logo` anchor (the logo
+    // img(s)) and a separate `.navbar-brand` title anchor with a
+    // `.navbar-title` span. User CSS documented against Q1 keys on
+    // these hooks. Q2 deviation (deliberate): a single logo emits ONE
+    // unclassed img where Q1 duplicates it as light-content +
+    // dark-content; behavior is identical because the pair is
+    // normalized (see NavbarLogo::is_single).
+
+    fn logo_variant(path: &str, alt: Option<&str>) -> LogoVariant {
+        LogoVariant {
+            path: path.to_string(),
+            alt: alt.map(str::to_string),
+            source: SourceInfo::for_test(),
+        }
+    }
+
+    fn single_logo(path: &str, alt: Option<&str>) -> NavbarLogo {
+        let v = logo_variant(path, alt);
+        NavbarLogo {
+            light: v.clone(),
+            dark: v,
+        }
+    }
+
+    #[test]
+    fn brand_emits_container_with_logo_and_title_anchors() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("My Site")),
+            logo: Some(single_logo("logo.svg", Some("Site logo"))),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(
+            html.contains("<div class=\"navbar-brand-container mx-auto\">"),
+            "brand must be wrapped in the Q1 container; html: {}",
+            html
+        );
+        assert!(
+            html.contains(
+                "<a href=\"./\" class=\"navbar-brand navbar-brand-logo\">\
+                 <img src=\"logo.svg\" alt=\"Site logo\" class=\"navbar-logo\"></a>"
+            ),
+            "logo must live in its own navbar-brand-logo anchor; html: {}",
+            html
+        );
+        assert!(
+            html.contains(
+                "<a class=\"navbar-brand\" href=\"./\">\
+                 <span class=\"navbar-title\">My Site</span></a>"
+            ),
+            "title must live in a separate anchor with a navbar-title span; html: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn brand_distinct_variants_emit_light_and_dark_imgs() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("Site")),
+            logo: Some(NavbarLogo {
+                light: logo_variant("l.svg", Some("Light")),
+                dark: logo_variant("d.svg", Some("Dark")),
+            }),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(
+            html.contains("<img src=\"l.svg\" alt=\"Light\" class=\"navbar-logo light-content\">"),
+            "light variant img with light-content class; html: {}",
+            html
+        );
+        assert!(
+            html.contains("<img src=\"d.svg\" alt=\"Dark\" class=\"navbar-logo dark-content\">"),
+            "dark variant img with dark-content class; html: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn brand_single_logo_img_has_no_variant_class() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("Site")),
+            logo: Some(single_logo("logo.svg", None)),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(
+            html.contains("<img src=\"logo.svg\" alt=\"\" class=\"navbar-logo\">"),
+            "single logo emits one unclassed img; html: {}",
+            html
+        );
+        assert!(
+            !html.contains("light-content") && !html.contains("dark-content"),
+            "no variant classes for a single logo; html: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn brand_logo_only_omits_title_anchor() {
+        let navbar = Navbar {
+            title: NavbarTitle::Hidden,
+            logo: Some(single_logo("logo.svg", None)),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(html.contains("<div class=\"navbar-brand-container mx-auto\">"));
+        assert!(html.contains("navbar-brand navbar-brand-logo"));
+        assert!(
+            !html.contains("navbar-title"),
+            "no title anchor when the title is hidden; html: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn brand_title_only_omits_logo_anchor() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("Site")),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(html.contains("<div class=\"navbar-brand-container mx-auto\">"));
+        assert!(html.contains("<span class=\"navbar-title\">Site</span>"));
+        assert!(
+            !html.contains("navbar-brand-logo"),
+            "no logo anchor without a logo; html: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn brand_both_anchors_share_the_logo_href() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("Site")),
+            logo: Some(single_logo("logo.svg", None)),
+            logo_href: Some("about.html".to_string()),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "../");
+        assert!(
+            html.contains("<a href=\"about.html\" class=\"navbar-brand navbar-brand-logo\">"),
+            "logo anchor uses logo_href; html: {}",
+            html
+        );
+        assert!(
+            html.contains("<a class=\"navbar-brand\" href=\"about.html\">"),
+            "title anchor uses the same logo_href; html: {}",
+            html
+        );
+        assert!(!html.contains("href=\"../\""), "home_url must not leak in");
+    }
+
+    #[test]
+    fn navbar_wrapper_carries_navbar_container_class() {
+        let navbar = Navbar {
+            title: NavbarTitle::Text(s("Site")),
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        assert!(
+            html.contains("<div class=\"navbar-container container-fluid\">"),
+            "the navbar wrapper div must carry Q1's navbar-container class; html: {}",
             html
         );
     }
@@ -1155,11 +1953,13 @@ mod tests {
     fn navbar_wraps_body_in_container_fluid() {
         // Sanity-check the navbar's existing container wrapper; same
         // rationale as the footer, and guards against regressions.
+        // The wrapper also carries Q1's `navbar-container` hook class
+        // (bd-navbar-logo-unstyled-gbzd8vcu).
         let navbar = Navbar::with_defaults();
-        let html = navbar_to_html(&navbar, Some("Doc"), "./");
+        let html = navbar_to_html(&navbar, Some(&s("Doc")), "./");
         assert!(
-            html.contains("<div class=\"container-fluid\">"),
-            "navbar should wrap body in .container-fluid: {}",
+            html.contains("<div class=\"navbar-container container-fluid\">"),
+            "navbar should wrap body in .navbar-container.container-fluid: {}",
             html
         );
     }
@@ -1242,6 +2042,139 @@ mod tests {
     }
 
     #[test]
+    fn center_append_lands_inside_the_center_region() {
+        let footer = PageFooter {
+            center_append: Some("<div class=\"toc-actions\">X</div>".to_string()),
+            ..PageFooter::default()
+        };
+        let html = page_footer_to_html(&footer);
+        assert!(
+            html.contains(
+                "<div class=\"nav-footer-center\"><div class=\"toc-actions\">X</div></div>"
+            )
+        );
+    }
+
+    #[test]
+    fn center_append_follows_existing_center_text() {
+        let footer = PageFooter {
+            center: FooterRegion::Text(ConfigValue::new_string(
+                "Positron 1.0",
+                quarto_source_map::SourceInfo::for_test(),
+            )),
+            center_append: Some("<div class=\"toc-actions\">X</div>".to_string()),
+            ..PageFooter::default()
+        };
+        let html = page_footer_to_html(&footer);
+        let center = html
+            .split("<div class=\"nav-footer-center\">")
+            .nth(1)
+            .expect("center region");
+        let text_at = center.find("Positron 1.0").expect("existing text");
+        let actions_at = center.find("toc-actions").expect("appended actions");
+        assert!(
+            text_at < actions_at,
+            "actions must follow the configured text"
+        );
+    }
+
+    #[test]
+    fn center_append_absent_leaves_output_unchanged() {
+        let footer = PageFooter::default();
+        let html = page_footer_to_html(&footer);
+        assert!(html.contains("<div class=\"nav-footer-center\"></div>"));
+    }
+
+    // --- href-less footer items (bd-page-footer-items-f4th80mj) -----
+
+    /// Defect 5 — an item with `text:` but no `href:` renders its label
+    /// directly in the `<li>`, with no wrapping anchor. Mirrors Q1 and
+    /// the sidebar's existing `SidebarEntry::Heading` precedent.
+    #[test]
+    fn footer_item_without_href_renders_without_anchor() {
+        let footer = PageFooter {
+            left: FooterRegion::Items(vec![NavigationItem {
+                text: Some(s("Just text")),
+                ..NavigationItem::default()
+            }]),
+            ..PageFooter::default()
+        };
+        let html = page_footer_to_html(&footer);
+        assert!(
+            html.contains("Just text"),
+            "label should be present; html: {}",
+            html
+        );
+        assert!(
+            !html.contains("href=\"#\""),
+            "href-less footer item must not be wrapped in <a href=\"#\">; html: {}",
+            html
+        );
+        assert!(
+            !html.contains("<a "),
+            "href-less footer item must emit no anchor at all; html: {}",
+            html
+        );
+    }
+
+    /// Defect 5, the case that forces it to land with defect 1: item
+    /// text carrying its own `<a>` must not end up nested inside a
+    /// wrapping anchor (invalid HTML). This is the cookie-preferences
+    /// pattern from the Posit Connect docs.
+    #[test]
+    fn footer_item_with_own_anchor_does_not_nest_anchors() {
+        use quarto_pandoc_types::inline::RawInline;
+        let raw = |t: &str| {
+            Inline::RawInline(RawInline {
+                format: "html".to_string(),
+                text: t.to_string(),
+                source_info: SourceInfo::for_test(),
+            })
+        };
+        let text = ConfigValue::new_inlines(
+            vec![
+                raw("<a href=\"#\" id=\"open_preferences_center\">"),
+                str_inline("Cookie Preferences"),
+                raw("</a>"),
+            ],
+            SourceInfo::for_test(),
+        );
+        let footer = PageFooter {
+            right: FooterRegion::Items(vec![NavigationItem {
+                text: Some(text),
+                ..NavigationItem::default()
+            }]),
+            ..PageFooter::default()
+        };
+        let html = page_footer_to_html(&footer);
+        assert_eq!(
+            html.matches("<a ").count(),
+            1,
+            "exactly one anchor (the author's own) should survive; html: {}",
+            html
+        );
+    }
+
+    /// An item that *does* have an href keeps its anchor.
+    #[test]
+    fn footer_item_with_href_still_renders_anchor() {
+        let footer = PageFooter {
+            left: FooterRegion::Items(vec![NavigationItem {
+                href: Some("https://example.com".to_string()),
+                text: Some(s("Support")),
+                ..NavigationItem::default()
+            }]),
+            ..PageFooter::default()
+        };
+        let html = page_footer_to_html(&footer);
+        assert!(
+            html.contains("<a href=\"https://example.com\""),
+            "item with href keeps its anchor; html: {}",
+            html
+        );
+    }
+
+    #[test]
     fn footer_escapes_literal_text() {
         let footer = PageFooter {
             center: FooterRegion::Text(s("A & B")),
@@ -1276,6 +2209,54 @@ mod tests {
         let out = inlines_to_html(&inlines);
         assert!(out.contains("<a href=\"https://example.com\">site</a>"));
         assert!(out.contains("<code>x &amp; y</code>"));
+    }
+
+    /// Case C incentive removal
+    /// (bd-root-relative-paths-design-fc5pvkcv): a markdown image in a
+    /// nav/footer text region renders as a real `<img>` — src, alt
+    /// (flattened content), title, and attributes all carried through —
+    /// instead of flattening to its alt text, which is what pushed
+    /// authors into raw `<img>`{=html}. The src is emitted verbatim:
+    /// page-relative resolution happens upstream in quarto-core.
+    #[test]
+    fn inlines_to_html_image_renders_img_tag() {
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        let mut attr: quarto_pandoc_types::attr::Attr = Default::default();
+        attr.0 = "brand-img".to_string();
+        attr.1.push("footer-logo".to_string());
+        attr.2.insert("width".to_string(), "32".to_string());
+        let inlines = vec![Inline::Image(quarto_pandoc_types::inline::Image {
+            attr,
+            content: vec![str_inline("Posit logo")],
+            target: ("../../images/logo.svg".to_string(), "The title".to_string()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        })];
+        let out = inlines_to_html(&inlines);
+        assert_eq!(
+            out,
+            "<img src=\"../../images/logo.svg\" alt=\"Posit logo\" \
+             title=\"The title\" id=\"brand-img\" class=\"footer-logo\" \
+             width=\"32\">"
+        );
+    }
+
+    /// Attribute-less image: only src and alt, and everything is
+    /// escaped.
+    #[test]
+    fn inlines_to_html_image_minimal_and_escaped() {
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        let inlines = vec![Inline::Image(quarto_pandoc_types::inline::Image {
+            attr: Default::default(),
+            content: vec![str_inline("a & b")],
+            target: ("x\"y.svg".to_string(), String::new()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        })];
+        let out = inlines_to_html(&inlines);
+        assert_eq!(out, "<img src=\"x&quot;y.svg\" alt=\"a &amp; b\">");
     }
 
     // --- Navbar active-item rendering (Phase 3) -------------------------
@@ -1391,7 +2372,12 @@ mod tests {
         };
         let html = sidebar_to_html(&sb, "./");
         assert!(html.contains("<nav id=\"quarto-sidebar\""));
-        assert!(html.contains("class=\"sidebar sidebar-navigation sidebar-floating\""));
+        // bd-26bf3j1y added the Bootstrap-collapse classes so the
+        // narrow-viewport toggle has a target.
+        assert!(html.contains(
+            "class=\"sidebar collapse collapse-horizontal quarto-sidebar-collapse-item \
+             sidebar-navigation sidebar-floating overflow-auto\""
+        ));
         assert!(html.contains("<div class=\"sidebar-menu-container\">"));
         assert!(html.contains("<ul class=\"list-unstyled mt-1\">"));
         assert!(html.contains("class=\"sidebar-item\""));
@@ -1617,8 +2603,18 @@ mod tests {
         // Still contains the real links.
         assert!(html.contains(">A<"));
         assert!(html.contains(">B<"));
-        // No auto artifact leaks out.
-        assert!(!html.contains("auto"));
+        // No auto artifact leaks out. This used to assert
+        // `!html.contains("auto")`, which stopped meaning anything once
+        // bd-26bf3j1y put `overflow-auto` on the nav — and was always a
+        // loose proxy, since it would have been tripped by any entry
+        // whose text happened to contain "auto". Counting the rendered
+        // items tests the actual property: the `Auto` entry contributed
+        // no item, so exactly the two real links are present.
+        assert_eq!(
+            html.matches("class=\"sidebar-item\"").count(),
+            2,
+            "expected exactly the two manual links; got: {html}"
+        );
     }
 
     // --- SidebarTitle rendering (sidebar-default-title) -----------------
@@ -1661,6 +2657,73 @@ mod tests {
             html
         );
         assert!(!html.contains("sidebar-title"));
+    }
+
+    /// bd-sidebar-title-with-navbar-82wxow6m: a page with a navbar
+    /// renders no sidebar title. Q1's `sidebar.ejs:51` gates the title
+    /// block on `!navbar`; q2 ported the markup without the condition.
+    /// A/B partner of `sidebar_render_text_title_without_navbar_emits_header`.
+    #[test]
+    fn sidebar_render_text_title_with_navbar_emits_no_header() {
+        let sb = Sidebar {
+            title: SidebarTitle::Text(s("Guides")),
+            contents: vec![link("a.html", "A")],
+            ..Sidebar::with_defaults()
+        };
+        let html = sidebar_to_html_with_options(
+            &sb,
+            &SidebarRenderOptions {
+                home_url: "./",
+                appended_html: None,
+                has_navbar: true,
+            },
+        );
+        assert!(
+            !html.contains("sidebar-header"),
+            "a navbar must suppress the sidebar-header wrapper; html: {}",
+            html
+        );
+        assert!(
+            !html.contains("sidebar-title"),
+            "a navbar must suppress the sidebar title; html: {}",
+            html
+        );
+        // The sidebar's contents are untouched — only the banner goes.
+        assert!(
+            html.contains(">A<"),
+            "sidebar contents must survive; html: {}",
+            html
+        );
+    }
+
+    /// The A/B partner of the test above: the same sidebar with no
+    /// navbar on the page still renders its title, which is the
+    /// ordinary case for books and sidebar-only doc sites.
+    #[test]
+    fn sidebar_render_text_title_without_navbar_emits_header() {
+        let sb = Sidebar {
+            title: SidebarTitle::Text(s("Guides")),
+            contents: vec![link("a.html", "A")],
+            ..Sidebar::with_defaults()
+        };
+        let html = sidebar_to_html_with_options(
+            &sb,
+            &SidebarRenderOptions {
+                home_url: "./",
+                appended_html: None,
+                has_navbar: false,
+            },
+        );
+        assert!(
+            html.contains("<div class=\"sidebar-header pt-lg-2 mt-2 text-left\">"),
+            "no navbar: expected the sidebar-header wrapper; html: {}",
+            html
+        );
+        assert!(
+            html.contains("<div class=\"sidebar-title mb-0 py-0\"><a href=\"./\">Guides</a></div>"),
+            "no navbar: expected the title in a home link; html: {}",
+            html
+        );
     }
 
     #[test]
@@ -1892,5 +2955,425 @@ mod tests {
             .unwrap_or("");
         assert!(prev_block.contains("bi-arrow-left-short"));
         assert!(!prev_block.contains("bi-arrow-right-short"));
+    }
+
+    // ---- breadcrumbs_to_html (bd-breadcrumbs-missing-1vpuqh34) ----
+
+    /// Full markup shape, Q1 parity: nav.quarto-page-breadcrumbs with
+    /// extra classes, aria-label, ol.breadcrumb, li.breadcrumb-item,
+    /// linked crumbs.
+    #[test]
+    fn breadcrumbs_markup_shape() {
+        let crumbs = vec![
+            Crumb {
+                text: Some(s("Guide")),
+                href: Some("../intro.html".to_string()),
+            },
+            Crumb {
+                text: Some(s("Deep")),
+                href: Some("deep.html".to_string()),
+            },
+        ];
+        let html = breadcrumbs_to_html(
+            &crumbs,
+            &["quarto-title-breadcrumbs", "d-none", "d-lg-block"],
+        );
+        assert_eq!(
+            html,
+            "<nav class=\"quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block\" \
+             aria-label=\"breadcrumb\"><ol class=\"breadcrumb\">\
+             <li class=\"breadcrumb-item\"><a href=\"../intro.html\">Guide</a></li>\
+             <li class=\"breadcrumb-item\"><a href=\"deep.html\">Deep</a></li>\
+             </ol></nav>"
+        );
+    }
+
+    /// Crumb without href renders unlinked; crumb without text is
+    /// skipped entirely (Q1's text filter).
+    #[test]
+    fn breadcrumbs_unlinked_and_textless_crumbs() {
+        let crumbs = vec![
+            Crumb {
+                text: Some(s("No Link")),
+                href: None,
+            },
+            Crumb {
+                text: None,
+                href: Some("skipped.html".to_string()),
+            },
+        ];
+        let html = breadcrumbs_to_html(&crumbs, &[]);
+        assert!(
+            html.contains("<li class=\"breadcrumb-item\">No Link</li>"),
+            "unlinked crumb renders as bare text; got: {}",
+            html
+        );
+        assert!(!html.contains("skipped.html"), "textless crumb skipped");
+        assert!(html.starts_with("<nav class=\"quarto-page-breadcrumbs\""));
+    }
+
+    /// Text and href are escaped.
+    #[test]
+    fn breadcrumbs_escapes_text_and_href() {
+        let crumbs = vec![Crumb {
+            text: Some(s("A & B")),
+            href: Some("x.html?a=1&b=2".to_string()),
+        }];
+        let html = breadcrumbs_to_html(&crumbs, &[]);
+        assert!(html.contains("A &amp; B"), "text escaped; got {}", html);
+        assert!(
+            html.contains("x.html?a=1&amp;b=2"),
+            "href escaped; got {}",
+            html
+        );
+    }
+
+    // --- repo_actions_to_html (bd-repo-actions-missing-99ezd2fe) --------
+
+    fn action(text: &str, url: &str, icon: Option<&str>) -> crate::repo_actions::RepoActionLink {
+        crate::repo_actions::RepoActionLink {
+            text: text.to_string(),
+            url: url.to_string(),
+            icon: icon.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn repo_actions_html_matches_q1_shape() {
+        let links = vec![
+            action(
+                "Edit this page",
+                "https://github.com/e/d/edit/main/index.qmd",
+                Some("github"),
+            ),
+            action(
+                "View source",
+                "https://github.com/e/d/blob/main/index.qmd",
+                None,
+            ),
+        ];
+        let html = repo_actions_to_html(&links, &[], None, None);
+        assert_eq!(
+            html,
+            "<div class=\"toc-actions\"><ul>\
+             <li><a href=\"https://github.com/e/d/edit/main/index.qmd\" class=\"toc-action\">\
+             <i class=\"bi bi-github\"></i>Edit this page</a></li>\
+             <li><a href=\"https://github.com/e/d/blob/main/index.qmd\" class=\"toc-action\">\
+             <i class=\"bi empty\"></i>View source</a></li>\
+             </ul></div>"
+        );
+    }
+
+    #[test]
+    fn repo_actions_html_applies_extra_classes() {
+        let links = vec![action("Edit this page", "https://x/e", Some("github"))];
+        let html = repo_actions_to_html(&links, &["d-sm-block", "d-md-none"], None, None);
+        assert!(html.starts_with("<div class=\"toc-actions d-sm-block d-md-none\">"));
+    }
+
+    #[test]
+    fn repo_actions_html_emits_target_and_rel() {
+        let links = vec![action("Edit this page", "https://x/e", None)];
+        let html = repo_actions_to_html(&links, &[], Some("_blank"), Some("noopener"));
+        assert!(html.contains(
+            "href=\"https://x/e\" target=\"_blank\" rel=\"noopener\" class=\"toc-action\""
+        ));
+    }
+
+    #[test]
+    fn repo_actions_html_escapes_the_url() {
+        let links = vec![action("Edit", "https://x/a\"b", None)];
+        let html = repo_actions_to_html(&links, &[], None, None);
+        assert!(
+            html.contains("href=\"https://x/a&quot;b\""),
+            "the escaped form must actually appear in the href"
+        );
+        assert!(!html.contains("a\"b"), "quote must be escaped in the href");
+    }
+
+    #[test]
+    fn repo_actions_html_is_empty_for_no_links() {
+        assert_eq!(repo_actions_to_html(&[], &["d-md-none"], None, None), "");
+    }
+}
+
+#[cfg(test)]
+mod secondary_nav_tests {
+    use super::*;
+    use crate::sidebar::{Sidebar, SidebarStyle};
+    use quarto_pandoc_types::config_value::ConfigValue;
+    use quarto_pandoc_types::inline::{Inline, Str, Strong};
+    use quarto_source_map::SourceInfo;
+
+    fn s(x: &str) -> ConfigValue {
+        ConfigValue::new_string(x, SourceInfo::for_test())
+    }
+
+    fn str_inline(text: &str) -> Inline {
+        Inline::Str(Str {
+            text: text.to_string(),
+            source_info: SourceInfo::for_test(),
+        })
+    }
+
+    /// The toggle button is the only way to open the sidebar on a
+    /// phone; every one of these attributes is load-bearing for
+    /// Bootstrap's collapse plugin or for assistive tech. Verbatim
+    /// from Q1 `nav-before-body.ejs:66-71`, confirmed against
+    /// rendered Connect output.
+    #[test]
+    fn secondary_nav_toggle_button_wiring() {
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs("<nav class=\"quarto-page-breadcrumbs\"></nav>"),
+            "Toggle sidebar navigation",
+        );
+
+        assert!(
+            html.starts_with("<nav class=\"quarto-secondary-nav\">"),
+            "container must be nav.quarto-secondary-nav; got: {html}"
+        );
+        assert!(
+            html.contains("<div class=\"container-fluid d-flex\">"),
+            "Q1 wraps the row in .container-fluid.d-flex; got: {html}"
+        );
+        for needle in [
+            "type=\"button\"",
+            "class=\"quarto-btn-toggle btn\"",
+            "data-bs-toggle=\"collapse\"",
+            "data-bs-target=\".quarto-sidebar-collapse-item\"",
+            "aria-controls=\"quarto-sidebar\"",
+            "aria-expanded=\"false\"",
+            "aria-label=\"Toggle sidebar navigation\"",
+            "<i class=\"bi bi-layout-text-sidebar-reverse\"></i>",
+        ] {
+            assert!(
+                html.contains(needle),
+                "toggle button missing {needle:?}; got: {html}"
+            );
+        }
+    }
+
+    /// The aria-label is localized (Q1's `language['toggle-sidebar']`),
+    /// so it must be attribute-escaped rather than interpolated raw.
+    #[test]
+    fn secondary_nav_toggle_label_is_escaped() {
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs("<nav></nav>"),
+            "Basculer \"la barre\"",
+        );
+        assert!(
+            html.contains("aria-label=\"Basculer &quot;la barre&quot;\""),
+            "aria-label must be attribute-escaped; got: {html}"
+        );
+    }
+
+    /// The mobile breadcrumb instance carries NO extra classes — the
+    /// title-block instance is the one that gets
+    /// `quarto-title-breadcrumbs d-none d-lg-block`. Emitting those
+    /// here would hide the trail at exactly the widths it exists for.
+    #[test]
+    fn secondary_nav_breadcrumb_instance_has_no_extra_classes() {
+        let crumbs = vec![
+            Crumb {
+                text: Some(s("Guide")),
+                href: Some("guide/intro.html".to_string()),
+            },
+            Crumb {
+                text: Some(s("Deep")),
+                href: Some("guide/deep.html".to_string()),
+            },
+        ];
+        let breadcrumbs = breadcrumbs_to_html(&crumbs, &[]);
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs(&breadcrumbs),
+            "Toggle sidebar navigation",
+        );
+
+        assert!(
+            html.contains("<nav class=\"quarto-page-breadcrumbs\" aria-label=\"breadcrumb\">"),
+            "mobile instance takes no extra classes; got: {html}"
+        );
+        assert!(
+            !html.contains("quarto-title-breadcrumbs"),
+            "title-block class must not leak into the mobile instance; got: {html}"
+        );
+        assert!(
+            !html.contains("d-lg-block"),
+            "the mobile instance must not be desktop-only; got: {html}"
+        );
+        assert!(
+            html.contains("<a class=\"flex-grow-1\""),
+            "Q1 follows the trail with a flex-grow-1 toggle link; got: {html}"
+        );
+    }
+
+    /// `bread-crumbs: false` swaps the trail for Q1's collapsed page
+    /// title inside an `a.flex-grow-1.no-decor`.
+    #[test]
+    fn secondary_nav_no_breadcrumbs_emits_collapsed_title() {
+        let title = s("Server Installation");
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::CollapsedTitle(&title),
+            "Toggle sidebar navigation",
+        );
+
+        assert!(
+            html.contains("<a class=\"flex-grow-1 no-decor\""),
+            "collapsed-title branch uses the no-decor link; got: {html}"
+        );
+        assert!(
+            html.contains("<h1 class=\"quarto-secondary-nav-title\">Server Installation</h1>"),
+            "collapsed title must carry the page title; got: {html}"
+        );
+        assert!(
+            !html.contains("quarto-page-breadcrumbs"),
+            "no breadcrumbs in this branch; got: {html}"
+        );
+    }
+
+    /// A markdown title must survive as inline HTML, matching how the
+    /// sidebar title is rendered.
+    #[test]
+    fn secondary_nav_collapsed_title_renders_markdown() {
+        let title = ConfigValue::new_inlines(
+            vec![Inline::Strong(Strong {
+                content: vec![str_inline("Bold")],
+                source_info: SourceInfo::for_test(),
+            })],
+            SourceInfo::for_test(),
+        );
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::CollapsedTitle(&title),
+            "Toggle sidebar navigation",
+        );
+        assert!(
+            html.contains("<h1 class=\"quarto-secondary-nav-title\"><strong>Bold</strong></h1>"),
+            "markdown title must render as inline HTML; got: {html}"
+        );
+    }
+
+    /// Decision 4: no search button until bd-6cme lands. Q1's markup
+    /// calls `window.quartoOpenSearch()` unguarded and q2 defines no
+    /// such function, so a button here would throw on click.
+    #[test]
+    fn secondary_nav_omits_search_button() {
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs("<nav></nav>"),
+            "Toggle sidebar navigation",
+        );
+        assert!(
+            !html.contains("quarto-search-button"),
+            "search button is out of scope (bd-6cme); got: {html}"
+        );
+        assert!(
+            !html.contains("quartoOpenSearch"),
+            "must not reference an undefined function; got: {html}"
+        );
+    }
+
+    /// bd-ersobfbt: the sidebar-toggle affordances freeze headroom while
+    /// the collapse is open, so the header can't slide away from under an
+    /// open menu. Q1 emits the same guarded inline hook on the toggle
+    /// button and the full-width link (`nav-before-body.ejs:66-84`); the
+    /// guard means the markup stays inert when headroom.min.js isn't
+    /// shipped (`pinned: true`).
+    const HEADROOM_ONCLICK: &str =
+        "onclick=\"if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }\"";
+
+    #[test]
+    fn secondary_nav_carries_headroom_hooks() {
+        let breadcrumbs = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs("<nav></nav>"),
+            "Toggle sidebar navigation",
+        );
+        assert_eq!(
+            breadcrumbs.matches(HEADROOM_ONCLICK).count(),
+            2,
+            "toggle button AND flex-grow link must both freeze headroom; got: {breadcrumbs}"
+        );
+
+        let title = ConfigValue::new_string("My Page", SourceInfo::for_test());
+        let collapsed = secondary_nav_to_html(
+            SecondaryNavContent::CollapsedTitle(&title),
+            "Toggle sidebar navigation",
+        );
+        assert_eq!(
+            collapsed.matches(HEADROOM_ONCLICK).count(),
+            2,
+            "toggle button AND title link must both freeze headroom; got: {collapsed}"
+        );
+    }
+
+    /// bd-ersobfbt: Q1's navbar hamburger carries the same guarded hook
+    /// (`navtoggle.ejs:3`) — an open navbar menu must pin the header too.
+    #[test]
+    fn navbar_toggler_carries_headroom_hook() {
+        let navbar = Navbar::with_defaults(); // collapse: true per Q1 semantics
+        let html = navbar_to_html(&navbar, None, "index.html");
+        let toggler_start = html.find("navbar-toggler").expect("toggler rendered");
+        let toggler_tag_end = html[toggler_start..]
+            .find('>')
+            .map(|i| i + toggler_start)
+            .unwrap();
+        assert!(
+            html[..toggler_tag_end].contains("quartoToggleHeadroom"),
+            "navbar toggler must carry the guarded headroom hook; got: {html}"
+        );
+    }
+
+    /// The toggle targets `.quarto-sidebar-collapse-item`, so the
+    /// sidebar has to carry that class — plus Bootstrap's own
+    /// `collapse collapse-horizontal` and Q1's `overflow-auto`.
+    /// Q1 `sidebar.ejs:1`.
+    #[test]
+    fn sidebar_html_carries_collapse_classes() {
+        let sidebar = Sidebar {
+            style: SidebarStyle::Floating,
+            ..Default::default()
+        };
+        let html = sidebar_to_html(&sidebar, "index.html");
+
+        let open_tag = html
+            .split_once('>')
+            .map(|(t, _)| t.to_string())
+            .unwrap_or_default();
+        for cls in [
+            "collapse",
+            "collapse-horizontal",
+            "quarto-sidebar-collapse-item",
+            "overflow-auto",
+            "sidebar-navigation",
+        ] {
+            assert!(
+                open_tag.contains(cls),
+                "nav#quarto-sidebar must carry {cls:?}; got: {open_tag}"
+            );
+        }
+    }
+
+    /// Q1 emits a click-catching glass pane as a SIBLING of the
+    /// sidebar (`sidebar.ejs:100`); it shares the collapse-item class
+    /// so tapping outside closes the drawer.
+    #[test]
+    fn sidebar_glass_pane_is_emitted_after_the_nav() {
+        let sidebar = Sidebar {
+            style: SidebarStyle::Floating,
+            ..Default::default()
+        };
+        let html = sidebar_to_html(&sidebar, "index.html");
+
+        assert!(
+            html.contains(
+                "<div id=\"quarto-sidebar-glass\" class=\"quarto-sidebar-collapse-item\" \
+                 data-bs-toggle=\"collapse\" data-bs-target=\".quarto-sidebar-collapse-item\"></div>"
+            ),
+            "expected the Q1 glass pane; got: {html}"
+        );
+        let nav_close = html.find("</nav>").expect("sidebar nav closes");
+        let glass = html.find("quarto-sidebar-glass").expect("glass present");
+        assert!(
+            glass > nav_close,
+            "glass must be a sibling AFTER the nav, not a child; got: {html}"
+        );
     }
 }

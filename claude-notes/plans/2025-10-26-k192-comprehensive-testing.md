@@ -1,12 +1,18 @@
-# Comprehensive Testing Plan for k-192
+---
+title: 'Comprehensive Testing Plan for k-192'
+date: 2025-10-26
+description: 'Plans the remaining tests for the annotated Pandoc AST TypeScript package, covering the DocumentConverter, realistic complex documents, edge cases, components tree structure and performance baselines.'
+braid:
+  strand: k-192
+  priority: P1
+status: in-progress
+---
 
-**Date**: 2025-10-26
-**Status**: In Progress
 **Owner**: Claude Code
 **Parent Task**: k-192 (Phase 5: Write comprehensive tests for annotated Pandoc AST)
 
 ## Current Status
-- **74 tests passing** across 10 test files (~3200 lines of test code)
+- **74 tests passing** across 10 test files (\~3200 lines of test code)
 - **Good coverage**: Individual block types, inline types, metadata, source mapping
 - **Strong foundation**: Substring invariant, offset invariant, type safety
 

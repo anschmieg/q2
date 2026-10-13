@@ -1,9 +1,12 @@
-# HTML Rendering Parity: Rust Quarto ↔ TypeScript Quarto
+---
+title: 'HTML Rendering Parity: Rust Quarto ↔ TypeScript Quarto'
+date: 2026-01-24
+date-modified: 2026-01-26
+description: 'Plans to close the HTML output gap with TypeScript Quarto by making structural fixes as Pandoc AST transforms rather than DOM postprocessors, so the same logic also runs in WASM.'
+status: draft  # Planning
+---
 
 **Beads Epic**: kyoto-6jv
-**Created**: 2026-01-24
-**Updated**: 2026-01-26 (added Phase 1b detailed subplan reference)
-**Status**: Planning
 
 ---
 
@@ -124,7 +127,7 @@ After analyzing TS Quarto's HTML postprocessors, we've adopted a **pure AST-firs
   - `ResourceCollectorTransform` - Resource collection
 
 **Major gaps** compared to TS Quarto:
-1. Limited AST transforms (only callouts, metadata, title block, resources - missing ~25 Lua filter equivalents)
+1. Limited AST transforms (only callouts, metadata, title block, resources - missing \~25 Lua filter equivalents)
 2. No HTML postprocessors (DOM manipulation for code buttons, anchors, etc.)
 3. Simplified HTML template (missing partials, dependencies)
 4. No JavaScript dependencies (quarto.js, tippy, popper, etc.)
@@ -296,7 +299,7 @@ For Rust Quarto, since we control pampa, we implement this as an AST transform t
 
 `SectionizeTransform` should be **implemented once in the `pampa` crate** and used by both:
 1. `pampa -t html` (standalone tool)
-2. `quarto-core`'s render pipeline
+2. `quarto-core`\'s render pipeline
 
 **Design principles:**
 
@@ -824,7 +827,7 @@ This can be implemented and tested in isolation before other transforms.
 |--------|----------|
 | **ID** | Moves from header to section. Header has NO ID in HTML output. |
 | **Classes** | Duplicated on both section AND header. |
-| **Attributes** | Key-value attributes (data-*, style, etc.) duplicated on both section AND header. |
+| **Attributes** | Key-value attributes (data-\*, style, etc.) duplicated on both section AND header. |
 | **levelN class** | Added ONLY to section, NOT to header. Format: `level2`, `level3`, etc. |
 | **"section" class** | Pandoc does NOT add a "section" class. Uses `<section>` HTML tag directly. |
 | **Empty sections** | Valid - section contains only the header with no other content. |

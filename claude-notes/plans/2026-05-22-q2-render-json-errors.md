@@ -1,9 +1,14 @@
-# Plan: `--json-errors` for `q2 render`
+---
+title: 'Plan: `--json-errors` for `q2 render`'
+date: 2026-05-22
+description: 'Adds a `--json-errors` flag to `q2 render` that emits diagnostics as one JSON object per line on stderr, so agents and tools can read errors without scraping text.'
+status: done  # Implementation complete on `feature/q2-render-json-errors`; awaiting review before merge to `main`. Beads issue still `in_progress` until then.
+braid:
+  strand: bd-iey8o
+  priority: P1
+  labels: [agent-ux, error-reporting]
+---
 
-**Status:** Implementation complete on `feature/q2-render-json-errors`;
-awaiting review before merge to `main`. Beads issue still `in_progress`
-until then.
-**Beads issue:** bd-iey8o
 **Related issues:** bd-creo (strict pass-1 exit policy), k-lckc (uniform
 quarto-error-reporting in render pipeline), bd-rqba (JsonPass1Failure)
 **Related plans:**
@@ -182,7 +187,7 @@ fn print_render_diagnostics(
 
 `print_render_diagnostics_text` is the existing body verbatim.
 `print_render_diagnostics_json` walks the same four sources
-(pass1_failures, pass2_failures, outputs[..].render_output.diagnostics,
+(pass1_failures, pass2_failures, `outputs[..]`.render_output.diagnostics,
 project_diagnostics) but emits `diagnostic_to_json(diag, &ctx)` as
 NDJSON.
 
@@ -344,7 +349,7 @@ Guardrails:
 - **Document the boundary** in both directions: a note in
   `crates/quarto-yaml-validation/README.md` ("for user-facing YAML
   config; do NOT replace with schemars-generated JSON Schema") and a
-  parallel rustdoc on `JsonDiagnostic`'s schema export ("schemars is
+  parallel rustdoc on `JsonDiagnostic`\'s schema export ("schemars is
   used here for wire-format documentation only; YAML config
   validation lives in `quarto-yaml-validation`").
 - **Optional follow-up:** an `xtask lint` rule
@@ -412,7 +417,7 @@ assert structure.
 
 - [x] Add Q-7-2..8 catalog entries in `error_catalog.json` (one per
   `DispatchError` variant).
-- [x] Add `schemars` to `quarto-error-reporting`'s deps, derive
+- [x] Add `schemars` to `quarto-error-reporting`\'s deps, derive
   `JsonSchema` on `JsonDiagnostic` / `JsonDiagnosticDetail` /
   `JsonPass1Failure`.
 - [x] Add `$schema` field (with `#[serde(rename = "$schema")]`) and

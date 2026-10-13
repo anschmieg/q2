@@ -34,7 +34,9 @@ pub mod config;
 pub mod filter;
 pub mod helpers;
 pub mod item;
+pub mod listjs;
 pub mod placeholders;
+pub mod record;
 pub mod sort;
 pub mod templates;
 
@@ -57,12 +59,17 @@ pub mod post_render_upgrade;
 // §"Module gate granularity".
 pub mod feed;
 
+pub mod glob_resolve;
+
 pub use config::{
     ColumnType, FeedType, GridItemAlign, ImageAlign, Listing, ListingCategoriesMode,
     ListingContents, ListingFeedOptions, ListingFilter, ListingSort, ListingType, SortDirection,
     parse_listings,
 };
-pub use item::{ListingItem, hydrate_item};
+pub use glob_resolve::resolve_content_globs;
+pub use item::{
+    FieldSource, ItemOrigin, ItemTarget, ListingItem, flattened_prose_diagnostics, hydrate_item,
+};
 
 /// One fully-resolved listing — its config plus the hydrated item
 /// set in final sort order. Produced by `ListingGenerateTransform`

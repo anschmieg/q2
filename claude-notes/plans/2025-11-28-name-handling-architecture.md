@@ -1,12 +1,15 @@
-# Name Handling Architecture Fixes for quarto-citeproc
+---
+title: 'Name Handling Architecture Fixes for quarto-citeproc'
+date: 2025-11-28
+description: 'Catalogs the architectural gaps in `quarto-citeproc` name formatting, such as missing name-part support, string-only output and absent suffix and particle handling, that block many CSL conformance tests.'
+---
 
-**Date**: 2025-11-28
 **Parent Issue**: k-422 (CSL Conformance)
 **Related Issue**: (to be created)
 
 ## Overview
 
-The name handling in quarto-citeproc has several architectural issues that prevent it from passing ~56 CSL conformance tests. This document describes the issues and the implementation plan.
+The name handling in quarto-citeproc has several architectural issues that prevent it from passing \~56 CSL conformance tests. This document describes the issues and the implementation plan.
 
 ## Current State
 
@@ -41,7 +44,7 @@ data NameFormat = NameFormat
 
 **Our implementation**: Missing entirely. The `InheritableNameOptions` struct and CSL parser have no support for name-part formatting.
 
-**Impact**: ~19 tests fail due to missing name case handling (UPPERCASE family names, etc.)
+**Impact**: \~19 tests fail due to missing name case handling (UPPERCASE family names, etc.)
 
 ### 2. Name Formatting Returns `String`, Not `Output` (Critical Blocker)
 
@@ -129,7 +132,7 @@ The CSL spec has a style-level option `demote-non-dropping-particle` with values
 - `sort-only` - particle demoted only in sort keys (display: "van Gogh", sort: "Gogh, van")
 - `display-and-sort` - particle always demoted
 
-The Haskell implementation handles this with ~6 different code paths in `getDisplayName` (Eval.hs:2534-2604):
+The Haskell implementation handles this with \~6 different code paths in `getDisplayName` (Eval.hs:2534-2604):
 
 ```haskell
 if isByzantineName name

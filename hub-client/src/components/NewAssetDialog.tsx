@@ -16,13 +16,19 @@ import {
   validateProjectPath,
   type AssetFilePreview,
 } from './fileUpload';
+import ModalDialog from './ModalDialog';
+import FolderPicker from './FolderPicker';
+import { DownloadIcon, FileTextIcon } from './icons';
+import { common, dialogs } from '../strings';
 import './NewAssetDialog.css';
 
 export interface NewAssetDialogProps {
   isOpen: boolean;
   existingPaths: string[];
-  /** Destination folder to seed the input with. Empty string = project root. */
+  /** Destination folder to seed the picker with. Empty string = project root. */
   defaultDestination: string;
+  /** Every folder in the project (explicit and file-derived), for the picker. */
+  folders?: string[];
   onClose: () => void;
   /**
    * Called once per valid file on confirm. `targetPath` is the composed
@@ -42,6 +48,7 @@ export default function NewAssetDialog({
   isOpen,
   existingPaths,
   defaultDestination,
+  folders = [],
   onClose,
   onUploadAsset,
   initialFiles,
@@ -127,13 +134,13 @@ export default function NewAssetDialog({
       const pathErr = validateProjectPath(path);
       if (pathErr) return pathErr;
       if (existingPaths.includes(path)) {
-        return `"${path}" already exists in the project`;
+        return dialogs.newAsset.errorExists(path);
       }
       for (const other of previews) {
         if (other.file === file) continue;
         if (other.error) continue;
         if (composePath(other.file) === path) {
-          return 'Duplicate path with another file in this batch';
+          return dialogs.newAsset.errorDuplicateInBatch;
         }
       }
       return null;
@@ -216,62 +223,50 @@ export default function NewAssetDialog({
     }
   }, [canUpload, previews, entryErrors, composePath, onUploadAsset, onClose]);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    },
-    [onClose]
-  );
-
   if (!isOpen) return null;
 
   const maxMB = FILE_SIZE_LIMITS.MAX_FILE_SIZE / (1024 * 1024);
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="new-asset-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
-        <div className="dialog-header">
-          <h2>Add asset to project</h2>
-          <button className="close-btn" onClick={onClose} aria-label="Close">
-            &times;
-          </button>
-        </div>
-
+    <ModalDialog
+      title={dialogs.newAsset.title}
+      className="new-asset-dialog"
+      onClose={onClose}
+      dialogProps={{
+        onDragOver: handleDragOver,
+        onDragLeave: handleDragLeave,
+        onDrop: handleDrop,
+      }}
+    >
         <div className="dialog-content">
           <div className="destination-input">
-            <label htmlFor="asset-destination">Destination folder:</label>
-            <input
+            <label htmlFor="asset-destination">{dialogs.newAsset.destinationLabel}</label>
+            <FolderPicker
               id="asset-destination"
-              type="text"
+              folders={folders}
               value={destination}
-              placeholder="(project root)"
-              onChange={(e) => setDestination(e.target.value)}
+              onChange={setDestination}
             />
             {destinationError && (
-              <div className="error-message">{destinationError}</div>
+              <div className="qh-error inline">{destinationError}</div>
             )}
           </div>
 
           <div className={`drop-zone ${isDragOver ? 'drag-over' : ''}`}>
             {previews.length === 0 ? (
               <>
-                <span className="drop-icon">📥</span>
-                <p>Drag &amp; drop files here</p>
-                <p className="hint">or</p>
+                <span className="drop-icon"><DownloadIcon size={32} /></span>
+                <p>{dialogs.newAsset.dropZone}</p>
+                <p className="hint">{dialogs.newAsset.dropZoneOr}</p>
                 <button
-                  className="browse-btn"
+                  className="qh-btn primary browse-btn"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  Browse Files
+                  {dialogs.newAsset.browse}
                 </button>
-                <p className="size-hint">Max file size: {maxMB}MB</p>
+                <p className="size-hint">{dialogs.newAsset.maxSize(maxMB)}</p>
+                <p className="hint">{dialogs.newAsset.dropZoneOr}</p>
+                <p className="hint">{dialogs.newAsset.sidebarHint}</p>
               </>
             ) : (
               <div className="file-previews">
@@ -287,7 +282,7 @@ export default function NewAssetDialog({
                       {p.previewUrl ? (
                         <img src={p.previewUrl} alt={editedName} />
                       ) : (
-                        <span className="file-icon">📄</span>
+                        <span className="file-icon"><FileTextIcon size={14} /></span>
                       )}
                       <div className="file-info">
                         <input
@@ -320,7 +315,7 @@ export default function NewAssetDialog({
                       </div>
                       <button
                         className="remove-btn"
-                        aria-label={`Remove ${editedName}`}
+                        aria-label={dialogs.newAsset.remove(editedName)}
                         onClick={() => removePreview(p.file)}
                       >
                         &times;
@@ -332,7 +327,7 @@ export default function NewAssetDialog({
                   className="add-more-btn"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  + Add more
+                  {dialogs.newAsset.addMore}
                 </button>
               </div>
             )}
@@ -345,22 +340,21 @@ export default function NewAssetDialog({
             onChange={handleFileSelect}
             style={{ display: 'none' }}
           />
-          {submitError && <div className="error-message">{submitError}</div>}
+          {submitError && <div className="qh-error inline">{submitError}</div>}
         </div>
 
         <div className="dialog-actions">
-          <button className="cancel-btn" onClick={onClose}>
-            Cancel
+          <button className="qh-btn outline" onClick={onClose}>
+            {common.cancel}
           </button>
           <button
-            className="upload-btn"
+            className="qh-btn primary"
             onClick={handleUpload}
             disabled={!canUpload}
           >
-            {isUploading ? 'Uploading...' : 'Upload'}
+            {isUploading ? dialogs.newAsset.uploading : dialogs.newAsset.upload}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

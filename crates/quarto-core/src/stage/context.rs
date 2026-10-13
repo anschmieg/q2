@@ -30,6 +30,7 @@ use super::error::PipelineError;
 use super::observer::{NoopObserver, PipelineObserver};
 use crate::artifact::ArtifactStore;
 use crate::crossref::{CrossrefIndex, RefTypeRegistry};
+use crate::engine::{EngineRegistry, resolution::EngineResolution};
 use crate::extension::Extension;
 use crate::format::Format;
 use crate::project::index::ProjectIndex;
@@ -86,6 +87,15 @@ pub struct StageContext {
     /// file does not exist.
     pub variables: Option<quarto_pandoc_types::ConfigValue>,
 
+    /// Project environment variables from `_environment` files
+    /// (`_environment` + `_environment.local`; profile variants once
+    /// bd-ev8mk1rp lands). File-defined values only — q2 never mutates
+    /// the process environment, and consumers must check the real
+    /// environment first so it always wins (see
+    /// [`crate::project::environment`]). Empty for single-file renders
+    /// (Q1 parity: env files are project-scoped).
+    pub project_env: hashlink::LinkedHashMap<String, String>,
+
     // === Mutable state ===
     /// Artifact store for dependencies and intermediates
     pub artifacts: ArtifactStore,
@@ -99,6 +109,17 @@ pub struct StageContext {
     /// Diagnostics (warnings, errors, info) collected during execution
     pub diagnostics: Vec<DiagnosticMessage>,
 
+    /// Per-code suppression policy declared in `diagnostics:` metadata.
+    ///
+    /// Resolved by `MetadataMergeStage` (the first point at which
+    /// project + directory + document layers have been merged) and applied
+    /// by [`run_pipeline`](crate::pipeline::run_pipeline) to
+    /// [`Self::diagnostics`] just before it returns — the single point every
+    /// per-document diagnostic passes through, for every frontend. Empty by
+    /// default, in which case application is a no-op.
+    /// See [`crate::diagnostic_policy`] (bd-lone-bracket-diagnostic-mxu41qbt).
+    pub diagnostic_policy: crate::diagnostic_policy::DiagnosticPolicy,
+
     /// Ref-type registry: built-in + `crossref.custom` + promised-id prefixes.
     ///
     /// Populated by `PreEngineSugaringStage` after metadata merge and before
@@ -111,6 +132,23 @@ pub struct StageContext {
     /// `AstTransformsStage` and consumed by later transforms and back-end
     /// renderers. Bridged to/from `RenderContext` by `AstTransformsStage`.
     pub crossref_index: Option<CrossrefIndex>,
+
+    /// This document's book chapter seed (book-projects P4): chapter
+    /// number + appendix flag, consumed by the crossref index/render
+    /// transforms (`None` for every non-book render). Bridged one-way
+    /// from [`crate::render::RenderContext::chapter_seed`] — read-only
+    /// input to transforms, never mutated, so nothing restores it.
+    pub chapter_seed: Option<crate::render::ChapterSeed>,
+
+    /// Project-wide crossref registry (book-projects P5): the merged
+    /// multi-file-book index that
+    /// [`crate::transforms::CrossChapterCrossrefResolveTransform`] consults
+    /// for `@ref`s no single chapter defines (`None` for every non-book
+    /// render). Bridged one-way from
+    /// [`crate::render::RenderContext::cross_chapter_crossref_registry`] —
+    /// read-only input, never mutated, so nothing restores it.
+    pub cross_chapter_crossref_registry:
+        Option<std::sync::Arc<crate::crossref::project_index::ProjectCrossrefIndex>>,
 
     /// Per-document resource report (`bd-o8pr`). Engine stages and
     /// (Phase 3) Lua-filter post-drain push raw paths into this; the
@@ -152,6 +190,67 @@ pub struct StageContext {
     /// [`DocumentProfile`]: crate::document_profile::DocumentProfile
     pub project_index: Option<Arc<ProjectIndex>>,
 
+    /// Engine resolution artifact for this document, stashed by
+    /// `EngineExecutionStage` at the top of its `run` method.
+    ///
+    /// `None` before `EngineExecutionStage` runs (Pass-1 stages, pure-markdown
+    /// documents, stages that execute before engine execution). Mirrors how
+    /// `project_index` is stashed from outside the stage.
+    ///
+    /// Consumed by future stages that need the per-language ownership map
+    /// (e.g. Pass-1 profile lift, `DocumentProfile` extension) without
+    /// re-running the resolver.
+    pub engine_resolution: Option<EngineResolution>,
+
+    /// This document's Pass-1 [`DocumentProfile`], stashed by
+    /// `UnwrapProfileStage` as it hands the AST back to downstream
+    /// stages (bd-0rsk07il). `None` until that stage runs — and for
+    /// Pass-1 head pipelines, which stop at the `AtProfile` bundle
+    /// and never reach the unwrap (the orchestrator holds the profile
+    /// itself there).
+    ///
+    /// `run_pipeline` bridges it back to
+    /// `RenderContext::document_profile`, where response builders
+    /// (the WASM `RenderResponse` comment summary; future native
+    /// consumers) read it without re-parsing the document.
+    ///
+    /// [`DocumentProfile`]: crate::document_profile::DocumentProfile
+    pub document_profile: Option<crate::document_profile::DocumentProfile>,
+
+    /// Engine registry for this render — carried from `project.registry`.
+    /// Shared via Arc so clones across pipeline stages are cheap.
+    ///
+    /// The engine registry comes from `project.registry` (built once at
+    /// project construction in Task 7b); per-document format/filter extension
+    /// discovery stays separate (handled by `discover_extensions` above).
+    ///
+    /// `run_pipeline` may replace this with an override supplied via
+    /// `RenderContext.engine_registry_override` (e.g. a `ReplayEngine`
+    /// registry for testing, set from `HtmlRenderConfig.engine_registry`).
+    pub registry: Arc<EngineRegistry>,
+
+    /// Which documents may execute code (bd-sl79jjiq); threaded from
+    /// `RenderContext::execution_policy` by `run_pipeline`. Consulted by
+    /// `EngineExecutionStage` after engine resolution.
+    pub execution_policy: crate::engine::ExecutionPolicy,
+
+    /// Set by `EngineExecutionStage` when the policy excluded this
+    /// document although it resolved to a code-executing engine.
+    pub execution_skipped: bool,
+
+    /// Set by `SourceConversionStage` (Task 10) when an engine claims a
+    /// non-QMD file; consumed by `resolve_engines` (Task 9) to
+    /// short-circuit to the single claiming engine. `None` for `.qmd`.
+    pub claimed_engine_name: Option<String>,
+
+    /// Conversion provenance stashed by `ParseDocumentStage` (Plan 7c
+    /// seam 2) so `run_pipeline`'s StageError arm can rebuild a
+    /// `SourceContext` that resolves diagnostics against the converted
+    /// buffer, the original file, and any per-cell virtual files. `None`
+    /// unless the document was engine-converted. Mirrors
+    /// `claimed_engine_name`'s stash pattern.
+    pub conversion_stash: Option<crate::stage::ConversionStash>,
+
     /// Per-page scope-aware resolver for HTML asset URLs and
     /// cross-document body links.
     ///
@@ -188,6 +287,19 @@ pub struct StageContext {
     /// provider was installed.
     pub attribution_data: Option<Arc<crate::attribution::AttributionData>>,
 
+    /// Code-block decoration sideband (book-projects P5 bridge):
+    /// `CodeBlockGenerateTransform` (Normalization) writes it and
+    /// `CodeBlockRenderTransform` (Finalization) reads it — both inside
+    /// `AstTransformsStage`'s inner `RenderContext`, but on *opposite
+    /// sides* of a book chapter's pause/resume split, so the map must
+    /// survive on the stage context across the two pipeline calls
+    /// instead of living only inside one inner context. Single-shot
+    /// renders never notice it: both legs move it straight through.
+    pub code_block_decorations: std::collections::HashMap<
+        crate::transforms::CodeBlockDecorationKey,
+        crate::transforms::CodeBlockDecoration,
+    >,
+
     /// Per-format writer-side options, populated by Render-phase
     /// transforms inside [`crate::stage::stages::AstTransformsStage`]
     /// and bridged back here after the inner pipeline runs. Consumed
@@ -210,6 +322,50 @@ pub struct StageContext {
     ///   forwards highlight requests to JS callbacks backed by
     ///   `web-tree-sitter`. See `crates/wasm-quarto-hub-client/src/lib.rs`.
     pub user_grammar_provider: Option<Rc<RefCell<dyn quarto_highlight::UserGrammarProvider>>>,
+
+    /// Defer citeproc out of this render's `UserFiltersStage::pre()`.
+    /// Bridged one-way from [`crate::render::RenderContext::defer_citeproc`]
+    /// by `run_pipeline` — see that field for semantics. `false` by
+    /// default (citeproc runs when `"citeproc"` appears in
+    /// `meta["filters"]`).
+    pub defer_citeproc: bool,
+
+    /// Input-only host options for [`crate::stage::stages::PandocPrepareStage`],
+    /// bridged one way from [`crate::render::RenderContext::prepare_options`].
+    /// When set, `run_pipeline` also pre-seeds this context's temp dir with
+    /// `temp_root` (see [`StageContext::with_temp_dir`]).
+    pub prepare_options: Option<crate::pandoc_request::PrepareOptions>,
+
+    /// Output of [`crate::stage::stages::PandocPrepareStage`], restored into
+    /// [`crate::render::RenderContext::pandoc_request`] by `run_pipeline`.
+    pub pandoc_request: Option<crate::pandoc_request::PandocRequest>,
+
+    /// Engine cells left after the capture splice, counted by
+    /// [`crate::stage::stages::UnexecutedCellCountStage`] and restored into
+    /// [`crate::render::RenderContext::unexecuted_cells`] by `run_pipeline`.
+    pub unexecuted_cells: usize,
+
+    /// This chapter's harvested citation manifest (book-projects P6),
+    /// set by [`crate::stage::stages::UserFiltersStage`] from the
+    /// citeproc filter's output alongside its existing, unchanged
+    /// per-chapter citeproc pass. `None` when citeproc did not run or
+    /// resolved no citations. Bridged to/from
+    /// [`crate::render::RenderContext::citation_manifest`] by
+    /// [`crate::pipeline::stage_context_from_render_context`]/
+    /// [`crate::pipeline::restore_render_context`].
+    pub citation_manifest: Option<pampa::citeproc_filter::ChapterCitationManifest>,
+
+    /// Book-projects P6 input, bridged one-way from
+    /// [`crate::render::RenderContext::suppress_book_bibliography`] — see
+    /// that field for semantics. `false` by default.
+    pub suppress_book_bibliography: bool,
+
+    /// Book-projects P6 output, set by
+    /// [`crate::stage::stages::UserFiltersStage::pre`] when filter
+    /// resolution placed `"citeproc"` into the `.post` group. Bridged
+    /// one-way to [`crate::render::RenderContext::citeproc_filter_in_post`]
+    /// by [`crate::pipeline::restore_render_context`].
+    pub citeproc_filter_in_post: bool,
 }
 
 impl StageContext {
@@ -230,7 +386,8 @@ impl StageContext {
         project: ProjectContext,
         document: DocumentInfo,
     ) -> Result<Self, PipelineError> {
-        let builtin_ext_path = builtin_extensions_path(runtime.as_ref());
+        let builtin_roots = all_builtin_extension_roots(runtime.as_ref());
+        let builtin_root_refs: Vec<&Path> = builtin_roots.iter().map(|p| p.as_path()).collect();
         let (extensions, mut startup_diagnostics) = crate::extension::discover_extensions(
             &document.input,
             if project.is_single_file {
@@ -238,12 +395,28 @@ impl StageContext {
             } else {
                 Some(&project.dir)
             },
-            builtin_ext_path.as_deref(),
+            &builtin_root_refs,
             runtime.as_ref(),
         );
 
+        // Clone the project registry before moving `project` into the struct.
+        let registry = project.registry.clone();
+
         let variables =
             load_project_variables(runtime.as_ref(), &project, &mut startup_diagnostics);
+
+        let active_profile_names: Vec<String> = project
+            .config
+            .active_config_profiles
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let project_env = crate::project::environment::load_project_environment(
+            runtime.as_ref(),
+            &project,
+            &active_profile_names,
+            &mut startup_diagnostics,
+        );
 
         Ok(Self {
             runtime,
@@ -253,21 +426,40 @@ impl StageContext {
             temp_dir: std::sync::OnceLock::new(),
             extensions,
             variables,
+            project_env,
             artifacts: ArtifactStore::new(),
             includes: PandocIncludes::default(),
             diagnostics: startup_diagnostics,
+            diagnostic_policy: crate::diagnostic_policy::DiagnosticPolicy::default(),
             ref_type_registry: None,
             crossref_index: None,
             resource_report: crate::project_resources::DocumentResourceReport::new(),
             resource_copies: Vec::new(),
             project_index: None,
+            engine_resolution: None,
+            document_profile: None,
+            registry,
+            execution_policy: crate::engine::ExecutionPolicy::default(),
+            execution_skipped: false,
+            claimed_engine_name: None,
+            conversion_stash: None,
             resource_resolver: None,
             observer: Arc::new(NoopObserver),
             cancellation: Cancellation::new(),
             attribution_provider: None,
             attribution_data: None,
+            code_block_decorations: std::collections::HashMap::new(),
             format_options: crate::render::FormatOptions::default(),
             user_grammar_provider: None,
+            defer_citeproc: false,
+            prepare_options: None,
+            pandoc_request: None,
+            unexecuted_cells: 0,
+            chapter_seed: None,
+            cross_chapter_crossref_registry: None,
+            citation_manifest: None,
+            suppress_book_bibliography: false,
+            citeproc_filter_in_post: false,
         })
     }
 
@@ -590,6 +782,8 @@ mod tests {
             is_single_file: true,
             files: vec![DocumentInfo::from_path("/project/test.qmd")],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         }
     }
 
@@ -746,6 +940,94 @@ mod tests {
         assert!(debug.contains("StageContext"));
         assert!(debug.contains("Html")); // FormatIdentifier::Html in Debug format
     }
+
+    /// Task 8 threading: `project.registry` must flow into `stage_ctx.registry`
+    /// through `StageContext::new`. A project carrying a distinctive engine
+    /// ("sentinel-engine") must produce a context whose registry has that engine.
+    ///
+    /// Named revert: drop `registry: project.registry.clone()` in `new()` and
+    /// replace with `registry: Arc::new(EngineRegistry::new())` — the sentinel
+    /// engine is absent and this test goes RED.
+    #[test]
+    fn test_registry_flows_from_project_to_stage_ctx() {
+        use crate::engine::ExecuteResult;
+        use crate::engine::{EngineRegistry, ExecutionContext, ExecutionEngine, ExecutionError};
+
+        // A no-op sentinel engine whose name we can look up.
+        struct SentinelEngine;
+        impl ExecutionEngine for SentinelEngine {
+            fn name(&self) -> &str {
+                "sentinel-engine"
+            }
+            fn execute(
+                &self,
+                input: &str,
+                _ctx: &ExecutionContext,
+            ) -> Result<ExecuteResult, ExecutionError> {
+                Ok(ExecuteResult::passthrough(input))
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let mut reg = EngineRegistry::new();
+        reg.register(Arc::new(SentinelEngine));
+
+        let project = ProjectContext {
+            dir: PathBuf::from("/project"),
+            registry: Arc::new(reg),
+            is_single_file: true,
+            output_dir: PathBuf::from("/project"),
+            ..Default::default()
+        };
+        let runtime = Arc::new(MockRuntime::new());
+        let doc = DocumentInfo::from_path("/project/test.qmd");
+        let format = Format::html();
+
+        let ctx = StageContext::new(runtime, format, project, doc).unwrap();
+
+        assert!(
+            ctx.registry.has_engine("sentinel-engine"),
+            "stage_ctx.registry must carry the project's sentinel engine"
+        );
+    }
+
+    /// Task 8: `claimed_engine_name` must default to `None` at construction.
+    /// It is set later by `SourceConversionStage` (Task 10) for non-QMD files.
+    #[test]
+    fn test_claimed_engine_name_defaults_to_none() {
+        let runtime = Arc::new(MockRuntime::new());
+        let project = make_test_project();
+        let doc = DocumentInfo::from_path("/project/test.qmd");
+        let format = Format::html();
+
+        let ctx = StageContext::new(runtime, format, project, doc).unwrap();
+        assert_eq!(ctx.claimed_engine_name, None);
+    }
+
+    #[test]
+    fn variables_yaml_syntax_error_warning_names_the_position() {
+        // bd-x30aq7ae: quarto-yaml >= 0.4.0 keeps the position out of the
+        // message, so the warning's prose must spell it out. The unclosed
+        // flow sequence fails at the `:` of `b:` (line 3, column 2).
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("_quarto.yml"),
+            "project:\n  type: default\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("_variables.yml"), "a: 1\nlist: [x\nb: 2\n").unwrap();
+        std::fs::write(tmp.path().join("index.qmd"), "# Hi\n").unwrap();
+        let runtime = quarto_system_runtime::NativeRuntime::new();
+        let project = ProjectContext::discover(tmp.path(), &runtime).unwrap();
+
+        let mut diagnostics = Vec::new();
+        assert!(load_project_variables(&runtime, &project, &mut diagnostics).is_none());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let text = diagnostics[0].to_text(None);
+        assert!(text.contains("(line 3, column 2)"), "{text}");
+    }
 }
 
 /// Resolve the path to built-in extensions.
@@ -785,7 +1067,7 @@ fn load_project_variables(
                 .problem(format!(
                     "`{}` could not be parsed: {}; `var` shortcodes will not resolve",
                     path.display(),
-                    e
+                    pampa::utils::yaml_syntax_error::describe_yaml_error(&content, e)
                 ))
                 .build(),
             );
@@ -794,27 +1076,4 @@ fn load_project_variables(
     }
 }
 
-fn builtin_extensions_path(
-    _runtime: &dyn quarto_system_runtime::SystemRuntime,
-) -> Option<std::path::PathBuf> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        crate::extension::BUILTIN_EXTENSIONS
-            .path()
-            .ok()
-            .map(|p| p.to_path_buf())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let vfs_path = std::path::PathBuf::from("/__quarto_resources__/extensions");
-        if _runtime
-            .path_exists(&vfs_path, Some(quarto_system_runtime::PathKind::Directory))
-            .unwrap_or(false)
-        {
-            Some(vfs_path)
-        } else {
-            None
-        }
-    }
-}
+use crate::extension::all_builtin_extension_roots;

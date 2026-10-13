@@ -1,8 +1,13 @@
-# hub-client revealjs ≠ q2 render/preview — assessment & plan
-
-**Strand:** bd-vwp4y5ku
-**Date:** 2026-06-22
-**Status:** assessment — awaiting go-ahead to implement
+---
+title: 'hub-client revealjs ≠ q2 render/preview — assessment & plan'
+date: 2026-06-22
+description: 'Explains why hub-client''s live editor shows `format: revealjs` decks with stock reveal.js styling instead of the document''s compiled theme, and proposes routing them through the shared preview renderer.'
+status: approved  # assessment — awaiting go-ahead to implement
+braid:
+  strand: bd-vwp4y5ku
+  priority: P1
+  labels: [bug]
+---
 
 ## Symptom
 
@@ -88,7 +93,7 @@ renderers, and the editor chose the legacy one for this format.
 
 Native / shared (correct):
 - `crates/quarto-core/src/revealjs/assemble.rs` — `reveal_config_json`
-  (~188-289) builds the reveal init from merged metadata; `register_reveal_assets`
+  (\~188-289) builds the reveal init from merged metadata; `register_reveal_assets`
   emits theme links in cascade order.
 - `crates/quarto-core/src/stage/stages/compile_theme_css.rs:275-343` — compiles
   the reveal theme, gated on `is_revealjs_target(...)` (true for both `revealjs`
@@ -255,7 +260,7 @@ click-to-edit on slides; attribution on slides.
 - [x] Routing test: `ReactRenderer` with `format: revealjs` renders
       `Q2PreviewIframe`, **not** `RevealjsSlideAst`. Added to
       `ReactRenderer.integration.test.tsx`; confirmed red, then green.
-- [~] `doRender` dispatch: `doRender` is module-private with no existing test
+- \[\~\] `doRender` dispatch: `doRender` is module-private with no existing test
       harness; covered instead by the routing test + the end-to-end browser
       verification below (calling `renderPageForPreview` is what makes the iframe
       receive a themed AST — observable as non-uppercase `<h2>`). A unit test
@@ -276,9 +281,9 @@ click-to-edit on slides; attribution on slides.
 - [x] Removed `RevealjsSlideAst` + its `white.css` import + the dead reveal
       branch in `ReactRenderer` (commit `5b45e8be`). Generic `q2-slides` keeps
       `SlideAst`.
-- [→] Reveal menu / thumbnails / click-to-edit / attribution on the shared
+- \[→\] Reveal menu / thumbnails / click-to-edit / attribution on the shared
       path → **bd-ktuojk26** (P2 task, discovered-from this). Out of scope here.
-- [x] Filed follow-up strands (bd-mwbsdmel [done], bd-ktuojk26 [open]).
+- [x] Filed follow-up strands (bd-mwbsdmel \[done\], bd-ktuojk26 \[open\]).
 
 ### Phase 3 — Verify end-to-end
 - [x] Browser check (share-link project): `<h2>` `text-transform: none`, slides

@@ -1,7 +1,14 @@
-# Migrate pampa to hash-based FileIds
+---
+title: 'Migrate pampa to hash-based FileIds'
+date: 2026-05-22
+description: 'Switches pampa''s `ASTContext` to hash-based FileIds derived from the filename, as `quarto_yaml` already does, replacing hard-coded `FileId(0)` references and the remap step in include expansion.'
+status: draft  # drafting — pending review
+braid:
+  strand: bd-ky14a
+  priority: P2
+  labels: [diagnostics, refactor, source-location]
+---
 
-**Status:** drafting — pending review
-**Beads:** bd-ky14a
 **Discovered-from:** bd-1pwy8 (UnknownTheme structured diagnostic)
 **Workflow:** **PR-reviewed, NOT direct-to-main** — coordinate with
 the parallel source-location workstream before merging.
@@ -131,7 +138,7 @@ With hash-based FileIds, including `sub.qmd`:
 
 The `remap_file_ids` call in `include_expansion.rs:206` becomes
 unnecessary. The `debug_assert_eq!` becomes a tautology and can be
-deleted. Net: ~30 lines simpler.
+deleted. Net: \~30 lines simpler.
 
 ### 4. Public-API impact
 
@@ -177,7 +184,7 @@ silently regress.
 
 2. **Cross-parser agreement.** Parse the same `_quarto.yml` via
    `quarto_yaml::parse_file` and via pampa's recursive
-   metadata parser; assert the root `SourceInfo`s' FileIds
+   metadata parser; assert the root `SourceInfo`s\' FileIds
    match. Fails today because pampa wraps everything as
    `FileId(0)`.
 
@@ -273,8 +280,8 @@ ensure no interaction. Specifically:
   break. Grep for them and decide per-site whether to update or
   delete.
 - **Hash collisions**: extremely unlikely for distinct file paths
-  (`DefaultHasher` is 64-bit; ~`2^32` distinct paths before a
-  collision becomes ~50% likely). Not worth defending against.
+  (`DefaultHasher` is 64-bit; \~`2^32` distinct paths before a
+  collision becomes \~50% likely). Not worth defending against.
 - **Anonymous ASTContexts collide on FileId**: multiple
   `ASTContext::anonymous()` instances share
   `FileId(hash("<anonymous>"))`. If any code path puts both into

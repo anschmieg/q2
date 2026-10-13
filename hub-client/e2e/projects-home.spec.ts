@@ -41,7 +41,7 @@ async function seedNamedProject(
   // The home renders entries reactively from the synced set — the seeded
   // project must show up in the "Everything else" list without a reload.
   await expect(
-    page.locator('.ph-row', { hasText: name }),
+    page.locator('.qh-row', { hasText: name }),
   ).toBeVisible({ timeout: 15000 });
 }
 
@@ -57,8 +57,8 @@ async function createCollection(page: Page, name: string): Promise<void> {
 /** The <section> for one collection, located by its header name. */
 function collectionSection(page: Page, name: string) {
   return page
-    .locator('section.ph-collection')
-    .filter({ has: page.locator('.ph-collection-name', { hasText: name }) });
+    .locator('section.qh-collection')
+    .filter({ has: page.locator('.qh-collection-name', { hasText: name }) });
 }
 
 /** Move a project from "Everything else" into a collection via its ⋯ menu. */
@@ -67,15 +67,15 @@ async function moveProjectToCollection(
   projectName: string,
   collectionName: string,
 ): Promise<void> {
-  const row = page.locator('.ph-row', { hasText: projectName });
-  await row.getByRole('button', { name: '⋯' }).click();
-  await page.getByRole('button', { name: /^Move to collection/ }).click();
+  const row = page.locator('.qh-row', { hasText: projectName });
+  await row.getByRole('button', { name: `Actions for ${projectName}` }).click();
+  await page.getByRole('menuitem', { name: /^Move to collection/ }).click();
   await page
-    .locator('.ph-submenu')
-    .getByRole('button', { name: collectionName, exact: true })
+    .locator('.qh-submenu')
+    .getByRole('menuitem', { name: collectionName, exact: true })
     .click();
   await expect(
-    collectionSection(page, collectionName).locator('.ph-card', { hasText: projectName }),
+    collectionSection(page, collectionName).locator('.qh-card', { hasText: projectName }),
   ).toBeVisible({ timeout: 10000 });
 }
 
@@ -86,7 +86,7 @@ test.describe('Collections projects home', () => {
 
   test('boots into the home and organizes a project into a new collection', async ({ page }) => {
     const syncServer = getServerUrl();
-    await bootstrapProjectsHome(page, syncServer);
+    await bootstrapProjectsHome(page);
 
     await seedNamedProject(page, syncServer, 'Alpha Project');
     await createCollection(page, 'E2E Shelf');
@@ -95,14 +95,14 @@ test.describe('Collections projects home', () => {
     // The collection header counts its one project, and the project left the
     // "Everything else" list.
     await expect(
-      collectionSection(page, 'E2E Shelf').locator('.ph-collection-count'),
+      collectionSection(page, 'E2E Shelf').locator('.qh-collection-count'),
     ).toHaveText('1');
-    await expect(page.locator('.ph-row', { hasText: 'Alpha Project' })).toHaveCount(0);
+    await expect(page.locator('.qh-row', { hasText: 'Alpha Project' })).toHaveCount(0);
   });
 
   test('right-click opens the project menu; per-collection sort reorders cards', async ({ page }) => {
     const syncServer = getServerUrl();
-    await bootstrapProjectsHome(page, syncServer);
+    await bootstrapProjectsHome(page);
 
     await seedNamedProject(page, syncServer, 'Beta Project');
     await seedNamedProject(page, syncServer, 'Alpha Project');
@@ -113,10 +113,10 @@ test.describe('Collections projects home', () => {
     const section = collectionSection(page, 'Sortable');
 
     // Right-click on a card opens the same contextual menu as its ⋯ button.
-    await section.locator('.ph-card', { hasText: 'Alpha Project' }).click({ button: 'right' });
-    const menu = section.locator('.ph-card', { hasText: 'Alpha Project' }).getByRole('menu');
+    await section.locator('.qh-card', { hasText: 'Alpha Project' }).click({ button: 'right' });
+    const menu = section.locator('.qh-card', { hasText: 'Alpha Project' }).locator('.qh-menu');
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Open', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(menu).not.toBeVisible();
 
@@ -124,11 +124,11 @@ test.describe('Collections projects home', () => {
     // two projects were seeded milliseconds apart, so recency order between
     // them is not asserted — A-to-Z is the deterministic check.)
     await section.getByRole('button', { name: /^Sort collection/ }).click();
-    await section.getByRole('button', { name: 'A to Z', exact: true }).click();
+    await section.getByRole('menuitem', { name: 'A to Z', exact: true }).click();
     await expect(
       section.getByRole('button', { name: /^Sort collection \(A to Z\)/ }),
     ).toBeVisible();
-    await expect(section.locator('.ph-card .ph-card-name')).toHaveText([
+    await expect(section.locator('.qh-card .qh-card-name')).toHaveText([
       'Alpha Project',
       'Beta Project',
     ]);

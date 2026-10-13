@@ -4,13 +4,17 @@
  * Displays user settings:
  * - Scroll sync toggle
  * - Error overlay collapsed toggle
- * - Preview screenshot button
+ * - Nesting cursor toggle
+ * - Rich-text editor toggle
+ * - Document branches toggle (experimental)
+ *
+ * Preferences only — actions that produce artifacts (Export ZIP, Screenshot
+ * Preview) live in the Project tab.
  */
 
-import { useState } from 'react';
-import html2canvas from 'html2canvas';
 import './SettingsTab.css';
 import { usePreference } from '../../hooks/usePreference';
+import { tabs } from '../../strings';
 
 interface SettingsTabProps {
   scrollSyncEnabled: boolean;
@@ -24,75 +28,31 @@ export default function SettingsTab({
   const [errorOverlayCollapsed, setErrorOverlayCollapsed] = usePreference('errorOverlayCollapsed');
   const [unlockNestingCursor, setUnlockNestingCursor] = usePreference('unlockNestingCursor');
   const [richText, setRichText] = usePreference('richText');
-  const [isCapturing, setIsCapturing] = useState(false);
-
-  const handleScreenshot = async () => {
-    try {
-      setIsCapturing(true);
-
-      // Find the preview pane element
-      const previewPane = document.querySelector('.preview-pane') as HTMLElement;
-
-      if (!previewPane) {
-        alert('Preview pane not found');
-        return;
-      }
-
-      // Capture the preview pane using html2canvas
-      const canvas = await html2canvas(previewPane, {
-        backgroundColor: '#ffffff',
-        useCORS: true,
-        logging: false,
-      });
-
-      // Convert canvas to blob and download
-      canvas.toBlob((blob) => {
-        if (blob) {
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = `preview-screenshot-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          URL.revokeObjectURL(url);
-        }
-      }, 'image/png');
-    } catch (error) {
-      console.error('Failed to capture screenshot:', error);
-      alert('Failed to capture screenshot. Please try again.');
-    } finally {
-      setIsCapturing(false);
-    }
-  };
+  const [documentBranches, setDocumentBranches] = usePreference('documentBranches');
 
   return (
     <div className="settings-tab">
       <div className="settings-tab-section">
-        <label className="section-label">Editor</label>
         <label className="setting-toggle">
           <input
             type="checkbox"
             checked={scrollSyncEnabled}
             onChange={(e) => onScrollSyncChange(e.target.checked)}
           />
-          <span className="setting-name">Scroll sync</span>
+          <span className="setting-name">{tabs.settings.scrollSync}</span>
           <span className="setting-description">
-            Sync scroll position between editor and preview
+            {tabs.settings.scrollSyncDescription}
           </span>
         </label>
-      </div>
-      <div className="settings-tab-section">
-        <label className="section-label">Preview</label>
         <label className="setting-toggle">
           <input
             type="checkbox"
             checked={errorOverlayCollapsed}
             onChange={(e) => setErrorOverlayCollapsed(e.target.checked)}
           />
-          <span className="setting-name">Collapse error overlay</span>
+          <span className="setting-name">{tabs.settings.collapseErrorOverlay}</span>
           <span className="setting-description">
-            Show errors as a small indicator instead of expanded panel
+            {tabs.settings.collapseErrorOverlayDescription}
           </span>
         </label>
         <label className="setting-toggle">
@@ -101,9 +61,9 @@ export default function SettingsTab({
             checked={unlockNestingCursor}
             onChange={(e) => setUnlockNestingCursor(e.target.checked)}
           />
-          <span className="setting-name">Nesting cursor</span>
+          <span className="setting-name">{tabs.settings.nestingCursor}</span>
           <span className="setting-description">
-            Descend into nested list/quote blocks; edit each level cleanly.
+            {tabs.settings.nestingCursorDescription}
           </span>
         </label>
         <label className="setting-toggle">
@@ -112,35 +72,22 @@ export default function SettingsTab({
             checked={richText}
             onChange={(e) => setRichText(e.target.checked)}
           />
-          <span className="setting-name">Rich-text editor</span>
+          <span className="setting-name">{tabs.settings.richText}</span>
           <span className="setting-description">
-            Edit paragraphs and headings as formatted text (WYSIWYG) instead of
-            raw markdown. Other blocks still use the plain text editor.
+            {tabs.settings.richTextDescription}
           </span>
         </label>
-        <div style={{ marginTop: '16px' }}>
-          <button
-            className="screenshot-button"
-            onClick={handleScreenshot}
-            disabled={isCapturing}
-            style={{
-              width: '100%',
-              padding: '8px 12px',
-              backgroundColor: '#007acc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: isCapturing ? 'wait' : 'pointer',
-              fontSize: '13px',
-              fontWeight: 500,
-            }}
-          >
-            {isCapturing ? 'Capturing...' : '📸 Screenshot Preview'}
-          </button>
-          <span className="setting-description" style={{ marginTop: '8px', display: 'block' }}>
-            Capture the current preview as a PNG image
+        <label className="setting-toggle">
+          <input
+            type="checkbox"
+            checked={documentBranches}
+            onChange={(e) => setDocumentBranches(e.target.checked)}
+          />
+          <span className="setting-name">{tabs.settings.documentBranches}</span>
+          <span className="setting-description">
+            {tabs.settings.documentBranchesDescription}
           </span>
-        </div>
+        </label>
       </div>
     </div>
   );

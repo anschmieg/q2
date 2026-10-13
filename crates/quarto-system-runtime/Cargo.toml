@@ -9,7 +9,7 @@ description = "Runtime abstraction layer for Quarto system operations"
 
 [features]
 # Enables wasm-bindgen `raw_module` imports of the JS bridge files at
-# /src/wasm-js-bridge/{template,sass,cache,fetch}.js.
+# /src/wasm-js-bridge/{template,sass,cache,fetch,rasterize}.js.
 #
 # Hub-client provides those JS modules at runtime via Vite. Off-by-default
 # because non-hub-client wasm32 binaries (e.g. wasm-bindgen-test runs of
@@ -21,6 +21,8 @@ js-bridge = []
 [dependencies]
 # Async methods in traits
 async-trait.workspace = true
+# Async mutex for the LRU index RMW (bd-ddahjqr1); works under pollster and on wasm
+async-lock.workspace = true
 # JSON serialization for JS interop
 serde_json.workspace = true
 # Serde derive for fetch_url response deserialization
@@ -38,6 +40,8 @@ base64.workspace = true
 tempfile = "3.24"
 # SASS compilation (pure Rust, ~2x faster than dart-sass)
 grass.workspace = true
+# Canonical paths without the Windows `\\?\` prefix when a plain form exists
+dunce = "1"
 
 # WASM-only dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

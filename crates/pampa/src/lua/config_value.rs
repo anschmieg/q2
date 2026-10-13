@@ -147,7 +147,7 @@ impl UserData for LuaConfigNull {
 /// | `Path`/`Glob`/`Expr` | `LuaConfigSpecial` userdata |
 pub fn push_config_value(lua: &Lua, config: &ConfigValue) -> Result<Value> {
     match &config.value {
-        ConfigValueKind::Scalar(yaml) => push_yaml_scalar(lua, yaml),
+        ConfigValueKind::Scalar { yaml, .. } => push_yaml_scalar(lua, yaml),
         ConfigValueKind::PandocInlines(inlines) => create_inlines_table(lua, inlines),
         ConfigValueKind::PandocBlocks(blocks) => create_blocks_table(lua, blocks),
         ConfigValueKind::Array(items) => {
@@ -321,13 +321,13 @@ fn build_config_value(
         merge_op: MergeOp::default(),
     };
     match val {
-        Value::Boolean(b) => Ok(mk(ConfigValueKind::Scalar(Yaml::Boolean(b)))),
-        Value::String(s) => Ok(mk(ConfigValueKind::Scalar(Yaml::String(
+        Value::Boolean(b) => Ok(mk(ConfigValueKind::scalar(Yaml::Boolean(b)))),
+        Value::String(s) => Ok(mk(ConfigValueKind::scalar(Yaml::String(
             s.to_str()?.to_string(),
         )))),
         // Divergence D-num: Lua numbers stay numeric (pandoc stringifies).
-        Value::Integer(i) => Ok(mk(ConfigValueKind::Scalar(Yaml::Integer(i)))),
-        Value::Number(n) => Ok(mk(ConfigValueKind::Scalar(Yaml::Real(n.to_string())))),
+        Value::Integer(i) => Ok(mk(ConfigValueKind::scalar(Yaml::Integer(i)))),
+        Value::Number(n) => Ok(mk(ConfigValueKind::scalar(Yaml::Real(n.to_string())))),
         Value::UserData(ref ud) => {
             if let Ok(special) = ud.borrow::<LuaConfigSpecial>() {
                 let raw = special.value.borrow().clone();
@@ -338,7 +338,7 @@ fn build_config_value(
                 };
                 Ok(mk(kind))
             } else if ud.borrow::<LuaConfigNull>().is_ok() {
-                Ok(mk(ConfigValueKind::Scalar(Yaml::Null)))
+                Ok(mk(ConfigValueKind::scalar(Yaml::Null)))
             } else if let Ok(inline) = ud.borrow::<LuaInline>() {
                 // Pandoc: single Inline userdata -> singleton MetaInlines.
                 Ok(mk(ConfigValueKind::PandocInlines(vec![
@@ -469,7 +469,13 @@ fn build_map(
         if lua_value.is_nil() {
             // Divergence D-null: a null-valued key was pushed as nil, so
             // its absence is "unchanged", not "deleted".
-            if matches!(orig_entry.value.value, ConfigValueKind::Scalar(Yaml::Null)) {
+            if matches!(
+                orig_entry.value.value,
+                ConfigValueKind::Scalar {
+                    yaml: Yaml::Null,
+                    ..
+                }
+            ) {
                 entries.push(orig_entry.clone());
             }
             continue;
@@ -531,7 +537,7 @@ pub fn config_value_structurally_eq(a: &ConfigValue, b: &ConfigValue) -> bool {
 fn config_kind_structurally_eq(a: &ConfigValueKind, b: &ConfigValueKind) -> bool {
     use ConfigValueKind::*;
     match (a, b) {
-        (Scalar(x), Scalar(y)) => yaml_scalar_eq(x, y),
+        (Scalar { yaml: x, .. }, Scalar { yaml: y, .. }) => yaml_scalar_eq(x, y),
         (PandocInlines(x), PandocInlines(y)) => {
             x == y || {
                 let ctx = crate::pandoc::ast_context::ASTContext::default();
@@ -607,6 +613,76 @@ pub fn register_quarto_config(lua: &Lua, quarto: &Table) -> Result<()> {
     // quarto.config.md(s): parse as markdown, the Lua analog of `!md`.
     // Single paragraph -> Inlines, anything else -> Blocks (the same rule
     // yaml_to_config_value applies to document metadata strings).
+    //
+    // PROVENANCE — why this is safe, and what would break it.
+    //
+    // The `Some(filter_source_info(lua))` parent below is
+    // `Generated { by: By::filter(<chunk name>, <line>), from: [] }` when the
+    // stack walk finds a Lua frame, and `Generated { by: By::unknown(),
+    // from: [] }` when it does not (`lua/types.rs`, `filter_source_info`,
+    // fallback at `:2320`). The two differ only in attribution: both carry an
+    // empty `from`, and a `By` of either kind carries only a JSON `data` blob
+    // — no `FileId`, no byte offsets. Everything below holds for either.
+    //
+    // Nodes come back from the reader as
+    // `Substring { parent: <that Generated>, .. }` — byte offsets measured
+    // against a base that has **no byte extent**. There is nothing for those
+    // offsets to be relative to.
+    //
+    // Neither of the two accessors that could turn those offsets into a
+    // source range does so today (quarto-source-map 0.1.3), and for
+    // different reasons:
+    //
+    //   * `map_offset` is safe unconditionally. Its `Generated` arm
+    //     (`mapping.rs:75-79`) returns `None` while ignoring `from`
+    //     entirely, so the `Substring` recursion dead-ends there no matter
+    //     what the base carries.
+    //
+    //   * `resolve_byte_range` is safe only *contingently*, on `from`
+    //     staying empty. Its `Generated` arm (`source_info.rs:404-406`)
+    //     delegates to `invocation_anchor()`, which is `None` only because
+    //     there is no `AnchorRole::Invocation` anchor to find.
+    //
+    //     `from` is empty at construction, and **nothing mutates this value
+    //     in place**: no production call site in `crates/` calls
+    //     `append_anchor` (all 8 sit inside their file's `#[cfg(test)]`
+    //     module), and there is no `Arc::make_mut`/`Arc::get_mut` in
+    //     `crates/` that could reach the `Arc<SourceInfo>` parent from
+    //     behind the `Arc`.
+    //
+    //     Read that as the narrow claim it is. Production code *does* attach
+    //     anchors, `Invocation` among them — but by **constructing a new
+    //     `Generated`**, never by mutating one that already exists:
+    //     `shortcode_resolve.rs:1177` (unconditionally an `Invocation`),
+    //     `readers/json.rs:502` and `lua/diagnostics.rs:195` (both take the
+    //     role from the data they decode). That last one is in this very
+    //     subsystem — it rebuilds a `SourceInfo` from a Lua table. None of
+    //     the three replaces the parent minted here, which goes straight
+    //     into `qmd::read` below with nothing in between. Grepping
+    //     `append_anchor` alone would tell you production never attaches
+    //     anchors, and that is false about this repo.
+    //
+    //     (Both greps match this comment's own mentions of them. Discount
+    //     this block when counting.)
+    //
+    // FORWARD RISK. The second bullet is the fragile one, and the change
+    // that breaks it is an attractive-looking improvement: give
+    // `filter_source_info` a real `Invocation` anchor instead of
+    // `SmallVec::new()`, so filter-created nodes point back at the
+    // invocation site. `quarto-core/src/transforms/shortcode_resolve.rs`
+    // (`enrich_or_create` at ~:1156, anchor at ~:1177) already does that in
+    // production — it mints `Generated { by, from: smallvec![
+    // Anchor::invocation(..) ] }`, and its filter branch reads the very
+    // `By::filter` data this function emits. Doing the same here would give
+    // `resolve_byte_range` an anchor to walk, and the `Substring` offsets
+    // above would start resolving against a base with no byte extent —
+    // offsets into whatever file the anchor names, measured from a string
+    // that is not in it. Fixing *that* would need an ephemeral
+    // `SourceFile` for the parsed string, not an anchor.
+    //
+    // GUARD: `quarto_config_md_yields_no_byte_range` (T8, in the test
+    // module below) asserts the `resolve_byte_range() == None` half and goes
+    // red if `from` ever gains an `Invocation` anchor.
     config.set(
         "md",
         lua.create_function(|lua, s: String| {
@@ -713,7 +789,7 @@ mod tests {
 
     fn scalar(y: Yaml, source: SourceInfo) -> ConfigValue {
         ConfigValue {
-            value: ConfigValueKind::Scalar(y),
+            value: ConfigValueKind::scalar(y),
             source_info: source,
             merge_op: MergeOp::default(),
         }
@@ -948,7 +1024,7 @@ mod tests {
         let fsi = filter_si();
 
         let got = peek_config_value(&lua, Value::Boolean(true), None, &fsi).unwrap();
-        assert_eq!(got.value, ConfigValueKind::Scalar(Yaml::Boolean(true)));
+        assert_eq!(got.value, ConfigValueKind::scalar(Yaml::Boolean(true)));
         assert_eq!(got.source_info, fsi);
 
         let s = lua.create_string("hey").unwrap();
@@ -957,16 +1033,19 @@ mod tests {
         // markdown-parsed.
         assert_eq!(
             got.value,
-            ConfigValueKind::Scalar(Yaml::String("hey".into()))
+            ConfigValueKind::scalar(Yaml::String("hey".into()))
         );
 
         // D-num: integers stay integers, floats stay reals — never strings.
         let got = peek_config_value(&lua, Value::Integer(5), None, &fsi).unwrap();
-        assert_eq!(got.value, ConfigValueKind::Scalar(Yaml::Integer(5)));
+        assert_eq!(got.value, ConfigValueKind::scalar(Yaml::Integer(5)));
 
         let got = peek_config_value(&lua, Value::Number(2.5), None, &fsi).unwrap();
         match &got.value {
-            ConfigValueKind::Scalar(Yaml::Real(r)) => assert_eq!(r.parse::<f64>().unwrap(), 2.5),
+            ConfigValueKind::Scalar {
+                yaml: Yaml::Real(r),
+                ..
+            } => assert_eq!(r.parse::<f64>().unwrap(), 2.5),
             other => panic!("expected Real, got {:?}", other),
         }
     }
@@ -1052,7 +1131,7 @@ mod tests {
                 assert_eq!(items.len(), 3);
                 assert_eq!(
                     items[0].value,
-                    ConfigValueKind::Scalar(Yaml::String("eins".into()))
+                    ConfigValueKind::scalar(Yaml::String("eins".into()))
                 );
             }
             other => panic!("expected Array, got {:?}", other),
@@ -1115,7 +1194,7 @@ mod tests {
         let lua = lua_env();
         let ud = lua.create_userdata(LuaConfigNull).unwrap();
         let got = peek_config_value(&lua, Value::UserData(ud), None, &filter_si()).unwrap();
-        assert_eq!(got.value, ConfigValueKind::Scalar(Yaml::Null));
+        assert_eq!(got.value, ConfigValueKind::scalar(Yaml::Null));
     }
 
     // ------------------------------------------------------------------
@@ -1187,7 +1266,7 @@ mod tests {
         let preferred = entries.iter().find(|e| e.key == "preferred").unwrap();
         assert_eq!(
             preferred.value.value,
-            ConfigValueKind::Scalar(Yaml::String("changed".into()))
+            ConfigValueKind::scalar(Yaml::String("changed".into()))
         );
         assert_eq!(preferred.value.source_info, filter_si());
         assert_eq!(preferred.value.merge_op, MergeOp::default());
@@ -1277,7 +1356,7 @@ mod tests {
             other => panic!("expected Map, got {:?}", other),
         };
         let maybe = entries.iter().find(|e| e.key == "maybe").unwrap();
-        assert_eq!(maybe.value.value, ConfigValueKind::Scalar(Yaml::Null));
+        assert_eq!(maybe.value.value, ConfigValueKind::scalar(Yaml::Null));
         assert_eq!(maybe.value.source_info, si(61));
     }
 
@@ -1302,7 +1381,7 @@ mod tests {
                 // Unchanged element keeps original provenance.
                 assert_eq!(items[0], scalar(Yaml::String("a".into()), si(20)));
                 // Changed element re-built with filter provenance.
-                assert_eq!(items[1].value, ConfigValueKind::Scalar(Yaml::Integer(8)));
+                assert_eq!(items[1].value, ConfigValueKind::scalar(Yaml::Integer(8)));
                 assert_eq!(items[1].source_info, filter_si());
             }
             other => panic!("expected Array, got {:?}", other),
@@ -1335,7 +1414,7 @@ mod tests {
         match &nested.value.value {
             ConfigValueKind::Map(inner) => {
                 let x = inner.iter().find(|e| e.key == "x").unwrap();
-                assert_eq!(x.value.value, ConfigValueKind::Scalar(Yaml::Boolean(false)));
+                assert_eq!(x.value.value, ConfigValueKind::scalar(Yaml::Boolean(false)));
                 assert_eq!(x.value.source_info, filter_si());
                 // Sibling leaf untouched: exact original node.
                 let y = inner.iter().find(|e| e.key == "y").unwrap();
@@ -1449,7 +1528,7 @@ mod tests {
         let got = peek_config_value(&lua, v, None, &filter_si()).unwrap();
         assert_eq!(
             got.value,
-            ConfigValueKind::Scalar(Yaml::String("**not md**".into()))
+            ConfigValueKind::scalar(Yaml::String("**not md**".into()))
         );
     }
 
@@ -1459,7 +1538,7 @@ mod tests {
         let v: Value = lua.load("return quarto.config.null()").eval().unwrap();
         assert_eq!(utils_type(&lua, v.clone()), "Null");
         let got = peek_config_value(&lua, v, None, &filter_si()).unwrap();
-        assert_eq!(got.value, ConfigValueKind::Scalar(Yaml::Null));
+        assert_eq!(got.value, ConfigValueKind::scalar(Yaml::Null));
     }
 
     #[test]
@@ -1478,6 +1557,58 @@ mod tests {
             }
             other => panic!("expected PandocInlines, got {:?}", other),
         }
+    }
+
+    /// T8 — guard the inertness of the `quarto.config.md` provenance path.
+    ///
+    /// `quarto.config.md` re-parses a Lua string with
+    /// `filter_source_info(lua)` as the parent `SourceInfo` (see the comment
+    /// at the constructor). Nodes come back as
+    /// `Substring { parent: Generated { by: By::filter(..), from: [] } }` —
+    /// a byte range measured against a base that has **no byte extent**.
+    ///
+    /// The accessor that would expose that as a bogus source range is
+    /// `resolve_byte_range`, and it returns `None` today because the
+    /// `Generated` arm delegates to `invocation_anchor()`, which is `None`
+    /// while `from` is empty. **That is the assertion that discriminates**:
+    /// attach an `Invocation` anchor in `filter_source_info`
+    /// (`lua/types.rs`) and this test goes red.
+    ///
+    /// The `map_offset` assertion below is **documentation only: it cannot
+    /// redden under the revert hunk above** — `map_offset`'s `Generated` arm
+    /// returns `None` unconditionally, ignoring `from` entirely. (Measured,
+    /// not assumed: with that hunk applied and the `resolve_byte_range`
+    /// assertion neutralized, this test still passed.) It is here to record
+    /// which of the two accessors is load-bearing, not to add coverage.
+    #[test]
+    fn quarto_config_md_yields_no_byte_range() {
+        let lua = lua_env();
+        let v: Value = lua.load("return quarto.config.md('x')").eval().unwrap();
+        let got = peek_config_value(&lua, v, None, &filter_si()).unwrap();
+
+        let inlines = match &got.value {
+            ConfigValueKind::PandocInlines(inls) => inls,
+            other => panic!("expected PandocInlines, got {:?}", other),
+        };
+        let node_si = inlines
+            .first()
+            .expect("quarto.config.md('x') should parse to one inline")
+            .source_info();
+
+        // Discriminating assertion: no byte range is derivable from a
+        // filter-attributed base.
+        assert_eq!(
+            node_si.resolve_byte_range(),
+            None,
+            "quarto.config.md node resolved to a byte range; \
+             `filter_source_info` has grown a source-side anchor and the \
+             Substring offsets are now being resolved against a base with \
+             no byte extent"
+        );
+
+        // Documentation only — cannot redden (see the doc comment above).
+        let ctx = quarto_source_map::SourceContext::new();
+        assert_eq!(node_si.map_offset(0, &ctx), None);
     }
 
     #[test]

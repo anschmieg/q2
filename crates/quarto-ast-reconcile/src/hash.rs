@@ -571,7 +571,14 @@ fn hash_config_value_kind(
     std::mem::discriminant(kind).hash(hasher);
 
     match kind {
-        ConfigValueKind::Scalar(yaml) => {
+        // Provenance is deliberately excluded, for the same reason
+        // `ConfigValue.source_info` is excluded above: this is the
+        // change-detection hash for incremental rebuilds, and a value
+        // moving in the source without changing must not churn it.
+        // The exclusion is additionally enforced at the type level:
+        // `content_source_info`'s `SourceInfo` does not implement `Hash`,
+        // so a mutation that tried to hash it would not even compile.
+        ConfigValueKind::Scalar { yaml, .. } => {
             yaml.hash(hasher);
         }
         ConfigValueKind::PandocInlines(inlines) => {
@@ -918,13 +925,7 @@ pub fn structural_eq_inline(a: &Inline, b: &Inline) -> bool {
             a.quote_type == b.quote_type && structural_eq_inlines(&a.content, &b.content)
         }
         (Inline::Cite(a), Inline::Cite(b)) => {
-            a.citations.len() == b.citations.len()
-                && a.citations.iter().zip(&b.citations).all(|(a, b)| {
-                    a.id == b.id
-                        && a.mode == b.mode
-                        && structural_eq_inlines(&a.prefix, &b.prefix)
-                        && structural_eq_inlines(&a.suffix, &b.suffix)
-                })
+            structural_eq_citations(&a.citations, &b.citations)
                 && structural_eq_inlines(&a.content, &b.content)
         }
         (Inline::Code(a), Inline::Code(b)) => attr_eq(&a.attr, &b.attr) && a.text == b.text,
@@ -977,6 +978,23 @@ pub fn structural_eq_blocks(a: &[Block], b: &[Block]) -> bool {
 }
 
 /// Check structural equality of inline sequences.
+/// Structural equality for a Cite's `citations`: id and mode compared
+/// directly, prefix/suffix inlines compared structurally (ignoring
+/// source info). `note_num` and `hash` are transient Pandoc bookkeeping
+/// and are ignored, matching `hash_inline`'s Cite arm.
+pub fn structural_eq_citations(
+    a: &[quarto_pandoc_types::Citation],
+    b: &[quarto_pandoc_types::Citation],
+) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.id == b.id
+                && a.mode == b.mode
+                && structural_eq_inlines(&a.prefix, &b.prefix)
+                && structural_eq_inlines(&a.suffix, &b.suffix)
+        })
+}
+
 pub fn structural_eq_inlines(a: &[Inline], b: &[Inline]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| structural_eq_inline(a, b))
 }
@@ -1572,12 +1590,14 @@ mod tests {
             math_type: MathType::InlineMath,
             text: "x^2".to_string(),
             source_info: dummy_source(),
+            text_source: None,
         });
 
         let math2 = Inline::Math(Math {
             math_type: MathType::DisplayMath,
             text: "x^2".to_string(),
             source_info: dummy_source(),
+            text_source: None,
         });
 
         // Different math type -> different hash
@@ -2060,18 +2080,21 @@ mod tests {
             math_type: MathType::InlineMath,
             text: "x".to_string(),
             source_info: dummy_source(),
+            text_source: None,
         });
 
         let m2 = Inline::Math(Math {
             math_type: MathType::InlineMath,
             text: "x".to_string(),
             source_info: other_source(),
+            text_source: None,
         });
 
         let m3 = Inline::Math(Math {
             math_type: MathType::DisplayMath,
             text: "x".to_string(),
             source_info: dummy_source(),
+            text_source: None,
         });
 
         assert!(structural_eq_inline(&m1, &m2));
@@ -2489,7 +2512,7 @@ mod tests {
 
     fn scalar_str(s: &str) -> ConfigValue {
         ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String(s.to_string())),
+            value: ConfigValueKind::scalar(Yaml::String(s.to_string())),
             source_info: dummy_source(),
             merge_op: MergeOp::default(),
         }
@@ -2497,7 +2520,7 @@ mod tests {
 
     fn scalar_int(i: i64) -> ConfigValue {
         ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::Integer(i)),
+            value: ConfigValueKind::scalar(Yaml::Integer(i)),
             source_info: dummy_source(),
             merge_op: MergeOp::default(),
         }
@@ -2548,6 +2571,33 @@ mod tests {
             entries[0].value.source_info = other_source();
         }
         assert_eq!(compute_meta_hash_fresh(&a), compute_meta_hash_fresh(&b));
+    }
+
+    #[test]
+    fn meta_hash_excludes_scalar_content_provenance() {
+        // A string scalar's *content* provenance (the inner span of a
+        // quoted/block scalar, threaded in by this epic) must not reach the
+        // change-detection hash either. Hashing it would over-invalidate
+        // every incremental rebuild: a value that merely moved in the source
+        // would churn the hash even though its content is unchanged.
+        //
+        // `scalar_str` and friends always build `content_source_info: None`,
+        // so no other test in this module can observe this arm's behavior --
+        // it is reachable only by constructing the `Some` variants directly.
+        let with_prov = |prov: SourceInfo| ConfigValue {
+            value: ConfigValueKind::scalar_with_provenance(Yaml::String("hello".to_string()), prov),
+            source_info: dummy_source(),
+            merge_op: MergeOp::default(),
+        };
+
+        let a = map_of(vec![("title", with_prov(dummy_source()))]);
+        let b = map_of(vec![("title", with_prov(other_source()))]);
+
+        assert_eq!(
+            compute_meta_hash_fresh(&a),
+            compute_meta_hash_fresh(&b),
+            "content provenance must be excluded from the meta hash",
+        );
     }
 
     #[test]
@@ -2613,12 +2663,12 @@ mod tests {
     #[test]
     fn meta_hash_merge_op_participates() {
         let a = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String("x".into())),
+            value: ConfigValueKind::scalar(Yaml::String("x".into())),
             source_info: dummy_source(),
             merge_op: MergeOp::Concat,
         };
         let b = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String("x".into())),
+            value: ConfigValueKind::scalar(Yaml::String("x".into())),
             source_info: dummy_source(),
             merge_op: MergeOp::Prefer,
         };

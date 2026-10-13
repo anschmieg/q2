@@ -1,4 +1,8 @@
-# Plan: pico-quarto-render HTML Template Integration
+---
+title: 'Plan: pico-quarto-render HTML Template Integration'
+date: 2025-11-25
+description: 'Extends `pico-quarto-render` to produce complete HTML documents by embedding templates with `include_dir`, converting document metadata into template values, and building the full template context.'
+---
 
 ## Overview
 
@@ -310,7 +314,7 @@ From analyzing the templates, these variables are used:
 **Required for basic rendering**:
 - `body` - rendered document content
 - `lang` - document language (default: "en")
-- `pagetitle` - page title for <title> tag
+- `pagetitle` - page title for \<title> tag
 
 **Optional metadata**:
 - `title`, `subtitle` - document title block

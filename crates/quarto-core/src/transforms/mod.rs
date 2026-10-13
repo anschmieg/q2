@@ -12,9 +12,11 @@
 //! - [`AppendixStructureTransform`] - Consolidates appendix content into single container
 //! - [`CalloutTransform`] - Converts callout Divs to CustomNodes
 //! - [`CalloutResolveTransform`] - Resolves Callout CustomNodes to standard Div structure
+//! - [`EditorialMarksOoxmlTransform`] - Renders editorial marks to Word and PowerPoint (docx, pptx)
 //! - [`FooterGenerateTransform`] - Resolves `page-footer:` YAML into `navigation.footer`
 //! - [`FooterRenderTransform`] - Renders `navigation.footer` to HTML
-//! - [`FootnotesTransform`] - Extracts footnotes and creates footnotes section
+//! - [`FootnotesTransform`] - Resolves footnote refs/defs into native `Inline::Note`s
+//! - [`FootnotesResolveTransform`] - Resolves `Inline::Note`s into HTML footnote chrome
 //! - [`MetadataNormalizeTransform`] - Normalizes document metadata (adds pagetitle, etc.)
 //! - [`NavbarGenerateTransform`] - Resolves `navbar:` YAML into `navigation.navbar`
 //! - [`NavbarRenderTransform`] - Renders `navigation.navbar` to HTML
@@ -28,30 +30,59 @@
 //! These transforms implement [`AstTransform`](crate::transform::AstTransform) and
 //! can be added to a [`TransformPipeline`](crate::transform::TransformPipeline).
 
+/// `RawBlock` format tag [`FootnotesTransform`] uses to mark the first block
+/// of a resolved named-reference `Inline::Note`'s content with the original
+/// `[^id]` string, so [`FootnotesResolveTransform`] can dedupe repeated
+/// references to the same id into one shared footnote entry — matching the
+/// pre-split transform's `resolve_reference` dedup — without a
+/// `RenderContext` sideband: the id rides inside the `Inline::Note` AST node
+/// itself, the one thing the two halves are allowed to communicate through.
+///
+/// Not a real pandoc writer format, so any writer that doesn't recognize it
+/// (every one, by construction) drops it silently — the same convention
+/// `ExampleEmbedRenderTransform`'s `RawBlock("html", ...)` iframe relies on
+/// for non-HTML profiles (see `claude-notes/designs/pandoc-hybrid-architecture.md`
+/// line ~588). Under `Pandoc(_)` profiles, where `FootnotesResolveTransform`
+/// never runs to strip it, this RawBlock survives into the `Note`'s content
+/// fed to pandoc's own writer and is silently dropped there — the visible
+/// docx/pptx output is unaffected; only inline `^[...]` notes (which carry no
+/// id and are never deduped) skip this marker entirely.
+pub(crate) const FOOTNOTE_REF_ID_MARKER_FORMAT: &str = "quarto-internal-footnote-ref-id";
+
 mod appendix;
 mod attribution_generate;
 mod attribution_render;
 mod attribution_viewer;
 mod authors_normalize;
+mod book_cover_image;
+mod breadcrumbs_render;
 mod callout;
 mod callout_resolve;
 mod categories_sidebar;
 mod code_block_generate;
 mod code_block_render;
+mod conditional_content;
 mod config;
+mod config_markdown;
+pub(crate) mod cross_chapter_crossref_resolve;
 mod crossref_index;
-mod crossref_render;
+pub(crate) mod crossref_render;
 mod crossref_resolve;
 mod date_normalize;
+mod draft_alert;
+mod editorial_marks_ooxml;
 mod equation_label;
 mod example_embed;
 mod float_ref_target;
 mod footer_generate;
 mod footer_render;
 mod footnotes;
+mod footnotes_resolve;
+mod format_css;
 mod link_rewrite;
 mod listing_generate;
 mod listing_render;
+pub mod llms;
 mod mermaid;
 mod metadata_normalize;
 mod navbar_generate;
@@ -61,19 +92,41 @@ mod navigation_enrich;
 pub(crate) mod navigation_href;
 mod page_nav_generate;
 mod page_nav_render;
+mod panel_tabset;
+mod panel_tabset_resolve;
 mod proof;
+mod reference_link_diagnostics;
+mod repo_actions_render;
 mod resource_collector;
+mod responsive_image;
+// Shared mutable walk over body images (bd-3qych45b), used by
+// `responsive_image` and `hephaestus`.
+mod image_walk;
+// hephaestus `.hep` → SVG (bd-3qych45b). Native-only: the crate links
+// hephaestus's SVG backend, which the WASM preview replaces with the
+// npm `hephaestus-svg-wasm` client — see the module docs.
+#[cfg(not(target_arch = "wasm32"))]
+mod hephaestus;
+mod secondary_nav_render;
+// Fixed-header JS shipping (bd-ersobfbt). Native-only: the preview
+// excludes ApplyTemplateStage (no <script> emission) and injects the
+// same vendored files itself in entry.tsx — see the module docs.
+#[cfg(not(target_arch = "wasm32"))]
+mod quarto_nav_js;
 mod sectionize;
 mod shortcode_resolve;
+mod shortcode_text;
 pub(crate) mod sidebar_auto;
 mod sidebar_generate;
 mod sidebar_render;
 mod table_bootstrap_class;
 mod theorem;
 mod title_banner;
-mod title_block;
+pub(crate) mod title_block;
 mod toc_generate;
+mod toc_location;
 mod toc_render;
+pub(crate) use toc_render::strip_links_and_notes;
 mod website_bootstrap_icons;
 mod website_canonical_url;
 mod website_favicon;
@@ -84,6 +137,8 @@ pub use attribution_generate::AttributionGenerateTransform;
 pub use attribution_render::AttributionRenderTransform;
 pub use attribution_viewer::AttributionViewerTransform;
 pub use authors_normalize::{AuthorsNormalizeTransform, normalize_authors_meta};
+pub use book_cover_image::BookCoverImageTransform;
+pub use breadcrumbs_render::BreadcrumbsRenderTransform;
 pub use callout::CalloutTransform;
 pub use callout_resolve::CalloutResolveTransform;
 pub use categories_sidebar::CategoriesSidebarTransform;
@@ -92,22 +147,33 @@ pub use code_block_generate::{
     resolve_default_copy_mode,
 };
 pub use code_block_render::CodeBlockRenderTransform;
+pub use conditional_content::ConditionalContentTransform;
 pub use config::{
-    AppendixStyle, ReferenceLocation, TitleBlockStyle, is_feature_disabled, resolve_website_bool,
+    AppendixStyle, ReferenceLocation, TitleBlockStyle, is_feature_disabled, page_has_navbar,
+    resolve_website_bool,
 };
+pub use config_markdown::{ConfigMarkdownTransform, apply_markdown_config_paths};
 pub use crossref_index::CrossrefIndexTransform;
 pub use crossref_render::CrossrefRenderTransform;
 pub use crossref_resolve::CrossrefResolveTransform;
 pub use date_normalize::DateNormalizeTransform;
+pub use draft_alert::DraftAlertTransform;
+pub use editorial_marks_ooxml::EditorialMarksOoxmlTransform;
 pub use equation_label::EquationLabelTransform;
 pub use example_embed::{ExampleEmbedRenderTransform, ExampleEmbedTransform};
 pub use float_ref_target::FloatRefTargetSugarTransform;
 pub use footer_generate::FooterGenerateTransform;
 pub use footer_render::FooterRenderTransform;
 pub use footnotes::FootnotesTransform;
+pub use footnotes_resolve::FootnotesResolveTransform;
+pub use format_css::FormatCssTransform;
+pub(crate) use format_css::user_css_urls;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hephaestus::HephaestusRenderTransform;
 pub use link_rewrite::LinkRewriteTransform;
 pub use listing_generate::ListingGenerateTransform;
 pub use listing_render::ListingRenderTransform;
+pub use llms::LlmsCaptureTransform;
 pub use mermaid::{MERMAID_VERSION, MermaidRenderTransform};
 pub use metadata_normalize::MetadataNormalizeTransform;
 pub(crate) use metadata_normalize::inlines_to_plain_text;
@@ -115,10 +181,20 @@ pub use navbar_generate::NavbarGenerateTransform;
 pub use navbar_render::NavbarRenderTransform;
 pub use page_nav_generate::PageNavGenerateTransform;
 pub use page_nav_render::PageNavRenderTransform;
+pub use panel_tabset::PanelTabsetTransform;
+pub use panel_tabset_resolve::PanelTabsetResolveTransform;
 pub use proof::ProofSugarTransform;
+#[cfg(not(target_arch = "wasm32"))]
+pub use quarto_nav_js::QuartoNavJsTransform;
+pub use reference_link_diagnostics::ReferenceLinkDiagnosticsTransform;
+pub use repo_actions_render::RepoActionsRenderTransform;
 pub use resource_collector::{ResourceCollectorTransform, collect_referenced_asset_urls};
+pub use responsive_image::ResponsiveImageTransform;
+pub use secondary_nav_render::SecondaryNavRenderTransform;
 pub use sectionize::SectionizeTransform;
+pub(crate) use shortcode_resolve::code_shortcode_opt_out;
 pub use shortcode_resolve::{ShortcodeResolveTransform, extract_shortcode_paths};
+pub(crate) use shortcode_text::{TextSegment, parse_text_shortcodes};
 pub use sidebar_generate::SidebarGenerateTransform;
 pub use sidebar_render::SidebarRenderTransform;
 pub use table_bootstrap_class::TableBootstrapClassTransform;
@@ -126,6 +202,7 @@ pub use theorem::TheoremSugarTransform;
 pub use title_banner::TitleBannerTransform;
 pub use title_block::TitleBlockTransform;
 pub use toc_generate::TocGenerateTransform;
+pub use toc_location::TocLocationTransform;
 pub use toc_render::TocRenderTransform;
 pub use website_bootstrap_icons::WebsiteBootstrapIconsTransform;
 pub use website_canonical_url::WebsiteCanonicalUrlTransform;

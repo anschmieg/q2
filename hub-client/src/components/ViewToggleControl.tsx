@@ -1,48 +1,69 @@
-import { useViewMode } from './ViewModeContext';
+import { LayoutMarkupIcon, LayoutSplitIcon, LayoutPreviewIcon } from './icons';
+import Tooltip from './Tooltip';
+import { viewToggle } from '../strings';
 import './ViewToggleControl.css';
 
 /**
- * Compact horizontal view toggle in the header.
- * Three small square buttons with layout-split icons.
+ * Split presets for the editor/preview divider — clicking a button is
+ * exactly equivalent to dragging the pane divider to that position
+ * (markup = the drag's editor-max clamp, preview = its editor-min
+ * clamp), except the move is animated (Editor's split-animating class).
  */
-export default function ViewToggleControl() {
-  const { viewMode, setViewMode } = useViewMode();
+export const SPLIT_PRESETS = {
+  markup: 0.85,
+  split: 0.5,
+  preview: 0.15,
+} as const;
 
+interface ViewToggleControlProps {
+  /** Current editor-pane fraction of the split. */
+  fraction?: number;
+  /** Jump the divider to a preset fraction (animated by the caller). */
+  onSelect?: (fraction: number) => void;
+  /** Gray out every preset (no preview pane for the current file). */
+  disabled?: boolean;
+}
+
+function isActive(fraction: number | undefined, preset: number): boolean {
+  return fraction !== undefined && Math.abs(fraction - preset) < 0.01;
+}
+
+export default function ViewToggleControl({ fraction, onSelect, disabled = false }: ViewToggleControlProps) {
   return (
     <div className="view-toggle-control">
-      <button
-        className={`view-toggle-btn${viewMode === 'markup' ? ' active' : ''}`}
-        onClick={() => setViewMode('markup')}
-        title="Expand markup"
-        aria-label="Markup view"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <rect x="0" y="0" width="7" height="10" rx="0.5" fill="currentColor" />
-          <rect x="9" y="0" width="3" height="10" rx="0.5" fill="currentColor" opacity="0.25" />
-        </svg>
-      </button>
-      <button
-        className={`view-toggle-btn${viewMode === 'both' ? ' active' : ''}`}
-        onClick={() => setViewMode('both')}
-        title="Split equally"
-        aria-label="Split view"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <rect x="0" y="0" width="5" height="10" rx="0.5" fill="currentColor" />
-          <rect x="7" y="0" width="5" height="10" rx="0.5" fill="currentColor" />
-        </svg>
-      </button>
-      <button
-        className={`view-toggle-btn${viewMode === 'preview' ? ' active' : ''}`}
-        onClick={() => setViewMode('preview')}
-        title="Expand preview"
-        aria-label="Preview view"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <rect x="0" y="0" width="3" height="10" rx="0.5" fill="currentColor" opacity="0.25" />
-          <rect x="5" y="0" width="7" height="10" rx="0.5" fill="currentColor" />
-        </svg>
-      </button>
+      <Tooltip content={viewToggle.expandMarkup}>
+        <button
+          className={`view-toggle-btn${isActive(fraction, SPLIT_PRESETS.markup) ? ' active' : ''}`}
+          onClick={() => onSelect?.(SPLIT_PRESETS.markup)}
+          disabled={disabled}
+          aria-label={viewToggle.markupView}
+          aria-pressed={isActive(fraction, SPLIT_PRESETS.markup)}
+        >
+          <LayoutMarkupIcon />
+        </button>
+      </Tooltip>
+      <Tooltip content={viewToggle.splitEqually}>
+        <button
+          className={`view-toggle-btn${isActive(fraction, SPLIT_PRESETS.split) ? ' active' : ''}`}
+          onClick={() => onSelect?.(SPLIT_PRESETS.split)}
+          disabled={disabled}
+          aria-label={viewToggle.splitView}
+          aria-pressed={isActive(fraction, SPLIT_PRESETS.split)}
+        >
+          <LayoutSplitIcon />
+        </button>
+      </Tooltip>
+      <Tooltip content={viewToggle.expandPreview}>
+        <button
+          className={`view-toggle-btn${isActive(fraction, SPLIT_PRESETS.preview) ? ' active' : ''}`}
+          onClick={() => onSelect?.(SPLIT_PRESETS.preview)}
+          disabled={disabled}
+          aria-label={viewToggle.previewView}
+          aria-pressed={isActive(fraction, SPLIT_PRESETS.preview)}
+        >
+          <LayoutPreviewIcon />
+        </button>
+      </Tooltip>
     </div>
   );
 }

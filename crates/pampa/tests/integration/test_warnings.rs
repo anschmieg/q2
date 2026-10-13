@@ -35,6 +35,225 @@ Some content
 }
 
 #[test]
+fn test_definition_list_lines_fall_back_to_literal_text_with_q254() {
+    use pampa::pandoc::{Block, Inline};
+
+    let input =
+        "time\n\n: A timestamp that identifies when the request was initiated.\n\n: Type: string\n";
+    let (pandoc, _context, warnings) = readers::qmd::read(
+        input.as_bytes(),
+        false,
+        "definitions.qmd",
+        &mut std::io::sink(),
+        true,
+        None,
+    )
+    .expect("definition-list fallback should parse successfully");
+
+    let literal_lines: Vec<_> = pandoc
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Paragraph(paragraph) => {
+                paragraph.content.iter().find_map(|inline| match inline {
+                    Inline::Str(text) if text.text.starts_with(':') => Some(text),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        literal_lines.len(),
+        2,
+        "both definition lines should remain: {pandoc:#?}"
+    );
+    assert_eq!(
+        literal_lines[0].text,
+        ": A timestamp that identifies when the request was initiated."
+    );
+    assert_eq!(literal_lines[1].text, ": Type: string");
+    assert!(
+        pandoc
+            .blocks
+            .iter()
+            .all(|block| !matches!(block, Block::DefinitionList(_))),
+        "native Pandoc definition lists remain unsupported"
+    );
+
+    let definition_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.code.as_deref() == Some("Q-2-54"))
+        .collect();
+    assert_eq!(
+        definition_warnings.len(),
+        2,
+        "expected one warning per definition line: {warnings:#?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.code.as_deref() != Some("Q-0-99")),
+        "definition-list warnings should use Q-2-54: {warnings:#?}"
+    );
+    let warning_text = definition_warnings
+        .iter()
+        .map(|warning| warning.to_text(None))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "definition list",
+        "literal text",
+        "{.definition-list}",
+        "\\:",
+        "qmd-syntax-helper convert -r definition-lists",
+    ] {
+        assert!(
+            warning_text.contains(expected),
+            "warning should mention {expected:?}: {warning_text}"
+        );
+    }
+    for (warning, line) in definition_warnings.iter().zip([
+        ": A timestamp that identifies when the request was initiated.",
+        ": Type: string",
+    ]) {
+        let location = warning
+            .location
+            .as_ref()
+            .expect("warning should have a source location");
+        let (_, start, _) = location
+            .resolve_byte_range()
+            .expect("warning location should resolve");
+        assert_eq!(
+            start,
+            input.find(line).unwrap(),
+            "warning should point to its definition line"
+        );
+    }
+}
+
+#[test]
+fn test_tight_definition_fallback_preserves_spacing_and_trailing_attribute() {
+    use pampa::pandoc::{Block, Inline};
+
+    let input = "Term\n:   A tight definition {#tbl-x}\n";
+    let (pandoc, _context, warnings) = readers::qmd::read(
+        input.as_bytes(),
+        false,
+        "tight-definition.qmd",
+        &mut std::io::sink(),
+        true,
+        None,
+    )
+    .expect("definition-list fallback should parse successfully");
+
+    let fallback = pandoc.blocks.iter().find_map(|block| match block {
+        Block::Paragraph(paragraph) => paragraph.content.iter().find_map(|inline| match inline {
+            Inline::Str(text) if text.text.starts_with(':') => Some(text),
+            _ => None,
+        }),
+        _ => None,
+    });
+    assert_eq!(
+        fallback.map(|text| text.text.as_str()),
+        Some(":   A tight definition {#tbl-x}"),
+        "the original line, including spacing and attributes, should remain literal: {pandoc:#?}"
+    );
+    let source_range = fallback
+        .expect("literal fallback should exist")
+        .source_info
+        .resolve_byte_range()
+        .expect("literal fallback source should resolve");
+    assert_eq!(source_range, (0, input.find(":   ").unwrap(), input.len()));
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.code.as_deref() == Some("Q-2-54"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_nested_definition_fallback_keeps_lead_in_and_first_list_item() {
+    let input = "`type`\n\n: Set to one of the following\n: - `current` - A current source package request.\n  - `archived` - An archived source package request.\n";
+    let (pandoc, _context, warnings) = readers::qmd::read(
+        input.as_bytes(),
+        false,
+        "nested-definition.qmd",
+        &mut std::io::sink(),
+        true,
+        None,
+    )
+    .expect("nested definition fallback should parse successfully");
+
+    let rendered_tree = format!("{pandoc:#?}");
+    let lead_in = rendered_tree
+        .find(": Set to one of the following")
+        .expect("definition lead-in should remain");
+    let first_item = rendered_tree
+        .find(": - `current` - A current source package request.")
+        .expect("first list item should remain literal");
+    let second_item = rendered_tree
+        .find("archived")
+        .expect("continued list item should remain");
+    assert!(
+        lead_in < first_item && first_item < second_item,
+        "the literal first item should precede the surviving continuation: {rendered_tree}"
+    );
+    assert!(
+        !rendered_tree[lead_in..].contains("BulletList"),
+        "definition list continuation should not be re-parented as a parsed list: {rendered_tree}"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.code.as_deref() == Some("Q-2-54"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn test_caption_after_non_paragraph_keeps_literal_text_and_generic_warning() {
+    use pampa::pandoc::{Block, Inline};
+
+    let input = "::: {.my-div}\nSome content\n:::\n\n: This caption has no table\n";
+    let (pandoc, _context, warnings) = readers::qmd::read(
+        input.as_bytes(),
+        false,
+        "standalone-caption.qmd",
+        &mut std::io::sink(),
+        true,
+        None,
+    )
+    .expect("standalone caption should remain a warning");
+
+    assert!(
+        pandoc.blocks.iter().any(|block| matches!(block,
+            Block::Paragraph(paragraph) if paragraph.content.iter().any(|inline|
+                matches!(inline, Inline::Str(text) if text.text == ": This caption has no table")
+            )
+        )),
+        "standalone caption text should be retained: {pandoc:#?}"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.code.as_deref() == Some("Q-0-99")
+                && warning
+                    .to_text(None)
+                    .contains("Caption found without a preceding table")
+        }),
+        "non-paragraph captions should keep the generic warning: {warnings:#?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.code.as_deref() != Some("Q-2-54"))
+    );
+}
+
+#[test]
 fn test_caption_with_table_no_warning() {
     // Create input with a proper table caption
     // This should parse successfully with no warnings
@@ -212,7 +431,10 @@ fn test_multiple_html_elements() {
 
 #[test]
 fn test_block_level_html_elements() {
-    // Block-level HTML elements like <div> should also be converted to RawInline
+    // A block-level tag that opens a line makes the whole thing a raw HTML
+    // *block*, not a paragraph of RawInlines: `<div>` is flow content and is
+    // not allowed inside a `<p>` (bd-block-html-wrapped-in-p-w8qebxig).
+    // It still warns — naked HTML remains an unsupported authoring form.
     let input = "<div>content</div>";
 
     let result = readers::qmd::read(
@@ -239,11 +461,43 @@ fn test_block_level_html_elements() {
         "Should have warnings for HTML div elements"
     );
 
-    // Verify AST contains RawInline nodes
+    use pampa::pandoc::Block;
+    // The tags stay raw and `content` is parsed between them, so the first
+    // block quotes just the opening tag rather than the whole element
+    // (bd-block-html-adjacent-markdown-unparsed-0qnjuwuy).
+    match &pandoc.blocks[0] {
+        Block::RawBlock(r) => {
+            assert_eq!(r.format, "html");
+            assert_eq!(r.text, "<div>");
+        }
+        other => panic!("Expected a RawBlock, got {:?}", other),
+    }
+    match &pandoc.blocks[2] {
+        Block::RawBlock(r) => assert_eq!(r.text, "</div>"),
+        other => panic!("Expected the closing tag as a RawBlock, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_inline_html_elements_stay_in_a_paragraph() {
+    // The counterpart to the test above: an inline element, or a block-level
+    // tag that does not open the line, stays a RawInline inside its paragraph.
+    let input = "text <div>content</div> more";
+
+    let (pandoc, _context, _warnings) = readers::qmd::read(
+        input.as_bytes(),
+        false,
+        "test.md",
+        &mut std::io::sink(),
+        true,
+        None,
+    )
+    .expect("Document should parse successfully");
+
     use pampa::pandoc::{Block, Inline};
     let para = match &pandoc.blocks[0] {
         Block::Paragraph(p) => p,
-        _ => panic!("Expected paragraph block"),
+        other => panic!("Expected paragraph block, got {:?}", other),
     };
 
     let raw_inlines: Vec<_> = para
@@ -255,18 +509,13 @@ fn test_block_level_html_elements() {
         })
         .collect();
 
-    assert!(
-        raw_inlines.len() >= 2,
-        "Should have at least 2 RawInline nodes for opening and closing div"
+    assert_eq!(
+        raw_inlines.len(),
+        2,
+        "Should have RawInline nodes for the opening and closing div"
     );
-
-    // Verify the div tags
-    assert_eq!(raw_inlines[0].format, "html");
     assert_eq!(raw_inlines[0].text, "<div>");
-
-    let last = raw_inlines.last().unwrap();
-    assert_eq!(last.format, "html");
-    assert_eq!(last.text, "</div>");
+    assert_eq!(raw_inlines[1].text, "</div>");
 }
 
 #[test]

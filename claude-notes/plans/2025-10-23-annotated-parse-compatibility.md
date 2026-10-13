@@ -1,4 +1,8 @@
-# AnnotatedParse Compatibility Analysis Report
+---
+title: 'AnnotatedParse Compatibility Analysis Report'
+date: 2025-10-23
+description: 'Checks whether the quarto-cli TypeScript code can safely accept JSON arrays in the `AnnotatedParse.result` field, which converted metadata inlines would need, and concludes the existing code already guards against arrays.'
+---
 
 ## Executive Summary
 
@@ -135,7 +139,7 @@ function validateArray(value: AnnotatedParse, schema: ArraySchema, context: Vali
 
 Extensive search across the codebase shows `kind` is used to:
 - Determine navigation structure in mappings/sequences (lines 550, 579, 697, 721-724, etc.)
-- Skip special parsing cases (<<EMPTY>>, etc.)
+- Skip special parsing cases (\<\<EMPTY>>, etc.)
 - NOT to determine whether result is an array or object
 
 This is important: **changing result structure won't break kind-based logic**
@@ -164,9 +168,9 @@ function validateArray(value: AnnotatedParse, schema: ArraySchema, context: Vali
 ### 3. Most Code Doesn't Access result Directly
 
 Analysis of all 32 files using AnnotatedParse:
-- ~60% only pass AnnotatedParse through the system
-- ~30% use result with proper type guards
-- ~10% assume specific result structures (all properly guarded)
+- \~60% only pass AnnotatedParse through the system
+- \~30% use result with proper type guards
+- \~10% assume specific result structures (all properly guarded)
 
 ## Test Files Examined
 

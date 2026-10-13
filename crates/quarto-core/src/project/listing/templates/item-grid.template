@@ -1,25 +1,47 @@
-::: {.g-col-1}
+::: {.g-col-1 $metadata-attrs$}
 
 ::: {.quarto-grid-item .card .h-100}
 
+$if(show.image)$
 $if(image-html)$
 ::: card-img-top
-[`$image-html$`{=html}]($path$){.no-external}
+$if(path)$
+[`$image-placeholder-begin$$image-html$$image-placeholder-end$`{=html}]($path$){.no-external}
+$else$
+`$image-placeholder-begin$$image-html$$image-placeholder-end$`{=html}
+$endif$
 :::
 $else$
 ::: card-img-top
+$if(path)$
 [`$image-placeholder-begin$<div class="listing-item-img-placeholder card-img-top">&nbsp;</div>$image-placeholder-end$`{=html}]($path$){.no-external}
+$else$
+`$image-placeholder-begin$<div class="listing-item-img-placeholder card-img-top">&nbsp;</div>$image-placeholder-end$`{=html}
+$endif$
 :::
+$endif$
 $endif$
 
 ::: {.card-body .post-contents}
 
+$if(show.title)$
 $if(title)$
+$if(path)$
 ##### [$title$]($path$){.no-anchor .no-external .card-title .listing-title}
+$else$
+##### $title$ {.no-anchor .card-title .listing-title}
+$endif$
+$endif$
 $endif$
 
+$if(show.subtitle)$
 $if(subtitle)$
+$if(path)$
 [$subtitle$]($path$){.no-external .card-subtitle .listing-subtitle}
+$else$
+[$subtitle$]{.card-subtitle .listing-subtitle}
+$endif$
+$endif$
 $endif$
 
 $if(show.categories)$
@@ -30,32 +52,44 @@ $category-html$
 $endif$
 $endif$
 
+$if(show.reading-time)$
 $if(reading-time)$
 [$reading-time$]{.listing-reading-time .card-text .text-muted}
 $endif$
+$endif$
 
-$if(description)$
+$if(show.description)$
+$if(show-description)$
 ::: {.card-text .listing-description .delink}
+$if(path)$
+[$if(description-placeholder-begin)$`$description-placeholder-begin$`{=html}$endif$$if(description)$$description$$endif$$if(description-placeholder-end)$`$description-placeholder-end$`{=html}$endif$]($path$){.no-external}
+$else$
 ```{=html}
 $description-placeholder-begin$
 ```
 
-[$description$]($path$){.no-external}
+$if(description)$$description$$endif$
 
 ```{=html}
 $description-placeholder-end$
 ```
+$endif$
 :::
+$endif$
 $endif$
 
 ::: {.card-attribution .card-text-small}
 
+$if(show.author)$
 $if(author)$
 [$author$]{.listing-author}
 $endif$
+$endif$
 
+$if(show.date)$
 $if(date)$
 [$date$]{.listing-date}
+$endif$
 $endif$
 
 :::

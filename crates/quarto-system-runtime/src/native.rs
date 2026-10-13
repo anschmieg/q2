@@ -20,10 +20,71 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::sass_native;
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use crate::traits::{
-    CommandOutput, PathKind, PathMetadata, RuntimeError, RuntimeResult, SystemRuntime, TempDir,
-    XdgDirKind,
+    CommandOutput, FetchPolicy, PathKind, PathMetadata, RuntimeError, RuntimeResult, SassOutput,
+    SystemRuntime, TempDir, XdgDirKind, validate_fetch_url,
 };
+
+/// How long [`SystemRuntime::fetch_url`] waits for a whole request, headers
+/// and body, before giving up. reqwest has no timeout by default, so without
+/// this a stalled connection would hang a render (or a CI run) indefinitely.
+/// Matches `quarto-source-fetch`'s request timeout.
+pub const FETCH_URL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The blocking HTTP client behind [`SystemRuntime::fetch_url`].
+///
+/// Blocking rather than async: the native render pipeline is driven by
+/// `pollster::block_on` (render_to_file.rs, pipeline.rs tests), which
+/// provides no tokio reactor, and async reqwest panics with "there is no
+/// reactor running". Blocking is appropriate: Lua filter execution already
+/// occupies a dedicated thread, and fetches happen only when a document or
+/// filter explicitly asks for a URL. One client is shared so its connection
+/// pool and TLS configuration are built once.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(FETCH_URL_TIMEOUT)
+            .build()
+            // The builder only fails on an unusable TLS/system configuration;
+            // fall back to the default client rather than making every fetch
+            // unavailable.
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
+}
+
+/// GET `url` with `timeout` covering the whole request; returns the body and
+/// its `content-type`.
+///
+/// A non-2xx status is an error. A 404 or 503 body is an HTML error page,
+/// not the resource: handing it back as success gives callers something that
+/// parses as nothing (a font stylesheet with no `@font-face`, an image that
+/// will not decode) with no hint of why. The status code is in the message
+/// so a log can say what the server actually answered.
+fn fetch_blocking(url: &str, timeout: Duration) -> RuntimeResult<(Vec<u8>, String)> {
+    let response = http_client()
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .map_err(|e| RuntimeError::Network(format!("HTTP request failed for {url}: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RuntimeError::Network(format!("HTTP {status} for {url}")));
+    }
+    let mime_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let content = response.bytes().map_err(|e| {
+        RuntimeError::Network(format!("Failed to read response body for {url}: {e}"))
+    })?;
+    Ok((content.to_vec(), mime_type))
+}
 
 /// Native runtime with full system access.
 ///
@@ -92,7 +153,7 @@ impl SystemRuntime for NativeRuntime {
     }
 
     fn canonicalize(&self, path: &Path) -> RuntimeResult<PathBuf> {
-        path.canonicalize().map_err(RuntimeError::from)
+        crate::canonicalize(path).map_err(RuntimeError::from)
     }
 
     fn path_metadata(&self, path: &Path) -> RuntimeResult<PathMetadata> {
@@ -258,30 +319,39 @@ impl SystemRuntime for NativeRuntime {
         Ok(std::env::vars().collect())
     }
 
+    fn is_interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // NETWORK
     // ═══════════════════════════════════════════════════════════════════════
 
     async fn fetch_url(&self, url: &str) -> RuntimeResult<(Vec<u8>, String)> {
-        // Use reqwest::blocking rather than the async client. The native
-        // render pipeline is driven by pollster::block_on (render_to_file.rs,
-        // pipeline.rs tests) which provides no tokio reactor — async reqwest
-        // panics with "there is no reactor running". Blocking is appropriate:
-        // Lua filter execution already occupies a dedicated thread, and
-        // fetch_url is only called when Lua explicitly requests a URL.
-        let response = reqwest::blocking::get(url).map_err(|e| {
-            RuntimeError::NotSupported(format!("HTTP request failed for {url}: {e}"))
-        })?;
-        let mime_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        let content = response.bytes().map_err(|e| {
-            RuntimeError::NotSupported(format!("Failed to read response body for {url}: {e}"))
-        })?;
-        Ok((content.to_vec(), mime_type))
+        fetch_blocking(url, FETCH_URL_TIMEOUT)
+    }
+
+    /// The trait default delegates to `fetch_url`, whose fixed timeout would
+    /// ignore the policy's. Enforce the policy's own timeout here, so a
+    /// remote-image prefetch gives up when its `FetchPolicy` says, not after
+    /// [`FETCH_URL_TIMEOUT`].
+    async fn fetch_url_hardened(
+        &self,
+        url: &str,
+        policy: &FetchPolicy,
+    ) -> RuntimeResult<(Vec<u8>, String)> {
+        validate_fetch_url(url).map_err(RuntimeError::Network)?;
+        let (bytes, mime) =
+            fetch_blocking(url, Duration::from_millis(u64::from(policy.timeout_ms)))?;
+        if bytes.len() as u64 > policy.max_bytes {
+            return Err(RuntimeError::Network(format!(
+                "{url} is {} bytes; the limit is {}",
+                bytes.len(),
+                policy.max_bytes
+            )));
+        }
+        Ok((bytes, mime))
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -407,7 +477,7 @@ impl SystemRuntime for NativeRuntime {
         scss: &str,
         load_paths: &[PathBuf],
         minified: bool,
-    ) -> RuntimeResult<String> {
+    ) -> RuntimeResult<SassOutput> {
         sass_native::compile_scss(self, scss, load_paths, minified)
     }
 
@@ -494,6 +564,52 @@ impl SystemRuntime for NativeRuntime {
                 "failed to clear cache namespace {namespace}: {e}"
             ))),
         }
+    }
+
+    async fn cache_list(
+        &self,
+        namespace: &str,
+    ) -> RuntimeResult<Option<Vec<crate::traits::CacheEntryInfo>>> {
+        let Some(cache_dir) = &self.cache_dir else {
+            return Ok(None);
+        };
+        crate::traits::validate_cache_namespace(namespace)?;
+        let ns_dir = cache_dir.join(namespace);
+        let read_dir = match fs::read_dir(&ns_dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+            Err(e) => {
+                return Err(RuntimeError::CacheError(format!(
+                    "failed to list cache namespace {namespace}: {e}"
+                )));
+            }
+        };
+        let mut entries = Vec::new();
+        for entry in read_dir {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let Some(key) = name.to_str() else { continue };
+            // `cache_set` writes through a `NamedTempFile` in the same
+            // directory; an in-flight one is not an entry.
+            if key.starts_with(".tmp") || crate::traits::validate_cache_key(key).is_err() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let modified_ms = meta.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as u64)
+            });
+            entries.push(crate::traits::CacheEntryInfo {
+                key: key.to_string(),
+                size: meta.len(),
+                modified_ms,
+            });
+        }
+        Ok(Some(entries))
     }
 }
 
@@ -978,6 +1094,14 @@ mod tests {
     }
 
     #[test]
+    fn svg_rasterization_is_unavailable_on_native() {
+        let rt = runtime();
+        assert!(!rt.can_rasterize_svg());
+        let err = pollster::block_on(rt.rasterize_svg(b"<svg/>", 2048)).unwrap_err();
+        assert!(matches!(err, RuntimeError::NotSupported(_)), "{err}");
+    }
+
+    #[test]
     fn test_compile_sass_via_trait() {
         let rt = runtime();
         let scss = "$color: #333; body { color: $color; }";
@@ -985,7 +1109,7 @@ mod tests {
         let result = pollster::block_on(rt.compile_sass(scss, &[], false));
 
         assert!(result.is_ok());
-        let css = result.unwrap();
+        let css = result.unwrap().css;
         assert!(css.contains("body"));
         assert!(css.contains("#333"));
     }
@@ -998,7 +1122,7 @@ mod tests {
         let result = pollster::block_on(rt.compile_sass(scss, &[], true));
 
         assert!(result.is_ok());
-        let css = result.unwrap();
+        let css = result.unwrap().css;
         // Minified output should not have newlines between selectors and braces
         assert!(css.contains(".container{") || css.contains(".container {"));
     }
@@ -1009,6 +1133,42 @@ mod tests {
     fn test_native_runtime_new_has_no_cache_dir() {
         let rt = NativeRuntime::new();
         assert!(rt.cache_dir().is_none());
+    }
+
+    /// `cache_list` enumerates a namespace's entries with sizes and
+    /// mtimes, skips in-flight atomic-write temp files, reports an
+    /// absent namespace as empty, and reports "cannot enumerate" when
+    /// no cache dir is configured (bd-ddahjqr1).
+    #[test]
+    fn test_native_cache_list() {
+        use crate::traits::SystemRuntime;
+        let temp = tempfile::TempDir::new().unwrap();
+        let rt = NativeRuntime::with_cache_dir(temp.path().to_path_buf());
+
+        assert_eq!(
+            pollster::block_on(rt.cache_list("sass")).unwrap(),
+            Some(Vec::new()),
+            "absent namespace lists as empty"
+        );
+
+        pollster::block_on(rt.cache_set("sass", "a", b"aaaa")).unwrap();
+        pollster::block_on(rt.cache_set("sass", "bb", b"bbbbbbbb")).unwrap();
+        fs::write(temp.path().join("sass").join(".tmpXYZ"), b"in-flight").unwrap();
+
+        let mut listed = pollster::block_on(rt.cache_list("sass")).unwrap().unwrap();
+        listed.sort_by(|x, y| x.key.cmp(&y.key));
+        let summary: Vec<(&str, u64, bool)> = listed
+            .iter()
+            .map(|e| (e.key.as_str(), e.size, e.modified_ms.is_some()))
+            .collect();
+        assert_eq!(summary, vec![("a", 4, true), ("bb", 8, true)]);
+
+        let no_cache = NativeRuntime::new();
+        assert_eq!(
+            pollster::block_on(no_cache.cache_list("sass")).unwrap(),
+            None,
+            "no cache dir → cannot enumerate"
+        );
     }
 
     #[test]
@@ -1208,5 +1368,115 @@ mod tests {
         // The namespace directory should have been created
         assert!(tmp.path().join("sass").is_dir());
         assert!(tmp.path().join("sass").join("key1").is_file());
+    }
+
+    #[test]
+    fn is_interactive_native_false_under_nextest() {
+        // nextest runs tests without a TTY, so stdin is not a terminal.
+        // This asserts the thin IsTerminal call returns false in the test harness.
+        // The `true` path requires a PTY and is not unit-tested (acceptable — it
+        // is a one-liner delegating to std::io::IsTerminal).
+        let rt = NativeRuntime::new();
+        assert!(
+            !rt.is_interactive(),
+            "NativeRuntime::is_interactive() should be false under nextest (no PTY)"
+        );
+    }
+
+    // ── fetch_url ──────────────────────────────────────────────────────────
+    //
+    // A loopback TCP listener stands in for the server. The handler gets the
+    // accepted stream after the request line has been read, so each test
+    // scripts exactly one response (or none, for the stall).
+
+    fn serve_once(
+        respond: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Consume the request head so the client is not blocked writing it.
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line.trim() != "" {
+                line.clear();
+            }
+            respond(&mut stream);
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn respond_with(
+        stream: &mut std::net::TcpStream,
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) {
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    #[test]
+    fn fetch_url_returns_body_and_content_type() {
+        let (base, server) = serve_once(|s| respond_with(s, "200 OK", "text/css", "body{}"));
+        let (bytes, mime) =
+            pollster::block_on(runtime().fetch_url(&format!("{base}/a.css"))).unwrap();
+        assert_eq!(bytes, b"body{}");
+        assert_eq!(mime, "text/css");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_url_treats_a_non_2xx_status_as_an_error() {
+        let (base, server) = serve_once(|s| {
+            respond_with(
+                s,
+                "503 Service Unavailable",
+                "text/html",
+                "<html>busy</html>",
+            )
+        });
+        let url = format!("{base}/css2?family=Fira+Code");
+        let err = pollster::block_on(runtime().fetch_url(&url)).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("503"), "{text}");
+        assert!(text.contains(&url), "{text}");
+        assert!(matches!(err, RuntimeError::Network(_)), "{err:?}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_blocking_gives_up_on_a_stalled_connection() {
+        // The server accepts, reads the request, and then goes quiet. The
+        // sleep is longer than the client's timeout, so a client that waits
+        // for the response would hang; dropping the stream afterwards lets
+        // the thread finish.
+        let (base, server) = serve_once(|_| std::thread::sleep(Duration::from_millis(1500)));
+        let url = format!("{base}/slow");
+        let started = std::time::Instant::now();
+        let err = fetch_blocking(&url, Duration::from_millis(200)).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(matches!(err, RuntimeError::Network(_)), "{err:?}");
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "expected the 200 ms timeout to fire, took {elapsed:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_url_hardened_refuses_plain_http() {
+        let err = pollster::block_on(
+            runtime().fetch_url_hardened("http://127.0.0.1:9/x.png", &FetchPolicy::default()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::Network(_)), "{err:?}");
     }
 }

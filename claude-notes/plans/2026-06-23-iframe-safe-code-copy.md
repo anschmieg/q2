@@ -1,13 +1,17 @@
-# iframe-safe code-copy in q2 preview / hub-client
+---
+title: 'iframe-safe code-copy in q2 preview / hub-client'
+date: 2026-06-23
+description: 'Makes code-copy buttons actually copy text in the `q2 preview` iframe and hub-client by using one capture-phase delegated listener on the preview host, which survives edit re-renders and keeps block editing from opening.'
+status: done  # IMPLEMENTATION COMPLETE (2026-06-23) — both reveal and plain-HTML preview copy verified working in a real q2-preview iframe; edit-isolation confirmed. Awaiting push approval.
+braid:
+  strand: bd-wa2pgri8
+  priority: P3
+---
 
 **Strand:** bd-wa2pgri8 (feature, p3) — follow-up to **bd-lg6t6qfy**, which made
 revealjs code-copy buttons styled + hover-hidden in all paths but functional
 (actually copies) only in native `q2 render`. This strand makes them copy in the
 WASM/iframe paths (q2 preview + hub-client) too.
-
-**Status:** IMPLEMENTATION COMPLETE (2026-06-23) — both reveal and plain-HTML
-preview copy verified working in a real q2-preview iframe; edit-isolation
-confirmed. Awaiting push approval.
 
 ---
 
@@ -57,7 +61,7 @@ pattern (`ShareDialog.tsx`, `Editor.tsx`, `ProjectTab.tsx`); no clipboard.js
 dependency added. Secure-context only (localhost/https — both preview hosts
 qualify).
 
-**Text extraction:** mirror native `code-copy-init.js`'s `getTextToCopy`: from
+**Text extraction:** mirror native `code-copy-init.js`\'s `getTextToCopy`: from
 the button, `closest('.code-copy-outer-scaffold')` → `querySelector('code')` →
 clone → strip `.code-annotation-*` children → `innerText`.
 
@@ -73,7 +77,7 @@ Bootstrap tooltip (none in preview) — parity with native render v1.
   helper. Unit-testable without React.
 - **Edit** `ts-packages/preview-renderer/src/q2-preview/PreviewRoot.tsx` — one
   `useEffect(() => installCodeCopy(previewHostRef.current!), [])` (guarded for a
-  null ref). ~5 lines.
+  null ref). \~5 lines.
 
 ### Out of scope
 

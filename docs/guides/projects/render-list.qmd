@@ -1,0 +1,232 @@
+---
+title: "The render list: choosing which files render"
+---
+
+## Overview
+
+When you run `q2 render` on a project, Quarto builds a **render
+list**: the set of source files that become pages of your site. You
+control it with the `project.render` key in `_quarto.yml`:
+
+```yaml
+project:
+  type: website
+  render:
+    - "**/*.qmd"
+    - "!drafts/**"
+```
+
+Each entry is a glob, matched against paths relative to the project
+root. Entries starting with `!` are exclusions; an exclusion applies
+to the whole list, wherever it appears. A bare directory name means
+everything renderable beneath it.
+
+## The default
+
+Omitting `project.render` is exactly equivalent to writing:
+
+```yaml
+project:
+  render:
+    - "**/*.qmd"
+```
+
+That is: every `.qmd` file in the project, wherever it lives. A render
+list containing only exclusions subtracts from that same default —
+`render: ["!drafts/**"]` means "all `.qmd` files except those under
+`drafts/`".
+
+Quarto renders `.qmd` by default and nothing else. Every other input
+type must be listed:
+
+| Input | Rendered by default? |
+|-------|----------------------|
+| `.qmd` | yes |
+| `.md` | only when a pattern matches it |
+| `.ipynb` | only when a pattern matches it |
+| `.py` / `.R` scripts | only when a pattern matches it |
+| file types added by an extension | only when a pattern matches it |
+
+A positive pattern replaces the default; it does not add to it. Keep
+`"**/*.qmd"` in any list you write, or your `.qmd` files stop
+rendering:
+
+```yaml
+project:
+  render:
+    - "**/*.qmd"      # keep this
+    - "**/*.ipynb"
+```
+
+## Rendering `.md` files
+
+Plain Markdown files can be full members of a Quarto project — they
+support the complete Quarto markdown dialect (shortcodes, divs,
+cross-references, navigation, themes) and render exactly like `.qmd`
+files, with one difference: **`.md` files never execute code**.
+
+`.md` files are opt-in: they render only when a `project.render`
+pattern you wrote matches them. Add them alongside your `.qmd` globs:
+
+```yaml
+project:
+  render:
+    - "**/*.qmd"
+    - "**/*.md"
+    - "!news/NEWS.md"
+```
+
+Any pattern you write can opt them in — `chapters/*`, a literal
+`notes.md`, or an extension glob all work. What never opts them in is
+the default: a project without a `render:` key renders `.qmd` only.
+
+Because `.md` files never execute code, an `engine:` specification in
+a `.md` file's front matter has no effect. Quarto warns about it
+([`Q-2-40`](/errors/markdown/Q-2-40.qmd)) and renders the document
+without execution; rename the file to `.qmd` if you need executable
+code.
+
+### Why other file types are opt-in
+
+Quarto 1 built its render list by walking the whole project and asking
+each execution engine whether it claimed each file. The Markdown engine
+claimed `.md` unconditionally. The Jupyter engine claimed `.ipynb`, and
+opened every `.py` to see whether it held `# %%` cells. The knitr engine
+opened every `.R` looking for a `#'` header.
+
+Quarto 2 does not inspect files to decide what to render. The render
+list comes from patterns alone.
+
+Two consequences. A stray `NEWS.md`, a `conftest.py`, or a scratch
+notebook stays out of the render list until you ask for it. And
+installing an extension never changes which files your project
+renders — only what Quarto can do with them once listed.
+
+### Listed scripts with a declared processor
+
+Once a script *is* listed, Quarto still has to turn it into a
+document. For the two script formats Quarto understands natively, that
+conversion happens in-process — no execution engine is launched to
+decide what the file is:
+
+- **Percent scripts** — cells delimited by comment lines such as
+  `# %%` (the format Jupytext and VS Code popularized), in Python,
+  Julia, R, and other `#`-comment languages.
+- **Spin scripts** — an R script whose `#'` lines are prose and whose
+  remaining code becomes executable chunks, in the style of knitr's
+  `spin()`.
+
+The built-in Jupyter and knitr engines declare these conversions
+statically, so a listed `.py`, `.jl`, or `.R` script is recognized and
+converted without launching anything — and an error in the rendered
+page points back at the original script's file, line, and column.
+
+An engine extension declares the same thing on a `claims-files` entry
+in its `_extension.yml`, with the `processor:` key:
+
+```yaml
+contributes:
+  engines:
+    - name: myengine
+      claims-files:
+        - extension: .jl
+          processor: { name: percent, language: julia }
+```
+
+`processor: spin` takes no parameters and may be written as a bare
+name. `percent` requires a `language` and accepts an optional
+`comment` marker (default `#`). An unknown processor name — or a
+`percent` with no `language` — is a hard error at project load, never
+a silently skipped file.
+
+## Files that never render
+
+Some files are excluded from the render list even when a pattern
+matches them:
+
+- files and directories whose name starts with `_` (partials,
+  metadata) or `.` (hidden);
+- anything under `node_modules/` or the output directory;
+- `README` files (any extension, any capitalization);
+- agent-instruction Markdown: `CLAUDE.md`, `CLAUDE.local.md`,
+  `AGENTS.md`, `AGENTS.local.md`, and `*.llms.md` companions.
+
+A render entry that names one of these — or that matches nothing at
+all — produces a warning
+([`Q-5-13`](/errors/project/Q-5-13.qmd)) so a silent gap in your site
+doesn't go unnoticed.
+
+Files inside a [nested project](#nested-projects) are also left out
+unless a pattern names that directory.
+
+## Nested projects
+
+A subdirectory with its own `_quarto.yml` (or `_quarto.yaml`) is a
+**nested project**, even inside another project and even when that
+file has no `project:` key. Its files belong to it: `q2 render sub`
+renders them with the nested config, and the outer project's render
+list stops at the directory.
+
+```
+my-site/
+├── _quarto.yml        ← outer project
+├── index.qmd          ← in the outer render list
+└── sub/
+    ├── _quarto.yml    ← nested project: owns everything under sub/
+    ├── index.qmd
+    └── page.qmd
+```
+
+Whether a pattern reaches into `sub/` depends on whether it **names**
+the directory. Look at the part of the pattern before its first
+wildcard:
+
+| Pattern | Reaches into `sub/`? |
+|---------|----------------------|
+| `**/*.qmd` (the default) | no |
+| `**/*.md` | no |
+| `*/page.qmd` | no, because `*` doesn't name `sub` |
+| `sub/page.qmd` | yes |
+| `sub/*.qmd` | yes |
+| `sub/**/*.qmd` | yes |
+| `sub` (bare directory) | yes |
+
+When a pattern doesn't reach in, the nested project's files are left
+out and Quarto warns once per render, listing every nested project it
+skipped ([`Q-5-31`](/errors/project/Q-5-31.qmd)). A `!` pattern that
+excludes the directory (e.g. `"!sub/**"`) silences the warning. You
+have told Quarto the directory isn't part of this project.
+
+When a pattern does reach in, the matched files render **as part of
+the outer project, with the outer config**. The nested `_quarto.yml`
+is not applied. Quarto warns about that too
+([`Q-5-32`](/errors/project/Q-5-32.qmd)), because the same page
+renders differently under `q2 render sub`.
+
+A nested project inside a nested project is its own boundary. Naming
+`sub` doesn't reach into `sub/deeper/` if that directory has its own
+`_quarto.yml`.
+
+Only `_quarto.yml` and `_quarto.yaml` mark a nested project. A
+profile file such as `_quarto-prod.yml` on its own doesn't. To apply
+settings to one directory of a project without splitting it off, use
+`_metadata.yml`, which merges into every document in its directory
+and leaves the directory in the outer project.
+
+::: {.callout-note}
+## Quarto 1 behaves differently
+
+Quarto 1 ignores a nested `_quarto.yml` when rendering the outer
+project, without any warning. It renders `sub/page.qmd` into the outer
+site with the outer config, while `quarto render sub` renders it with
+the nested config. If you migrate a site and pages under a
+subdirectory go missing, check for a stray `_quarto.yml` there. Rename
+it to `_metadata.yml` if it only held settings, or remove it if it's
+left over.
+:::
+
+## Order
+
+Positive patterns contribute files in the order you list them
+(alphabetically within a single pattern). This is also the order pages
+render in.

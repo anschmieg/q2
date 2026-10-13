@@ -460,6 +460,8 @@ mod tests {
             is_single_file: false,
             files: vec![],
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/page.qmd");
         let format = Format::html();
@@ -493,6 +495,7 @@ mod tests {
             source_context,
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         };
         let profile = DocumentProfile {
             source_path: PathBuf::from(source_relative),
@@ -509,14 +512,14 @@ mod tests {
                 source_path: PathBuf::from("about.qmd"),
                 output_href: "about.html".to_string(),
                 format_id: "html".to_string(),
-                title: Some("About".to_string()),
+                title: Some(crate::document_profile::text("About")),
                 ..DocumentProfile::default()
             },
             DocumentProfile {
                 source_path: PathBuf::from("docs/api.qmd"),
                 output_href: "docs/api.html".to_string(),
                 format_id: "html".to_string(),
-                title: Some("API".to_string()),
+                title: Some(crate::document_profile::text("API")),
                 ..DocumentProfile::default()
             },
         ]))

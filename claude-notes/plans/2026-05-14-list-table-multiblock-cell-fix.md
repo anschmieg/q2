@@ -1,10 +1,13 @@
-# Fix: qmd writer emits list-table cell with multiple blocks as broken bullet item
+---
+title: 'Fix: qmd writer emits list-table cell with multiple blocks as broken bullet item'
+date: 2026-05-14
+description: 'Fixes the qmd writer so `list-table` cells holding several blocks, or one non-paragraph block, emit valid marker lines and indentation, so the output parses back without error.'
+---
 
 - **Issue**: GitHub #183
 - **Beads**: bd-oxsr
 - **Worktree**: `.worktrees/issue-183` (branch `issue-183`)
 - **Triage**: `claude-notes/issue-reports/183/triage.md`
-- **Started**: 2026-05-14
 
 ## Overview
 
@@ -15,7 +18,7 @@
 
 The canonical valid shape — first `Plain`/`Paragraph` inline with the marker, blank line, then subsequent blocks at indent-4 — round-trips cleanly (`claude-notes/issue-reports/183/expected-output.qmd`).
 
-## TDD ground rules (from `crates/pampa/CLAUDE.md`)
+## TDD ground rules (from `crates/pampa/AGENTS.md`)
 
 1. Write the failing test.
 2. Confirm it fails as expected.
@@ -36,10 +39,10 @@ The canonical valid shape — first `Plain`/`Paragraph` inline with the marker, 
 
 ### Phase 2 — Implementation
 
-- [x] **2.1** Refactor the cell-emission block in `write_list_table` to handle three shapes uniformly. One change vs. the original plan: for the "first block is non-Plain/non-Para" case, the block's **first line goes on the marker line** (e.g. `  - \`\`\`python`) rather than leaving the marker line empty and using a blank line. Probing showed that the empty-marker + blank-line shape introduces a phantom empty `Para` in the parsed AST (mismatching the original), whereas the first-line-on-marker shape round-trips cleanly. Implementation uses two helpers: `write_cell_block_on_marker_line` (first block, non-Plain/non-Para) and `write_cell_block_indented` (every subsequent block).
+- [x] **2.1** Refactor the cell-emission block in `write_list_table` to handle three shapes uniformly. One change vs. the original plan: for the "first block is non-Plain/non-Para" case, the block's **first line goes on the marker line** (e.g. ``  - ```python``) rather than leaving the marker line empty and using a blank line. Probing showed that the empty-marker + blank-line shape introduces a phantom empty `Para` in the parsed AST (mismatching the original), whereas the first-line-on-marker shape round-trips cleanly. Implementation uses two helpers: `write_cell_block_on_marker_line` (first block, non-Plain/non-Para) and `write_cell_block_indented` (every subsequent block).
 - [x] **2.2** Fixtures from Phase 1 pass — `test_qmd_roundtrip_consistency` green.
 - [x] **2.3** `table_list_colspan.qmd` still passes — Plain-content cells unaffected.
-- [x] **2.4** Surveyed all `list-table-*.qmd` snapshots — every existing one uses single-Plain cells; none touch the code paths the fix changed.
+- [x] **2.4** Surveyed all ``list-table-*.qmd`` snapshots — every existing one uses single-Plain cells; none touch the code paths the fix changed.
 
 ### Phase 3 — Verification
 

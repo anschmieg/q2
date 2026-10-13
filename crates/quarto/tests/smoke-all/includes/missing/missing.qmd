@@ -4,9 +4,9 @@ format: html
 _quarto:
   tests:
     html:
-      noErrors: default
+      shouldError: default
       printsMessage:
-        level: WARN
+        level: ERROR
         regex: "Include file not found"
 ---
 

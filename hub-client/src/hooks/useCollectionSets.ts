@@ -29,7 +29,11 @@ import type { CollectionPointerEntry } from '../services/storage/types';
 import * as projectSetService from '../services/projectSetService';
 import type { CollectionSnapshot } from '../services/projectSetService';
 import * as projectStorage from '../services/projectStorage';
-import { reconcileIntoConnectedProjectSet } from '../services/projectSetReconciler';
+import {
+  reconcileIntoConnectedProjectSet,
+  importProjectsAndReconcile,
+  type ImportReconcileResult,
+} from '../services/projectSetReconciler';
 import type { ProjectEntry } from '@quarto/preview-renderer/types/project';
 
 // ============================================================================
@@ -63,6 +67,8 @@ export interface CollectionSetsActions {
   linkProjectSet: (projectSetDocId: string, syncServer: string) => Promise<void>;
   migrateProjects: (syncServer: string) => Promise<void>;
   mergeIntoProjectSet: (projectSetDocId: string, syncServer: string) => Promise<void>;
+  /** After an 'error': re-read the pointers and re-enter the state machine. */
+  retry: () => Promise<void>;
 
   // ---- root-set compat operations ----
   addProject: (entry: Omit<ProjectSetEntry, 'addedAt' | 'lastAccessed'>) => void;
@@ -70,6 +76,9 @@ export interface CollectionSetsActions {
   updateProjectDescription: (indexDocId: string, description: string) => void;
   updateProjectSummary: (indexDocId: string, summary: ProjectSetEntrySummary) => void;
   touchProject: (indexDocId: string) => void;
+  /** Import a project-list JSON export and reconcile it into the root set so
+   * the projects appear immediately (no reload needed). */
+  importProjects: (json: string) => Promise<ImportReconcileResult>;
   getProjectSetDocId: () => string | null;
   getSyncServer: () => string | null;
 
@@ -215,31 +224,43 @@ export function useCollectionSets(): [CollectionSetsState, CollectionSetsActions
     setStatus('connected');
   }, []);
 
+  /** Read the pointers and enter the state machine: connect when there
+   * is something to connect to, otherwise report which setup is needed. */
+  const initialize = useCallback(async () => {
+    try {
+      const pointers = await getCollectionPointers();
+      if (pointers.length > 0) {
+        await connectAll(pointers);
+        return;
+      }
+      const legacy = await projectStorage.listProjects();
+      if (legacy.length > 0) {
+        setLegacyProjects(legacy);
+        setStatus('needs-migration');
+      } else {
+        setStatus('needs-setup');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus('error');
+    }
+  }, [connectAll]);
+
   // Initialize on mount
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
+    void initialize();
+  }, [initialize]);
 
-    (async () => {
-      try {
-        const pointers = await getCollectionPointers();
-        if (pointers.length > 0) {
-          await connectAll(pointers);
-          return;
-        }
-        const legacy = await projectStorage.listProjects();
-        if (legacy.length > 0) {
-          setLegacyProjects(legacy);
-          setStatus('needs-migration');
-        } else {
-          setStatus('needs-setup');
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        setStatus('error');
-      }
-    })();
-  }, [connectAll]);
+  /** Start over after an 'error': re-read the pointers and re-enter the
+   * state machine. Publishes 'loading' first so consumers keyed on a
+   * fresh cycle (useAutoEstablishRoot re-arms on it) see one. */
+  const retry = useCallback(async () => {
+    setStatus('loading');
+    setError(null);
+    await initialize();
+  }, [initialize]);
 
   // ---- setup actions ----
 
@@ -356,7 +377,11 @@ export function useCollectionSets(): [CollectionSetsState, CollectionSetsActions
   const removeProject = useCallback((indexDocId: string) => {
     // Personal removal: root plus every subscribed collection this browser
     // can see. Other members of shared collections are unaffected (their
-    // own root supersets still hold the project).
+    // own root supersets still hold the project). Each removal also writes
+    // a deletion tombstone into that set's document; the on-load reconciler
+    // compares tombstones against stale legacy IDB rows (latest-wins) and
+    // purges the losers, so deletions survive page reloads — and other
+    // browsers' reconcilers reach the same verdict once the tombstone syncs.
     for (const c of projectSetService.listCollections()) {
       projectSetService.removeProjectFromCollection(c.docId, indexDocId);
     }
@@ -377,6 +402,14 @@ export function useCollectionSets(): [CollectionSetsState, CollectionSetsActions
   const touchProject = useCallback((indexDocId: string) => {
     projectSetService.touchProjectEverywhere(indexDocId);
   }, []);
+
+  const importProjects = useCallback(async (json: string): Promise<ImportReconcileResult> => {
+    const result = await importProjectsAndReconcile(json);
+    if (result.reconciled > 0) {
+      refresh();
+    }
+    return result;
+  }, [refresh]);
 
   const getProjectSetDocId = useCallback(() => projectSetService.getProjectSetDocId(), []);
   const getSyncServer = useCallback(() => syncServerRef.current, []);
@@ -439,11 +472,13 @@ export function useCollectionSets(): [CollectionSetsState, CollectionSetsActions
     linkProjectSet,
     migrateProjects,
     mergeIntoProjectSet,
+    retry,
     addProject,
     removeProject,
     updateProjectDescription,
     updateProjectSummary,
     touchProject,
+    importProjects,
     getProjectSetDocId,
     getSyncServer,
     createCollection,

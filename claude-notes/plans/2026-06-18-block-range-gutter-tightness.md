@@ -1,10 +1,11 @@
-# Block source-range tightness — blockquote gutters & list continuation
+---
+title: 'Block source-range tightness — blockquote gutters & list continuation'
+date: 2026-06-18
+description: 'Investigates why a block''s source range absorbs the blockquote gutter of the following line, forcing a heuristic in navigation code, and weighs options for making the producer ranges tight.'
+status: draft  # **RESEARCH** — problem framed, options sketched, open questions listed. NOT yet a development plan; do not implement from this. Convert to a dev plan (TDD checklist) only after the open questions below are answered.
+---
 
-**Date:** 2026-06-18
 **Branch:** feature/block-editing-improvements (worktree `.worktrees/block-editing`)
-**Status:** **RESEARCH** — problem framed, options sketched, open questions listed.
-NOT yet a development plan; do not implement from this. Convert to a dev plan
-(TDD checklist) only after the open questions below are answered.
 **Parent / prior art:** `2026-06-01-q2-preview-plan-7g-source-range-tiling.md`
 (the provenance epic's source-range tiling work — **landed** on `feature/provenance`,
 merged) and `claude-notes/designs/provenance-contract.md` (the P1–P4 contract).
@@ -24,7 +25,7 @@ blockquote gutter / continuation prefix. Concretely, for
 
 the `oh` `Plain`'s range is `[31,39]`, whose end byte (39) is the `2` of the
 **next** item — i.e. the range reaches past `oh`'s own content, across the blank
-`> ` continuation line, and into `dear`'s marker. The same happens for every
+`> ` continuation line, and into `dear`\'s marker. The same happens for every
 loose item inside a blockquote.
 
 This is invisible to most consumers but breaks anything that needs the *lines a
@@ -90,7 +91,7 @@ a **`>` gutter** — outside both of 7g's scope limits. This plan is the candida
   change (`SourceInfo` payload + TS wire-format + `profile_version`-style bump).
 - **B — tighten the trailing block range.** A new gutter-aware
   `SourceInfoOptions` trim ("trim trailing blockquote-continuation / blank-gutter
-  lines": consume trailing `\n` + `[ \t]*>[ \t]*` runs) applied to block handlers'
+  lines": consume trailing `\n` + `[ \t]*>[ \t]*` runs) applied to block handlers\'
   trailing extent so a block ends at its last content line. No new field; smallest
   surface. Creates **gaps** (the gutter owned by nobody) — which the 7g contract
   *already blesses* (P4 is non-overlap, not gap-free). Risk concentrated in the

@@ -1,12 +1,17 @@
-# SourceInfo Pool-Based Serialization Implementation Plan
+---
+title: 'SourceInfo Pool-Based Serialization Implementation Plan'
+date: 2025-10-19
+description: 'Changes the JSON writer to store each SourceInfo once in an interned pool and refer to it by ID, so parent chains are no longer duplicated and the serialized output shrinks sharply.'
+braid:
+  strand: k-44
+  priority: P1
+---
 
-**Date**: 2025-10-19
-**Issue**: k-44
 **Design**: See ../sourceinfo-serialization-optimization-design.md
 
 ## Goal
 
-Reduce SourceInfo JSON serialization size from 25-55x blowup to ~2-5x blowup by using an interned pool with ID references instead of duplicating parent chains.
+Reduce SourceInfo JSON serialization size from 25-55x blowup to \~2-5x blowup by using an interned pool with ID references instead of duplicating parent chains.
 
 ## Implementation Tasks
 
@@ -78,7 +83,7 @@ impl SourceInfoSerializer {
 }
 ```
 
-#### Task 1.3: Update write_* Functions
+#### Task 1.3: Update write\_* Functions
 
 Modify all write functions to accept and use SourceInfoSerializer.
 
@@ -185,7 +190,7 @@ impl SourceInfoDeserializer {
 }
 ```
 
-#### Task 2.2: Update read_* Functions
+#### Task 2.2: Update read\_* Functions
 
 Modify all read functions to accept and use SourceInfoDeserializer.
 
@@ -443,4 +448,4 @@ Since this is an internal format change:
 - Day 5: Phase 4.5-4.6 (Integration tests, snapshots)
 - Day 6: Phase 5 (Documentation, cleanup)
 
-**Total**: ~6 days focused work
+**Total**: \~6 days focused work

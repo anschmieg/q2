@@ -73,13 +73,13 @@ export async function createProjectOnServer(
   const result = await client.createNewProject({
     syncServer: serverUrl,
     files,
-    // Wait for the hub peer to connect before creating documents so they
-    // flush synchronously in online mode. Without this, createNewProject
-    // uses the default 1 ms timeout, falls into offline mode, and the
-    // background WebSocket sync races against waitForServerDocuments —
-    // a race that fails under parallel CI load (two workers syncing
-    // simultaneously through the same hub). 10 s is ample for the
-    // loopback connection (typically <100 ms).
+    // Wait for the hub peer to connect before creating documents, so
+    // they are created in online mode and sync as they are made. Without
+    // this, createNewProject uses the default 1 ms timeout, falls into
+    // offline mode, and the later switch to online races against
+    // waitForServerDocuments — a race that fails under parallel CI load
+    // (two workers syncing simultaneously through the same hub). 10 s is
+    // ample for the loopback connection (typically <100 ms).
     peerTimeoutMs: 10000,
   });
 
@@ -89,7 +89,12 @@ export async function createProjectOnServer(
   const allDocIds = [result.indexDocId, ...result.files.map((f) => f.docId)];
   await waitForServerDocuments(httpUrl, allDocIds);
 
-  await client.disconnect();
+  // Presence is not delivery: even online, a client's changes go out
+  // through automerge-repo's 100 ms sync throttle, so the hub can hold a
+  // doc that is still a change behind this client (bd-c72wsugj). The
+  // drain waits until the hub confirms this client's heads before the
+  // socket closes.
+  await client.disconnect({ drainMs: 5000 });
 
   return result.indexDocId;
 }
@@ -196,11 +201,22 @@ async function interceptMonacoCdn(page: Page): Promise<void> {
   );
 }
 
+/**
+ * Bring a fresh browser context to the classic project selector with a
+ * connected project set.
+ *
+ * The app establishes the personal project set silently on first run
+ * (bd-4h1hv60p) against DEFAULT_SYNC_SERVER — `/ws` in the e2e build
+ * (see the test:e2e script), which `vite preview` proxies to the hub that
+ * globalSetup started. So there is no setup form to fill in and no server
+ * URL to pass: this helper installs the usual init scripts, loads `/`, and
+ * waits for the home to appear.
+ */
 export async function bootstrapProjectSet(
   page: Page,
-  syncServer: string,
+  opts?: { stubAuthMe?: boolean; baseUrl?: string },
 ): Promise<void> {
-  await bootstrapProjectSetVariant(page, syncServer, 'classic');
+  await bootstrapProjectSetVariant(page, 'classic', opts);
 }
 
 /**
@@ -209,17 +225,19 @@ export async function bootstrapProjectSet(
  */
 export async function bootstrapProjectsHome(
   page: Page,
-  syncServer: string,
+  opts?: { stubAuthMe?: boolean; baseUrl?: string },
 ): Promise<void> {
-  await bootstrapProjectSetVariant(page, syncServer, 'collections');
+  await bootstrapProjectSetVariant(page, 'collections', opts);
 }
 
 async function bootstrapProjectSetVariant(
   page: Page,
-  syncServer: string,
   variant: 'classic' | 'collections',
+  opts?: { stubAuthMe?: boolean; baseUrl?: string },
 ): Promise<void> {
-  await mockAuthMe(page);
+  // Authenticated contexts (author-attribution e2e) must NOT stub
+  // /auth/me — the real response carries the signed-in user.
+  if (opts?.stubAuthMe !== false) await mockAuthMe(page);
   await interceptMonacoCdn(page);
   await seedUiVariant(page, variant);
   // Monaco 0.55+ requires MonacoEnvironment.getWorkerUrl. Without it the
@@ -260,16 +278,16 @@ async function bootstrapProjectSetVariant(
       localStorage.setItem(KEY, JSON.stringify({ ...defaults, richText: false }));
     }
   }, DEFAULT_PREFERENCES);
-  await page.goto('/');
+  // baseUrl override: the author-attribution e2e serves the app from two
+  // different proxy origins (auth-on vs auth-disabled hub), so its pages
+  // must boot against an absolute origin rather than the config baseURL.
+  await page.goto(opts?.baseUrl ?? '/');
   await expect(page.locator('body')).toBeVisible();
 
-  // Wait for React to render before checking test hooks — the `body` becomes
+  // Wait for React to mount before checking test hooks — the `body` becomes
   // visible before JS finishes executing, so checking window.__quartoTestReady
-  // at that point is a race. The "Quarto Hub" heading is React-rendered, so
-  // its presence proves JS has fully executed.
-  await expect(
-    page.getByRole('heading', { name: 'Quarto Hub' }),
-  ).toBeVisible();
+  // at that point is a race. A populated #root proves JS has fully executed.
+  await expect(page.locator('#root')).not.toBeEmpty();
 
   // Fail fast with a clear error if the app was not built with VITE_E2E=1.
   // Without that flag the test hooks (window.__quartoTest) are tree-shaken
@@ -280,20 +298,15 @@ async function bootstrapProjectSetVariant(
     throw new Error(
       '\n\nE2E test hooks not found (window.__quartoTestReady is absent).\n' +
       'The app must be built with VITE_E2E=1 before running Playwright tests:\n\n' +
-      '  VITE_E2E=1 npm run build\n\n' +
+      '  VITE_E2E=1 VITE_DEFAULT_SYNC_SERVER=/ws npm run build\n\n' +
       'Or use the full e2e command, which handles the build automatically:\n\n' +
       '  npm run test:e2e\n',
     );
   }
-  await expect(
-    page.getByText(/Get started by creating a new project set/i),
-  ).toBeVisible();
 
-  await page.locator('#setup-sync-server').fill(syncServer);
-  await page
-    .getByRole('button', { name: /Create New Project Set/i })
-    .click();
-
+  // The app creates the project set on its own. The home renders while the
+  // set is still connecting (its skeleton covers 'connecting'), so a visible
+  // home is not yet a connected root: wait for both.
   if (variant === 'classic') {
     await expect(
       page.getByRole('heading', { name: 'Your Projects' }),
@@ -306,6 +319,31 @@ async function bootstrapProjectSetVariant(
       page.getByPlaceholder('Search projects…'),
     ).toBeVisible({ timeout: 20000 });
   }
+  await waitForProjectSetDocId(page);
+}
+
+/**
+ * Wait for the root project set to be fully connected and return its
+ * document id, bare (no `automerge:` prefix).
+ *
+ * Waits on the app's own status (`data-project-set-status` on `<html>`,
+ * published by App.tsx). Neither a visible home nor a non-null
+ * `getProjectSetDocId()` is enough: the home renders while the root is
+ * still connecting, and the root's connection (and doc id) exists before
+ * its pointers are saved and the status reaches 'connected'.
+ */
+export async function waitForProjectSetDocId(page: Page, timeout = 20000): Promise<string> {
+  await expect(page.locator('html')).toHaveAttribute('data-project-set-status', 'connected', {
+    timeout,
+  });
+  const id = await page.evaluate(async () => {
+    await window.__quartoTestReady;
+    const hooks = window.__quartoTest;
+    if (!hooks) throw new Error('__quartoTest missing — rebuild with VITE_E2E=1');
+    return hooks.projectSet.getProjectSetDocId();
+  });
+  if (id === null) throw new Error("project set status is 'connected' but it has no root doc id");
+  return id.replace(/^automerge:/, '');
 }
 
 /**

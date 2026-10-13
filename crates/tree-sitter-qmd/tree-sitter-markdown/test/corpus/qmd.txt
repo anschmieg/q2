@@ -473,7 +473,8 @@ author: Someone
 Content paragraph.
 --------------------------------------------------------------------------------
     (document
-      (metadata)
+      (metadata
+        body: (yaml))
       (section
         (pandoc_paragraph
           (pandoc_str)
@@ -924,6 +925,7 @@ After.
         (pandoc_paragraph
           (pandoc_str)))
       (ERROR
+        (shortcode_name)
         (shortcode_name)))
 ================================================================================
 Q-2-35: tab indent rejected (issue #184)

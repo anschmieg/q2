@@ -1,9 +1,12 @@
-# Experiment: Lua on wasm32-unknown-unknown via LUAI_TRY/LUAI_THROW Override
+---
+title: 'Experiment: Lua on wasm32-unknown-unknown via LUAI_TRY/LUAI_THROW Override'
+date: 2026-03-16
+description: 'Experiment to compile Lua 5.4 into the hub-client WASM build by replacing its setjmp error handling with Rust panics caught by `catch_unwind`, so Lua filters can run in the browser.'
+status: done  # Phase 4 COMPLETE — End-to-end Lua filter works through full render pipeline! 10/10 tests pass.
+---
 
-**Date**: 2026-03-16
 **Branch**: `experiment/lua-wasm`
 **Worktree**: `~/src/q2-lua-wasm-spike` (git worktree of `~/src/q2`)
-**Status**: Phase 4 COMPLETE — End-to-end Lua filter works through full render pipeline! 10/10 tests pass.
 **Context**: [Investigation](../investigations/2026-03-16-lua-wasm-options.md) — Option 8
 
 ## Goal
@@ -76,7 +79,7 @@ engine for live preview. The WASM build targets `wasm32-unknown-unknown` with
 `wasm-bindgen` (the standard Rust-in-browser toolchain).
 
 Quarto supports **Lua filters** — user scripts that transform the document AST.
-The filter engine lives in `crates/pampa/src/lua/` (~24,600 lines) and is built
+The filter engine lives in `crates/pampa/src/lua/` (\~24,600 lines) and is built
 on **mlua** (Rust bindings to PUC-Rio Lua 5.4 via C FFI). It's gated behind a
 `lua-filter` cargo feature.
 

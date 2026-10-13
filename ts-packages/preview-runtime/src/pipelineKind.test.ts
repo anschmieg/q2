@@ -12,6 +12,10 @@ describe('pipelineKindForFormat', () => {
     expect(pipelineKindForFormat('q2-preview')).toBe('preview');
   });
 
+  it('returns "preview" for q2-sandboxed-preview (sandboxed-preview port, bd-jgpz4hfq)', () => {
+    expect(pipelineKindForFormat('q2-sandboxed-preview')).toBe('preview');
+  });
+
   it('returns undefined for q2-debug (parser-only path, not the q2-preview pipeline)', () => {
     expect(pipelineKindForFormat('q2-debug')).toBeUndefined();
   });
@@ -22,6 +26,10 @@ describe('pipelineKindForFormat', () => {
 
   it('returns undefined for plain html', () => {
     expect(pipelineKindForFormat('html')).toBeUndefined();
+  });
+
+  it('returns undefined for q2-html-render (the full-DOM opt-out renders through the HTML pipeline)', () => {
+    expect(pipelineKindForFormat('q2-html-render')).toBeUndefined();
   });
 
   it('returns undefined for unknown formats', () => {

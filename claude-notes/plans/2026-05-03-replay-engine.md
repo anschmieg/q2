@@ -1,9 +1,14 @@
-# Replay engine: deterministic in-Rust engine for tests (bd-45yw)
+---
+title: 'Replay engine: deterministic in-Rust engine for tests (bd-45yw)'
+date: 2026-05-03
+description: 'Adds a replay engine that reproduces a recorded engine run in pure Rust, so engine-channel tests need no R or Python installs; replay is activated by `--replay` or `QUARTO_REPLAY`.'
+status: draft  # Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+braid:
+  strand: bd-45yw
+  priority: P2
+---
 
-**Date:** 2026-05-03
-**Beads:** bd-45yw
-**Worktree:** `.worktrees/45yw-replay-engine` (branch `beads/45yw-replay-engine`, based on `main` @ `b77c5674`)
-**Status:** Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+**Worktree:** `.worktrees/45yw-replay-engine` (branch `beads/45yw-replay-engine`, based on `main` \@ `b77c5674`)
 
 ## Triage verdict
 
@@ -17,6 +22,10 @@
 4. **Miss policy.** Hard, loud fail. No quiet fallback. Replay misses on a debugging tool send investigators on wild-goose chases; we make them impossible.
 5. **v1 scope.** Recording-capable v1 is fine, even if it means more phases. Hand-authored fixtures alone don't help users reporting actual bugs; recording does.
 6. **Source-info handling.** Ignore in fixtures for v1; document explicitly that this breaks diagnostic-location tests against replayed runs. A future phase can add it back if a use case appears.
+
+## Future extension — capture the deferred `dependencies` round-trip (RTQ FC-2)
+
+This plan's capture/replay is **execute-centric**: `RecordingEngine`/`ReplayEngine` record and replay the `execute()` call only (`replay.rs`). RTQ FC-2 adds a Q1-faithful deferred-deps path where, under `dependencies: false`, q2's render orchestrator makes a **separate** `engine.dependencies()` call after `execute` (a new `dependencies` wire verb; mirrors Q1 `render.ts:90-109`). When that consumer lands (with the book/project renderer), **the `dependencies` round-trip must also be captured and replayed** so a frozen render reproduces resolved deps deterministically — otherwise a replayed deferred-deps render would lose its `DependenciesResult.includes`. Not needed in v1 (no caller sends `dependencies: false`); flagged here so it isn't forgotten when the book feature arrives.
 
 ## Issue context
 
@@ -64,7 +73,7 @@ Recording is the symmetric story: activated by `trace: true` (existing) plus a n
 
 The plan now extends the existing `quarto-trace` framework rather than inventing a parallel fixture format. Touch points:
 
-- `crates/quarto-trace/src/lib.rs` — `TraceEntry` (currently per-stage, ~108) gains an optional engine-execution payload, OR a sibling type (e.g. `EngineCapture`) is added on `TraceDocument` carrying `(engine_name, input_qmd, ExecuteResult)`. Whichever design keeps `TraceEntry` clean.
+- `crates/quarto-trace/src/lib.rs` — `TraceEntry` (currently per-stage, \~108) gains an optional engine-execution payload, OR a sibling type (e.g. `EngineCapture`) is added on `TraceDocument` carrying `(engine_name, input_qmd, ExecuteResult)`. Whichever design keeps `TraceEntry` clean.
 - `crates/quarto-core/src/stage/trace.rs` — `JsonTraceObserver` already serializes pipeline state; extend its `on_stage_end` (or equivalent) for `EngineExecutionStage` to capture the `ExecuteResult` if recording is enabled.
 - `crates/quarto-core/src/stage/stages/metadata_merge.rs:294` — `activate_trace_from_metadata` is the existing entry point; either extend it to also activate replay-recording, or factor out a sibling `activate_replay_from_metadata`.
 - The replay-input side is read at orchestrator/CLI level (before pipeline construction) — when `--replay <path>` is set, parse the trace and substitute `ReplayEngine` in the registry handed to `EngineExecutionStage::with_registry`.

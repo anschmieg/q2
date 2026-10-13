@@ -3,14 +3,12 @@ name: Hub-Client E2E Tests
 # Label runs by mode in the Actions UI. `run-name` is evaluated at workflow
 # top level with only the `github`/`inputs` contexts available, so it branches
 # purely on the trigger. Order matters — first truthy arm wins:
-#   - recreate-all-snapshots dispatch → baseline regeneration
 #   - schedule                        → nightly (interactive + smoke-all)
 #   - run-smoke-all dispatch          → on-demand interactive + smoke-all
 #   - everything else (push/PR)       → the fast interactive gate
 run-name: >-
   ${{
-    inputs.recreate-all-snapshots && 'E2E — recreate baselines'
-    || github.event_name == 'schedule' && 'E2E — interactive + smoke-all (nightly)'
+    github.event_name == 'schedule' && 'E2E — interactive + smoke-all (nightly)'
     || inputs.run-smoke-all && 'E2E — interactive + smoke-all'
     || 'E2E — interactive'
   }}
@@ -18,14 +16,15 @@ run-name: >-
 on:
   workflow_dispatch:
     inputs:
-      recreate-all-snapshots:
-        description: 'Delete and recreate ALL visual regression baselines'
-        type: boolean
-        default: false
       run-smoke-all:
         description: 'Also run smoke-all E2E tests (slow, ~80 extra tests, opt-in only)'
         type: boolean
         default: false
+      smoke-all-browser:
+        description: 'Browser(s) for the on-demand smoke-all run (nightly and fixture PRs always run both)'
+        type: choice
+        options: [both, chromium, firefox]
+        default: both
       smoke-all-workers:
         description: 'Playwright worker count for smoke-all (override; nightly default is 3)'
         type: string
@@ -49,10 +48,16 @@ jobs:
     name: Hub-Client E2E Tests
     if: github.repository == 'quarto-dev/q2'
 
-    # Needed for the "Commit new baselines" step to push back to the
-    # workflow branch. Default GITHUB_TOKEN is read-only.
-    permissions:
-      contents: write
+    # One parallel leg per browser, so adding Firefox does not lengthen the
+    # Chromium run. Firefox is non-gating (job-level continue-on-error) while
+    # it is new: a red Firefox leg is reported but does not fail the workflow.
+    # Remove that line, and add `Hub-Client E2E Tests (firefox)` to the
+    # required checks, once Firefox has proven stable.
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    continue-on-error: ${{ matrix.browser == 'firefox' }}
 
     steps:
       - name: Checkout Repo
@@ -117,12 +122,34 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # wasm-opt (binaryen) is `build:wasm` step 3 (live-share payload
+      # plan Phase 1). Pinned to the version local dev uses (Homebrew
+      # binaryen 132) so CI and dev builds produce the same bytes.
+      - name: Install binaryen (wasm-opt)
+        run: npm install -g binaryen@132.0.0
+
       # WASM artifacts must exist before any package's `vite build` runs
       # (hub-client and q2-demos/* all import the WASM module).
       - name: Build WASM
         run: |
           cd hub-client
           npm run build:wasm
+
+      # pandoc.wasm.gz must be in hub-client/public/pandoc/ before the hub-client
+      # build below: Vite copies public/ into dist/ at build time, so a later fetch
+      # leaves the loader without its asset and every pandoc-*.harness.spec.ts
+      # assertion fails (host phase H2). A cache miss during a GitHub outage fails
+      # the job (--require).
+      - name: Cache pandoc.wasm and typst assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/pandoc-wasm
+            .cache/typst-assets
+          key: pandoc-wasm-${{ hashFiles('resources/pandoc-wasm.json', 'resources/typst-wasm.json') }}
+
+      - name: Fetch pandoc.wasm
+        run: node scripts/fetch-pandoc-wasm.mjs --require
 
       # Build only the workspaces the e2e tests actually exercise.
       # q2-demos/* currently fail their vite build (they import an
@@ -138,12 +165,27 @@ jobs:
       - name: Build TypeScript packages (ts-packages + hub-client)
         env:
           VITE_E2E: '1'
+          # The app establishes the personal project set silently on first
+          # run against DEFAULT_SYNC_SERVER (bd-4h1hv60p) — there is no
+          # setup form for a test to type the hub URL into. `/ws` resolves
+          # to the page origin, which `vite preview` proxies to the e2e hub
+          # (playwright.config.ts webServer.env.VITE_HUB_SERVER). Mirrors
+          # the test:e2e script in hub-client/package.json.
+          VITE_DEFAULT_SYNC_SERVER: '/ws'
+          # Point the sandboxed-preview iframe at the freshly built
+          # same-origin copy in public/ (built by build:sandboxed below)
+          # instead of the GitHub Pages deployment — PR CI must test this
+          # branch's renderer, not the last deployed one.
+          VITE_Q2_SANDBOXED_PREVIEW_URL: 'q2-sandboxed-preview/index.html'
         run: |
           for pkg in ts-packages/*/; do
             if [ -f "$pkg/package.json" ]; then
               npm run build --workspace "$pkg" --if-present
             fi
           done
+          # The sandboxed renderer dist must land in hub-client/public/
+          # before hub-client's vite build copies public/ into dist/.
+          npm run build:sandboxed --workspace hub-client --if-present
           npm run build --workspace hub-client --if-present
 
       # globalSetup launches the hub via `cargo run --bin hub` with a 120s
@@ -152,29 +194,97 @@ jobs:
       - name: Pre-build hub binary
         run: cargo build --bin hub
 
-      # Install Playwright browsers
+      # Playwright browsers. The cache key is the resolved Playwright
+      # version (browser builds are pinned to it); on a hit the download is
+      # skipped, but `--with-deps` still installs the OS libraries, which
+      # live outside the cache.
+      - name: Get Playwright version
+        id: playwright_version
+        run: |
+          cd hub-client
+          echo "version=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright_version.outputs.version }}-${{ matrix.browser }}
+
+      # The pandoc.wasm parity net (hub-client/e2e/pandoc-parity.harness.spec.ts, host
+      # phase H3) runs in "Run harness tests" below: it renders the P7 docx golden
+      # fixtures through the Rust request and pandoc.wasm in Chromium and compares them
+      # with the Q1 goldens through R0's extractor CLI, which is Rust-only. Its Node twin
+      # (src/pandoc/goldenParity.wasm.test.ts) runs in ts-test-suite.yml's test:ci.
+      # Both run on every PR rather than behind `paths:` filters: the wasm build they
+      # need is already in these jobs, so a filter would only add a way to miss a change.
+      - name: Build quarto-output-extract
+        run: cargo build -p quarto-output-extract
+
       - name: Install Playwright
         run: |
           cd hub-client
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps ${{ matrix.browser }}
 
-      # Delete all snapshots if recreating from scratch
-      - name: Delete all snapshots (recreate mode)
-        if: inputs.recreate-all-snapshots == true
-        run: find hub-client/e2e -type d -name '*-snapshots' -exec rm -rf {} + || true
+      # WebKit only runs the pandoc.wasm specs (host phase H6), in the chromium leg.
+      - name: Install Playwright WebKit
+        if: matrix.browser == 'chromium'
+        run: |
+          cd hub-client
+          npx playwright install --with-deps webkit
 
       # Run E2E tests — custom specs only (smoke-all excluded by testIgnore)
       - name: Run E2E tests
         run: |
           cd hub-client
-          npx playwright test
+          npx playwright test --project=${{ matrix.browser }}
+
+      # Author-attribution E2E (author-ID transition, Phase 5): runs its own
+      # auth-on hub + mock OIDC IdP + static proxies (e2e-author/setup.ts),
+      # so no vite preview is needed — the VITE_E2E=1 dist built above is
+      # served by scripts/local-prod-server.mjs.
+      - name: Run author-attribution E2E tests
+        if: matrix.browser == 'chromium'
+        run: |
+          cd hub-client
+          npx playwright test --config playwright.author-e2e.config.ts
+
+      # Did this PR touch smoke-all fixtures? If so we run smoke-all below, so
+      # a fixture can't be authored against `q2 render` (no source-location),
+      # land green, and then sit red in a nightly nobody watches — which is
+      # exactly how three fixtures were born red (bd-nhn7snpg).
+      #
+      # This is a step-level gate on purpose. `on.pull_request.paths` would
+      # filter the whole WORKFLOW, which would stop the fast interactive E2E
+      # gate from running on every other PR.
+      #
+      # The explicit fetch is load-bearing: actions/checkout clones shallow,
+      # so without it there is no base commit to diff against. Two-dot diff
+      # (not three-dot) for the same reason — no merge-base in a shallow clone.
+      - name: Did this PR touch smoke-all fixtures?
+        id: smoke_changed
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          if git diff --quiet FETCH_HEAD HEAD -- crates/quarto/tests/smoke-all/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No smoke-all fixture changes; skipping smoke-all."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Smoke-all fixtures changed:"
+            git diff --name-only FETCH_HEAD HEAD -- crates/quarto/tests/smoke-all/
+          fi
 
       # Smoke-all: full render pipeline matrix (~80 tests). Runs nightly
-      # (schedule trigger) or on demand (workflow_dispatch with run-smoke-all=true).
-      # Skipped for every push/PR. Use this to verify render correctness after
-      # changes to the WASM pipeline or theme resolution.
-      - name: Run smoke-all E2E tests (nightly + opt-in)
-        if: inputs.run-smoke-all == true || github.event_name == 'schedule'
+      # (schedule trigger), on demand (workflow_dispatch with run-smoke-all=true),
+      # and on PRs that touch smoke-all fixtures. Otherwise skipped for push/PR.
+      # Use this to verify render correctness after changes to the WASM
+      # pipeline or theme resolution.
+      - name: Run smoke-all E2E tests (nightly + opt-in + fixture PRs)
+        if: >-
+          (inputs.run-smoke-all == true
+            && (inputs.smoke-all-browser == 'both' || inputs.smoke-all-browser == matrix.browser))
+          || github.event_name == 'schedule'
+          || steps.smoke_changed.outputs.changed == 'true'
         env:
           # Worker count override. Scheduled nightlies leave inputs unset, so
           # this is empty → the config uses its default (3). A workflow_dispatch
@@ -182,48 +292,90 @@ jobs:
           SMOKE_ALL_WORKERS: ${{ inputs.smoke-all-workers }}
         run: |
           cd hub-client
-          npx playwright test --config playwright.smoke-all.config.ts
+          npx playwright test --config playwright.smoke-all.config.ts --project=${{ matrix.browser }}
 
-      # Run visual regression tests
-      - name: Run visual tests
-        id: visual
+      # Dev-harness behavioral tests: keyboard contracts, dialog focus,
+      # axe scans, forced-colors, reduced-motion, viewport reflow. No hub
+      # server needed — the config serves the VITE_E2E=1 dist built above
+      # via `vite preview` (VITE_E2E admits the #/dev routes in a
+      # production bundle).
+      - name: Run harness tests
+        run: |
+          cd hub-client
+          npx playwright test --config playwright.harness.config.ts --project=${{ matrix.browser }}
+
+      # pandoc.wasm in WebKit (host phase H6). Playwright's Linux WebKit was never checked for
+      # wasm exnref (the spike covered macOS WebKit 26.4 only), so a feature probe runs first.
+      # If the probe fails the suite is skipped with a warning rather than failing the job:
+      # that means this WebKit build cannot run pandoc.wasm, which the app reports to users
+      # as "unsupported browser", not a regression in this repo. Once the probe has passed on
+      # a CI run, delete `continue-on-error` and the `if:` so a webkit failure gates.
+      - name: Probe WebKit for pandoc.wasm features
+        if: matrix.browser == 'chromium'
+        id: webkit_probe
         continue-on-error: true
         run: |
           cd hub-client
-          npx playwright test --config playwright.visual.config.ts
+          npx playwright test --config playwright.harness.config.ts --project=webkit \
+            --workers=1 --retries=0 e2e/pandoc-browser-probe.harness.spec.ts
 
-      # If visual tests failed, retry with --update-snapshots=missing
-      # This only creates baselines for NEW tests; existing mismatches still fail
-      - name: Retry visual tests (add missing baselines)
-        id: visual-retry
-        if: steps.visual.outcome == 'failure'
+      - name: Warn that the WebKit pandoc suite was skipped
+        if: matrix.browser == 'chromium' && steps.webkit_probe.outcome != 'success'
+        run: echo "::warning title=WebKit pandoc suite skipped::This Playwright WebKit build failed the exnref/feature probe (see the probe step); pandoc.wasm specs did not run in WebKit."
+
+      - name: Run pandoc harness tests in WebKit
+        if: matrix.browser == 'chromium' && steps.webkit_probe.outcome == 'success'
         run: |
           cd hub-client
-          npx playwright test --config playwright.visual.config.ts --update-snapshots=missing
+          npx playwright test --config playwright.harness.config.ts --project=webkit --workers=1
 
-      # If retry passed (only missing baselines), commit them back.
-      # Use `find` instead of a `**` glob — bash globstar isn't enabled
-      # by default and visual specs sit directly under hub-client/e2e/,
-      # not one directory deeper.
-      - name: Commit new baselines
-        if: steps.visual.outcome == 'failure' && steps.visual-retry.outcome == 'success'
+      # Warm-pandoc timing (H10b 5c): same-run ratios, byte equality and frame order only; the
+      # absolute figures are local. Its own single-worker step because the medians need an
+      # otherwise idle machine, which the two-worker harness step above is not.
+      - name: Run warm-pandoc timing specs
+        if: matrix.browser == 'chromium'  # Firefox timing is run by hand (plan 5c)
+        env:
+          PANDOC_WARM_TIMING: '1'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          find hub-client/e2e -type d -name '*-snapshots' -exec git add -f {} +
-          git diff --cached --quiet || git commit -m "Add missing Playwright visual regression baselines"
-          git push
+          cd hub-client
+          npx playwright test --config playwright.harness.config.ts --project=${{ matrix.browser }} \
+            --workers=1 --retries=0 e2e/pandoc-warm.harness.spec.ts -g timing
 
-      # Fail the workflow if visual retry also failed (real regression)
-      - name: Fail on visual regression
-        if: steps.visual-retry.outcome == 'failure'
-        run: exit 1
+      - name: Run warm-pandoc timing specs in WebKit
+        if: matrix.browser == 'chromium' && steps.webkit_probe.outcome == 'success'
+        env:
+          PANDOC_WARM_TIMING: '1'
+        run: |
+          cd hub-client
+          npx playwright test --config playwright.harness.config.ts --project=webkit \
+            --workers=1 --retries=0 e2e/pandoc-warm.harness.spec.ts -g timing
 
-      # Upload test artifacts on failure
+      # sync-test-harness's hub tier spawns `cargo run --bin hub` with a 120s
+      # readiness timeout, so it belongs in this workflow rather than
+      # ts-test-suite.yml: "Pre-build hub binary" above has already compiled
+      # that binary, so `cargo run` is a no-op re-exec. It also needs the
+      # ts-packages dists built above (it depends on quarto-sync-client and
+      # quarto-automerge-schema through their dist entries). Its ts-sync-server
+      # tier skips itself — that needs external-sources/, which CI never has.
+      #
+      # Placed last, with `if: always()`, on purpose: this suite spawns servers
+      # and waits on ports, and a flake here must not abort the pre-existing
+      # Playwright gate, the smoke-all fixture gate, or the harness-test
+      # step above — each of those has a bare `if:` (implicit `success()`), so
+      # a non-zero exit from this step would otherwise silently skip all of
+      # them. Running last with `always()` still reports this step's own
+      # result without gating anything upstream of it. GH #250.
+      - name: Run sync-test-harness tests
+        if: always() && matrix.browser == 'chromium'
+        run: npm test -w ts-packages/sync-test-harness
+
+      # Upload test artifacts on failure. Firefox reports are also kept when
+      # green (Firefox is non-gating, so a triage run wants the traces).
       - name: Upload Playwright report
         uses: actions/upload-artifact@v7
-        if: failure()
+        if: failure() || (matrix.browser == 'firefox' && !cancelled())
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: hub-client/playwright-report/
           retention-days: 7
+          if-no-files-found: ignore

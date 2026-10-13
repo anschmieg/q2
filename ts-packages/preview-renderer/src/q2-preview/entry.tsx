@@ -46,14 +46,36 @@ import 'katex/dist/katex.min.css';
 // `?raw` is typed via `src/global.d.ts` (Vite's `?raw` suffix
 // returns a string at build time).
 import bootstrapJsSrc from '../../../../resources/js/bootstrap/bootstrap.bundle.min.js?raw';
+// bd-ersobfbt: the fixed scroll-away header's runtime, same vendored
+// files the native render ships as `js:quarto-nav:*` artifacts
+// (`transforms/quarto_nav_js.rs`) — native and preview must load the
+// same bytes. headroom.min.js defines `window.Headroom`; quarto-nav.js
+// measures `#quarto-header` and manages body/sidebar offsets. Both are
+// DOMContentLoaded-guarded, and quarto-nav.js additionally watches for
+// the header element itself (React mounts it after the first
+// UPDATE_AST, and a `_quarto.yml` edit can replace it) — see the
+// "q2 EXTENSION" note in that file. Injection order mirrors the native
+// sorted-key order: bootstrap, headroom, quarto-nav.
+//
+// `pinned:` in preview: this bundle always contains headroom (there is
+// no per-project build), so PreviewDocument tags a pinned site's header
+// with `data-headroom-pinned` and quarto-nav.js declines to bind
+// Headroom to a tagged header — same observable behavior as the native
+// opt-out.
+import headroomJsSrc from '../../../../resources/js/headroom/headroom.min.js?raw';
+import quartoNavJsSrc from '../../../../resources/js/quarto-nav/quarto-nav.js?raw';
 
 (() => {
-    const existing = document.head.querySelector('script[data-q2-bootstrap]');
-    if (existing) return;
-    const tag = document.createElement('script');
-    tag.setAttribute('data-q2-bootstrap', '1');
-    tag.textContent = bootstrapJsSrc;
-    document.head.appendChild(tag);
+    const inject = (marker: string, src: string) => {
+        if (document.head.querySelector(`script[${marker}]`)) return;
+        const tag = document.createElement('script');
+        tag.setAttribute(marker, '1');
+        tag.textContent = src;
+        document.head.appendChild(tag);
+    };
+    inject('data-q2-bootstrap', bootstrapJsSrc);
+    inject('data-q2-headroom', headroomJsSrc);
+    inject('data-q2-quarto-nav', quartoNavJsSrc);
 })();
 
 import {
@@ -128,6 +150,12 @@ import { PreviewRoot } from './PreviewRoot';
 let root: ReturnType<typeof createRoot> | null = null;
 let customRegistry: Record<string, React.ComponentType<any>> = {};
 let componentsLoading = false;
+// Last UPDATE_AST payload, cached so a LOAD_CUSTOM_COMPONENTS that
+// arrives with no accompanying AST change (a `.tsx` edit re-transpiled
+// by the parent) can repaint the current document with the rebuilt
+// registry (GH #402 / bd-ue80chl0). Null until the first UPDATE_AST —
+// the boot-order LOAD (posted before the first AST) must not render.
+let lastAstPayload: UpdateAstPayload | null = null;
 
 // Slide-navigation bridge (bd-mwbsdmel). `RevealDeck`'s `RevealNavSync`
 // registers an imperative `goTo` here (and clears it on unmount); the
@@ -182,8 +210,9 @@ interface UpdateAstPayload {
     renderedContent?: string;
     /**
      * Reactji-authorship demo (2026-05-25 plan): current viewer's
-     * Automerge actor id. Provided via `CurrentActorContext` to user
-     * TSX so `useCurrentActor()` can drive `actor === me` checks.
+     * attribution key (automerge author id; bare actor id only for
+     * pre-transition history). Provided via `CurrentActorContext` to
+     * user TSX so `useCurrentActor()` can drive `actor === me` checks.
      */
     currentActor?: string | null;
     /**
@@ -223,7 +252,15 @@ window.addEventListener('message', async (event) => {
         componentsLoading = true;
         await loadCustomComponents(event.data.componentsCode);
         componentsLoading = false;
+        // Repaint the current document so the rebuilt registry takes
+        // effect immediately. Without this, a component (re)load only
+        // showed up on the next UPDATE_AST — a live `.tsx` edit that
+        // doesn't change the AST would repaint nothing.
+        if (lastAstPayload) {
+            updateAst(lastAstPayload);
+        }
     } else if (event.data.type === 'UPDATE_AST') {
+        lastAstPayload = event.data.payload;
         if (componentsLoading) {
             await new Promise((resolve) => {
                 const check = setInterval(() => {

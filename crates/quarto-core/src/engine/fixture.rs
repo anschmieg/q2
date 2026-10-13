@@ -46,6 +46,9 @@
 //! [`new`]: FixtureEngine::new
 //! [`with_results`]: FixtureEngine::with_results
 
+use std::sync::{Arc, Mutex};
+
+use super::LanguageClaim;
 use super::context::{ExecuteResult, ExecutionContext};
 use super::error::ExecutionError;
 use super::traits::ExecutionEngine;
@@ -59,6 +62,18 @@ pub struct FixtureEngine {
     /// In-memory results, used when `Some`. When `None`, results are read
     /// from the JSON file named by the engine config `results` key.
     results: Option<Vec<String>>,
+    /// Test-only: every `input` string this engine's [`execute`] has been
+    /// called with, in call order. Shared (not per-clone) so a caller can
+    /// take a handle via [`received_inputs`] *before* registering the
+    /// engine (registration erases it into `Arc<dyn ExecutionEngine>`) and
+    /// still observe what the running stage fed it. Added for bd-knitr /
+    /// T22 (nested-cell-masking plan): asserting that a *second* engine in
+    /// a sequence receives a masked input requires inspecting what it
+    /// actually received, which `ExecuteResult` alone doesn't expose.
+    ///
+    /// [`execute`]: ExecutionEngine::execute
+    /// [`received_inputs`]: FixtureEngine::received_inputs
+    received_inputs: Arc<Mutex<Vec<String>>>,
 }
 
 impl FixtureEngine {
@@ -69,6 +84,7 @@ impl FixtureEngine {
         Self {
             name: name.into(),
             results: None,
+            received_inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -78,7 +94,18 @@ impl FixtureEngine {
         Self {
             name: name.into(),
             results: Some(results),
+            received_inputs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Test-only: a shared handle onto every `input` string passed to
+    /// [`execute`](ExecutionEngine::execute) so far, in call order. Clone
+    /// (or hold) this *before* wrapping the engine in `Arc<dyn
+    /// ExecutionEngine>` and registering it — the handle stays valid
+    /// because the backing `Arc<Mutex<_>>` is shared across `Clone`s of
+    /// `FixtureEngine`, not reset by them.
+    pub fn received_inputs(&self) -> Arc<Mutex<Vec<String>>> {
+        self.received_inputs.clone()
     }
 
     /// Resolve the ordered results list: in-memory if present, else from
@@ -127,11 +154,40 @@ impl ExecutionEngine for FixtureEngine {
         &self.name
     }
 
+    /// A `FixtureEngine` named `foo` claims `{foo}` cells as Primary(1).
+    ///
+    /// This makes the cell language equal to the engine name, so the resolver
+    /// can include the engine in the sequence via T1 when `{foo}` cells exist
+    /// in the document. Without this claim the engine would never appear in
+    /// `EngineResolution::sequence` and execution tests that rely on fixture
+    /// engines running would silently do nothing.
+    fn claims_language(&self, language: &str, _first_class: Option<&str>) -> LanguageClaim {
+        if language == self.name.as_str() {
+            LanguageClaim::Primary(1)
+        } else {
+            LanguageClaim::None
+        }
+    }
+
+    /// Pure name comparison, always static (Phase 4) — a `FixtureEngine`
+    /// never loads anything.
+    fn try_claims_language(
+        &self,
+        language: &str,
+        first_class: Option<&str>,
+    ) -> Option<LanguageClaim> {
+        Some(self.claims_language(language, first_class))
+    }
+
     fn execute(
         &self,
         input: &str,
         ctx: &ExecutionContext,
     ) -> Result<ExecuteResult, ExecutionError> {
+        self.received_inputs
+            .lock()
+            .expect("received_inputs mutex poisoned")
+            .push(input.to_string());
         let results = self.resolve_results(ctx)?;
         let output = splice_cells(input, &self.name, &results)
             .map_err(|msg| ExecutionError::execution_failed(&self.name, msg))?;

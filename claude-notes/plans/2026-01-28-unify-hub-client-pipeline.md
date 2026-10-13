@@ -1,8 +1,11 @@
-# Unify hub-client Rendering with quarto-core Pipeline
+---
+title: 'Unify hub-client Rendering with quarto-core Pipeline'
+date: 2026-01-28
+description: 'Makes hub-client rendering share the quarto-core format metadata extraction used by the native CLI, so frontmatter options such as `toc` take effect in the browser preview.'
+status: in-progress
+---
 
 **Beads Issue**: kyoto-5hi
-**Created**: 2026-01-28
-**Status**: In Progress
 
 ---
 
@@ -262,7 +265,7 @@ This means hub-client misses all AST transforms including:
 - Footnotes processing
 - Future cross-reference resolution
 
-**Goal**: Refactor the rendering architecture so hub-client can use `quarto-core`'s pipeline stages, ensuring feature parity between native and WASM rendering.
+**Goal**: Refactor the rendering architecture so hub-client can use `quarto-core`\'s pipeline stages, ensuring feature parity between native and WASM rendering.
 
 ---
 

@@ -1,7 +1,10 @@
-# Binary File Support for Quarto-Hub
+---
+title: 'Binary File Support for Quarto-Hub'
+date: 2026-01-09
+description: 'Extends the automerge document schema so that binary assets such as images can be stored, synced and served to the preview alongside text files, with each document self-describing as text or binary.'
+status: draft  # Planning
+---
 
-**Created:** 2026-01-09
-**Status:** Planning
 **Related Documents:**
 - 2025-12-08-quarto-hub-mvp.md (hub architecture)
 - 2025-12-11-unified-lsp-hub-design.md (unified architecture)
@@ -183,7 +186,7 @@ This heuristic is for display optimization only; the document content is the sou
 When two users upload images concurrently:
 1. User A uploads `diagram.png` (their version)
 2. User B uploads `diagram.png` (different content)
-3. Both users' clients add to the index simultaneously
+3. Both users\' clients add to the index simultaneously
 
 ### Solution: Content-Addressable Naming
 

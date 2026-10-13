@@ -15,7 +15,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PANDOC_VERSION: "3.8.3"
+  PANDOC_VERSION: "3.11"
+  # Deno version provisioned for the QUARTO_CI assertion test in ts_process.rs.
+  # Must provide `Deno.Command`/`Deno.stdin.isTerminal()` (available since Deno 1.40+).
+  DENO_VERSION: "2.9.0"
+  # Typst — the Pandoc-hybrid typst leg's `L`-tier tests (typst_compile.rs)
+  # require a real `typst` binary on PATH (TYPST_VERSION_FLOOR is 0.8+).
+  TYPST_VERSION: "0.15.1"
 
 jobs:
   test-suite:
@@ -92,6 +98,21 @@ jobs:
           sudo installer -pkg "pandoc-${PANDOC_VERSION}-arm64-macOS.pkg" -target /
         shell: bash
 
+      # Typst setup — the docx/pptx Pandoc-hybrid leg also has a typst
+      # backend whose `L`-tier tests require a real binary (see TYPST_VERSION above).
+      - name: Set up Typst (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -LO "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          tar -xf "typst-x86_64-unknown-linux-musl.tar.xz"
+          sudo mv "typst-x86_64-unknown-linux-musl/typst" /usr/local/bin/typst
+        shell: bash
+
+      - name: Set up Typst (macOS)
+        if: runner.os == 'macOS'
+        run: brew install typst
+        shell: bash
+
       # tree-sitter setup
       - name: Set up tree-sitter CLI (Linux)
         if: runner.os == 'Linux'
@@ -118,6 +139,20 @@ jobs:
       - name: Set up minisign (macOS)
         if: runner.os == 'macOS'
         run: brew install minisign
+
+      # Deno — required for ts_process.rs engine tests and the deno_available_when_quarto_ci
+      # assertion.  Plain install (curl + $GITHUB_PATH on Linux; brew on macOS) avoids
+      # /opt/hostedtoolcache/ so the "Free disk space" invariant below is not broken.
+      - name: Set up Deno (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh -s -- v${DENO_VERSION}
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Deno (macOS)
+        if: runner.os == 'macOS'
+        run: brew install deno
 
       # Free disk space on Linux runners (14 GB SSD is tight for Rust monorepo).
       # `remove_tool_cache: true` is safe — no step in this job uses /opt/hostedtoolcache/
@@ -178,6 +213,62 @@ jobs:
         shell: bash
         run: cargo nextest run --tests --cargo-profile ci
         env:
+          RUSTFLAGS: "-D warnings"
+          # Turns the silent Deno-skip in deno_available_when_quarto_ci into a hard
+          # failure if the "Set up Deno" step above regresses.
+          QUARTO_CI: "1"
+
+      # Cross-uid UDS accept-check test (bd-m49e3s5o): the peer-uid
+      # rejection test re-execs the integration binary as `nobody`, so it
+      # needs root. Reuse the already-built test binary (no rebuild —
+      # root-owned files in target/ would break later steps) and run just
+      # this test under sudo with the gate enabled; it skips loudly
+      # everywhere else. jq extracts the binary's path from cargo's
+      # --no-run artifact output.
+      - name: Test UDS cross-uid accept check (root)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          # The JSON stream also carries the `hub` bin artifact (built for
+          # CARGO_BIN_EXE_hub) — select the integration test binary by
+          # target name, or sudo runs clap and fails on --exact.
+          BIN=$(cargo test --profile ci -p quarto-hub --test integration --no-run --message-format json \
+            | jq -rs '[.[] | select(.executable != null and .target.name == "integration")] | .[0].executable')
+          test -n "$BIN" || { echo "integration test binary not found" >&2; exit 1; }
+          sudo Q2_TEST_SETUID=1 "$BIN" --exact uds_server::unix_imp::peer_cred_other_uid_rejected_unless_allowlisted --nocapture
+
+      # claude-notes/ is a Quarto 2 website (claude-notes/_quarto.yml; epic
+      # bd-uk8zgkha), brought to a clean render in PR #807. This keeps it
+      # there (bd-7v3trpxn): `--strict` promotes warnings to errors and
+      # exits 1 on any diagnostic, so a note that fails to parse or warns
+      # fails the job, with the same report `q2 render` prints locally.
+      # Per-document `diagnostics:` opt-outs in front matter are applied
+      # before the promotion and stay suppressed.
+      #
+      # It lives here, after nextest, rather than in its own workflow so
+      # the q2 binary is reused: the crates/quarto integration tests run
+      # it via CARGO_BIN_EXE_q2, so `--tests --cargo-profile ci` has
+      # already built target/ci/q2 (`cargo run` makes this a link-only
+      # step if that ever changes). The render takes seconds and needs
+      # nothing on PATH. Built from the branch, it also catches a parser
+      # change that breaks the notes — ~1,450 documents of qmd corpus.
+      # Linux-only: parsing is platform-independent. `!cancelled()` so a
+      # red test does not hide a bad note, or the other way round.
+      # Guidance for notes that pass: claude-notes/instructions/writing-notes.md.
+      # `cargo xtask verify` runs the same render after its Rust build
+      # (bd-zn87vwi8); a test in crates/xtask/src/verify.rs fails if this
+      # line's q2 args and verify's CLAUDE_NOTES_RENDER_ARGS diverge.
+      - name: Render claude-notes (warnings are errors)
+        if: runner.os == 'Linux' && !cancelled()
+        shell: bash
+        run: cargo run --profile ci --bin q2 -- render --strict claude-notes
+        env:
+          # Must match the nextest step above: RUSTFLAGS is part of
+          # cargo's fingerprint, so a different value here rebuilds the
+          # entire tree (836 crates, 12 min, in the first run of this
+          # step — PR #809) instead of reusing target/ci/q2.
           RUSTFLAGS: "-D warnings"
 
   wasm-tests:

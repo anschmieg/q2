@@ -5,8 +5,9 @@ import { Q2DebugIframe } from './q2-debug/Q2DebugIframe';
 import { Q2PreviewIframe, type Q2PreviewIframeHandle } from '@quarto/preview-renderer/iframe/Q2PreviewIframe';
 import { Q2SandboxedPreviewIframe } from './q2-sandboxed-preview/Q2SandboxedPreviewIframe';
 import { SlideAst } from './ReactAstSlideRenderer';
-import { transpileTSX } from '../../services/tsxTranspiler';
+import { transpileTSX } from '@quarto/preview-renderer/utils/tsxTranspiler';
 import { resolveComponentPath } from '@quarto/preview-renderer/utils/componentPath';
+import { extractRenderComponentPaths } from '@quarto/preview-renderer/utils/renderComponents';
 import type { PandocAST } from '@quarto/preview-renderer/framework';
 
 // Simple error boundary to catch errors in custom components
@@ -101,9 +102,10 @@ interface ReactRendererProps {
   untransformedAstJson?: string | null;
   /**
    * Reactji-authorship demo (2026-05-25 plan): current viewer's
-   * Automerge actor id, forwarded only to `Q2PreviewIframe` so user
+   * attribution key (automerge author id; a bare actor id only for
+   * pre-transition history), forwarded only to `Q2PreviewIframe` so user
    * TSX can do `actor === me` checks. `null` is a valid "unknown"
-   * value. Sourced from `getActorId()` in `ReactPreview`.
+   * value. Sourced from `getAuthorId()` in `ReactPreview`.
    */
   currentActor?: string | null;
   /**
@@ -123,6 +125,12 @@ interface ReactRendererProps {
    */
   richText?: boolean;
   /**
+   * bd-ew0vak6b: read-only mode (the bottom-bar Edit pill off). Forwarded
+   * to `Q2PreviewIframe` only, which ships it in `UPDATE_AST`; the renderer
+   * already honours it (bd-ov4gqk3m). Absent/false ⇒ editable.
+   */
+  editingDisabled?: boolean;
+  /**
    * P3.2: per-siKey clean QMD buffers for nested blocks, produced by
    * `regenerateNestedBuffers` in `ReactPreview` (gated on
    * `unlockNestingCursor`). Forwarded to `Q2PreviewIframe` only.
@@ -135,7 +143,14 @@ interface ReactRendererProps {
    */
   scrollHandleRef?: Ref<Q2PreviewIframeHandle>;
   onPreviewScroll?: () => void;
-  onPreviewClick?: () => void;
+  /**
+   * Preview→editor click sync (click-to-editor-scroll): called with the
+   * resolved source line when a click in the preview resolves one via
+   * `lineForClickTarget`. Forwarded to `Q2PreviewIframe` as `onClickAtLine`.
+   * The second argument, `hostY`, is the clicked block's top edge in
+   * host-page coordinates, used to align (not just reveal) the line.
+   */
+  onPreviewClickAtLine?: (line: number, hostY?: number) => void;
   onAstRendered?: () => void;
 }
 
@@ -162,10 +177,11 @@ function ReactRenderer({
   commentsMode,
   unlockNestingCursor,
   richText,
+  editingDisabled,
   nestedEditBuffers,
   scrollHandleRef,
   onPreviewScroll,
-  onPreviewClick,
+  onPreviewClickAtLine,
   onAstRendered,
 }: ReactRendererProps) {
   // Stable wrappers for Q2PreviewIframe props that are useEffect dependencies.
@@ -190,30 +206,28 @@ function ReactRenderer({
   );
 
   // Extract component paths - only recompute when the list of paths
-  // changes. The gate covers both q2-debug and q2-preview because both
-  // load user TSX overrides via the iframe's
-  // `LOAD_CUSTOM_COMPONENTS` postMessage handler. Plan 2A item 13
-  // extended the q2-debug-only gate to also include q2-preview.
+  // changes. The gate covers every format that loads user TSX overrides
+  // via the iframe's `LOAD_CUSTOM_COMPONENTS` postMessage handler:
+  // q2-debug, q2-preview (Plan 2A item 13), revealjs (converged onto the
+  // same Q2PreviewIframe tree in bd-vwp4y5ku; gate caught up in
+  // ee47e8ec), and q2-sandboxed-preview (sandboxed-preview port Phase 4
+  // — its entry exposes the same renderer surface and blob-import
+  // loader).
   const componentPathsKey = useMemo(() => {
-    if (format !== 'q2-debug' && format !== 'q2-preview') {
+    if (
+      format !== 'q2-debug' &&
+      format !== 'q2-preview' &&
+      format !== 'revealjs' &&
+      format !== 'q2-sandboxed-preview'
+    ) {
       return '';
     }
 
-    const ast = JSON.parse(astJson);
-    // Walk the MetaList → MetaInlines → Str(c) chain. Entries that
-    // don't resolve to a non-empty string are dropped: this includes
-    // (a) `render-components:\n  -` mid-typing, where the bullet has
-    // no value and parses to `null`, and (b) an empty MetaInlines
-    // (the user typed the path-string-open delimiter but no content
-    // yet). Without this filter, `resolveComponentPath(undefined …)`
-    // throws inside this useMemo and the iframe-host page goes blank
-    // with no upstream ErrorBoundary to catch it.
-    const rawPaths: unknown[] =
-      ast?.meta?.['render-components']?.c?.map?.((o: any) => o?.c?.[0]?.c) ??
-      [];
-    const componentPaths = rawPaths.filter(
-      (p): p is string => typeof p === 'string' && p.length > 0,
-    );
+    // Shared MetaList → MetaInlines → Str(c) walk (GH #402 Phase 1).
+    // Drops mid-typing entries (null bullet, empty MetaInlines) so
+    // `resolveComponentPath(undefined …)` can never throw inside this
+    // useMemo and blank the iframe-host page.
+    const componentPaths = extractRenderComponentPaths(JSON.parse(astJson));
 
     return JSON.stringify(componentPaths);
   }, [format, astJson]);
@@ -268,7 +282,27 @@ function ReactRenderer({
           right: 0,
           bottom: 0,
         }}>
-          <Q2SandboxedPreviewIframe astJson={astJson} />
+          <Q2SandboxedPreviewIframe
+            astJson={astJson}
+            currentFilePath={currentFilePath}
+            onNavigateToDocument={stableNavigate}
+            setAst={stableSetAst}
+            customComponentsCode={customComponentsCode}
+            themeFingerprint={themeFingerprint}
+            renderedContent={renderedContent}
+            untransformedAstJson={untransformedAstJson}
+            currentActor={currentActor}
+            commentsMode={commentsMode}
+            unlockNestingCursor={unlockNestingCursor}
+            richText={richText}
+            nestedEditBuffers={nestedEditBuffers}
+            currentSlideIndex={currentSlideIndex}
+            onSlideChange={onSlideChange}
+            scrollHandleRef={scrollHandleRef}
+            onScroll={onPreviewScroll}
+            onClickAtLine={onPreviewClickAtLine}
+            onAstRendered={onAstRendered}
+          />
         </div>
       </ErrorBoundary>
     );
@@ -329,12 +363,13 @@ function ReactRenderer({
             commentsMode={commentsMode}
             unlockNestingCursor={unlockNestingCursor}
             richText={richText}
+            editingDisabled={editingDisabled}
             nestedEditBuffers={nestedEditBuffers}
             currentSlideIndex={currentSlideIndex}
             onSlideChange={onSlideChange}
             scrollHandleRef={scrollHandleRef}
             onScroll={onPreviewScroll}
-            onClick={onPreviewClick}
+            onClickAtLine={onPreviewClickAtLine}
             onAstRendered={onAstRendered}
           />
         </div>

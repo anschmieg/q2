@@ -10,6 +10,43 @@
 //! The harness handles `#[test]` discovery across all modules, and
 //! nextest still runs each test in its own process for isolation.
 
+fn main() {}
+
+// Counting global allocator for allocation-budget tests
+// (`topdown_traverse_alloc_budget`). A thin wrapper over `System` that
+// counts calls; nextest runs each test in its own process, so the
+// counters are per-test. Negligible overhead for the other tests.
+pub mod alloc_counter {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            unsafe { System.realloc(p, l, n) }
+        }
+    }
+
+    pub fn allocs() -> u64 {
+        ALLOCS.load(Relaxed)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: alloc_counter::Counting = alloc_counter::Counting;
+
+pub mod annotated_qmd_fixture_guard;
 pub mod attribution_html_coalescing_test;
 pub mod attribution_json_wire_test;
 pub mod incremental_writer_investigation;
@@ -22,34 +59,56 @@ pub mod json_location_test;
 pub mod json_reader_smoke_tests;
 pub mod lua_conformance;
 pub mod lua_differential;
+pub mod math_text_source;
 pub mod nesting_cursor_roundtrip_tests;
 pub mod node_edit_tests;
+pub mod qmd_writer_pandoc_shapes;
 pub mod qmd_writer_source_info;
+pub mod quarto_math_seam;
 pub mod regenerate_nested_buffers_tests;
+pub mod table_caption_provenance;
 pub mod test;
 pub mod test_ansi_writer;
 pub mod test_attr_source_parsing;
 pub mod test_attr_source_structure;
+pub mod test_attribute_order_contexts;
+pub mod test_bare_at_str;
 pub mod test_bare_lt_str;
 pub mod test_blockquote_multiline_attrs;
+pub mod test_brace_hint_contexts;
 pub mod test_citeproc_integration;
 pub mod test_cli_input_arg;
 pub mod test_code_block_attributes;
+pub mod test_code_block_writer_roundtrip;
 pub mod test_code_span;
+pub mod test_concrete_tree_dump;
 pub mod test_diagnostic_determinism;
 pub mod test_diagnostic_path_normalization;
+pub mod test_doubled_brace;
 pub mod test_editorial_mark_spacing;
+pub mod test_email_autolink;
 pub mod test_emphasis_opening_mark;
 pub mod test_error_corpus;
+pub mod test_fenced_div_no_space;
+pub mod test_fenced_div_sigils;
 pub mod test_figure_figcaption_synthesis;
+pub mod test_flanking_delimiters;
+pub mod test_frontmatter_delimiters;
+pub mod test_frontmatter_yaml_syntax_error;
 pub mod test_grid_table_error;
 pub mod test_hard_soft_break;
+pub mod test_heading_auto_id;
 pub mod test_html_attr_handling;
+pub mod test_html_block_lift;
+pub mod test_indented_continuation;
 pub mod test_inline_locations;
 pub mod test_json_div_transforms;
 pub mod test_json_errors;
 pub mod test_json_roundtrip;
+pub mod test_kv_attr_promotion;
 pub mod test_link_destination_linebreak;
+pub mod test_link_title_provenance;
+pub mod test_list_table_editorial_marks;
 pub mod test_location_health;
 pub mod test_lua_attr_mutation;
 pub mod test_lua_constructors;
@@ -61,11 +120,14 @@ pub mod test_math_attr;
 pub mod test_meta;
 pub mod test_metadata_source_tracking;
 pub mod test_nested_yaml_serialization;
+pub mod test_nesting_depth_limit;
 pub mod test_ordered_list_formatting;
 pub mod test_raw_json_roundtrip;
 pub mod test_rawblock_to_config_value;
 pub mod test_section_divs;
 pub mod test_shortcode;
+pub mod test_shortcode_separator_diagnostics;
+pub mod test_smart_typography_positions;
 pub mod test_task_list;
 pub mod test_template_integration;
 pub mod test_trailing_linebreak_commonmark;
@@ -73,12 +135,13 @@ pub mod test_treesitter_coverage;
 pub mod test_treesitter_refactoring;
 pub mod test_unclosed_attr_specifier;
 pub mod test_unicode_error_offsets;
+pub mod test_unicode_punctuation;
 pub mod test_unicode_whitespace;
 pub mod test_warnings;
 pub mod test_wasm_entrypoints;
 pub mod test_whitespace_re_compile_once;
 pub mod test_yaml_tag_regression;
 pub mod test_yaml_to_config_value;
+pub mod tiling_corpus_tests;
 pub mod tiling_phase3_tests;
-
-fn main() {}
+pub mod topdown_traverse_alloc_budget;

@@ -2,9 +2,11 @@ import type { FormatRegistry } from '../framework';
 import * as Blocks from './blocks';
 import * as Inlines from './inlines';
 import * as Custom from './custom';
-import { Inline, CustomBlock, CustomInline } from './dispatchers';
+import { CustomBlock, CustomInline } from './dispatchers';
 import { CommentBlock } from './custom/CommentBlock';
+import { CommentInline } from './custom/CommentSpan';
 import { MermaidCodeBlock } from './blocks/MermaidCodeBlock';
+import { HepImage } from './inlines/HepImage';
 import { PreviewDocument } from './PreviewDocument';
 
 /**
@@ -46,6 +48,12 @@ export const previewRegistry: FormatRegistry = {
     // from the `...Blocks` spread; user render-components overrides
     // of `CodeBlock` still layer on top via mergedPreviewRegistry.
     CodeBlock: MermaidCodeBlock,
+    // bd-sxiv2tio: hephaestus-aware Image wrapper — mounts a local
+    // `.hep` plot document as a live SVG via the npm hephaestus-svg-wasm
+    // client, delegates every other target to Inlines.Image. Overrides
+    // the plain entry from the `...Inlines` spread; user render-components
+    // overrides of `Image` still layer on top via mergedPreviewRegistry.
+    Image: HepImage,
     __fallback__: Custom.Fallback,
     __title_block__: Custom.PreviewTitleBlock,
     // Default comment/reaction chrome (custom/CommentBlock.tsx): wraps
@@ -54,7 +62,12 @@ export const previewRegistry: FormatRegistry = {
     // render-components override of `Block` still wins via
     // mergedPreviewRegistry.
     Block: CommentBlock,
-    Inline,
+    // Span-comment chrome (custom/CommentSpan.tsx, prototype): wraps the
+    // dispatchers.tsx Inline dispatcher, extracting `quarto-edit-comment`
+    // spans nested directly in a Span into the same bubble chrome. A user
+    // render-components override of `Inline` still wins via
+    // mergedPreviewRegistry.
+    Inline: CommentInline,
     CustomBlock,
     CustomInline,
     Ast: PreviewDocument,

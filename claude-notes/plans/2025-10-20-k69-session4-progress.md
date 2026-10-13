@@ -1,8 +1,12 @@
-# k-69 Session 4 Progress - Source Map Migration Final Switchover
-
-**Date:** 2025-10-20
-**Task:** k-69 - Replace source_info with source_info_qsm throughout
-**Status:** Part 1 Complete (struct definitions), Part 2-4 remaining
+---
+title: 'k-69 Session 4 Progress - Source Map Migration Final Switchover'
+date: 2025-10-20
+description: 'Tracks the in-progress switch of AST structs from the old dual `source_info` fields to `quarto_source_map::SourceInfo`, listing the remaining compile errors and the subtasks that will clear them.'
+status: in-progress  # Part 1 Complete (struct definitions), Part 2-4 remaining
+braid:
+  strand: k-69
+  priority: P1
+---
 
 ## Summary
 
@@ -54,7 +58,7 @@ Updated macro to use these helpers instead of direct field access.
 
 ## Remaining Work (Created as Beads Tasks)
 
-### k-79: Update function signatures (~126 type errors)
+### k-79: Update function signatures (\~126 type errors)
 
 **Problem:** Helper functions still expect old `location::SourceInfo` type:
 - `make_span_inline(source_info: SourceInfo)` in inline.rs

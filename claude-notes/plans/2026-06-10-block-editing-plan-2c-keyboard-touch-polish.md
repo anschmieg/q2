@@ -1,6 +1,9 @@
-# Block editing — Plan 2c: keyboard a11y, touch polish, Tier-2 tests
+---
+title: 'Block editing — Plan 2c: keyboard a11y, touch polish, Tier-2 tests'
+date: 2026-06-10
+description: 'Adds roving-tabindex keyboard access and ARIA to inline block editing in the `useBlockEditHover` hook, suppresses touch OS gestures, adds WASM round-trip tests for more block types, and restores the box layout that editing lost.'
+---
 
-**Date:** 2026-06-10
 **Branch:** feature/block-editing-improvements (worktree `.worktrees/block-editing`)
 **Depends on:** Plans 2a, 2b, 3 (all done).
 **Audit source:** 2026-06-10 post-2b audit — items that were either falsely
@@ -56,7 +59,7 @@ box was not reproduced, so:
 
 - **Spacing crunched.** A heading's margins/padding/border (Bootstrap `h2` has
   `padding-bottom: 0.5rem` + a `border-bottom`) vanished, pulling the following
-  blocks up ~9.5px; the gap between a paragraph and a following list collapsed.
+  blocks up \~9.5px; the gap between a paragraph and a following list collapsed.
 - **Decorations disappeared.** The visible rule under an `<h2>` (its
   `border-bottom`) was gone while editing.
 
@@ -68,7 +71,7 @@ inherited automatically; the four types whose root cannot legally contain a
 `<textarea>` (`<ul>`/`<ol>`/`<dl>`/`<table>`) used a synthetic `<div>` with
 captured margins instead. In practice the synthetic-`<div>` (measure-and-set)
 types looked *better* than the element-wrapping ones, and the hybrid added a
-dead `editOverride` branch to ~12 leaf components. **We discarded the hybrid**
+dead `editOverride` branch to \~12 leaf components. **We discarded the hybrid**
 and use measure-and-set for every type; `EditContentContext.tsx` and all the
 `editOverride` lines were removed.
 

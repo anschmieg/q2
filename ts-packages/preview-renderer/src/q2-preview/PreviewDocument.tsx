@@ -11,7 +11,9 @@ import {
 import type { BlockNode, PandocAST } from '../framework';
 import * as Custom from './custom';
 import {
+    DraftAlertSlot,
     NavbarSlot,
+    SecondaryNavSlot,
     SidebarSlot,
     PageNavSlot,
     FooterSlot,
@@ -19,6 +21,7 @@ import {
     HeaderIncludesEffect,
 } from './chromeSlots';
 import { useBlockEditHover } from './useBlockEditHover';
+import { suggestMainColumn } from './mainColumn';
 
 /**
  * bd-elgxx (D6 react): mirror of Rust
@@ -82,33 +85,81 @@ export const PreviewDocument = ({
     // Mirror Rust template.rs:415-417: page-layout defaults to "article".
     const pageLayout = extractMetaString(meta['page-layout']) ?? 'article';
 
+    // Chrome HTML needed by both the body-class compose (below) and
+    // the header wrapper (in the JSX): hoisted here so the two agree.
+    const navbarHtml = extractMetaString(
+        getMetaPath(meta, ['rendered', 'navigation', 'navbar']),
+    );
+    const secondaryNavHtml = extractMetaString(
+        getMetaPath(meta, ['rendered', 'navigation', 'secondary-nav']),
+    );
+    // `draft: true` pages: the localized banner label from
+    // `DraftAlertTransform` (bd-3cpv7dah). Absent on non-draft pages.
+    const draftAlertText = extractMetaString(
+        getMetaPath(meta, ['rendered', 'draft-alert-text']),
+    );
+
     // Mirror Rust `render_with_compiled_template`'s body-class
-    // computation. Precedence:
-    //   1. User-set top-level `body-classes` (always wins).
+    // compose (the accumulating list, bd-ersobfbt). Precedence for the
+    // structural base:
+    //   1. User-set top-level `body-classes` (wins WHOLESALE — the
+    //      compose below, including the nav-fixed append, is skipped,
+    //      matching the Rust `ctx.get("body-classes").is_none()` guard).
     //   2. `rendered.navigation.body-classes` populated by
     //      `SidebarRenderTransform` (e.g. `nav-sidebar floating`,
     //      `nav-sidebar docked`) — required for Bootstrap's
     //      sidebar-aware grid layout to take effect.
-    //   3. TOC rendered but no sidebar → empty class. Falls through
-    //      to the default (no-class) wide grid, whose right margin
-    //      column is `minmax(0.3*mw, 0.58*mw)` and has room for the
-    //      TOC. The `fullcontent` mixin's margin column is only
-    //      `0.28*mw` (~70px at the default 250px) and squashes a TOC.
-    //   4. Otherwise → literal `fullcontent`.
+    //   3. no sidebar → empty base. Falls through to the default
+    //      (no-class) wide grid, whose right margin column is
+    //      `minmax(0.3*mw, 0.58*mw)` and has room for a TOC.
+    // Onto the structural base: `fullcontent` when nothing occupies
+    // the right margin — the TOC, listing categories in the margin, or
+    // the `page-layout: full` main-column remedy below
+    // (bd-no-toc-reserves-margin-column-s8nonx0w). It is orthogonal to
+    // the structural base, so it appends rather than replaces: a page
+    // in a sidebar gets `nav-sidebar docked … fullcontent`. The
+    // `fullcontent` mixin shrinks the right margin to ~70px without a
+    // sidebar (`0.14*mw` per segment) and to zero in the docked/floating
+    // variants; either would squash a TOC.
+    // Then: `nav-fixed` when a navbar is rendered
+    // (bd-ersobfbt — the `#quarto-header` is `fixed-top`, and
+    // `body.nav-fixed { padding-top }` is its pre-JS compensation;
+    // same condition as Q1's postprocessor and the Rust compose in
+    // template.rs — keep the three in sync). A secondary-nav-only
+    // page (sidebar site, no navbar) gets NO nav-fixed, matching Q1.
     // Empty string for the *structural* class is the user's opt-out;
     // only `undefined` triggers the fallback chain. The color-mode
     // class (`quarto-light`) is then appended in all cases (bd-tkamn).
-    const bodyClassesValue =
-        extractMetaString(meta['body-classes']) ??
-        extractMetaString(
-            getMetaPath(meta, ['rendered', 'navigation', 'body-classes']),
-        );
+    const userBodyClasses = extractMetaString(meta['body-classes']);
+    const renderedBodyClasses = extractMetaString(
+        getMetaPath(meta, ['rendered', 'navigation', 'body-classes']),
+    );
     const tocRendered = extractMetaString(
         getMetaPath(meta, ['rendered', 'navigation', 'toc']),
     );
     const hasToc = tocRendered !== undefined && tocRendered !== '';
+    const marginCategoriesHtml = extractMetaString(
+        getMetaPath(meta, ['rendered', 'navigation', 'margin_categories']),
+    );
+    const hasMarginCategories =
+        marginCategoriesHtml !== undefined && marginCategoriesHtml !== '';
+    const pageLayoutFull = pageLayout === 'full';
     const structuralBodyClasses =
-        bodyClassesValue ?? (hasToc ? '' : 'fullcontent');
+        userBodyClasses ??
+        [
+            renderedBodyClasses,
+            !hasToc && !hasMarginCategories && !pageLayoutFull
+                ? 'fullcontent'
+                : undefined,
+        ]
+            .filter((c): c is string => c !== undefined && c !== '')
+            .join(' ');
+    const composedBodyClasses =
+        userBodyClasses === undefined && navbarHtml
+            ? [structuralBodyClasses, 'nav-fixed']
+                  .filter((c) => c !== '')
+                  .join(' ')
+            : structuralBodyClasses;
     // bd-tkamn (D6 react): mirror Rust `template.rs::append_color_mode_class`
     // so the preview's `<body>` carries `quarto-light` regardless of
     // how the structural class was computed (including the TOC-
@@ -116,7 +167,7 @@ export const PreviewDocument = ({
     // key off `body.quarto-light`. Dark-mode support is deferred
     // until the pipeline grows light/dark theme configs; until then
     // the append is unconditional (matches Q1 default).
-    const bodyClasses = appendColorModeClass(structuralBodyClasses);
+    const bodyClasses = appendColorModeClass(composedBodyClasses);
 
     // Mirror Rust is_minimal_html() (format.rs:306-318).
     const minimal =
@@ -161,29 +212,40 @@ export const PreviewDocument = ({
     // Phase F.2 (bd-kw93.15): chrome HTML strings populated by the
     // `*-render` transforms now in the q2-preview pipeline. Each
     // slot is React.memo'd so an identical re-post (edit to body
-    // content) doesn't tear down the chrome DOM.
-    const navbarHtml = extractMetaString(
-        getMetaPath(meta, ['rendered', 'navigation', 'navbar']),
-    );
+    // content) doesn't tear down the chrome DOM. (navbarHtml and
+    // secondaryNavHtml are hoisted above the body-class compose.)
     const sidebarHtml = extractMetaString(
         getMetaPath(meta, ['rendered', 'navigation', 'sidebar']),
     );
     const pageNavHtml = extractMetaString(
         getMetaPath(meta, ['rendered', 'navigation', 'page_navigation']),
     );
+    // Q2's port of Q1's `suggestColumn` / `setMainColumn`, shared with
+    // `PreviewTitleBlock` so the banner title tracks `<main>`. Mirrors
+    // the Rust `$main-column$` computation in template.rs.
+    const mainColumn = suggestMainColumn(meta);
     const tocHtml = extractMetaString(
         getMetaPath(meta, ['rendered', 'navigation', 'toc']),
     );
     const footerHtml = extractMetaString(
         getMetaPath(meta, ['rendered', 'navigation', 'footer']),
     );
-    // TocGenerateTransform always sets `navigation.toc.title`
-    // (default "Table of Contents" — toc_generate.rs:113-119), but
-    // a user can still override or set it to empty. Surface it
-    // verbatim; the slot omits the `<h2>` when the title is empty.
-    const tocTitle =
-        extractMetaString(getMetaPath(meta, ['navigation', 'toc', 'title'])) ??
-        '';
+    // TocGenerateTransform always sets the TOC title (default
+    // "Table of Contents" — toc_generate.rs), but a user can still
+    // override it or set it to empty; the slot omits the `<h2>` when
+    // the title is empty.
+    //
+    // Read the *rendered* value, not `navigation.toc.title`: the title
+    // carries inline markup (`toc-title: "On **this** page"`), so the
+    // metadata value is `PandocInlines`, which `extractMetaString`
+    // cannot see. `TocRenderTransform` renders it to HTML alongside the
+    // entries, and `q2 render`'s template reads the same key — which is
+    // what keeps preview and render in agreement
+    // (bd-toc-smart-quotes-6nro57ed).
+    const tocTitleHtml =
+        extractMetaString(
+            getMetaPath(meta, ['rendered', 'navigation', 'toc-title']),
+        ) ?? '';
     // `meta.rendered.includes.header` collects favicon / RSS links /
     // any user includes-in-header (already a list; q2 render's
     // template wires `$header-includes$` into `<head>`). The banner
@@ -267,8 +329,47 @@ export const PreviewDocument = ({
                 includes) appended imperatively to `document.head`. */}
             <HeaderIncludesEffect items={headerIncludes} />
 
-            {/* Navbar lives BEFORE quarto-content (template.rs:178-180). */}
-            {navbarHtml ? <NavbarSlot html={navbarHtml} /> : null}
+            {/* Draft alert banner: first thing in the body, above the
+                site header (template.rs `$if(rendered.draft-alert-text)$`
+                precedes `$quarto-header()$`). bd-3cpv7dah. */}
+            {draftAlertText ? <DraftAlertSlot text={draftAlertText} /> : null}
+
+            {/* The site header lives BEFORE quarto-content, wrapping
+                the navbar and the narrow-viewport secondary nav
+                (template.rs QUARTO_HEADER_PARTIAL + its call-site gate).
+                The <header> element is React-owned — NOT part of the
+                dangerouslySetInnerHTML chrome — so a live Headroom
+                instance (entry.tsx injects headroom.min.js +
+                quarto-nav.js) stays bound to a stable element while the
+                chrome HTML inside it churns (bd-ersobfbt, decision 8).
+                Classes mirror the template: `headroom fixed-top`
+                unconditionally (Q1 parity — also under pinned:), plus
+                `quarto-banner` in banner mode. */}
+            {navbarHtml || secondaryNavHtml ? (
+                <header
+                    id="quarto-header"
+                    className={`headroom fixed-top${bannerTitleBlock ? ' quarto-banner' : ''}`}
+                    // Preview analogue of the native `pinned:` opt-out
+                    // (transforms/quarto_nav_js.rs omits headroom.min.js;
+                    // the preview bundle always contains it, so the header
+                    // is tagged instead and quarto-nav.js declines to bind
+                    // Headroom to a tagged header). Same config keys as the
+                    // native decide().
+                    {...(extractMetaBool(
+                        getMetaPath(meta, ['navigation', 'navbar', 'pinned']),
+                    ) === true ||
+                    extractMetaBool(
+                        getMetaPath(meta, ['navigation', 'sidebar', 'pinned']),
+                    ) === true
+                        ? { 'data-headroom-pinned': 'true' }
+                        : {})}
+                >
+                    {navbarHtml ? <NavbarSlot html={navbarHtml} /> : null}
+                    {secondaryNavHtml ? (
+                        <SecondaryNavSlot html={secondaryNavHtml} />
+                    ) : null}
+                </header>
+            ) : null}
 
             {/* Banner mode (P5, bd-364ol5lu): the title block renders
                 ABOVE #quarto-content, mirroring FULL_HTML_TEMPLATE's
@@ -293,10 +394,10 @@ export const PreviewDocument = ({
 
                 {/* TOC — INSIDE quarto-content, before main
                     (template.rs:189-200). */}
-                {tocHtml ? <TocSlot html={tocHtml} title={tocTitle} /> : null}
+                {tocHtml ? <TocSlot html={tocHtml} titleHtml={tocTitleHtml} /> : null}
 
                 <main
-                    className={`content${bannerTitleBlock ? ' quarto-banner-title-block' : ''}`}
+                    className={`content${mainColumn ? ` ${mainColumn}` : ''}${bannerTitleBlock ? ' quarto-banner-title-block' : ''}`}
                     id="quarto-document-content"
                 >
                     {!bannerTitleBlock ? (

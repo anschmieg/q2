@@ -83,17 +83,17 @@ enum Curated {
 
 fn lookup_curated(item: &ListingItem, key: &str) -> Option<Curated> {
     let v = match key {
-        "title" => Curated::Scalar(Some(item.title.clone())),
-        "subtitle" => Curated::Scalar(item.subtitle.clone()),
-        "description" => Curated::Scalar(item.description.clone()),
+        "title" => Curated::Scalar(Some(item.title_text())),
+        "subtitle" => Curated::Scalar(item.subtitle_text()),
+        "description" => Curated::Scalar(item.description_text()),
         "author" => Curated::List(item.authors.clone()),
         "date" => Curated::Scalar(item.date.clone()),
         "date-modified" => Curated::Scalar(item.date_modified.clone()),
         "categories" => Curated::List(item.categories.clone()),
         "image" => Curated::Scalar(item.image.clone()),
         "image-alt" => Curated::Scalar(item.image_alt.clone()),
-        "path" => Curated::Scalar(Some(item.source_path.display().to_string())),
-        "output-href" => Curated::Scalar(Some(item.output_href.clone())),
+        "path" => Curated::Scalar(item.target.filter_path()),
+        "output-href" => Curated::Scalar(item.target.href().map(String::from)),
         _ => return None,
     };
     Some(v)
@@ -109,7 +109,7 @@ fn curated_matches(curated: &Curated, expected: &str) -> bool {
 
 fn extra_matches(extra: &ConfigValue, expected: &str) -> bool {
     match &extra.value {
-        ConfigValueKind::Scalar(_) => extra.as_plain_text().as_deref() == Some(expected),
+        ConfigValueKind::Scalar { .. } => extra.as_plain_text().as_deref() == Some(expected),
         ConfigValueKind::Array(items) => items
             .iter()
             .any(|v| v.as_plain_text().as_deref() == Some(expected)),
@@ -123,11 +123,10 @@ fn extra_matches(extra: &ConfigValue, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::listing::item::ListingItem;
+    use crate::project::listing::item::{ItemOrigin, ItemTarget, ListingItem};
     use quarto_pandoc_types::ConfigValue;
     use quarto_source_map::SourceInfo;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
 
     fn s(value: &str) -> ConfigValue {
         ConfigValue::new_string(value, SourceInfo::for_test())
@@ -144,7 +143,9 @@ mod tests {
             extra_map.insert(k.to_string(), v);
         }
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
             description: None,
             author: if authors.is_empty() {
@@ -161,8 +162,9 @@ mod tests {
             image_lazy_loading: None,
             reading_time_minutes: None,
             word_count: None,
-            source_path: PathBuf::from("posts/foo.qmd"),
-            output_href: "posts/foo.html".to_string(),
+            order: None,
+            target: ItemTarget::document("posts/foo.qmd", "posts/foo.html"),
+            origin: ItemOrigin::Document,
             extra: extra_map,
         }
     }
@@ -184,7 +186,7 @@ mod tests {
         ];
         apply_filters(&mut items, &[filter(vec![("author", s("Foo"))])], &[]);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "a");
+        assert_eq!(items[0].title_text(), "a");
     }
 
     // 12. include filter on list field (curated)
@@ -196,7 +198,7 @@ mod tests {
         ];
         apply_filters(&mut items, &[filter(vec![("categories", s("rust"))])], &[]);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "a");
+        assert_eq!(items[0].title_text(), "a");
     }
 
     // 12b. include filter falls through to extra (D12)
@@ -208,7 +210,7 @@ mod tests {
         ];
         apply_filters(&mut items, &[filter(vec![("status", s("published"))])], &[]);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "a");
+        assert_eq!(items[0].title_text(), "a");
     }
 
     // 12c. curated field shadows extra with the same name
@@ -273,7 +275,7 @@ mod tests {
             &[],
         );
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "a");
+        assert_eq!(items[0].title_text(), "a");
     }
 
     // multiple include records = OR
@@ -304,6 +306,6 @@ mod tests {
         ];
         apply_filters(&mut items, &[], &[filter(vec![("author", s("Foo"))])]);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "b");
+        assert_eq!(items[0].title_text(), "b");
     }
 }

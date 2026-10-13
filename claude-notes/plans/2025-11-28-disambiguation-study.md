@@ -1,6 +1,8 @@
-# CSL Disambiguation Study
-
-**Date**: 2025-11-28
+---
+title: 'CSL Disambiguation Study'
+date: 2025-11-28
+description: 'Studies the Haskell reference implementation of CSL disambiguation and proposes how `quarto-citeproc` should add names, given names, and year suffixes to ambiguous citations.'
+---
 
 ## Executive Summary
 
@@ -144,7 +146,7 @@ Text element doesn't render `year-suffix` variable.
 
 ## Proposed Implementation Plan
 
-### Phase 1: Infrastructure (~2 sessions)
+### Phase 1: Infrastructure (\~2 sessions)
 
 **1.1 Parse Disambiguation Options**
 
@@ -212,7 +214,7 @@ In `evaluate_text`:
 }
 ```
 
-### Phase 2: Ambiguity Detection (~1 session)
+### Phase 2: Ambiguity Detection (\~1 session)
 
 **2.1 Add DisambData Structure**
 
@@ -234,7 +236,7 @@ fn find_ambiguities(outputs: &[(String, Output)]) -> Vec<Vec<DisambData>> {
 }
 ```
 
-### Phase 3: Year Suffix Assignment (~1-2 sessions)
+### Phase 3: Year Suffix Assignment (\~1-2 sessions)
 
 **3.1 Implement addYearSuffixes**
 
@@ -245,7 +247,7 @@ fn find_ambiguities(outputs: &[(String, Output)]) -> Vec<Vec<DisambData>> {
 
 **3.2 Store in Reference DisambiguationData**
 
-### Phase 4: Name Disambiguation (~2-3 sessions)
+### Phase 4: Name Disambiguation (\~2-3 sessions)
 
 **4.1 Implement tryAddNames**
 
@@ -265,7 +267,7 @@ fn find_ambiguities(outputs: &[(String, Output)]) -> Vec<Vec<DisambData>> {
 
 Modify `format_names` to check disambiguation hints and expand accordingly.
 
-### Phase 5: Disambiguation Condition (~1 session)
+### Phase 5: Disambiguation Condition (\~1 session)
 
 **5.1 Implement tryDisambiguateCondition**
 
@@ -282,7 +284,7 @@ ConditionType::Disambiguate(val) => {
 }
 ```
 
-### Phase 6: Integration (~1-2 sessions)
+### Phase 6: Integration (\~1-2 sessions)
 
 **6.1 Two-Pass Rendering**
 
@@ -345,7 +347,7 @@ Expected test improvement: 13 → 60+ passing (83%+)
 Start with **Phase 1 + Phase 3 (Year Suffix)** as the first milestone:
 - Year suffix is the most commonly used disambiguation method
 - It's relatively self-contained
-- Would unlock ~15-20 tests immediately
+- Would unlock \~15-20 tests immediately
 - Provides foundation for subsequent phases
 
 This would be a meaningful first step that demonstrates the architecture while providing immediate value.

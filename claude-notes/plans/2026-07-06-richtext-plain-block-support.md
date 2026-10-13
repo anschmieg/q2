@@ -1,8 +1,13 @@
-# Rich-text editor support for `Plain` blocks (tight list items)
-
-**Strand:** bd-7pxub583 (related to bd-sjb4pzx8 — the tiptap rich-text block editor)
-**Status:** IN PROGRESS — user approved 2026-07-06
-**Date:** 2026-07-06
+---
+title: 'Rich-text editor support for `Plain` blocks (tight list items)'
+date: 2026-07-06
+description: 'Adds `Plain` to the rich-text editor''s supported block types so that tight list items and table cells become rich-text editable, with the backend already keeping tight lists tight on commit.'
+status: in-progress  # IN PROGRESS — user approved 2026-07-06
+braid:
+  strand: bd-7pxub583  # related to bd-sjb4pzx8 (the tiptap rich-text block editor)
+  priority: P2
+  labels: [block-editing]
+---
 
 ## Decisions locked with user (2026-07-06)
 
@@ -106,7 +111,7 @@ fidelity and deciding the scope of "any `Plain`" vs. "only list-item `Plain`".
 
 3. **Multi-block tight items.** A tight list item can be `Plain` + nested
    `BulletList` (a tight item with a sublist). The edit target for the leading
-   `Plain` should cover only that `Plain`'s range, leaving the sublist intact.
+   `Plain` should cover only that `Plain`\'s range, leaving the sublist intact.
    Confirm the leading-`Plain` edit target does not swallow the sublist on
    commit. → **Test:** nested tight list, edit the parent item text, assert the
    sublist survives unchanged.
@@ -160,7 +165,7 @@ fidelity and deciding the scope of "any `Plain`" vs. "only list-item `Plain`".
       pampa). Guards the exact `astToDoc([Plain], …)` seed the RichTextEditor
       uses: a lone `Plain` → one paragraph → serializes to the bare inline text
       (marks incl. `**bold**`/`_italic_`), no dropped nodes, no list marker.
-- [~] Tightness-on-commit is **already** covered by the Rust suite
+- \[\~\] Tightness-on-commit is **already** covered by the Rust suite
       (`text_edit_preserves_{bullet,ordered}_list_tightness`, Phase 0). The rich
       editor commits through that same text channel, so no new Rust test is
       needed; Phase 3 confirms it live.

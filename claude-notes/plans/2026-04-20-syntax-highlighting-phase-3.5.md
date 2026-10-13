@@ -1,8 +1,14 @@
-# Syntax highlighting — Phase 3.5: native user grammars + filter-authored spans + documentation fixtures
+---
+title: 'Syntax highlighting — Phase 3.5: native user grammars + filter-authored spans + documentation fixtures'
+date: 2026-04-20
+description: 'Adds end-to-end CLI tests for native user grammars, filter-authored highlight spans, and `theme: none` behavior, using fixtures that double as future user documentation.'
+status: draft  # planned 2026-04-20
+braid:
+  strand: bd-n7x2  # overall syntax-highlighting epic
+  priority: P2
+---
 
 - **Parent plan**: `claude-notes/plans/2026-04-19-syntax-highlighting-design.md`
-- **Beads**: bd-n7x2 (overall syntax-highlighting epic)
-- **Status**: planned 2026-04-20
 
 ## Why this phase exists
 
@@ -22,7 +28,7 @@ This phase fills those four gaps using fixtures that **double as tests and as fu
 
 1. Fill the four gaps above with end-to-end tests that exercise the CLI path (not in-process helpers with default config), per the Phase 2 post-mortem lesson.
 2. Produce `.qmd` fixtures that are readable as examples — suitable for lifting into `docs/` when user-facing documentation is written.
-3. Keep everything in `crates/quarto/tests/smoke-all/`'s existing pattern (`ensureFileRegexMatches` frontmatter) so we inherit its CI integration for free.
+3. Keep everything in `crates/quarto/tests/smoke-all/`\'s existing pattern (`ensureFileRegexMatches` frontmatter) so we inherit its CI integration for free.
 4. Settle the `theme: none` question explicitly.
 
 Out of scope:

@@ -2,7 +2,10 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { ReplayState, ReplayControls } from '../hooks/useReplayMode';
 import { actorColor } from '../utils/palette';
 import type { ActorIdentity } from '@quarto/preview-runtime';
-import { getActorId } from '@quarto/preview-runtime';
+import { getAuthorId } from '@quarto/preview-runtime';
+import { CommentsExpandIcon, CommentsShowIcon, CommentsHideIcon } from './icons';
+import Tooltip from './Tooltip';
+import { replay } from '../strings';
 import './ReplayDrawer.css';
 import './ViewToggleControl.css';
 
@@ -49,6 +52,35 @@ interface Props {
    */
   commentsMode?: CommentsMode;
   onCommentsModeChange?: (next: CommentsMode) => void;
+  /** Gray out the comments-mode toggle (current file has no preview). */
+  commentsDisabled?: boolean;
+  /**
+   * q2-preview block editing on/off (bd-ew0vak6b) — the Edit pill,
+   * rendered before the Authors pill. Both props must be supplied to
+   * render it. Backed by the persisted `previewEditing` preference
+   * (owned by `Editor.tsx`), unlike the session-only Authors/Comments
+   * toggles: read mode is a way of working, and should survive reloads.
+   */
+  previewEditing?: boolean;
+  onPreviewEditingChange?: (next: boolean) => void;
+  /**
+   * When true the Edit pill renders greyed-out and non-interactive —
+   * formats without a block-edit surface (everything but q2-preview).
+   * The stored preference is untouched while disabled.
+   */
+  previewEditingDisabled?: boolean;
+  /**
+   * Optional status element (the document sync-status badge) rendered
+   * in the bar's right-side cluster, to the left of the Authors pill.
+   */
+  statusSlot?: React.ReactNode;
+  /**
+   * Number of outstanding editorial comments on the active page
+   * (bd-0rsk07il, GH #445), from the render pipeline's
+   * `DocumentProfile` comment summary. Renders one count badge on
+   * the comments toggle group; hidden when 0 or absent.
+   */
+  commentsCount?: number;
 }
 
 type CommentsMode = 'expand' | 'show' | 'hide';
@@ -61,63 +93,72 @@ type CommentsMode = 'expand' | 'show' | 'hide';
 function CommentsModeToggle({
   mode,
   onChange,
+  count,
+  disabled = false,
 }: {
   mode: CommentsMode;
   onChange: (next: CommentsMode) => void;
+  /** Outstanding-comment count; badge hidden when 0 or absent. */
+  count?: number;
+  /** Gray out all three modes (current file has no preview). */
+  disabled?: boolean;
 }) {
-  // Speech-bubble outline shared by the show/hide icons; the expand
-  // icon is the same bubble with a taller body.
-  const bubblePath =
-    'M1 0 h10 a1 1 0 0 1 1 1 v5 a1 1 0 0 1 -1 1 H5 L2 10 V7 H1 a1 1 0 0 1 -1 -1 V1 a1 1 0 0 1 1 -1 Z';
-  const tallBubblePath =
-    'M1 0 h10 a1 1 0 0 1 1 1 v6 a1 1 0 0 1 -1 1 H5 L2 10 V8 H1 a1 1 0 0 1 -1 -1 V1 a1 1 0 0 1 1 -1 Z';
   return (
     <div
-      className="view-toggle-control"
+      className="view-toggle-control comments-mode-box"
       role="group"
       aria-label="Comment display mode"
-      style={{ marginLeft: '6px' }}
     >
-      <button
-        className={`view-toggle-btn${mode === 'expand' ? ' active' : ''}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onChange('expand');
-        }}
-        title="Expand all comments"
-        aria-label="Expand comments"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <path d={tallBubblePath} fill="currentColor" />
-        </svg>
-      </button>
-      <button
-        className={`view-toggle-btn${mode === 'show' ? ' active' : ''}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onChange('show');
-        }}
-        title="Show comment bubbles"
-        aria-label="Show comments"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <path d={bubblePath} fill="currentColor" />
-        </svg>
-      </button>
-      <button
-        className={`view-toggle-btn${mode === 'hide' ? ' active' : ''}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onChange('hide');
-        }}
-        title="Hide comment bubbles"
-        aria-label="Hide comments"
-      >
-        <svg width="12" height="10" viewBox="0 0 12 10">
-          <path d={bubblePath} fill="currentColor" opacity="0.25" />
-          <line x1="1" y1="9" x2="11" y2="1" stroke="currentColor" strokeWidth="1.5" />
-        </svg>
-      </button>
+      <Tooltip content="Expand all comments">
+        <button
+          className={`view-toggle-btn${mode === 'expand' ? ' active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onChange('expand');
+          }}
+          disabled={disabled}
+          aria-label="Expand comments"
+        >
+          <CommentsExpandIcon />
+        </button>
+      </Tooltip>
+      <Tooltip content="Show comment bubbles">
+        <button
+          className={`view-toggle-btn${mode === 'show' ? ' active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onChange('show');
+          }}
+          disabled={disabled}
+          aria-label="Show comments"
+        >
+          <CommentsShowIcon />
+        </button>
+      </Tooltip>
+      <Tooltip content="Hide comment bubbles">
+        <button
+          className={`view-toggle-btn${mode === 'hide' ? ' active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onChange('hide');
+          }}
+          disabled={disabled}
+          aria-label="Hide comments"
+        >
+          <CommentsHideIcon />
+        </button>
+      </Tooltip>
+      <span className="comments-mode-label" aria-hidden="true">
+        Comments
+      </span>
+      {count !== undefined && count > 0 && (
+        <span
+          className="comments-toggle-badge"
+          aria-label={`${count} outstanding comment${count === 1 ? '' : 's'}`}
+        >
+          {count}
+        </span>
+      )}
     </div>
   );
 }
@@ -130,8 +171,46 @@ interface AttributionToggleProps {
 }
 
 function AttributionToggle({ attributionOn, onAttributionChange, generating, disabled }: AttributionToggleProps) {
+  // Drive the multicolor ring's conic-gradient angle with eased angular
+  // velocity: ramps up when generation starts and coasts to a stop when
+  // it ends (CSS animation-play-state can only hard start/stop).
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const angleRef = useRef(0);
+  const speedRef = useRef(0); // deg/s
+  useEffect(() => {
+    const el = btnRef.current;
+    if (!el) return;
+    if (
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ) {
+      return;
+    }
+    const TARGET = generating && !disabled ? 180 : 0; // 180deg/s = 2s/rev
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      // Exponential ease toward the target speed (~0.4s ramp).
+      speedRef.current += (TARGET - speedRef.current) * Math.min(1, dt * 5);
+      if (Math.abs(TARGET - speedRef.current) < 2) speedRef.current = TARGET;
+      angleRef.current = (angleRef.current + speedRef.current * dt) % 360;
+      el.style.setProperty(
+        '--replay-drawer__attribution-angle',
+        `${angleRef.current}deg`,
+      );
+      if (speedRef.current !== 0 || TARGET !== 0) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [generating, disabled]);
   const classes = [
+    'replay-drawer__pill',
     'replay-drawer__attribution',
+    attributionOn && !disabled && 'replay-drawer__pill--on',
     attributionOn && !disabled && 'replay-drawer__attribution--on',
     generating && !disabled && 'replay-drawer__attribution--generating',
   ]
@@ -146,22 +225,81 @@ function AttributionToggle({ attributionOn, onAttributionChange, generating, dis
     ? 'Authors overlay unavailable for this format'
     : `Authors overlay ${attributionOn ? 'on' : 'off'}`;
   return (
-    <button
-      type="button"
-      className={classes}
-      onClick={(e) => {
-        e.stopPropagation();
-        onAttributionChange(!attributionOn);
-      }}
-      disabled={disabled}
-      aria-pressed={disabled ? undefined : attributionOn}
-      aria-label={ariaLabel}
-      aria-busy={generating && !disabled || undefined}
-      title={titleText}
-    >
-      <span className="replay-drawer__attribution-dot" />
-      <span className="replay-drawer__attribution-label">Authors</span>
-    </button>
+    // Full-height cell around the pill — border/divider styling lands
+    // here, never on the pill itself.
+    <span className="replay-drawer__pill-cell">
+    <Tooltip content={titleText}>
+      <button
+        ref={btnRef}
+        type="button"
+        className={classes}
+        onClick={(e) => {
+          e.stopPropagation();
+          onAttributionChange(!attributionOn);
+        }}
+        disabled={disabled}
+        aria-pressed={disabled ? undefined : attributionOn}
+        aria-label={ariaLabel}
+        aria-busy={generating && !disabled || undefined}
+      >
+        <span className="replay-drawer__pill-dot" />
+        <span className="replay-drawer__pill-label">Authors</span>
+      </button>
+    </Tooltip>
+    </span>
+  );
+}
+
+interface EditToggleProps {
+  previewEditing: boolean;
+  onPreviewEditingChange: (next: boolean) => void;
+  disabled: boolean;
+}
+
+/**
+ * The Edit pill (bd-ew0vak6b): q2-preview block editing on/off. Same
+ * anatomy as the Authors pill. With editing off the preview behaves
+ * like a read-only `q2 preview` — no hover outlines, no edit
+ * affordances, and links are plain links (with editing on, a click on
+ * a link inside a paragraph also opens that paragraph's editor).
+ */
+function EditToggle({ previewEditing, onPreviewEditingChange, disabled }: EditToggleProps) {
+  const on = previewEditing && !disabled;
+  const classes = [
+    'replay-drawer__pill',
+    'replay-drawer__edit',
+    on && 'replay-drawer__pill--on',
+    on && 'replay-drawer__edit--on',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const titleText = disabled
+    ? 'Editing is not available for this format'
+    : previewEditing
+      ? 'Turn off editing — links become plain links'
+      : 'Turn on editing';
+  const ariaLabel = disabled
+    ? 'Editing unavailable for this format'
+    : `Editing ${previewEditing ? 'on' : 'off'}`;
+  return (
+    <span className="replay-drawer__pill-cell">
+    <Tooltip content={titleText}>
+      <button
+        type="button"
+        className={classes}
+        onClick={(e) => {
+          e.stopPropagation();
+          onPreviewEditingChange(!previewEditing);
+        }}
+        disabled={disabled}
+        aria-pressed={disabled ? undefined : previewEditing}
+        aria-label={ariaLabel}
+      >
+        <span className="replay-drawer__pill-dot" />
+        <span className="replay-drawer__pill-label">Edit</span>
+      </button>
+    </Tooltip>
+    </span>
   );
 }
 
@@ -203,12 +341,20 @@ export default function ReplayDrawer({
   attributionDisabled,
   commentsMode,
   onCommentsModeChange,
+  commentsDisabled,
+  previewEditing,
+  onPreviewEditingChange,
+  previewEditingDisabled,
+  commentsCount,
+  statusSlot,
 }: Props) {
+  const showEditToggle =
+    previewEditing !== undefined && onPreviewEditingChange !== undefined;
   const showAttributionToggle =
     attributionOn !== undefined && onAttributionChange !== undefined;
   const showCommentsToggle =
     commentsMode !== undefined && onCommentsModeChange !== undefined;
-  const currentActorId = getActorId();
+  const currentActorId = getAuthorId();
   const drawerRef = useRef<HTMLDivElement>(null);
 
   // Auto-focus the drawer when replay mode activates so keyboard shortcuts work immediately
@@ -266,7 +412,7 @@ export default function ReplayDrawer({
     const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const index = Math.round(fraction * (state.historyLength - 1));
     const ts = controls.getTimestampAtIndex(index);
-    const text = ts !== null ? formatFullTimestamp(ts) : `Change ${index + 1}`;
+    const text = ts !== null ? formatFullTimestamp(ts) : replay.changeTooltip(index + 1);
     // Position relative to the scrubber container
     const left = e.clientX - (scrubberRef.current?.getBoundingClientRect().left ?? rect.left);
     setScrubberTooltip({ left, text });
@@ -306,11 +452,18 @@ export default function ReplayDrawer({
           className="replay-drawer__toggle"
           onClick={disabled ? undefined : controls.enter}
           disabled={disabled}
-          title={disabled ? 'Replay is not available for binary files' : undefined}
         >
           <span className="replay-drawer__chevron">&#x25B6;</span>
-          <span>Replay</span>
+          <span>{replay.title}</span>
         </button>
+        {statusSlot}
+        {showEditToggle && (
+          <EditToggle
+            previewEditing={previewEditing!}
+            onPreviewEditingChange={onPreviewEditingChange!}
+            disabled={!!previewEditingDisabled}
+          />
+        )}
         {showAttributionToggle && (
           <AttributionToggle
             attributionOn={attributionOn!}
@@ -320,7 +473,7 @@ export default function ReplayDrawer({
           />
         )}
         {showCommentsToggle && (
-          <CommentsModeToggle mode={commentsMode!} onChange={onCommentsModeChange!} />
+          <CommentsModeToggle mode={commentsMode!} onChange={onCommentsModeChange!} count={commentsCount} disabled={!!commentsDisabled} />
         )}
       </div>
     );
@@ -342,16 +495,16 @@ export default function ReplayDrawer({
           type="button"
           className="replay-drawer__toggle"
           onClick={controls.exit}
-          aria-label="Collapse replay"
+          aria-label={replay.collapse}
         >
           <span className="replay-drawer__chevron">&#x25BC;</span>
-          <span>Replay</span>
+          <span>{replay.title}</span>
         </button>
 
         <button
           className="replay-drawer__handle"
           onClick={controls.exit}
-          aria-label="Close replay"
+          aria-label={replay.close}
         >
           <span className="replay-drawer__handle-bar" />
         </button>
@@ -364,7 +517,11 @@ export default function ReplayDrawer({
             </span>
           )}
           {state.actor && (
-            <span className={`replay-drawer__actor${currentActorId === state.actor ? ' replay-drawer__actor--me' : ''}`}>
+            <span
+              className={`replay-drawer__actor${currentActorId === state.actor ? ' replay-drawer__actor--me' : ''}`}
+              data-actor-key={state.actor}
+              data-current-actor={currentActorId ?? ''}
+            >
               <span
                 className="replay-drawer__actor-dot"
                 style={{ backgroundColor: resolveActorColor(state.actor) }}
@@ -377,6 +534,14 @@ export default function ReplayDrawer({
           </span>
         </div>
 
+        {statusSlot}
+        {showEditToggle && (
+          <EditToggle
+            previewEditing={previewEditing!}
+            onPreviewEditingChange={onPreviewEditingChange!}
+            disabled={!!previewEditingDisabled}
+          />
+        )}
         {showAttributionToggle && (
           <AttributionToggle
             attributionOn={attributionOn!}
@@ -386,7 +551,7 @@ export default function ReplayDrawer({
           />
         )}
         {showCommentsToggle && (
-          <CommentsModeToggle mode={commentsMode!} onChange={onCommentsModeChange!} />
+          <CommentsModeToggle mode={commentsMode!} onChange={onCommentsModeChange!} count={commentsCount} disabled={!!commentsDisabled} />
         )}
       </div>
 
@@ -395,14 +560,14 @@ export default function ReplayDrawer({
           <button
             className="replay-drawer__btn"
             onClick={controls.seekToStart}
-            aria-label="Skip to start"
+            aria-label={replay.skipToStart}
           >
             &#x23EE;
           </button>
           <button
             className="replay-drawer__btn"
             onClick={controls.stepBackward}
-            aria-label="Step backward"
+            aria-label={replay.stepBackward}
           >
             &#x25C1;
           </button>
@@ -410,7 +575,7 @@ export default function ReplayDrawer({
             <button
               className="replay-drawer__btn replay-drawer__btn--play"
               onClick={controls.pause}
-              aria-label="Pause"
+              aria-label={replay.pause}
             >
               &#x23F8;
             </button>
@@ -418,7 +583,7 @@ export default function ReplayDrawer({
             <button
               className="replay-drawer__btn replay-drawer__btn--play"
               onClick={controls.play}
-              aria-label="Play"
+              aria-label={replay.play}
             >
               &#x25B6;
             </button>
@@ -426,21 +591,21 @@ export default function ReplayDrawer({
           <button
             className="replay-drawer__btn"
             onClick={controls.stepForward}
-            aria-label="Step forward"
+            aria-label={replay.stepForward}
           >
             &#x25B7;
           </button>
           <button
             className="replay-drawer__btn"
             onClick={controls.seekToEnd}
-            aria-label="Skip to end"
+            aria-label={replay.skipToEnd}
           >
             &#x23ED;
           </button>
           <button
             className="replay-drawer__btn replay-drawer__btn--speed"
             onClick={controls.cycleSpeed}
-            aria-label="Playback speed"
+            aria-label={replay.playbackSpeed}
           >
             {state.playbackSpeed}x
           </button>
@@ -478,6 +643,7 @@ export default function ReplayDrawer({
             onMouseLeave={handleScrubberMouseLeave}
             className="replay-waveform__input"
             role="slider"
+            aria-label={replay.position}
           />
           {scrubberTooltip && (
             <div
@@ -493,7 +659,7 @@ export default function ReplayDrawer({
           className="replay-drawer__btn replay-drawer__btn--apply"
           onClick={controls.apply}
         >
-          Restore
+          {replay.restore}
         </button>
       </div>
     </div>

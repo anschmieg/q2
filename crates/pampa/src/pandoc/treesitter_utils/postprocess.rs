@@ -38,8 +38,8 @@ use crate::filters::{
 };
 use crate::pandoc::location::empty_source_info;
 use crate::pandoc::{
-    Attr, Block, Blocks, Caption, DefinitionList, Div, Figure, Inline, Inlines, Pandoc, Plain,
-    Space, Span, Str, Superscript, is_empty_attr,
+    Attr, Block, Blocks, Caption, DefinitionList, Div, Figure, Inline, Inlines, Pandoc, Paragraph,
+    Plain, Space, Span, Str, Superscript, is_empty_attr,
 };
 use crate::utils::autoid;
 use crate::utils::diagnostic_collector::DiagnosticCollector;
@@ -50,7 +50,6 @@ use quarto_pandoc_types::table::{
     Alignment, Cell, ColSpec, ColWidth, Row, Table, TableBody, TableFoot, TableHead,
 };
 use quarto_source_map::{By, FileId, SourceInfo};
-use smallvec::smallvec;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -296,9 +295,63 @@ fn empty_table_attr() -> Attr {
 
 /// Compute a tight hull `SourceInfo` spanning from `first.start` to `last.end`.
 ///
-/// Used for list-table cell source_info when a cell has multiple content blocks:
-/// the cell must contain all its children (P4 tiling / containment check (b)).
-fn hull_source_infos(first: &SourceInfo, last: &SourceInfo) -> SourceInfo {
+/// Used for list-table cell source_info when a cell has multiple content
+/// blocks (the cell must contain all its children — P4 tiling / containment
+/// check (b)), and for caption-extended table spans in `section.rs` /
+/// `pipe_table.rs` (bd-t3enk8gq).
+///
+/// How it fuses two spans: same-file check via `root_file_id`, file-absolute
+/// offsets via `preimage_in` (raw `start_offset()`/`end_offset()` are
+/// parent-relative for Substrings and the sentinel 0 for Concat/Generated,
+/// so they are never the right read here), and a lossless `combine()`
+/// fallback when the inputs don't share a file or don't both resolve.
+///
+/// **This is not the sanctioned way to build a hull, and the `Original` it
+/// returns is not a byte-identity claim.** An earlier revision of this
+/// comment called it "the only correct way to fuse two spans into one
+/// `Original`". That is false under the provenance audit's accessor rule
+/// (`claude-notes/research/2026-08-21-provenance-audit-findings.md` § 1),
+/// which reads: file id → `root_file_id()`; positions → `map_offset`; **a
+/// hull → the `map_offset(0)` / `map_offset(length())` pair; never
+/// `preimage_in` for a hull.** Corrected 2026-08-23 (Plan 3 Phase 2,
+/// `bd-mxa44voa`) — the same retraction Phase 1 had to make at
+/// `writers/incremental.rs`. Migrating the three sites onto the `map_offset`
+/// pair is `bd-ostgyku0`; it is a behaviour change with snapshot risk, which
+/// is why a comments-only phase corrected the claim and left the code.
+///
+/// # Drift amplifier — an ordering constraint, not a bug
+///
+/// (Provenance audit, `claude-notes/research/2026-08-21-provenance-audit-findings.md`
+/// § 4. Two sibling sites carry the same note: `contiguous_hull_for_run` and
+/// `math_with_attr_span_source_info`.)
+///
+/// > Drift amplifiers collapse `preimage_in()` results into a flat
+/// > `SourceInfo::original`, freezing any upstream drift and discarding the
+/// > provenance chain. An ordering constraint, not a bug: fix producers before
+/// > these consumers or the fix silently does not reach the output.
+///
+/// Mechanically: the two numbers `preimage_in` reports are baked into a fresh
+/// `Original` and the inputs' chains are dropped. Whatever offsets the
+/// producers were carrying at that moment become the answer, with nothing left
+/// downstream to say where they came from or that they were ever derived. A
+/// producer whose offsets drift therefore yields a *confidently wrong* flat
+/// range here rather than a traceable one, and no consumer-side change can
+/// recover what the flattening already discarded. So: **when a producer's
+/// provenance is fixed, verify the fix upstream of this call** — this
+/// function's output cannot distinguish a corrected producer from an
+/// uncorrected one.
+///
+/// The tension to keep in view: `preimage_in` on a `Concat` supplies an
+/// **offset claim, not a byte-identity claim**
+/// (`quarto-source-map-0.1.3/src/source_info.rs:410-457` — "a `Some(hull)`
+/// licenses *locating* … it does not license *copying*"), while the
+/// `Original` this returns reads downstream as both. § 4 triages the site as
+/// safe by shape; that verdict is about the inputs this function is reached
+/// with today, not a property of the flattening. Since 0.1.2 `preimage_in`
+/// also *refuses* for a `Substring` over a `Concat`, so those inputs silently
+/// take the coarse `combine()` fallback where the `map_offset` pair would
+/// have produced a tight hull — the other half of what `bd-ostgyku0` fixes.
+pub(crate) fn hull_source_infos(first: &SourceInfo, last: &SourceInfo) -> SourceInfo {
     let fid = first.root_file_id();
     let last_fid = last.root_file_id();
     match (fid, last_fid) {
@@ -317,6 +370,16 @@ fn hull_source_infos(first: &SourceInfo, last: &SourceInfo) -> SourceInfo {
 /// Create an empty AttrSourceInfo
 fn empty_attr_source() -> AttrSourceInfo {
     AttrSourceInfo::empty()
+}
+
+/// The attr sidecar for an inline editorial mark lowered to a Span: the
+/// mark's `quarto-*` class is prepended to the user's classes, so a `None`
+/// source is prepended to keep `classes` aligned with `attr.1` (the
+/// marker bytes are not available here). The user's own id/class/kv
+/// sources are kept.
+fn with_synthesized_leading_class(mut attr_source: AttrSourceInfo) -> AttrSourceInfo {
+    attr_source.classes.insert(0, None);
+    attr_source
 }
 
 /// Transform a valid list-table div into a Table block.
@@ -632,6 +695,20 @@ fn ends_with_abbreviation(text: &str) -> bool {
 ///
 /// Safety guard (R2, Plan 7g Phase 4b): the contiguity check ensures the hull
 /// never swallows bytes that belong to other nodes.
+///
+/// # Drift amplifier — an ordering constraint, not a bug
+///
+/// Same constraint as [`hull_source_infos`], which carries the full note
+/// (provenance audit § 4): the flat `Original` returned on the contiguous
+/// path freezes whatever offsets the run's producers reported and discards
+/// their provenance chains. Fix producers before this consumer, and verify a
+/// producer's provenance fix upstream of this call — the hull returned here
+/// cannot distinguish a corrected producer from an uncorrected one.
+///
+/// Building the hull from `preimage_in` rather than the
+/// `map_offset(0)`/`map_offset(length())` pair is off the accessor rule
+/// (findings § 1); see [`hull_source_infos`] for why that is latent here.
+/// Migration: `bd-ostgyku0`.
 fn contiguous_hull_for_run(run: &[Inline]) -> SourceInfo {
     if run.is_empty() {
         return SourceInfo::generated(By::tree_sitter_postprocess());
@@ -885,8 +962,97 @@ pub fn transform_divs(doc: Pandoc, error_collector: &mut DiagnosticCollector) ->
     topdown_traverse(doc, &mut filter, &mut ctx)
 }
 
+/// Is `line` a fence opener carrying Quarto 1's doubled-brace escape?
+///
+/// This is the narrow predicate `^\s*`{3,}\{\{` — a line that is *itself* a
+/// fence opener whose info string starts with doubled braces. Matching the
+/// opener **position** rather than "the body contains `{{`" is what keeps the
+/// false-positive surface empty: the Jinja/template counter-case that shaped
+/// the original design (`{{ name }}`, `{{ request.headers[...] }}`) always
+/// sits on ordinary content lines, never at an opener.
+fn is_doubled_brace_fence_opener(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let backticks = trimmed.bytes().take_while(|b| *b == b'`').count();
+    backticks >= 3 && trimmed[backticks..].starts_with("{{")
+}
+
+/// The language named by a doubled-brace opener line, e.g. `python` for
+/// ```` ```{{python}} ````. Returns `None` when the braces wrap something
+/// that is not a bare identifier-ish token, in which case the caller falls
+/// back to generic advice.
+fn doubled_brace_opener_language(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let backticks = trimmed.bytes().take_while(|b| *b == b'`').count();
+    let info = trimmed[backticks..].trim_end();
+    let lang = info.trim_start_matches('{').trim_end_matches('}');
+    if lang.is_empty() || lang.contains(['{', '}', '`']) || lang.contains(char::is_whitespace) {
+        None
+    } else {
+        Some(lang.to_string())
+    }
+}
+
+/// The block's byte range **in this parse's own input buffer**, or `None`
+/// when the span is not a direct slice of it.
+///
+/// `resolve_byte_range` is deliberately *not* used here. Under a recursive
+/// parse of an embedded string (config values, `!md` metadata, Lua-filter
+/// config values) spans are rerooted through a parent `SourceInfo`, and
+/// resolving would compose the offsets into the **parent's** file — a
+/// different buffer from the `input_bytes` we are about to index, which
+/// would slice unrelated text and point the diagnostic at the wrong place.
+/// The uncomposed `start_offset`/`end_offset` are the offsets into this
+/// parse's input in both cases.
+fn parse_local_range(info: &SourceInfo) -> Option<(usize, usize)> {
+    match info {
+        SourceInfo::Original {
+            start_offset,
+            end_offset,
+            ..
+        }
+        | SourceInfo::Substring {
+            start_offset,
+            end_offset,
+            ..
+        } => Some((*start_offset, *end_offset)),
+        // Concat/Generated have no single contiguous slice of the input.
+        SourceInfo::Concat { .. } | SourceInfo::Generated(_) => None,
+    }
+}
+
+/// Whether a no-table caption begins with a list marker in its definition
+/// body. Tree-sitter parses the following indented list as a sibling block; it
+/// needs a literal fallback too, or its items would survive as a parsed list.
+fn caption_has_list_definition_body(text: &str) -> bool {
+    let Some(body) = text.strip_prefix(':') else {
+        return false;
+    };
+    let body = body.trim_start();
+    if ["- ", "+ ", "* "]
+        .iter()
+        .any(|marker| body.starts_with(marker))
+    {
+        return true;
+    }
+
+    let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0
+        && matches!(body.as_bytes().get(digits), Some(b'.' | b')'))
+        && body.as_bytes().get(digits + 1) == Some(&b' ')
+}
+
 /// Apply post-processing transformations to the Pandoc AST
-pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Result<Pandoc, ()> {
+///
+/// `input_bytes` is the document text the AST's offsets are relative to. It
+/// is needed to locate diagnostics *inside* a block's body — a `CodeBlock`
+/// carries its body in `text`, but `text` has no offset relationship to the
+/// block's span (the span includes the fence lines), so pointing at a body
+/// line means reading the block's own source slice.
+pub fn postprocess(
+    doc: Pandoc,
+    input_bytes: &[u8],
+    error_collector: &mut DiagnosticCollector,
+) -> Result<Pandoc, ()> {
     let result = {
         // Wrap error_collector in RefCell for interior mutability across multiple closures
         let error_collector_ref = RefCell::new(error_collector);
@@ -1073,6 +1239,131 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                     }
                 }
             })
+            // Warn on doubled-brace fence openers (Quarto 1's display escape,
+            // e.g. ```{{python}}). A class beginning with `{{` can only arise
+            // from such an opener: attribute-form openers ({python}, {.foo})
+            // parse into single-brace or bare classes, and fence *content* is
+            // never a class. Q2 deliberately does not support the escape
+            // (bd-escaped-executable-fence-uuvv37pk); the block is left as-is
+            // and renders as literal code.
+            .with_code_block(|code_block, _ctx| {
+                let mut warned = false;
+                for (i, class) in code_block.attr.1.iter().enumerate() {
+                    if !class.starts_with("{{") {
+                        continue;
+                    }
+                    let location = code_block
+                        .attr_source
+                        .classes
+                        .get(i)
+                        .and_then(|s| s.clone())
+                        .unwrap_or_else(|| code_block.source_info.clone());
+                    let lang = class.trim_start_matches('{').trim_end_matches('}');
+                    let execute_hint = if lang.is_empty() || lang.contains(['{', '}']) {
+                        "To execute the cell, write the language with single braces, e.g. `{python}`.".to_string()
+                    } else {
+                        format!("To execute the cell, write single braces: `{{{}}}`.", lang)
+                    };
+                    error_collector_ref.borrow_mut().add(
+                        DiagnosticMessageBuilder::warning(
+                            "Doubled curly braces are not supported",
+                        )
+                        .with_code("Q-2-50")
+                        .with_location(location)
+                        .problem(format!(
+                            "Quarto 2 does not treat doubled curly braces as an escape, so `{}` is not a language specifier; this block renders as literal code.",
+                            class
+                        ))
+                        .add_hint(execute_hint)
+                        .add_hint(
+                            "To display the cell, wrap it in a `markdown` code block and write single braces; fenced code blocks are displayed verbatim.",
+                        )
+                        .build(),
+                    );
+                    warned = true;
+                    break;
+                }
+
+                // Second site: a doubled-brace opener *nested inside* a
+                // display fence. This is the form the real corpus uses --- the
+                // escape exists to SHOW a cell without running it, and showing
+                // a cell means wrapping it in an outer fence, so the escape
+                // essentially only ever appears nested. Measured on the Posit
+                // Connect docs port: 61 openers in 7 files, 61 of 61 nested,
+                // 0 top level (bd-q250-nested-fence-blind-spot-t68z1lsw).
+                //
+                // Nested openers are fence *content*, so they never become a
+                // class and the loop above cannot see them. We scan the
+                // block's own source slice rather than `code_block.text`
+                // because an offset into `text` has no relationship to the
+                // block's span --- the span includes the fence lines --- and a
+                // confidently wrong location is worse than none.
+                //
+                // The scan is deliberately NOT gated on the outer block's
+                // language. Gating on `markdown` would be tighter in
+                // principle, but on the measured corpus it selects exactly the
+                // same set, and an author who writes a doubled-brace opener
+                // inside a `text` or unlabelled display fence has the same
+                // problem.
+                if !warned
+                    && let Some((start, end)) = parse_local_range(&code_block.source_info)
+                    && let Some(block_src) = input_bytes.get(start..end)
+                    && let Ok(block_src) = std::str::from_utf8(block_src)
+                {
+                    // Skip the block's own opening fence line: if *it* carried
+                    // doubled braces the class loop above already reported it.
+                    let body_start = match block_src.find('\n') {
+                        Some(nl) => nl + 1,
+                        None => block_src.len(),
+                    };
+                    let mut offset = body_start;
+                    for line in block_src[body_start..].split_inclusive('\n') {
+                        let line_text = line.strip_suffix('\n').unwrap_or(line);
+                        if is_doubled_brace_fence_opener(line_text) {
+                            let lang = doubled_brace_opener_language(line_text);
+                            let execute_hint = match &lang {
+                                Some(lang) => format!(
+                                    "Write single braces: `{{{}}}`. The enclosing display block already shows the cell verbatim, so it will not run.",
+                                    lang
+                                ),
+                                None => "Write the language with single braces, e.g. `{python}`. The enclosing display block already shows the cell verbatim, so it will not run.".to_string(),
+                            };
+                            error_collector_ref.borrow_mut().add(
+                                DiagnosticMessageBuilder::warning(
+                                    "Doubled curly braces are not supported",
+                                )
+                                .with_code("Q-2-50")
+                                .with_location(SourceInfo::substring(
+                                    code_block.source_info.clone(),
+                                    offset,
+                                    offset + line_text.len(),
+                                ))
+                                // The opener is NOT wrapped in backticks here:
+                                // it begins with backticks itself, and nesting
+                                // them renders as ````{{python}}` --- noise
+                                // exactly where the message needs to be clear.
+                                // The snippet underlines the line anyway.
+                                .problem(format!(
+                                    "Quarto 2 does not treat doubled curly braces as an escape, so the opener {} is displayed exactly as written; readers are shown a fence opener that is not valid Quarto syntax.",
+                                    line_text.trim()
+                                ))
+                                .add_hint(execute_hint)
+                                .add_hint(
+                                    "Quarto 1 doubled the braces to keep a displayed cell from running. Quarto 2 does not need the escape: a fenced block's contents are displayed verbatim.",
+                                )
+                                .build(),
+                            );
+                            // One warning per block, matching the class path:
+                            // a page showing several cells should not produce
+                            // a wall of identical diagnostics.
+                            break;
+                        }
+                        offset += line.len();
+                    }
+                }
+
+                Unchanged(code_block)
+            })
             // Remove single empty spans from bullet list items
             // This allows `* []` to create truly empty list items in the AST
             .with_bullet_list(|mut bullet_list, _ctx| {
@@ -1246,7 +1537,7 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                         attr: (insert.attr.0, classes, insert.attr.2),
                         content,
                         source_info: insert.source_info,
-                        attr_source: crate::pandoc::attr::AttrSourceInfo::empty(),
+                        attr_source: with_synthesized_leading_class(insert.attr_source),
                     })],
                     true,
                 )
@@ -1260,7 +1551,7 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                         attr: (delete.attr.0, classes, delete.attr.2),
                         content,
                         source_info: delete.source_info,
-                        attr_source: crate::pandoc::attr::AttrSourceInfo::empty(),
+                        attr_source: with_synthesized_leading_class(delete.attr_source),
                     })],
                     true,
                 )
@@ -1274,7 +1565,7 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                         attr: (highlight.attr.0, classes, highlight.attr.2),
                         content,
                         source_info: highlight.source_info,
-                        attr_source: crate::pandoc::attr::AttrSourceInfo::empty(),
+                        attr_source: with_synthesized_leading_class(highlight.attr_source),
                     })],
                     true,
                 )
@@ -1288,7 +1579,7 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                         attr: (edit_comment.attr.0, classes, edit_comment.attr.2),
                         content,
                         source_info: edit_comment.source_info,
-                        attr_source: crate::pandoc::attr::AttrSourceInfo::empty(),
+                        attr_source: with_synthesized_leading_class(edit_comment.attr_source),
                     })],
                     true,
                 )
@@ -1300,32 +1591,31 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                 // This fixes an issue where tree-sitter emits both break types when
                 // a hard break (backslash-newline) is present. Pandoc only emits LineBreak
                 // in this case, so we match that behavior by dropping the redundant SoftBreak.
-                let mut break_cleaned = vec![];
-                let mut i = 0;
-
-                while i < inlines.len() {
-                    let current = &inlines[i];
-
-                    // Check if current is LineBreak and next is SoftBreak
-                    if matches!(current, Inline::LineBreak(_))
-                        && i + 1 < inlines.len()
-                        && matches!(inlines[i + 1], Inline::SoftBreak(_))
-                    {
-                        // Keep the LineBreak
-                        break_cleaned.push(inlines[i].clone());
-                        // Skip the SoftBreak (i+1)
-                        i += 2;
-                    } else {
-                        // Keep the current inline
-                        break_cleaned.push(inlines[i].clone());
-                        i += 1;
+                // Move the inlines through rather than cloning them: this
+                // closure runs on every inline vector in the document, and
+                // a deep clone here was paid once per ancestor level.
+                let mut break_cleaned = Vec::with_capacity(inlines.len());
+                let mut skip_next_softbreak = false;
+                for inline in inlines {
+                    if skip_next_softbreak && matches!(inline, Inline::SoftBreak(_)) {
+                        skip_next_softbreak = false;
+                        continue;
                     }
+                    skip_next_softbreak = matches!(inline, Inline::LineBreak(_));
+                    break_cleaned.push(inline);
                 }
 
                 // Step 1: Handle Math nodes followed by Attr (process on break_cleaned)
                 // Pattern: Math, Space (optional), Attr -> Span with "quarto-math-with-attribute" class
-                let mut math_processed = vec![];
+                let mut math_processed = Vec::with_capacity(break_cleaned.len());
                 let mut i = 0;
+                // Fast path: the pattern below needs an `Attr`, so a vector
+                // without one moves through untouched (no per-element clone).
+                let has_attr = break_cleaned.iter().any(|x| matches!(x, Inline::Attr(_)));
+                if !has_attr {
+                    math_processed = break_cleaned;
+                    break_cleaned = Vec::new();
+                }
 
                 while i < break_cleaned.len() {
                     if let Inline::Math(math) = &break_cleaned[i] {
@@ -1438,10 +1728,7 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
                                         cite.content.push(Inline::Space(Space {
                                             // Synthetic Space: inserted to separate citation from suffix.
                                             // Plan 6 §"tree-sitter postprocess" — Generated, no preimage.
-                                            source_info: SourceInfo::Generated {
-                                                by: By::tree_sitter_postprocess(),
-                                                from: smallvec![],
-                                            },
+                                            source_info: SourceInfo::generated(By::tree_sitter_postprocess()),
                                         }));
 
                                         // The span content may have been merged into a single string, so we need to
@@ -1550,8 +1837,9 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
             .with_blocks(|blocks, _ctx| {
                 // Process CaptionBlock nodes: attach to preceding tables or issue warnings
                 let mut result: Blocks = Vec::new();
+                let mut blocks = blocks.into_iter().peekable();
 
-                for block in blocks {
+                while let Some(block) = blocks.next() {
                     // Check if current block is a CaptionBlock
                     if let Block::CaptionBlock(caption_block) = block {
                         // Look for a preceding Table
@@ -1648,12 +1936,118 @@ pub fn postprocess(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Re
 
                             // Don't add the CaptionBlock to the result (it's now attached)
                         } else {
-                            // Issue a warning when caption has no preceding table
-                            error_collector_ref.borrow_mut().warn_at(
-                                "Caption found without a preceding table".to_string(),
-                                caption_block.source_info.clone(),
-                            );
-                            // Remove the caption from the output (don't add to result)
+                            let previous_was_definition_term = result.last().is_some_and(|block| {
+                                match block {
+                                    Block::Paragraph(paragraph) => {
+                                        !matches!(
+                                            paragraph.content.as_slice(),
+                                            [Inline::Image(_)]
+                                        )
+                                    }
+                                    Block::Plain(plain) => {
+                                        !matches!(plain.content.as_slice(), [Inline::Image(_)])
+                                    }
+                                    _ => false,
+                                }
+                            });
+                            let source_info = caption_block.source_info.clone();
+                            let fallback_content = || {
+                                let mut content = vec![Inline::Str(Str {
+                                    text: ":".to_string(),
+                                    source_info: source_info.clone(),
+                                })];
+                                content.extend(caption_block.content.clone());
+                                content
+                            };
+                            let emit_generic_warning = |collector: &mut DiagnosticCollector| {
+                                collector.warn_at(
+                                    "Caption found without a preceding table".to_string(),
+                                    source_info.clone(),
+                                );
+                            };
+                            let line_text = parse_local_range(&source_info)
+                                .and_then(|(start, end)| input_bytes.get(start..end))
+                                .map(|line_bytes| {
+                                    String::from_utf8_lossy(line_bytes)
+                                        .trim_end_matches(['\r', '\n'])
+                                        .to_string()
+                                });
+                            let Some(line_text) = line_text else {
+                                // Keep parsed content even when its source is generated,
+                                // discontiguous, or outside the input buffer.
+                                result.push(Block::Paragraph(Paragraph {
+                                    content: fallback_content(),
+                                    source_info: source_info.clone(),
+                                }));
+                                emit_generic_warning(&mut error_collector_ref.borrow_mut());
+                                continue;
+                            };
+                            let line_text = if line_text.starts_with(':') {
+                                line_text
+                            } else {
+                                format!(":{line_text}")
+                            };
+                            let has_list_definition_body =
+                                caption_has_list_definition_body(&line_text);
+                            let literal = Inline::Str(Str {
+                                text: line_text,
+                                source_info: source_info.clone(),
+                            });
+                            if previous_was_definition_term {
+                                error_collector_ref.borrow_mut().add(
+                                    DiagnosticMessageBuilder::warning(
+                                        "Pandoc definition lists are not supported",
+                                    )
+                                    .with_code("Q-2-54")
+                                    .with_location(source_info.clone())
+                                    .problem(
+                                        "This line follows a term and is parsed as a table caption. The line renders as literal text instead of a definition.",
+                                    )
+                                    .add_hint(
+                                        "Use the supported `::: {.definition-list}` form, with one bullet per term and a nested bullet per definition.",
+                                    )
+                                    .add_hint(
+                                        "If the colon is intentional literal text, escape it as `\\:`.",
+                                    )
+                                    .add_hint(
+                                        "Run `qmd-syntax-helper convert -r definition-lists` to migrate definition lists automatically.",
+                                    )
+                                    .build(),
+                                );
+                            } else {
+                                emit_generic_warning(&mut error_collector_ref.borrow_mut());
+                            }
+                            result.push(Block::Paragraph(Paragraph {
+                                content: vec![literal],
+                                source_info,
+                            }));
+                            if has_list_definition_body
+                                && matches!(
+                                    blocks.peek(),
+                                    Some(Block::BulletList(_) | Block::OrderedList(_))
+                                )
+                            {
+                                let list = blocks.next().expect("peeked list block");
+                                let list_source = list.source_info().clone();
+                                let list_text = parse_local_range(&list_source)
+                                    .and_then(|(start, end)| input_bytes.get(start..end))
+                                    .map(|bytes| {
+                                        String::from_utf8_lossy(bytes)
+                                            .trim_end_matches(['\r', '\n'])
+                                            .to_string()
+                                    });
+                                if let Some(text) = list_text {
+                                    result.push(Block::Paragraph(Paragraph {
+                                        content: vec![Inline::Str(Str {
+                                            text,
+                                            source_info: list_source.clone(),
+                                        })],
+                                        source_info: list_source,
+                                    }));
+                                } else {
+                                    result.push(list);
+                                }
+                            }
                         }
                     } else {
                         // Not a CaptionBlock, add it to result
@@ -1689,20 +2083,19 @@ pub fn merge_strs(pandoc: Pandoc) -> Pandoc {
         &mut Filter::new().with_inlines(|inlines, _ctx| {
             let mut current_str: Option<String> = None;
             let mut current_source_info: Option<quarto_source_map::SourceInfo> = None;
-            let mut result: Inlines = Vec::new();
+            let mut result: Inlines = Vec::with_capacity(inlines.len());
             let mut did_merge = false;
             for inline in inlines {
                 match inline {
                     Inline::Str(s) => {
-                        let str_text = s.text.clone();
                         if let Some(ref mut current) = current_str {
-                            current.push_str(&str_text);
+                            current.push_str(&s.text);
                             if let Some(ref mut info) = current_source_info {
                                 *info = info.combine(&s.source_info);
                             }
                             did_merge = true;
                         } else {
-                            current_str = Some(str_text);
+                            current_str = Some(s.text);
                             current_source_info = Some(s.source_info);
                         }
                     }
@@ -1756,6 +2149,31 @@ pub fn merge_strs(pandoc: Pandoc) -> Pandoc {
 /// `[math_start .. attr_content_end + 1]` where `+1` accounts for `}`.
 ///
 /// Falls back to `combine` when source infos don't resolve to the same file.
+///
+/// # Drift amplifier — an ordering constraint, not a bug
+///
+/// Same constraint as [`hull_source_infos`], which carries the full note
+/// (provenance audit § 4): the flat `Original` built below freezes whatever
+/// offsets `math_si` and `attr_inline_si` reported and discards their
+/// provenance chains. Fix producers before this consumer, and verify a
+/// producer's provenance fix upstream of this call. Building the hull from
+/// `preimage_in` rather than the `map_offset(0)`/`map_offset(length())` pair
+/// is off the accessor rule (findings § 1) and latent for the same reason;
+/// migration: `bd-ostgyku0`, which should re-derive the `+ 1` below rather
+/// than carry it across.
+///
+/// **The `+ 1` is a hardcoded assumption, not a measurement.** This site ends
+/// the hull at `attr_end + 1` on the belief that the closing `}` is the very
+/// next raw byte after the attribute content. Nothing here checks that. It
+/// holds only while (a) `attr_end` is a *raw-source* coordinate — the
+/// `preimage_in` hull of a `Concat` attr is an offset claim only
+/// (`quarto-source-map-0.1.3/src/source_info.rs:410-457`), so a
+/// non-verbatim attr chain can put `attr_end` somewhere `}` does not follow —
+/// and (b) the grammar never admits anything between the last attribute and
+/// the brace. Whitespace, a trailing separator, or a future attribute form
+/// that allows either would make the hull end one byte short or one byte into
+/// the next token, silently. If the closing delimiter's own span becomes
+/// reachable here, prefer it to the arithmetic.
 fn math_with_attr_span_source_info(
     math_si: &SourceInfo,
     attr_inline_si: &SourceInfo,

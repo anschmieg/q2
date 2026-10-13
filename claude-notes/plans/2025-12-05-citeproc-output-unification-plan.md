@@ -1,6 +1,12 @@
-# Citeproc Output Unification Implementation Plan
+---
+title: 'Citeproc Output Unification Implementation Plan'
+date: 2025-12-05
+description: 'Makes `to_inlines()` the single canonical conversion from citeproc output, replacing the duplicated `render()` logic with a String form derived from Pandoc inlines so both paths agree.'
+braid:
+  strand: k-0dqu
+  priority: P2
+---
 
-**Issue**: k-0dqu
 **Related**: claude-notes/plans/2025-12-05-citeproc-delimiter-inheritance-report.md
 
 ## Goal
@@ -113,9 +119,9 @@ These changes would be out of scope for the initial refactoring (which aims for 
 
 ### Completed Work
 
-1. **Created `inlines_to_markdown_string()` function** (output.rs lines ~2118-2404)
+1. **Created `inlines_to_markdown_string()` function** (output.rs lines \~2118-2404)
    - Converts Pandoc Inlines to markdown-like string format
-   - Handles all Inline types: Str, Space, Emph (*), Strong (**), Superscript (^), Subscript (~), Quoted, etc.
+   - Handles all Inline types: Str, Space, Emph (\*), Strong (\*\*), Superscript (^), Subscript (\~), Quoted, etc.
    - Includes helper `block_to_markdown_string()` for Note content
 
 2. **Migrated `render()` to use new path**

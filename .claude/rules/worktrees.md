@@ -96,6 +96,10 @@ npm install                              # only if hub-client work is in scope
 cargo xtask verify --skip-hub-build      # confirm green at branch HEAD
 ```
 
+`npm install` and `cargo xtask verify` both require the Node major pinned in
+`.nvmrc` / `engines.node`; with fnm's `--use-on-cd`, the `cd` into the worktree
+selects it (see `claude-notes/instructions/node-version.md`).
+
 `--base` defaults to `main` when omitted. **If the strand has an
 open parent epic, the command prints a warning** nudging you toward
 the epic's integration branch (e.g. `feature/<name>`). Pass
@@ -147,6 +151,11 @@ available, an italic-prose placeholder for the plan file path, and a
 (`/investigate-beads`, `/triage`, or `/upgrade-cargo-deps`). Placeholders are
 self-documenting — they say exactly what to replace them with.
 
+`cargo xtask switch-task` rewrites the same section in whichever checkout it runs
+in. In the main checkout (`git rev-parse --git-dir` equals `--git-common-dir`) the
+section is headed `# Task Context` and omits the worktree declaration and the
+`../..` main-repo path, which only hold for `.worktrees/*`.
+
 Status lives in the braid skein, not in this file. Run `braid show <id>` for current status + notes.
 
 The section is delimited by `<!-- BEGIN/END WORKTREE CONTEXT -->` markers so it can be
@@ -166,7 +175,7 @@ create/update/close operations produce **nothing to commit** — they converge
 through the CRDT on every command, from any worktree, automatically. (This is
 the big simplification over beads' "edit in the worktree, but commit `.beads/`
 from the main repo" rule.) The only git-tracked braid artifact is the
-backup-only `.braid/snapshot.jsonl` (see the snapshot policy in `CLAUDE.md`),
+backup-only `.braid/snapshot.jsonl` (see the snapshot policy in `AGENTS.md`),
 which is regenerated from the skein and never hand-edited or re-imported.
 
 ## Pushing for PR

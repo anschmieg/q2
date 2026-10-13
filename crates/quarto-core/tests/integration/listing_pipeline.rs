@@ -109,9 +109,13 @@ fn html_for<'a>(outputs: &'a [(String, String)], stem: &str) -> &'a str {
 }
 
 /// L3 phase 6 §"e2e CLI verification" — exact-fixture render on
-/// the standard four-file blog setup.
+/// the standard four-file blog setup. Default sort is Q1's
+/// `order asc, title asc` (bd-listing-declared-order-3ixcvc4o):
+/// Third carries `order: 1` so it leads; First and Second have no
+/// `order:` and follow in title-asc order. (Dates are set so the
+/// pre-fix date-desc default would produce a different order.)
 #[test]
-fn default_listing_renders_three_posts_in_date_desc_order() {
+fn default_listing_renders_three_posts_in_default_order() {
     let (_dir, outputs) = render_project(|p| {
         write(
             &p.join("_quarto.yml"),
@@ -123,24 +127,25 @@ fn default_listing_renders_three_posts_in_date_desc_order() {
         );
         write(
             &p.join("posts/a.qmd"),
-            "---\ntitle: First\ndate: 2026-01-15\nauthor: Alice\ndescription: First desc.\nformat: html\n---\n\nFirst body.\n",
+            "---\ntitle: First\ndate: 2026-01-15\nauthor: Alice\nformat: html\n---\n\nFirst body.\n",
         );
         write(
             &p.join("posts/b.qmd"),
-            "---\ntitle: Second\ndate: 2026-02-20\nauthor: Bob\ndescription: Second desc.\nformat: html\n---\n\nSecond body.\n",
+            "---\ntitle: Second\ndate: 2026-02-20\nauthor: Bob\nformat: html\n---\n\nSecond body.\n",
         );
         write(
             &p.join("posts/c.qmd"),
-            "---\ntitle: Third\ndate: 2026-03-05\nauthor: Carol\ndescription: Third desc.\nformat: html\n---\n\nThird body.\n",
+            "---\ntitle: Third\ndate: 2026-03-05\nauthor: Carol\ndescription: Third desc.\norder: 1\nformat: html\n---\n\nThird body.\n",
         );
     });
 
     let host = html_for(&outputs, "index");
 
-    // Listing wrapper Div with the auto-synthesized id and the
-    // data-listing-rendered marker.
+    // Listing wrapper Div with Q1's container id for the synthesized
+    // listing id (`listing-` + `listing`) and the data-listing-rendered
+    // marker.
     assert!(
-        host.contains(r#"id="listing-1""#),
+        host.contains(r#"id="listing-listing""#),
         "expected listing wrapper id; got:\n{}",
         host
     );
@@ -161,25 +166,26 @@ fn default_listing_renders_three_posts_in_date_desc_order() {
     assert!(host.contains("Second"));
     assert!(host.contains("Third"));
 
-    // Default sort = date desc → Third (Mar) before Second (Feb)
-    // before First (Jan). Find the three title positions and
-    // assert the ordering.
+    // Default sort = order asc, title asc → Third (order: 1) leads;
+    // First and Second (no order:) follow in title-asc order. Find
+    // the three title positions and assert the ordering.
     let p_third = host.find("Third").expect("Third missing");
     let p_second = host.find("Second").expect("Second missing");
     let p_first = host.find("First").expect("First missing");
     assert!(
-        p_third < p_second && p_second < p_first,
-        "expected date-desc ordering (Third, Second, First); positions: third={}, second={}, first={}",
+        p_third < p_first && p_first < p_second,
+        "expected default ordering (Third, First, Second); positions: third={}, first={}, second={}",
         p_third,
-        p_second,
-        p_first
+        p_first,
+        p_second
     );
 
     // L7 ran during `WebsiteProjectType::post_render`: the
     // description envelope markers are stripped from the rendered
-    // host and the description region is replaced with each post's
-    // engine-rendered first paragraph (`"First body."` etc., from
-    // the post bodies above).
+    // host. First and Second have no `description:`, so their region
+    // holds the engine-rendered first paragraph; Third's explicit
+    // `description:` is authored and stays as written
+    // (bd-listing-description-precedence-x4bh6w3m).
     assert!(
         !host.contains("desc-begin(5A0113B34292)"),
         "L7 should have stripped description begin markers; got: {host}"
@@ -188,12 +194,13 @@ fn default_listing_renders_three_posts_in_date_desc_order() {
         !host.contains("desc-end(5A0113B34292)"),
         "L7 should have stripped description end markers"
     );
-    // Engine-rendered first paragraph from each post's body.
     assert!(
-        host.contains("First body.")
-            && host.contains("Second body.")
-            && host.contains("Third body."),
+        host.contains("First body.") && host.contains("Second body."),
         "L7 should substitute the engine first paragraphs; got: {host}"
+    );
+    assert!(
+        host.contains("Third desc.") && !host.contains("Third body."),
+        "an explicit description is final, not replaced; got: {host}"
     );
 
     // Authors and dates flow through.
@@ -203,6 +210,46 @@ fn default_listing_renders_three_posts_in_date_desc_order() {
     // Dates are pre-formatted at record-build with the `medium`
     // default (bd-13f821l5).
     assert!(host.contains("Jan 15, 2026"));
+}
+
+/// bd-listing-declared-order-3ixcvc4o: a curated `contents:` list
+/// with `sort: false` renders in declared order (Q1 semantics).
+/// Same shape as the committed minimal repro at
+/// `claude-notes/plans/listing-declared-order-investigation/repro/`:
+/// bravo is declared first but sorts after alpha both alphabetically
+/// and by project-index order, so only declaration-order handling
+/// can put it first. (Item files have distinct stems because the
+/// harness keys outputs by file stem.)
+#[test]
+fn declared_contents_order_preserved_with_sort_false() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Home\nlisting:\n  id: things\n  type: default\n  sort: false\n  contents:\n    - bravo.qmd\n    - alpha.qmd\nformat: html\n---\n\n::: {#things}\n:::\n",
+        );
+        write(
+            &p.join("alpha.qmd"),
+            "---\ntitle: Alpha Page\nformat: html\n---\n\nAlpha body.\n",
+        );
+        write(
+            &p.join("bravo.qmd"),
+            "---\ntitle: Bravo Page\nformat: html\n---\n\nBravo body.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    let p_bravo = host.find("Bravo Page").expect("Bravo Page missing");
+    let p_alpha = host.find("Alpha Page").expect("Alpha Page missing");
+    assert!(
+        p_bravo < p_alpha,
+        "declared order (Bravo, Alpha) must be preserved; positions: bravo={}, alpha={}",
+        p_bravo,
+        p_alpha
+    );
 }
 
 /// Listing item links must travel through `LinkRewriteTransform`.
@@ -317,6 +364,128 @@ fn table_type_emits_listing_table_wrapper() {
     assert!(host.contains("Jan 15, 2026"));
 }
 
+/// bd-listing-table-fields-peg1w3b3 e2e: `fields:` selects the
+/// column set and `field-display-names:` renames headers (the
+/// Posit Connect docs "How To" case). Items lacking date/author
+/// must not produce extra columns.
+#[test]
+fn table_fields_and_display_names_render_single_column() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("posts/index.qmd"),
+            "---\ntitle: Guides\nlisting:\n  id: guides\n  type: table\n  fields: [title]\n  field-display-names:\n    title: \"How To\"\nformat: html\n---\n\n::: {#guides}\n:::\n",
+        );
+        // Neither item has date or author.
+        write(
+            &p.join("posts/a.qmd"),
+            "---\ntitle: First guide\nformat: html\n---\n\nBody A.\n",
+        );
+        write(
+            &p.join("posts/b.qmd"),
+            "---\ntitle: Second guide\nformat: html\n---\n\nBody B.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(host.contains("quarto-listing-table-wrapper"));
+    // Exactly one column, renamed via field-display-names.
+    assert_eq!(
+        host.matches("<th>").count(),
+        1,
+        "expected exactly one table header cell; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains("How To"),
+        "expected `How To` display-name header; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("<th>Title") && !host.contains("<th>Date") && !host.contains("<th>Author"),
+        "hardcoded Title/Date/Author headers leaked; got:\n{}",
+        host
+    );
+    // Both items link to their pages.
+    assert!(host.contains("First guide") && host.contains("Second guide"));
+    assert!(host.contains(r#"href="a.html""#) && host.contains(r#"href="b.html""#));
+    // Each item is its own table row: 1 header + 2 body rows. (The
+    // doctemplate resolver chomps a partial's final newline, so a
+    // naive `$items:item-table()$` merges all rows into one — the
+    // listing template must iterate with per-row separation.)
+    assert_eq!(
+        host.matches("<tr").count(),
+        3,
+        "expected one header row + one row per item; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("<td>|"),
+        "leaked pipe chars indicate merged table rows; got:\n{}",
+        host
+    );
+}
+
+/// bd-listing-table-fields-peg1w3b3 e2e: with no author-supplied
+/// `fields:`, the table default set `[date, title, author]` is
+/// presence-filtered against the items (Q1 parity) — items with no
+/// author ⇒ no Author column — and keeps Q1's Date-before-Title
+/// column order.
+#[test]
+fn table_default_fields_presence_filtered_and_ordered() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("posts/index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  type: table\nformat: html\n---\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            "---\ntitle: First\ndate: 2026-01-15\nformat: html\n---\n\nBody.\n",
+        );
+        write(
+            &p.join("posts/b.qmd"),
+            "---\ntitle: Second\ndate: 2026-02-20\nformat: html\n---\n\nBody.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert_eq!(
+        host.matches("<th>").count(),
+        2,
+        "expected Date + Title columns only; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("<th>Author"),
+        "Author column must be presence-filtered out; got:\n{}",
+        host
+    );
+    let p_date = host.find("<th>Date").expect("Date header missing");
+    let p_title = host.find("<th>Title").expect("Title header missing");
+    assert!(
+        p_date < p_title,
+        "expected Q1 column order Date | Title; positions: date={p_date}, title={p_title}"
+    );
+    // Cell data flows through: formatted date + linked titles.
+    assert!(host.contains("Jan 15, 2026") && host.contains("Feb 20, 2026"));
+    assert!(host.contains(r#"href="a.html""#) && host.contains(r#"href="b.html""#));
+    // One header row + one row per item (see the row-separation
+    // note in table_fields_and_display_names_render_single_column).
+    assert_eq!(
+        host.matches("<tr").count(),
+        3,
+        "expected one header row + one row per item; got:\n{}",
+        host
+    );
+}
+
 #[test]
 fn explicit_slot_div_id_is_filled() {
     // When the host page contains a Div with id matching
@@ -352,10 +521,12 @@ format: html
     });
 
     let host = html_for(&outputs, "index");
-    // The id should exist exactly once on a Div, with the
-    // data-listing-rendered marker, and the listing items live
-    // *inside* that Div (between Heading and After in source order).
-    assert!(host.contains(r#"id="my-blog""#));
+    // The slot is renamed to Q1's container id `listing-<id>`
+    // (bd-nbv80e33), carries the data-listing-rendered marker, and
+    // the listing items live *inside* it (between Heading and After
+    // in source order).
+    assert!(host.contains(r#"id="listing-my-blog""#), "{host}");
+    assert!(!host.contains(r#"id="my-blog""#), "{host}");
     assert!(host.contains(r#"data-listing-rendered="1""#));
     assert!(host.contains("First"));
     let p_heading = host.find("Heading").expect("Heading missing");
@@ -428,6 +599,91 @@ fn vendored_js_artifacts_emit_script_tags_and_land_under_site_libs() {
         "list.min.js body unexpectedly small: {} bytes",
         bytes.len()
     );
+}
+
+/// bd-nbv80e33: end to end, a paginated default listing with
+/// categories carries everything List.js and `quarto-listing.js` read
+/// back, under ids that agree with each other: the container
+/// `#listing-listing` (Q1's id for a lone listing), the items'
+/// `data-*` attrs, the pagination `<nav>` inside the container, and an
+/// init script naming that container. The script must reach the page
+/// verbatim (a raw-HTML block, not escaped text).
+#[test]
+fn paginated_listing_with_categories_carries_the_listjs_bootstrap() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Listing\nlisting:\n  contents: posts\n  page-size: 2\n  categories: true\nformat: html\n---\n",
+        );
+        for i in 1..=3 {
+            write(
+                &p.join(format!("posts/p{i}.qmd")),
+                &format!(
+                    "---\ntitle: Post {i}\ndate: 2026-01-0{i}\ncategories: [cat{i}, shared]\nformat: html\n---\n\nBody {i}.\n"
+                ),
+            );
+        }
+    });
+    let host = html_for(&outputs, "index");
+
+    // The container, with Q1's id and classes.
+    let container = host
+        .find(r#"id="listing-listing""#)
+        .unwrap_or_else(|| panic!("no #listing-listing container:\n{host}"));
+    let container_tag = &host[host[..container].rfind('<').unwrap()..];
+    let container_tag = &container_tag[..container_tag.find('>').unwrap()];
+    for class in ["quarto-listing", "quarto-listing-container-default"] {
+        assert!(container_tag.contains(class), "{class}: {container_tag}");
+    }
+
+    // Item attrs: one data-index per item, base64 categories
+    // (btoa(encodeURIComponent("cat1,shared"))), date sort values.
+    for i in 0..3 {
+        assert!(
+            host.contains(&format!(r#"data-index="{i}""#)),
+            "item {i}:\n{host}"
+        );
+    }
+    assert!(
+        host.contains(r#"data-categories="Y2F0MSUyQ3NoYXJlZA==""#),
+        "{host}"
+    );
+    assert!(
+        host.contains(r#"data-listing-date-sort="1767225600000""#),
+        "{host}"
+    );
+
+    // Pagination nav and script, inside the container (after it opens).
+    let nav = host
+        .find(r#"<nav id="listing-pagination" class="listing-pagination""#)
+        .unwrap_or_else(|| panic!("no pagination nav:\n{host}"));
+    let script = host
+        .find(r#"new List("listing-listing", options)"#)
+        .unwrap_or_else(|| panic!("no List.js init script:\n{host}"));
+    assert!(
+        container < nav && nav < script,
+        "order: container, nav, script"
+    );
+    assert!(host.contains(r#""page":2"#), "{host}");
+    assert_eq!(
+        host.matches("new List(").count(),
+        1,
+        "one script per listing"
+    );
+    assert!(
+        !host.contains("new List(&quot;"),
+        "script must not be HTML-escaped:\n{host}"
+    );
+
+    // The libraries it calls are linked from the page head.
+    let list_js = host
+        .find("site_libs/listing/list.min.js")
+        .expect("list.min.js linked");
+    assert!(list_js < container, "List.js is loaded before the listing");
 }
 
 #[test]
@@ -1008,4 +1264,438 @@ fn listing_css_rules_land_in_rendered_theme_css() {
         css.contains(".listing-category"),
         "rendered theme CSS must contain category-chip rules"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// bd-listing-ellipsis-no-matching-l963osy1: hidden "No matching
+// items" placeholder + derived-description ellipsis.
+//
+// The 62-char fixture sentence below truncates at
+// `max-description-length: 40` to exactly
+// "alpha bravo charlie delta echo foxtrot…" under Q1's
+// `truncateText(s, 40, "space")` (first 40 chars, drop one, cut at
+// the last space, append `…`).
+// ─────────────────────────────────────────────────────────────────
+
+const LONG_SENTENCE: &str = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+const TRUNCATED_SENTENCE: &str = "alpha bravo charlie delta echo foxtrot…";
+
+/// Default-type listing page: emits the hidden no-matching
+/// placeholder (Q1's `_pagination.ejs.md` parity) and the derived
+/// description ends with `…`.
+///
+/// The post has no `description:`, so the description is derived from
+/// its first paragraph and truncated at `max-description-length`
+/// (bd-listing-default-no-derived-desc-m0wrr8ty).
+#[test]
+fn default_listing_emits_no_matching_placeholder_and_derived_ellipsis() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  contents: posts\n  max-description-length: 40\nformat: html\n---\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            &format!("---\ntitle: Alpha\ndate: 2026-01-01\nformat: html\n---\n\n{LONG_SENTENCE}\n"),
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(r#"class="listing-no-matching d-none""#),
+        "expected hidden no-matching placeholder div; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains("No matching items"),
+        "expected default-English no-matching text; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains(TRUNCATED_SENTENCE),
+        "expected derived description truncated with ellipsis; got:\n{}",
+        host
+    );
+}
+
+/// Custom-template listing (the Connect-docs cookbook shape from the
+/// strand's repro): the no-matching placeholder and the derived-
+/// description ellipsis both apply to `type: custom` too. Unlike the
+/// default template, the repro template emits the description
+/// envelope markers unconditionally, so this path is independent of
+/// the `$if(description)$` guard and the precedence bug.
+#[test]
+fn custom_listing_emits_no_matching_placeholder_and_derived_ellipsis() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Custom Listing\nlisting:\n  type: custom\n  template: listing.template\n  contents: posts\n  max-description-length: 40\nformat: html\n---\n",
+        );
+        write(
+            &p.join("listing.template"),
+            "$for(items)$\n[$items.title$]($items.path$)\n\n::: {.listing-description}\n```{=html}\n$items.description-placeholder-begin$\n```\n\n$if(items.description)$\n$items.description$\n$endif$\n\n```{=html}\n$items.description-placeholder-end$\n```\n:::\n\n$endfor$\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            &format!("---\ntitle: Alpha\nformat: html\n---\n\n{LONG_SENTENCE}\n"),
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(r#"class="listing-no-matching d-none""#),
+        "expected hidden no-matching placeholder div on custom listing; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains("No matching items"),
+        "expected no-matching text on custom listing; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains(TRUNCATED_SENTENCE),
+        "expected derived description truncated with ellipsis; got:\n{}",
+        host
+    );
+    // The envelope markers themselves must be gone.
+    assert!(
+        !host.contains("desc-begin(5A0113B34292)") && !host.contains("desc-end(5A0113B34292)"),
+        "description envelope markers must be stripped"
+    );
+}
+
+/// The placeholder text is localized: `lang: de` renders the
+/// `listing-page-no-matches` term from `_language-de.yml`
+/// ("Keine Treffer"), not the English default.
+#[test]
+fn no_matching_placeholder_is_localized() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nlang: de\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  contents: posts\nformat: html\n---\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            "---\ntitle: Alpha\ndate: 2026-01-01\nformat: html\n---\n\nBody.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(r#"class="listing-no-matching d-none""#),
+        "expected hidden no-matching placeholder div; got:\n{}",
+        host
+    );
+    assert!(
+        host.contains("Keine Treffer"),
+        "expected German no-matching text under lang: de; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("No matching items"),
+        "English fallback must not appear when lang: de provides the term"
+    );
+}
+
+/// bd-pcmdb7qg: an explicit `description:` is truncated at the
+/// listing's `max-description-length` (with `…`), Q1 parity. The
+/// post body is heading-only so no derived paragraph exists — the
+/// post-render substitution keeps the template fallback, which is
+/// the binding-truncated explicit description.
+#[test]
+fn explicit_description_truncated_at_max_length() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  contents: posts\n  max-description-length: 40\nformat: html\n---\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            &format!(
+                "---\ntitle: Alpha\ndate: 2026-01-01\ndescription: \"{LONG_SENTENCE}\"\nformat: html\n---\n\n# Heading only\n"
+            ),
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(TRUNCATED_SENTENCE),
+        "expected explicit description truncated with ellipsis; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("golf hotel india juliet"),
+        "explicit description must not appear untruncated"
+    );
+}
+
+/// bd-pcmdb7qg: `max-description-length: 0` disables explicit-
+/// description truncation (Q1 treats 0 as missing).
+#[test]
+fn explicit_description_untruncated_when_max_length_zero() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  contents: posts\n  max-description-length: 0\nformat: html\n---\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            &format!(
+                "---\ntitle: Alpha\ndate: 2026-01-01\ndescription: \"{LONG_SENTENCE}\"\nformat: html\n---\n\n# Heading only\n"
+            ),
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(LONG_SENTENCE),
+        "expected full explicit description with truncation disabled; got:\n{}",
+        host
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// L10 — contract tests for the idioms the migration docs teach
+// (bd-hzsi). These lock behaviour that
+// `docs/guides/projects/listing-templates.qmd` asserts. All three
+// pass against unmodified production code: they exist so the
+// documented idioms cannot silently rot, and so the two *silent*
+// failure modes (raw HTML is neither link-rewritten nor
+// resource-collected) stay pinned as deliberate contract rather
+// than drifting into accidental "fixes".
+// ─────────────────────────────────────────────────────────────────
+
+/// The custom-template spelling the docs use is `$it.<key>$` inside
+/// `$for(items)$` (`$items.<key>$` is an accepted alias, covered by
+/// `custom_listing_emits_no_matching_placeholder_and_derived_ellipsis`).
+/// This pins the documented spelling *and* the documented envelope
+/// shape: the `description-placeholder-begin`/`-end` markers are
+/// emitted **unconditionally**, outside the `$if(it.description)$`
+/// guard, so an item with no front-matter `description:` still gets
+/// a post-render first-paragraph preview. The built-ins gate the
+/// whole envelope on `$if(description)$` and therefore do *not*
+/// get this; a custom template can do better, which is the point
+/// the docs make.
+#[test]
+fn custom_template_it_spelling_derives_description_without_front_matter() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  type: custom\n  template: card.template\n  contents: posts\nformat: html\n---\n",
+        );
+        // Exactly the shape documented in the "Descriptions and the
+        // placeholder envelope" section: markers unconditional, the
+        // explicit-description fallback guarded.
+        write(
+            &p.join("card.template"),
+            "$for(items)$\n[$it.title$]($it.path$)\n\n::: {.listing-description}\n```{=html}\n$it.description-placeholder-begin$\n```\n\n$if(it.description)$\n$it.description$\n$endif$\n\n```{=html}\n$it.description-placeholder-end$\n```\n:::\n\n$endfor$\n",
+        );
+        // No `description:` in front matter — the preview must come
+        // from the rendered page's first paragraph.
+        write(
+            &p.join("posts/a.qmd"),
+            "---\ntitle: Alpha\nformat: html\n---\n\nDerived from the first paragraph.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains("Derived from the first paragraph."),
+        "unconditional envelope must yield a derived description for an item \
+         with no front-matter `description:`; got:\n{}",
+        host
+    );
+    assert!(
+        !host.contains("desc-begin(5A0113B34292)") && !host.contains("desc-end(5A0113B34292)"),
+        "envelope markers must be stripped from the output; got:\n{}",
+        host
+    );
+}
+
+/// The #1 porting trap, pinned in both directions: a markdown link
+/// built from `$it.path$` is rewritten by `LinkRewriteTransform` to
+/// the output URL, while a raw-HTML anchor over the same value is
+/// not — `Inline::RawInline` is a no-op leaf in that transform
+/// (`transforms/link_rewrite.rs`). Quarto 1's EJS received
+/// already-resolved `.html` hrefs and raw HTML was the norm there,
+/// so a carried-over template ships a dead `.qmd` href with no
+/// diagnostic.
+#[test]
+fn custom_template_markdown_anchor_is_rewritten_raw_anchor_is_not() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Blog\nlisting:\n  type: custom\n  template: card.template\n  contents: posts\nformat: html\n---\n",
+        );
+        write(
+            &p.join("card.template"),
+            "$for(items)$\nmd: [$it.title$]($it.path$)\n\nraw: `<a href=\"$it.path$\">$it.title$</a>`{=html}\n\n$endfor$\n",
+        );
+        write(
+            &p.join("posts/a.qmd"),
+            "---\ntitle: Alpha\nformat: html\n---\n\nBody.\n",
+        );
+    });
+
+    let host = html_for(&outputs, "index");
+    assert!(
+        host.contains(r#"href="posts/a.html""#),
+        "markdown link must be rewritten to the output URL; got:\n{}",
+        host
+    );
+    // Deliberate, documented behaviour — not a bug to be "fixed"
+    // without also updating listing-templates.qmd and paths.qmd.
+    assert!(
+        host.contains(r#"href="posts/a.qmd""#),
+        "raw-HTML anchor must pass through unrewritten (RawInline is a no-op \
+         leaf in LinkRewriteTransform); got:\n{}",
+        host
+    );
+}
+
+/// The same split costs *two* things for images rather than one: a
+/// markdown image is rewritten **and** collected for copying, while
+/// a raw `<img>` is neither — so the asset never reaches the output
+/// tree at all and the `src` 404s.
+///
+/// The two image paths come from inline-record fields on purpose.
+/// When the image is an item *document's* own front-matter `image:`,
+/// that page's render copies it regardless (see
+/// `front_matter_image_is_rebased_and_copied`), which **masks** the
+/// bug — the raw-`<img>` template appears to work. Record and custom
+/// fields have no such second copier, which is where it bites.
+#[test]
+fn custom_template_markdown_image_is_copied_raw_image_is_not() {
+    let (dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            concat!(
+                "---\ntitle: Blog\nlisting:\n  type: custom\n  template: card.template\n",
+                "  contents:\n",
+                "    - title: MdItem\n      href: https://example.com/md\n      pic-md: images/md.png\n",
+                "    - title: RawItem\n      href: https://example.com/raw\n      pic-raw: images/raw.png\n",
+                "format: html\n---\n"
+            ),
+        );
+        write(
+            &p.join("card.template"),
+            "$for(items)$\n$if(it.pic-md)$md: ![]($it.pic-md$)$endif$\n$if(it.pic-raw)$raw: `<img src=\"$it.pic-raw$\">`{=html}$endif$\n\n$endfor$\n",
+        );
+        write(&p.join("images/md.png"), "not-really-a-png");
+        write(&p.join("images/raw.png"), "not-really-a-png");
+    });
+
+    let host = html_for(&outputs, "index");
+    // Both render a src; the difference is invisible in the HTML.
+    assert!(
+        host.contains(r#"src="images/md.png""#) && host.contains(r#"src="images/raw.png""#),
+        "both forms must emit a src (the failure is not visible in the markup); got:\n{}",
+        host
+    );
+    assert!(
+        dir.join("_site/images/md.png").exists(),
+        "markdown image must be collected and copied into the output tree"
+    );
+    // Deliberate, documented behaviour — see the doc-comment above.
+    assert!(
+        !dir.join("_site/images/raw.png").exists(),
+        "raw-HTML <img> must not be collected (RawInline is a no-op leaf in \
+         ResourceCollector), so the asset never reaches the output tree"
+    );
+}
+
+/// Element depth (count of unclosed `<div>`s) at each opening
+/// `<div class="<class>…">` in `html`, in document order.
+fn div_depths_of(html: &str, class: &str) -> Vec<usize> {
+    let needle = format!(r#"<div class="{class}"#);
+    html.match_indices(&needle)
+        .map(|(at, _)| {
+            let before = &html[..at];
+            before.matches("<div").count() - before.matches("</div").count()
+        })
+        .collect()
+}
+
+/// Write a website whose `index.qmd` lists `n` trivial docs with a
+/// listing of type `kind`.
+fn many_items_fixture(p: &std::path::Path, kind: &str, n: usize) {
+    write(
+        &p.join("_quarto.yml"),
+        "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+    );
+    write(
+        &p.join("index.qmd"),
+        &format!("---\ntitle: Home\nlisting:\n  type: {kind}\n  contents: \"p/*.qmd\"\n---\n"),
+    );
+    for i in 1..=n {
+        write(
+            &p.join(format!("p/d{i:03}.qmd")),
+            &format!("---\ntitle: \"Doc {i:03}\"\n---\n\nHello world\n"),
+        );
+    }
+}
+
+/// bd-mlmkev01: the item partials end in `:::`, and doctemplate
+/// strips a partial's final newline, so `$items:item-default()$`
+/// glued each item's closing fence onto the next item's opening
+/// fence and every item nested one level deeper than the last.
+/// Items must be siblings.
+#[test]
+fn default_and_grid_items_are_siblings() {
+    for (kind, item_class) in [("default", "quarto-post"), ("grid", "g-col-1")] {
+        let (_dir, outputs) = render_project(|p| many_items_fixture(p, kind, 3));
+        let depths = div_depths_of(html_for(&outputs, "index"), item_class);
+        assert_eq!(depths.len(), 3, "{kind}: expected 3 items, got {depths:?}");
+        assert!(
+            depths.iter().all(|d| *d == depths[0]),
+            "{kind}: listing items must be siblings at one depth, got {depths:?}"
+        );
+    }
+}
+
+/// bd-mlmkev01: with per-item nesting, ~90 items exceeded the
+/// parser's 99-level limit and the whole listing was dropped.
+#[test]
+fn default_and_grid_listings_with_120_items_render_every_item() {
+    for (kind, item_class) in [("default", "quarto-post"), ("grid", "g-col-1")] {
+        let (_dir, outputs) = render_project(|p| many_items_fixture(p, kind, 120));
+        let depths = div_depths_of(html_for(&outputs, "index"), item_class);
+        assert_eq!(
+            depths.len(),
+            120,
+            "{kind}: expected all 120 items in the listing"
+        );
+    }
 }

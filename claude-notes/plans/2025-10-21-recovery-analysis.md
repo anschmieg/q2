@@ -1,4 +1,8 @@
-# Recovery Analysis - What Went Wrong
+---
+title: 'Recovery Analysis - What Went Wrong'
+date: 2025-10-21
+description: 'Finds that a partially finished commit left the `quarto-markdown-pandoc` crate uncompilable, because `main.rs` calls a new `qmd::read` API that the implementation never adopted, and compares options for separating the two work streams.'
+---
 
 ## Investigation Results
 
@@ -46,7 +50,7 @@ The commit 274a1c5 contains a **partial implementation** of the DiagnosticMessag
 ## The Two Distinct Work Streams
 
 ### Stream 1: k-103 (In-Memory Content for Ariadne)
-**Goal:** Support <anonymous> and <unknown> files in ariadne diagnostics
+**Goal:** Support \<anonymous> and \<unknown> files in ariadne diagnostics
 
 **Changes (appears complete):**
 - `quarto-error-reporting/src/builder.rs` - New builder API

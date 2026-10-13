@@ -8,7 +8,7 @@
 use clap::Parser;
 use quarto_error_reporting::DiagnosticMessageBuilder;
 use quarto_util::to_forward_slashes;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 
 mod attribution;
@@ -100,19 +100,6 @@ struct Args {
     /// Export a built-in template as JSON and exit
     #[arg(long = "export-template", value_name = "NAME")]
     export_template: Option<String>,
-}
-
-fn print_whole_tree<T: Write>(cursor: &mut tree_sitter_qmd::MarkdownCursor, buf: &mut T) {
-    let mut depth = 0;
-    traversals::topdown_traverse_concrete_tree(cursor, &mut |node, phase| {
-        if phase == traversals::TraversePhase::Enter {
-            writeln!(buf, "{}{}: {:?}", "  ".repeat(depth), node.kind(), node).unwrap();
-            depth += 1;
-        } else {
-            depth -= 1;
-        }
-        true // continue traversing
-    });
 }
 
 /// Check if section-divs is enabled in the document metadata.
@@ -244,6 +231,9 @@ fn main() {
 
     let (pandoc, context) = match args.from.as_str() {
         "markdown" | "qmd" => {
+            if args.verbose {
+                readers::qmd::dump_concrete_tree(input.as_bytes(), &mut output_stream);
+            }
             let result = readers::qmd::read(
                 input.as_bytes(),
                 args.loose,
@@ -356,6 +346,17 @@ fn main() {
             .enable_all()
             .build()
             .expect("failed to create tokio runtime");
+        // bd-oqoozmtr: citeproc's `bibliography`/`csl` resolve against the
+        // input file's directory (the declaration site); stdin input has no
+        // directory, so it anchors at the process CWD as before.
+        let filter_base_dir = if input_source == "-" {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::Path::new(input_source)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or_else(|| std::path::PathBuf::from("."), |p| p.to_path_buf())
+        };
         match rt.block_on(unified_filter::apply_filters(
             pandoc,
             context,
@@ -363,6 +364,7 @@ fn main() {
             &args.to,
             runtime,
             None,
+            &filter_base_dir,
         )) {
             Ok(output) => {
                 // Output any diagnostics from filters

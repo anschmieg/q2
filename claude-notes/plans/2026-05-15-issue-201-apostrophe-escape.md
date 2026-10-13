@@ -1,11 +1,18 @@
-# Plan: writer emits `\'` for apostrophes the reader would re-reject (issue #201, bd-8lcm)
+---
+title: 'Plan: writer emits `\''` for apostrophes the reader would re-reject (issue #201, bd-8lcm)'
+date: 2026-05-15
+description: 'Fixes the qmd writer so that an apostrophe the reader would reject as a bare quote is escaped as `\''`, letting round-trips through pampa succeed.'
+braid:
+  strand: bd-8lcm
+  priority: P1
+---
 
 ## Context
 
 - **GitHub**: https://github.com/quarto-dev/q2/issues/201
 - **Beads**: bd-8lcm
 - **Triage**: `claude-notes/issue-reports/201/triage.md`
-- **Worktree**: `.worktrees/issue-201` (branch `issue-201`, based on `main` @ `26b8943c`)
+- **Worktree**: `.worktrees/issue-201` (branch `issue-201`, based on `main` \@ `26b8943c`)
 
 The qmd writer at `crates/pampa/src/writers/qmd.rs` emits a bare `'` for an apostrophe whose source form required a `\'` escape. Round-trip `qmd → AST → qmd → AST` fails on `reveal.js\' jump-to-slide.` and similar real-world inputs.
 

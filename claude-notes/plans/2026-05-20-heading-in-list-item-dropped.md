@@ -1,4 +1,8 @@
-# Heading inside list item is dropped
+---
+title: 'Heading inside list item is dropped'
+date: 2026-05-20
+description: 'Fixes the tree-sitter to Pandoc converter so a heading inside a bullet or ordered list item is kept rather than silently discarded, matching Pandoc''s output.'
+---
 
 Tracking issue: **bd-zpl4u**
 
@@ -128,7 +132,7 @@ Write the failing test **first**, then implement.
   ```
 
   Now returns a `BulletList` whose item contains a `Header` block
-  (level 1, id "section-1", inlines [Str "Section", Space, Str "1"]) —
+  (level 1, id "section-1", inlines `[Str "Section", Space, Str "1"]`) —
   structurally identical to Pandoc's output. Verified 2026-05-20.
 
 ## Out of scope

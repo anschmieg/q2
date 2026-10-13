@@ -42,13 +42,14 @@
 //! ## WASM exclusion
 //!
 //! Gated `#[cfg(not(target_arch = "wasm32"))]` for the same reasons as
-//! [`BootstrapJsStage`]. The hub-client preview reinitializes its
-//! iframe on every render tick, so no in-iframe JS state survives;
-//! shipping clipboard.js would bloat the WASM bundle by 9KB for no
-//! functional benefit. The copy *button* still appears in the iframe
-//! (it's an AST-level construct emitted by
-//! [`CodeBlockRenderTransform`](crate::transforms::CodeBlockRenderTransform))
-//! — it just isn't wired to a click handler.
+//! [`BootstrapJsStage`] (see its module docs — the original
+//! "iframe reinitializes every tick" rationale is obsolete; the real
+//! reasons are that the preview pipeline excludes `ApplyTemplateStage`,
+//! so `js:*` artifacts never become `<script>` tags there, and bundle
+//! size). The copy *button* in the preview is wired by the React-level
+//! delegated handler in
+//! `ts-packages/preview-renderer/src/utils/codeCopy.ts` (bd-wa2pgri8),
+//! not by clipboard.js.
 
 use std::path::PathBuf;
 
@@ -224,6 +225,8 @@ mod tests {
             is_single_file,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::html();
@@ -241,6 +244,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -436,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn clipboard_js_stage_skips_both_when_code_copy_false() {
-        let meta = meta_with_entry("code-copy", ConfigValueKind::Scalar(Yaml::Boolean(false)));
+        let meta = meta_with_entry("code-copy", ConfigValueKind::scalar(Yaml::Boolean(false)));
         let mut ctx = make_stage_context(Arc::new(MockRuntime), true);
         ClipboardJsStage::new()
             .run(make_doc_ast(meta), &mut ctx)
@@ -457,7 +461,7 @@ mod tests {
         // `minimal: true` opts the document into the minimal-HTML
         // template, which has no script-injection slot. Matches the
         // gate used by BootstrapJsStage.
-        let meta = meta_with_entry("minimal", ConfigValueKind::Scalar(Yaml::Boolean(true)));
+        let meta = meta_with_entry("minimal", ConfigValueKind::scalar(Yaml::Boolean(true)));
         let mut ctx = make_stage_context(Arc::new(MockRuntime), true);
         ClipboardJsStage::new()
             .run(make_doc_ast(meta), &mut ctx)

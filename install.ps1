@@ -3,8 +3,9 @@
 #
 #   irm https://raw.githubusercontent.com/quarto-dev/q2/main/install.ps1 | iex
 #
-# Downloads the published release zip for x86_64 Windows, verifies its
-# SHA-256 against the published checksum, and installs q2.exe. Mirrors
+# Downloads the published release zip for this machine's architecture
+# (windows_amd64 or windows_arm64), verifies its SHA-256 against the
+# published checksum, and installs q2.exe. Mirrors
 # install.sh's contract (same artifact naming, same checksum file
 # format). Signature verification is checksum-only on Windows for now —
 # minisign has no ubiquitous Windows install path; noted in the plan
@@ -14,18 +15,35 @@
 #
 # Flags (for testing / non-default installs):
 #   -Version v0.1.0      install a specific tag instead of the latest
+#   -Nightly             install the latest nightly build instead: the
+#                        rolling prerelease built from main whenever it
+#                        changes (version like 0.33.0-nightly.20260919,
+#                        replaced daily). Same archive contract; resolved
+#                        by tag since releases/latest skips prereleases.
+#                        Pass it through the one-liner as
+#                          & ([scriptblock]::Create((irm <url>))) -Nightly
 #   -Dest <dir>          install directory (default: %USERPROFILE%\.local\bin)
+#   -Platform <p>        windows_amd64 or windows_arm64 instead of the
+#                        detected one (e.g. x64 on ARM64, under emulation)
 #   -ArtifactUrl <u>     override the download (a URL or a local path — the
 #                        local path form is what the CI smoke test uses)
 #   -Checksum <hex>      expected sha256; skips fetching the .sha256 file
 #   -NoVerify            skip checksum verification (discouraged)
+#
+# Environment:
+#   GH_TOKEN / GITHUB_TOKEN  optional GitHub token for the release lookup
+#                        (api.github.com; anonymous reads are limited to
+#                        60/hour per IP address, a token raises that)
 [CmdletBinding()]
 param(
     [string]$Version,
     [string]$Dest,
     [string]$ArtifactUrl,
     [string]$Checksum,
-    [switch]$NoVerify
+    [switch]$NoVerify,
+    [switch]$Nightly,
+    [ValidateSet('windows_amd64', 'windows_arm64')]
+    [string]$Platform
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,17 +51,45 @@ Set-StrictMode -Version Latest
 
 $Owner = 'quarto-dev'
 $Repo = 'q2'
-$Platform = 'windows_amd64'
 $UA = @{ 'User-Agent' = 'q2-install' }
 
 function Die([string]$msg) { throw "q2 install: $msg" }
 function Step([string]$msg) { Write-Host "-> $msg" }
 
-# q2 ships an x86_64 Windows binary; ARM64 Windows runs it under
-# emulation, so we don't hard-block on architecture.
 if (-not [System.Environment]::Is64BitOperatingSystem) {
     Die 'only 64-bit Windows is supported'
 }
+
+# The OS architecture, not this process's: an x64 PowerShell running
+# under emulation on ARM64 sees PROCESSOR_ARCHITECTURE=AMD64. Any one
+# source saying ARM64 settles it; each is guarded, so on older .NET
+# Frameworks without RuntimeInformation (Windows releases that predate
+# Windows on ARM64) detection quietly answers "not ARM64".
+function Test-Arm64Os {
+    # Machine-wide; Windows seeds each process's PROCESSOR_ARCHITECTURE
+    # from this and only overrides the per-process copy under emulation.
+    try {
+        $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+        if ((Get-ItemProperty -LiteralPath $key -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE -eq 'ARM64') { return $true }
+    }
+    catch { }
+    try {
+        if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -eq 'Arm64') { return $true }
+    }
+    catch { }
+    return ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') -or ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64')
+}
+
+# Platforms to look for, preferred first. ARM64 prefers the native build
+# and falls back to windows_amd64 (which it runs under emulation) for
+# releases that predate the ARM64 asset (bd-windows-arm64-nightly-xms5p652).
+# An explicit -Platform is taken as-is.
+# (@() around the whole `if`: a one-element result would otherwise come
+# back as a bare string, and $Candidates[0] would be its first letter.)
+$Candidates = @(if ($Platform) { $Platform }
+                elseif (Test-Arm64Os) { 'windows_arm64', 'windows_amd64' }
+                else { 'windows_amd64' })
+$Platform = $Candidates[0]
 
 if (-not $Dest) { $Dest = Join-Path $env:USERPROFILE '.local\bin' }
 
@@ -58,13 +104,126 @@ function Get-Artifact([string]$src, [string]$out) {
     }
 }
 
-if (-not $Version -and -not $ArtifactUrl) {
+# GitHub API reads (bd-n9yh30c8). Anonymous calls share a budget of 60
+# per hour per IP address, which shared CI runners and NATed networks
+# exhaust; so a token from GH_TOKEN or GITHUB_TOKEN is sent when set. A
+# stale token gets a 401 where an anonymous call would work, so a 401
+# drops the token and retries. Other failures retry with a doubling
+# backoff from 2s (2+4+8+16 = 30s in all): transient API errors, and the
+# seconds after the Nightly workflow replaces the release, when the tag
+# can briefly 404 or list no assets. A rate limit (403/429) is not
+# retried: it lasts up to an hour.
+# A hashtable, not a plain variable, so Invoke-GitHubApi can drop the
+# token: under the README one-liner (& ([scriptblock]::Create(...))) this
+# is not a script scope, so `$script:` would not reach it.
+$Api = @{ Token = $(if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }) }
+$ApiAttempts = 5
+
+# HTTP status of a failed web request (0: no HTTP response). Works for
+# both Windows PowerShell 5.1 (WebException) and PowerShell 7
+# (HttpResponseException).
+function Get-HttpStatus($err) {
+    $resp = $err.Exception.PSObject.Properties['Response']
+    if ($resp -and $resp.Value) { return [int]$resp.Value.StatusCode }
+    return 0
+}
+
+function Get-ApiFailureReason([int]$status) {
+    switch ($status) {
+        0 { return 'no response from the GitHub API' }
+        { $_ -in 403, 429 } { return "HTTP ${status}: GitHub API rate limit, most likely; set GH_TOKEN to a GitHub token to raise it" }
+        404 { return 'HTTP 404: no such release' }
+        default { return "HTTP $status from the GitHub API" }
+    }
+}
+
+# GET a GitHub API URL, retrying as above. $Ready says whether a
+# successful response is usable yet (a nightly must list this
+# platform's asset); one that never becomes ready is returned as-is for
+# the caller to diagnose. $What names the lookup in the final error.
+function Invoke-GitHubApi([string]$Uri, [string]$What, [scriptblock]$Ready = { $true }) {
+    $delay = 2
+    for ($attempt = 1; ; $attempt++) {
+        $headers = @{ 'User-Agent' = 'q2-install'; 'Accept' = 'application/vnd.github+json' }
+        if ($Api.Token) { $headers['Authorization'] = "Bearer $($Api.Token)" }
+        try {
+            $rel = Invoke-RestMethod -Uri $Uri -Headers $headers
+            if ((& $Ready $rel) -or $attempt -ge $ApiAttempts) { return $rel }
+            $why = 'the release does not list the expected asset yet'
+        }
+        catch {
+            $status = Get-HttpStatus $_
+            if ($status -eq 401 -and $Api.Token) {
+                Write-Warning 'q2 install: GitHub rejected the token in GH_TOKEN/GITHUB_TOKEN (HTTP 401); retrying without it'
+                $Api.Token = $null
+                $attempt--
+                continue
+            }
+            $why = Get-ApiFailureReason $status
+            if ($status -in 403, 429 -or $attempt -ge $ApiAttempts) { Die "could not resolve $What ($why)" }
+        }
+        Step "$why; retrying in ${delay}s ($($attempt + 1)/$ApiAttempts)..."
+        Start-Sleep -Seconds $delay
+        $delay *= 2
+    }
+}
+
+# Does release $rel list a zip for platform $p?
+function Test-PlatformAsset($rel, [string]$p) {
+    return @($rel.assets | Where-Object { $_.name -match "^q2-.+-$p\.zip$" }).Count -gt 0
+}
+
+# The first of $Candidates that release $rel ships, announcing a fallback.
+function Select-Platform($rel, [string]$what) {
+    foreach ($p in $Candidates) {
+        if (Test-PlatformAsset $rel $p) {
+            if ($p -ne $Candidates[0]) {
+                Step "$what has no $($Candidates[0]) build; installing $p (runs under x64 emulation)"
+            }
+            return $p
+        }
+    }
+    Die "$what has no $($Candidates -join ' or ') archive (expected q2-<version>-$($Candidates[0]).zip)"
+}
+
+# Channel selection is one or the other (mirrors install.sh): nightlies
+# are replaced daily, so a nightly version can never be pinned by tag.
+if ($Nightly -and $Version) { Die '-Nightly and -Version are mutually exclusive: -Nightly for the latest nightly, -Version vX.Y.Z for a release' }
+if ($Version -match '-nightly\.') { Die "nightly builds cannot be pinned by version (they are replaced daily); use -Nightly instead of -Version $Version" }
+
+if ($Nightly -and -not $ArtifactUrl) {
+    # The rolling `nightly` prerelease: invisible to releases/latest, and
+    # its tag carries no version — the version is in the asset name
+    # (q2-<version>-windows_amd64.zip), so pick the asset by name. Wait
+    # for the PREFERRED platform's asset: right after the release is
+    # replaced its listing can be partial, and settling for the fallback
+    # then would install x64 on ARM64 for no reason.
+    Step 'resolving nightly release...'
+    $rel = Invoke-GitHubApi "https://api.github.com/repos/$Owner/$Repo/releases/tags/nightly" `
+        "the nightly release (is one published at https://github.com/$Owner/$Repo/releases/tag/nightly?)" `
+        { param($r) Test-PlatformAsset $r $Candidates[0] }
+    $Platform = Select-Platform $rel 'the nightly release'
+    $asset = @($rel.assets | Where-Object { $_.name -match "^q2-.+-$Platform\.zip$" })
+    $ArtifactUrl = $asset[0].browser_download_url
+    $Version = $asset[0].name -replace '^q2-', '' -replace "-$Platform\.zip$", ''
+    Step "nightly release: $Version"
+}
+elseif (-not $Version -and -not $ArtifactUrl) {
     Step 'resolving latest release...'
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/latest" -Headers $UA
+    $rel = Invoke-GitHubApi "https://api.github.com/repos/$Owner/$Repo/releases/latest" 'the latest release'
     $Version = $rel.tag_name
     if (-not $Version) { Die 'could not determine the latest release; pass -Version vX.Y.Z' }
+    $Platform = Select-Platform $rel "release $Version"
+}
+elseif ($Version -and -not $ArtifactUrl -and $Candidates.Count -gt 1) {
+    # A pinned tag may predate the ARM64 build; look before downloading.
+    $tag = if ($Version -match '^v') { $Version } else { "v$Version" }
+    $rel = Invoke-GitHubApi "https://api.github.com/repos/$Owner/$Repo/releases/tags/$tag" "release $tag"
+    $Platform = Select-Platform $rel "release $tag"
+    $Version = $rel.tag_name
 }
 if ($Version) { Step "release: $Version" }
+Step "platform: $Platform"
 
 $bare = if ($Version) { $Version -replace '^v', '' } else { '' }
 $archive = "q2-$bare-$Platform.zip"

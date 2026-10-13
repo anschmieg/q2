@@ -8,79 +8,1181 @@
  * This component is only imported in development builds.
  */
 
-import React from 'react';
-import ProjectSetSetup from './ProjectSetSetup';
-import type { ProjectEntry } from '@quarto/preview-renderer/types/project';
+import React, { useEffect, useMemo, useState } from 'react';
+import ProjectSetError from './ProjectSetError';
+import ProjectsHome from './ProjectsHome';
+import NewFileDialog from './NewFileDialog';
+import ShareDialog from './ShareDialog';
+import NewAssetDialog from './NewAssetDialog';
+import FileSidebar from './FileSidebar';
+import SearchFilesDialog from './SearchFilesDialog';
+import type { SearchFiles } from '../services/search';
+import OutlinePanel from './OutlinePanel';
+import SidebarTabs from './SidebarTabs';
+import { PreviewIcon } from './icons';
+import StatusTab from './tabs/StatusTab';
+import ProjectTopBar from './ProjectTopBar';
+import DocumentTopBar from './DocumentTopBar';
+import ImportDialog from './ImportDialog';
+import { createStubImportService, setImportServiceForTests, type ImportFormats, type ImportService } from '../pandoc/importService';
+import { DownloadOnlyView, NeitherView } from './render/DownloadOnlyViews';
+import type { DownloadFormat, DownloadStatus } from '../pandoc/downloadController';
+import Toast from './Toast';
+import UpdateAvailableToast from './UpdateAvailableToast';
+import EphemeralSessionBanner from './EphemeralSessionBanner';
+import DevTokensPage from './DevTokensPage';
+import DevGalleryPage from './DevGalleryPage';
+import InviteLanding from './InviteLanding';
+import EditorWelcomeBanner from './EditorWelcomeBanner';
+import { LoginScreen } from './auth/LoginScreen';
+import { AuthProviderRoot, type AuthProvider } from '../auth/AuthProvider';
+import type { CollectionInvitePreview, ProjectInvitePreview } from '../utils/invitePreview';
+import AboutTab from './tabs/AboutTab';
+import ReplayDrawer from './ReplayDrawer';
+import { PreviewStatusBar } from './render/PreviewStatusBar';
+import { PreviewErrorOverlay } from '@quarto/preview-renderer/overlays/PreviewErrorOverlay';
+import type { Diagnostic, Pass1Failure } from '@quarto/preview-renderer/types/diagnostic';
+import SidebarDrawer from './SidebarDrawer';
+import { useSidebarDrawer } from '../hooks/useSidebarDrawer';
+import { ViewModeProvider } from './ViewModeContext';
+import type { FileEntry } from '@quarto/preview-renderer/types/project';
+import type { Symbol } from '@quarto/preview-renderer/types/intelligence';
+import type { ProjectSetEntry } from '@quarto/quarto-automerge-schema';
+import type { CollectionSnapshot } from '../services/projectSetService';
+import type { PwaPromptStore } from '../pwaPrompt';
+import type { ReplayState, ReplayControls } from '../hooks/useReplayMode';
 
-const FAKE_LEGACY_PROJECTS: ProjectEntry[] = [
+const noop = async () => {};
+
+/* ---- canned data for baseline routes ---- */
+
+const FAKE_SET_ENTRIES: ProjectSetEntry[] = [
   {
-    id: 'fake-1',
-    indexDocId: 'automerge:fake1',
+    indexDocId: 'automerge:proj-alpha',
     syncServer: 'wss://sync.automerge.org',
-    description: 'My Research Paper',
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-    lastAccessed: new Date(Date.now() - 3600000).toISOString(),
+    description: 'Research Paper',
+    addedAt: '2026-08-01T10:00:00.000Z',
+    lastAccessed: '2026-08-24T15:30:00.000Z',
+    summary: {
+      fileCount: 4,
+      topFiles: ['index.qmd', 'analysis.qmd', 'references.bib'],
+      contributors: [{ name: 'Ada', color: '#447099' }],
+      asOf: '2026-08-24T15:30:00.000Z',
+    },
   },
   {
-    id: 'fake-2',
-    indexDocId: 'automerge:fake2',
+    indexDocId: 'automerge:proj-beta',
     syncServer: 'wss://sync.automerge.org',
     description: 'Course Notes',
-    createdAt: new Date(Date.now() - 172800000).toISOString(),
-    lastAccessed: new Date(Date.now() - 7200000).toISOString(),
+    addedAt: '2026-08-10T09:00:00.000Z',
+    lastAccessed: '2026-08-20T11:00:00.000Z',
   },
   {
-    id: 'fake-3',
-    indexDocId: 'automerge:fake3',
+    indexDocId: 'automerge:proj-gamma',
     syncServer: 'wss://sync.automerge.org',
-    description: 'Blog',
-    createdAt: new Date().toISOString(),
-    lastAccessed: new Date().toISOString(),
+    description: 'Blog Redesign',
+    addedAt: '2026-08-15T14:00:00.000Z',
+    lastAccessed: '2026-08-18T08:00:00.000Z',
   },
 ];
 
-const noop = async () => {};
+const FAKE_COLLECTIONS: CollectionSnapshot[] = [
+  {
+    docId: 'automerge:root-set',
+    syncServer: 'wss://sync.automerge.org',
+    name: undefined,
+    entries: FAKE_SET_ENTRIES,
+    isRoot: true,
+  },
+];
+
+const FAKE_FILES: FileEntry[] = [
+  { path: 'index.qmd', docId: 'automerge:file-1' },
+  { path: 'analysis.qmd', docId: 'automerge:file-2' },
+  { path: 'data/survey.csv', docId: 'automerge:file-3' },
+  { path: 'figures/plot.png', docId: 'automerge:file-4' },
+  { path: '_quarto.yml', docId: 'automerge:file-5' },
+  { path: 'references.bib', docId: 'automerge:file-6' },
+];
+
+const fakeRange = (line: number) => ({
+  start: { line, character: 0 },
+  end: { line, character: 10 },
+});
+
+const FAKE_SYMBOLS: Symbol[] = [
+  {
+    name: 'Introduction',
+    kind: 'string',
+    range: fakeRange(1),
+    selectionRange: fakeRange(1),
+    children: [
+      {
+        name: 'Background',
+        kind: 'string',
+        range: fakeRange(5),
+        selectionRange: fakeRange(5),
+        children: [],
+      },
+    ],
+  },
+  {
+    name: 'setup',
+    detail: '5 lines',
+    kind: 'function',
+    range: fakeRange(12),
+    selectionRange: fakeRange(12),
+    children: [],
+  },
+  {
+    name: 'Results',
+    kind: 'string',
+    range: fakeRange(20),
+    selectionRange: fakeRange(20),
+    children: [
+      {
+        name: 'plot-temperature',
+        detail: '12 lines',
+        kind: 'module',
+        range: fakeRange(24),
+        selectionRange: fakeRange(24),
+        children: [],
+      },
+    ],
+  },
+];
+
+/** Always-pending prompt store so the update toast renders in the harness. */
+const pendingPrompt: PwaPromptStore = {
+  show() {},
+  subscribe: () => () => {},
+  isPending: () => true,
+};
+
+/**
+ * Stateful sidebar sections fixture, shared by the sidebar and
+ * editor-shell routes. Interaction specs need observable behavior, so
+ * this tracks the selected file (aria-selected / active-row state) and
+ * records the last action in an offscreen testid element for assertions.
+ */
+/** Search fixture for the sidebar route: substring match over the files. */
+function fakeSearchFor(files: FileEntry[]): SearchFiles {
+  return async (query) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return files
+      .filter((f) => f.path.toLowerCase().includes(q))
+      .map((f) => ({ path: f.path, score: 1, terms: [q] }));
+  };
+}
+
+function StatefulSidebarSections({ files = FAKE_FILES }: { files?: FileEntry[] }) {
+  const [currentFile, setCurrentFile] = useState<FileEntry | null>(files[0] ?? null);
+  const [lastAction, setLastAction] = useState('none');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchFiles = useMemo(() => fakeSearchFor(files), [files]);
+  return (
+    <>
+      <SidebarTabs>
+        {(sectionId) =>
+          sectionId === 'files' ? (
+            <FileSidebar
+              files={files}
+              currentFile={currentFile}
+              onSelectFile={(f) => {
+                setCurrentFile(f);
+                setLastAction(`select:${f.path}`);
+              }}
+              onNewFile={() => setLastAction('new-file')}
+              onUploadFiles={() => setLastAction('upload')}
+              onDeleteFile={(f) => setLastAction(`delete:${f.path}`)}
+              onRenameFile={(f, p) => setLastAction(`rename:${f.path}->${p}`)}
+              onOpenInNewTab={(f) => setLastAction(`new-tab:${f.path}`)}
+              onCopyLink={(f) => setLastAction(`copy:${f.path}`)}
+              onOpenSearch={() => setSearchOpen(true)}
+            />
+          ) : sectionId === 'outline' ? (
+            <OutlinePanel
+              symbols={FAKE_SYMBOLS}
+              onSymbolClick={(s) => setLastAction(`symbol:${s.name}`)}
+            />
+          ) : (
+            <div style={{ padding: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
+              {sectionId} section
+            </div>
+          )
+        }
+      </SidebarTabs>
+      <SearchFilesDialog
+        isOpen={searchOpen}
+        files={files}
+        searchFiles={searchFiles}
+        onClose={() => setSearchOpen(false)}
+        onSelectFile={(f) => {
+          setCurrentFile(f);
+          setLastAction(`select:${f.path}`);
+        }}
+      />
+      {/* Offscreen action recorder for Playwright assertions. */}
+      <div
+        data-testid="sidebar-last-action"
+        style={{ position: 'fixed', left: -10000, top: 0 }}
+      >
+        {lastAction}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Stateful sidebar fixture at a fixed harness width, mirroring how the
+ * sidebar sits in the editor shell.
+ */
+function SidebarHarness({ files = FAKE_FILES }: { files?: FileEntry[] }) {
+  return (
+    <EditorChrome>
+      <div style={{ width: 280, height: '100%', borderRight: '1px solid var(--sidebar-border)' }}>
+        <StatefulSidebarSections files={files} />
+      </div>
+    </EditorChrome>
+  );
+}
+
+/**
+ * Editor status surfaces (bd-uue5voml): the diagnostics banner, the
+ * preview status bar in its error state, the preview error overlay
+ * (expanded and collapsed), and the replay-mode banner — every surface
+ * whose status text consumes the --editor-*-text tokens. The banner
+ * markup mirrors Editor.tsx (unlocatedErrors); the overlay and status
+ * bar are the real components with canned error state. Exists so the
+ * axe baseline scans these surfaces — the real-app e2e cannot reach
+ * them without a failing render.
+ */
+const HARNESS_BANNER_DIAGNOSTICS: Pick<Diagnostic, 'kind' | 'code' | 'title' | 'problem'>[] = [
+  { kind: 'error', code: 'Q-1-1', title: 'Render failed', problem: 'something broke' },
+  { kind: 'warning', title: 'Unresolved cross-reference', problem: '@fig-missing not found' },
+  { kind: 'info', title: 'Using default format', problem: 'html' },
+  { kind: 'note', title: 'Execution skipped', problem: 'no executable cells' },
+];
+
+const HARNESS_OVERLAY_DIAGNOSTICS: Diagnostic[] = [
+  {
+    kind: 'error',
+    title: 'Unknown cell option',
+    problem: 'cell uses an option that does not exist',
+    start_line: 12,
+    hints: [],
+    details: [],
+  },
+];
+
+const HARNESS_PASS1_FAILURES: Pass1Failure[] = [
+  {
+    source_file: 'notes.qmd',
+    error: 'parse error',
+    diagnostics: [
+      {
+        kind: 'error',
+        title: 'Malformed YAML metadata',
+        problem: 'unexpected end of stream',
+        start_line: 3,
+        hints: [],
+        details: [],
+      },
+    ],
+  },
+];
+
+function EditorStatusStatesHarness() {
+  return (
+    <EditorChrome>
+      {/* Mirrors the diagnostics-banner markup in Editor.tsx. */}
+      <div className="diagnostics-banner">
+        {HARNESS_BANNER_DIAGNOSTICS.map((diag, i) => (
+          <div key={i} className={`diagnostic-item diagnostic-${diag.kind}`}>
+            {diag.code && <span className="diagnostic-code">[{diag.code}]</span>}
+            <span className="diagnostic-title">{diag.title}</span>
+            {diag.problem && <span className="diagnostic-problem">: {diag.problem}</span>}
+          </div>
+        ))}
+      </div>
+      <PreviewStatusBar
+        path="index.qmd"
+        executorsOnline={true}
+        hasExecutableCells={true}
+        capture={{
+          captureDocId: 'automerge:cap-1',
+          state: 'error',
+          lastError: 'Execution failed: something broke',
+        }}
+        onRun={() => {}}
+        onClear={() => {}}
+      />
+      {/* The overlays are position:absolute; each gets a relative box. */}
+      <div style={{ position: 'relative', height: 300 }}>
+        <PreviewErrorOverlay
+          error={{
+            message: 'Render failed with 1 diagnostic',
+            diagnostics: HARNESS_OVERLAY_DIAGNOSTICS,
+            pass1Failures: HARNESS_PASS1_FAILURES,
+          }}
+          visible={true}
+          collapsed={false}
+          onToggleCollapsed={() => {}}
+        />
+      </div>
+      <div style={{ position: 'relative', height: 56 }}>
+        <PreviewErrorOverlay
+          error={{ message: 'Render failed with 1 diagnostic' }}
+          visible={true}
+          collapsed={true}
+          onToggleCollapsed={() => {}}
+        />
+      </div>
+      <div style={{ position: 'relative', height: 24 }}>
+        <div className="replay-mode-banner">REPLAY MODE</div>
+      </div>
+    </EditorChrome>
+  );
+}
+
+/**
+ * Composed editor-shell fixture (Phase 4): the real top bars,
+ * SidebarTabs, and `.editor-main view-mode-*` pane layout from Editor.tsx
+ * with placeholder pane content standing in for Monaco and the preview
+ * iframe (both need services the no-server harness doesn't have). This
+ * lets viewport-matrix specs exercise the shell's flex interplay at
+ * narrow widths. The view mode is pinned per route (the segmented
+ * view-toggle control was removed; the divider drag owns the split now).
+ */
+function EditorShellHarness({ viewMode }: { viewMode: 'markup' | 'both' | 'preview' }) {
+  // Phase 5: the same drawer wiring as Editor.tsx, plus an offscreen
+  // recorder so specs can assert overflow-menu actions fire.
+  const drawer = useSidebarDrawer();
+  const [lastAction, setLastAction] = useState('none');
+  const placeholder: React.CSSProperties = {
+    height: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'var(--editor-text-muted)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 12,
+  };
+  return (
+    <EditorChrome>
+      <div className="editor-columns">
+        <SidebarDrawer drawer={drawer}>
+          <div className="project-column">
+            <ProjectTopBar
+              projectName="Research Paper"
+              onChooseNewProject={() => {}}
+              onShare={() => setLastAction('share')}
+            />
+            <StatefulSidebarSections />
+          </div>
+        </SidebarDrawer>
+        <div className="document-column">
+          <DocumentTopBar
+            currentFilePath="index.qmd"
+            onToggleFullscreenPreview={() => setLastAction('fullscreen-preview')}
+            isFullscreenPreview={false}
+            sidebarOpen={drawer.sidebarVisible}
+            onToggleSidebar={drawer.toggle}
+            sidebarToggleRef={drawer.toggleRef}
+          />
+          <main className={`editor-main view-mode-${viewMode}`}>
+            <div className="pane editor-pane">
+              <div style={placeholder}>Editor pane</div>
+            </div>
+            <div className="pane-divider" />
+            <div className="pane preview-pane">
+              <div style={placeholder}>Preview pane</div>
+            </div>
+          </main>
+        </div>
+      </div>
+      {/* Offscreen action recorder for Playwright assertions. */}
+      <div
+        data-testid="header-last-action"
+        style={{ position: 'fixed', left: -10000, top: 0 }}
+      >
+        {lastAction}
+      </div>
+    </EditorChrome>
+  );
+}
+
+/** Shared canned props for the ProjectsHome routes. */
+const fakeProjectsHomeProps = {
+  onSelectProject: () => {},
+  error: null,
+  projectSetStatus: 'connected' as const,
+  projectSetEntries: FAKE_SET_ENTRIES,
+  collections: FAKE_COLLECTIONS,
+  onRemoveProjectFromSet: () => {},
+  onTouchProject: () => {},
+  onAddProjectToSet: () => {},
+  onRenameProject: () => {},
+  onUpdateProjectSummary: () => {},
+  onCreateCollection: async () => 'automerge:new-collection',
+  onUnsubscribeCollection: noop,
+  onRenameCollection: () => {},
+  onAddProjectToCollection: () => {},
+  onRemoveProjectFromCollection: () => {},
+  onMoveProjectBetweenCollections: () => {},
+};
+
+/**
+ * ProjectsHome with a pinned connection error and a working retry, wired
+ * to the offscreen action recorder so specs can assert the retry fires.
+ */
+function ProjectsHomeErrorHarness() {
+  const [lastAction, setLastAction] = useState('none');
+  return (
+    <>
+      <ProjectsHome
+        {...fakeProjectsHomeProps}
+        error="Could not reach the sync server."
+        onRetry={() => setLastAction('retry')}
+      />
+      <div
+        data-testid="async-last-action"
+        style={{ position: 'fixed', left: -10000, top: 0 }}
+      >
+        {lastAction}
+      </div>
+    </>
+  );
+}
+
+/** StatusTab with a pinned WASM boot error and a recorded retry. */
+function StatusTabErrorHarness() {
+  const [lastAction, setLastAction] = useState('none');
+  return (
+    <EditorChrome>
+      <div style={{ width: 280, height: '100%', overflowY: 'auto', borderRight: '1px solid var(--sidebar-border)', background: 'var(--sidebar-bg)' }}>
+        <StatusTab
+          wasmStatus="error"
+          wasmError="WebAssembly compilation failed: unexpected section id"
+          userCount={0}
+          remoteUsers={[]}
+          isOnline={true}
+          onRetry={() => setLastAction('reload')}
+        />
+      </div>
+      <div
+        data-testid="async-last-action"
+        style={{ position: 'fixed', left: -10000, top: 0 }}
+      >
+        {lastAction}
+      </div>
+    </EditorChrome>
+  );
+}
+
+/** Editor chrome must render inside .editor-container for the dark-ramp
+ *  token overrides (:root.dark .editor-container) to apply, and under a
+ *  ViewModeProvider for Editor-shell fixtures. */
+/** Module-level so ReplayHarness render stays pure (see timestamp below). */
+const REPLAY_FIXTURE_TIMESTAMP = (Date.now() - 42 * 60_000) / 1000;
+
+/**
+ * Replay drawer fixture (Phase 5): the real expanded drawer with a remote
+ * actor, plus a static replica of the "me" actor chip. The real
+ * `--me` state requires the live sync attribution key (getAuthorId()),
+ * which the no-server harness doesn't have — the replica uses the real
+ * `replay-drawer__actor` classes so token changes render authentically.
+ * Keep the replica's markup in sync with the actor chip in
+ * ReplayDrawer.tsx.
+ */
+function ReplayHarness() {
+  // Local stand-in for the persisted `previewEditing` preference so the
+  // Edit pill (bd-ew0vak6b) is interactive in the gallery.
+  const [previewEditing, setPreviewEditing] = useState(true);
+  const state: ReplayState = {
+    isActive: true,
+    historyLength: 100,
+    currentIndex: 41,
+    isPlaying: false,
+    playbackSpeed: 1,
+    currentContent: '',
+    // Seconds, not ms — ReplayDrawer formats with `new Date(ts * 1000)`.
+    // Module-level so render stays pure (react-hooks/purity); visual
+    // specs pin the clock (FIXED_NOW) before page load, so the module
+    // evaluation is deterministic there. The offset gives a "42 minutes
+    // ago" label.
+    timestamp: REPLAY_FIXTURE_TIMESTAMP,
+    actor: 'b3f7c2a1-remote',
+    chunkActors: Array.from({ length: 24 }, (_, i) =>
+      i % 3 === 2
+        ? [
+            { actor: 'b3f7c2a1-remote', fraction: 0.6 },
+            { actor: 'e4d8f0a2-other', fraction: 0.4 },
+          ]
+        : [{ actor: 'b3f7c2a1-remote', fraction: 1 }],
+    ),
+  };
+  const controls: ReplayControls = {
+    enter: () => {},
+    exit: () => {},
+    apply: () => {},
+    seekTo: () => {},
+    seekToStart: () => {},
+    seekToEnd: () => {},
+    play: () => {},
+    pause: () => {},
+    stepForward: () => {},
+    stepBackward: () => {},
+    cycleSpeed: () => {},
+    getTimestampAtIndex: () => null,
+  };
+  return (
+    <EditorChrome>
+      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+        {/* Tight crop target for the visual spec — the full-height flex
+            wrapper above is just for bottom-docking. */}
+        <div data-testid="replay-fixture">
+          {/* Static replica of the "me" actor chip (see comment above). */}
+          <div style={{ padding: '8px 12px', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: 'var(--editor-text-dim)' }}>
+              &ldquo;me&rdquo; chip replica:
+            </span>
+            <span className="replay-drawer__actor replay-drawer__actor--me">
+              <span
+                className="replay-drawer__actor-dot"
+                style={{ backgroundColor: '#447099' }}
+              />
+              Ada Lovelace
+            </span>
+            <span className="replay-drawer__actor">
+              <span
+                className="replay-drawer__actor-dot"
+                style={{ backgroundColor: '#E91E63' }}
+              />
+              Grace Hopper
+            </span>
+          </div>
+          <ReplayDrawer
+            state={state}
+            controls={controls}
+            identities={{ 'b3f7c2a1-remote': { name: 'Grace Hopper', color: '#E91E63' } }}
+            previewEditing={previewEditing}
+            onPreviewEditingChange={setPreviewEditing}
+          />
+        </div>
+      </div>
+    </EditorChrome>
+  );
+}
+
+/**
+ * Stateful NewFileDialog fixture (GH #635, bd-zcv0iea4): a real trigger
+ * button that owns `isOpen` state plus a visible record of created files,
+ * mirroring the Editor/FileSidebar wiring. Exists because the Enter-submit
+ * reopen bug is a browser-level interaction — close, focus-restore to the
+ * trigger, then the keydown's default-action click — that the static-props
+ * `dialog-new-file` route (and jsdom, which performs no keyboard
+ * activation) cannot express.
+ */
+function NewFileDialogStatefulHarness() {
+  const [isOpen, setIsOpen] = useState(false);
+  const [created, setCreated] = useState<string[]>([]);
+  return (
+    <EditorChrome>
+      <div style={{ padding: 16 }}>
+        <button
+          className="qh-btn small outline new-file-btn"
+          onClick={() => setIsOpen(true)}
+        >
+          New file
+        </button>
+        <ul data-testid="created-files">
+          {created.map((path, i) => (
+            <li key={`${path}-${i}`}>{path}</li>
+          ))}
+        </ul>
+      </div>
+      <NewFileDialog
+        isOpen={isOpen}
+        existingPaths={FAKE_FILES.map((f) => f.path)}
+        onClose={() => setIsOpen(false)}
+        onCreateTextFile={(path) => setCreated((prev) => [...prev, path])}
+      />
+    </EditorChrome>
+  );
+}
+
+function EditorChrome({ children }: { children: React.ReactNode }) {
+  return (
+    <ViewModeProvider>
+      <div className="editor-container" style={{ height: '100vh', background: 'var(--editor-bg)' }}>
+        {children}
+      </div>
+    </ViewModeProvider>
+  );
+}
+
+
+/**
+ * The import dialog (document import P5) reached in one state. The dialog owns its phase, so a
+ * state past the form is reached the way a user reaches it: a scripted service, and the harness
+ * clicks Import once the form is ready. `pending` states never resolve (the dialog stays there).
+ */
+type ImportHarnessMode =
+  | 'proposal'
+  | 'collision'
+  | 'too-large'
+  | 'unsupported'
+  | 'importing'
+  | 'loading-pandoc'
+  | 'writing'
+  | 'report'
+  | 'failure'
+  | 'offline'
+  | 'write-failure';
+
+function ImportDialogPage({ mode }: { mode: ImportHarnessMode }) {
+  const file = useMemo(() => {
+    const name = mode === 'unsupported' ? 'picture.png' : mode === 'failure' ? 'corrupt.docx' : 'report.docx';
+    const f = new File(['x'], name);
+    Object.defineProperty(f, 'size', { value: mode === 'too-large' ? 30 * 1024 * 1024 : 1024 });
+    if (mode === 'too-large') Object.defineProperty(f, 'name', { value: 'huge.docx' });
+    return f;
+  }, [mode]);
+
+  // Installed during the first render, before the dialog's mount effects read it.
+  useState(() => {
+    const base = createStubImportService();
+    const never = new Promise<never>(() => {});
+    const service: ImportService = { ...base };
+    if (mode === 'importing') service.importDocument = (_f, _p, opts) => (opts?.onProgress?.('converting'), never);
+    if (mode === 'loading-pandoc') {
+      service.importDocument = (_f, _p, opts) => {
+        opts?.onProgress?.('loading-pandoc');
+        opts?.onLoadProgress?.({ phase: 'download', loaded: 6_500_000, total: 16_700_000 });
+        return never;
+      };
+    }
+    if (mode === 'offline') {
+      service.importDocument = async () => ({
+        ok: false,
+        uiState: 'offline',
+        diagnostics: [{ origin: 'host', kind: 'error', code: 'offline', message: 'The converter could not be loaded.' }],
+      });
+    }
+    setImportServiceForTests(service);
+  });
+
+  const commit: React.ComponentProps<typeof ImportDialog>['commit'] = (outcome, qmdPath) => {
+    if (mode === 'writing') return new Promise(() => {});
+    if (mode === 'write-failure') {
+      return Promise.resolve({
+        ok: false,
+        diagnostics: [
+          { origin: 'host', kind: 'error', code: 'import-write-failed', message: `Could not add the document (${qmdPath}): A file appeared at ${qmdPath} while importing, so nothing was overwritten.`, path: qmdPath },
+          { origin: 'host', kind: 'error', code: 'import-cleanup-failed', message: 'Could not remove report_media/000000000000.png after the failed import: not connected', path: 'report_media/000000000000.png' },
+          ...outcome.diagnostics,
+        ],
+      });
+    }
+    return Promise.resolve({ ok: true, qmdPath, qmdDocId: 'harness', qmd: outcome.qmd, diagnostics: outcome.diagnostics });
+  };
+
+  // Past the form: press Import as soon as validation has enabled it.
+  useEffect(() => {
+    if (mode === 'proposal' || mode === 'collision' || mode === 'too-large' || mode === 'unsupported') return;
+    const timer = setInterval(() => {
+      const button = document.querySelector<HTMLButtonElement>('.import-dialog .qh-btn.primary:not([disabled])');
+      if (button) {
+        clearInterval(timer);
+        button.click();
+      }
+    }, 50);
+    return () => clearInterval(timer);
+  }, [mode]);
+
+  const taken = mode === 'collision';
+  return (
+    <EditorChrome>
+      <ImportDialog
+        request={{ kind: 'import', file, folder: 'docs' }}
+        folders={taken ? ['docs', 'docs/report_media'] : ['docs']}
+        existingPaths={taken ? ['docs/report.qmd', 'docs/index.qmd'] : ['docs/index.qmd']}
+        onClose={() => {}}
+        commit={commit}
+      />
+    </EditorChrome>
+  );
+}
+
+/** The Files sidebar with the Import button next to Add asset (formats from the stub table). */
+function ImportButtonPage({ loading }: { loading?: boolean }) {
+  const [formats, setFormats] = useState<ImportFormats | null>(null);
+  useEffect(() => {
+    if (loading) return;
+    void createStubImportService().getImportFormats().then(setFormats);
+  }, [loading]);
+  const [picked, setPicked] = useState<string[]>([]);
+  return (
+    <EditorChrome>
+      <div style={{ width: 260 }}>
+        <FileSidebar
+          files={[]}
+          currentFile={null}
+          onSelectFile={() => {}}
+          onNewFile={() => {}}
+          onUploadFiles={() => {}}
+          importDocument={{ formats, onPick: (f) => setPicked((p) => [...p, f.name]) }}
+        />
+      </div>
+      <div data-testid="import-picked">{picked.join(',')}</div>
+    </EditorChrome>
+  );
+}
 
 interface Props {
   page: string;
 }
 
+/**
+ * Visual stand-in for the GIS-rendered "Continue with Google" button (the
+ * real one is an iframe that needs a Google client id + network).
+ */
+/** Renders the Google stand-in in place of the GIS button. */
+const harnessAuthProvider: AuthProvider = {
+  SignInButton: () => <FakeGoogleCta />,
+  signOut: () => {},
+};
+
+const FakeGoogleCta = () => (
+  <button type="button" className="qh-btn outline" style={{ width: '100%', padding: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
+    <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+    </svg>
+    Continue with Google
+  </button>
+);
+
+const FAKE_COLLECTION_PREVIEW: CollectionInvitePreview = {
+  kind: 'collection',
+  projects: [
+    { name: 'Quarterly report', topFiles: ['report.qmd'], fileCount: 12, contributorInitials: ['CS', 'JL'] },
+    { name: 'Methods paper', topFiles: ['paper.qmd'], fileCount: 7, contributorInitials: ['JL'] },
+  ],
+  totalProjects: 4,
+  memberFirstNames: ['Carlos', 'Jenny', 'Mine'],
+};
+
+const FAKE_PROJECT_PREVIEW: ProjectInvitePreview = {
+  kind: 'project',
+  fileName: 'report.qmd',
+  topFiles: ['figures/', 'data.csv'],
+  fileCount: 12,
+  contributorInitials: ['CS', 'JL'],
+};
+
+/** A project holding only the invited file: the payload box is omitted. */
+const FAKE_SINGLE_FILE_PREVIEW: ProjectInvitePreview = {
+  kind: 'project',
+  fileName: 'notes.qmd',
+  topFiles: [],
+  fileCount: 1,
+  contributorInitials: ['CS'],
+};
+
+
+/* ---- "Download as" states (pandoc-host H5) ---- */
+
+const HARNESS_DOCX: DownloadFormat = {
+  key: 'docx',
+  label: 'Word',
+  extension: 'docx',
+  mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+
+/**
+ * The document top bar with the "Download as" control in one fixed state. `interactive`
+ * wires a fake controller: select an entry and it goes working -> done, cancel -> cancelled.
+ */
+function DownloadAsPage({
+  status: fixed,
+  disabledReason,
+  interactive,
+  book,
+  formats = [HARNESS_DOCX],
+  children,
+}: {
+  status?: DownloadStatus;
+  disabledReason?: string;
+  interactive?: boolean;
+  /** A document that is a book chapter: its menu offers the book entries. */
+  book?: { chapter: boolean; chapters: string[] };
+  formats?: DownloadFormat[];
+  children?: React.ReactNode;
+}) {
+  const [live, setLive] = useState<DownloadStatus>({ phase: 'idle' });
+  const status = interactive ? live : (fixed ?? { phase: 'idle' });
+  return (
+    <EditorChrome>
+      <div className="top-bars">
+        <DocumentTopBar
+          currentFilePath="report.qmd"
+          sidebarOpen={true}
+          onToggleSidebar={() => {}}
+          sidebarToggleRef={{ current: null }}
+          downloadAs={{
+            available: true,
+            formats,
+            status,
+            disabledReason,
+            book,
+            start: (format, scope) =>
+              setLive({
+                phase: 'done',
+                clickId: 1,
+                format,
+                fileName: `report.${format.extension}`,
+                warnings: [],
+                notices: [],
+                unexecutedCells: 0,
+                book: scope === 'auto' ? { chapters: 3 } : undefined,
+              }),
+            cancel: () => setLive({ phase: 'cancelled', clickId: 1, format: HARNESS_DOCX }),
+            dismiss: () => setLive({ phase: 'idle' }),
+          }}
+        />
+      </div>
+      <div id="sidebar-drawer" hidden />
+      {children}
+    </EditorChrome>
+  );
+}
+
+const HARNESS_EPUB: DownloadFormat = { key: 'epub', label: 'EPUB (.epub)', extension: 'epub', mime: 'application/epub+zip' };
+const HARNESS_BOOK = { chapter: true, chapters: ['index.qmd', 'report.qmd', 'two.qmd'] };
+
+const harnessDone: DownloadStatus = {
+  phase: 'done',
+  clickId: 1,
+  format: HARNESS_DOCX,
+  fileName: 'report.docx',
+  notices: [],
+  unexecutedCells: 2,
+  warnings: [
+    { origin: 'rust', kind: 'warning', code: 'Q-11-1', title: 'pandoc warning', problem: 'Could not fetch resource figure.png' },
+  ],
+};
+
 const DEV_PAGES: Record<string, () => React.ReactNode> = {
-  'setup-migration': () => (
-    <ProjectSetSetup
-      hasMigration={true}
-      legacyProjects={FAKE_LEGACY_PROJECTS}
-      error={null}
-      isConnecting={false}
-      onCreateProjectSet={noop}
-      onLinkProjectSet={noop}
-      onMigrateProjects={noop}
-      onMergeIntoProjectSet={noop}
+  'invite-landing-collection': () => (
+    <InviteLanding
+      kind="collection"
+      inviter="Carlos Scheidegger"
+      title="Team docs"
+      preview={FAKE_COLLECTION_PREVIEW}
+      signedIn={false}
+      signInCta={<FakeGoogleCta />}
+      joinState="idle"
+      onCta={noop}
     />
   ),
-  'setup-migration-error': () => (
-    <ProjectSetSetup
-      hasMigration={true}
-      legacyProjects={FAKE_LEGACY_PROJECTS}
+  'invite-landing-collection-signed-in': () => (
+    <InviteLanding
+      kind="collection"
+      inviter="Carlos Scheidegger"
+      title="Team docs"
+      preview={FAKE_COLLECTION_PREVIEW}
+      signedIn={true}
+      joinState="idle"
+      onCta={noop}
+    />
+  ),
+  'invite-landing-collection-legacy': () => (
+    <InviteLanding
+      kind="collection"
+      inviter="A collaborator"
+      title="Shared collection"
+      signedIn={true}
+      joinState="idle"
+      onCta={noop}
+    />
+  ),
+  'invite-landing-project': () => (
+    <InviteLanding
+      kind="project"
+      inviter="Carlos Scheidegger"
+      title="Quarterly report"
+      preview={FAKE_PROJECT_PREVIEW}
+      signedIn={false}
+      signInCta={<FakeGoogleCta />}
+      joinState="idle"
+      onCta={noop}
+    />
+  ),
+  'invite-landing-project-signed-in': () => (
+    <InviteLanding
+      kind="project"
+      inviter="Carlos Scheidegger"
+      title="Quarterly report"
+      preview={FAKE_PROJECT_PREVIEW}
+      signedIn={true}
+      joinState="idle"
+      onCta={noop}
+    />
+  ),
+  'invite-landing-project-single-file': () => (
+    <InviteLanding
+      kind="project"
+      inviter="Carlos Scheidegger"
+      title="Meeting notes"
+      preview={FAKE_SINGLE_FILE_PREVIEW}
+      signedIn={true}
+      joinState="idle"
+      onCta={noop}
+    />
+  ),
+  'invite-welcome-banner': () => (
+    <EditorWelcomeBanner
+      kind="collection"
+      targetId={`dev-harness-${Date.now()}`}
+      targetName="Team docs"
+      inviter="Carlos"
+      userName="Amy Mora"
+      onRename={noop}
+    />
+  ),
+  // The quarto-hub.com landing page (bd-g0uyp2v1). Wrapped in a provider
+  // that renders a stand-in for the GIS button, which needs a Google
+  // client id and network the harness has neither of.
+  'landing': () => (
+    <AuthProviderRoot provider={harnessAuthProvider}>
+      <LoginScreen />
+    </AuthProviderRoot>
+  ),
+  'landing-expired': () => (
+    <AuthProviderRoot provider={harnessAuthProvider}>
+      <LoginScreen message="Your session expired — please sign in again." />
+    </AuthProviderRoot>
+  ),
+  'landing-denied': () => (
+    <AuthProviderRoot provider={harnessAuthProvider}>
+      <LoginScreen errorReason="denied" />
+    </AuthProviderRoot>
+  ),
+  'project-set-error': () => (
+    <ProjectSetError
       error="Connection failed: could not reach sync server"
-      isConnecting={false}
-      onCreateProjectSet={noop}
-      onLinkProjectSet={noop}
-      onMigrateProjects={noop}
-      onMergeIntoProjectSet={noop}
+      onRetry={noop}
     />
   ),
-  'setup-fresh': () => (
-    <ProjectSetSetup
-      hasMigration={false}
-      legacyProjects={[]}
-      error={null}
-      isConnecting={false}
-      onCreateProjectSet={noop}
-      onLinkProjectSet={noop}
-      onMigrateProjects={noop}
-      onMergeIntoProjectSet={noop}
+
+  /* ---- Phase 0 baseline routes (characterization testing) ---- */
+
+  tokens: () => <DevTokensPage />,
+
+  gallery: () => <DevGalleryPage />,
+
+  'projects-home': () => <ProjectsHome {...fakeProjectsHomeProps} />,
+
+  /* ---- Phase 3 async-state routes (loading / error+retry / empty) ---- */
+
+  'projects-home-loading': () => (
+    <ProjectsHome
+      {...fakeProjectsHomeProps}
+      projectSetStatus="connecting"
+      projectSetEntries={undefined}
+      collections={undefined}
     />
+  ),
+  'projects-home-error': () => <ProjectsHomeErrorHarness />,
+  'projects-home-empty': () => (
+    <ProjectsHome
+      {...fakeProjectsHomeProps}
+      projectSetEntries={[]}
+      collections={[{ ...FAKE_COLLECTIONS[0], entries: [] }]}
+    />
+  ),
+  'sidebar-empty': () => <SidebarHarness files={[]} />,
+  'status-tab-loading': () => (
+    <EditorChrome>
+      <div style={{ width: 280, height: '100%', overflowY: 'auto', borderRight: '1px solid var(--sidebar-border)', background: 'var(--sidebar-bg)' }}>
+        <StatusTab wasmStatus="loading" wasmError={null} userCount={0} remoteUsers={[]} isOnline={true} />
+      </div>
+    </EditorChrome>
+  ),
+  'status-tab-error': () => <StatusTabErrorHarness />,
+  'dialog-new-file': () => (
+    <EditorChrome>
+      <NewFileDialog
+        isOpen={true}
+        existingPaths={FAKE_FILES.map((f) => f.path)}
+        onClose={() => {}}
+        onCreateTextFile={() => {}}
+      />
+    </EditorChrome>
+  ),
+  'dialog-new-file-stateful': () => <NewFileDialogStatefulHarness />,
+  'dialog-share': () => (
+    <EditorChrome>
+      <ShareDialog
+        isOpen={true}
+        shareableUrl="https://hub.example.com/#/share/abc123/index.qmd?name=Research%20Paper"
+        onClose={() => {}}
+      />
+    </EditorChrome>
+  ),
+  'dialog-new-asset': () => (
+    <EditorChrome>
+      <NewAssetDialog
+        isOpen={true}
+        existingPaths={FAKE_FILES.map((f) => f.path)}
+        defaultDestination="figures"
+        onClose={() => {}}
+        onUploadAsset={() => {}}
+      />
+    </EditorChrome>
+  ),
+  sidebar: () => <SidebarHarness />,
+  /* ---- Phase 5: replay drawer (actor-chip token review) ---- */
+  replay: () => <ReplayHarness />,
+  /* ---- bd-uue5voml: editor status surfaces (diagnostics banner, preview
+     status bar, error overlay, replay banner) so the axe baseline scans
+     the --editor-*-text token mapping — the real-app e2e can't reach
+     these states without a failing render. ---- */
+  'editor-status-states': () => <EditorStatusStatesHarness />,
+  /* ---- Phase 4: composed editor shell for the viewport matrix ---- */
+  'editor-shell': () => <EditorShellHarness viewMode="both" />,
+  'editor-shell-markup': () => <EditorShellHarness viewMode="markup" />,
+  'editor-shell-preview': () => <EditorShellHarness viewMode="preview" />,
+  // Fullscreen preview (Editor.tsx: header/editor-pane/divider unmount,
+  // the preview pane gains .fullscreen) — regression cover for the
+  // ≤700px split-collapse rule hiding the fullscreen pane.
+  'editor-shell-fullscreen': () => (
+    <EditorChrome>
+      <main className="editor-main view-mode-both">
+        <div className="pane preview-pane fullscreen">
+          <button
+            className="qh-icon-btn boxed fullscreen-close-btn"
+            aria-label="Exit fullscreen preview"
+          >
+            <PreviewIcon />
+          </button>
+          <div
+            style={{
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--editor-text-muted)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12,
+            }}
+          >
+            Preview pane (fullscreen)
+          </div>
+        </div>
+      </main>
+    </EditorChrome>
+  ),
+  // The About tab standalone (sidebar width) — covers the shortcuts
+  // reference, which the sidebar route's collapsed ABOUT section hides.
+  'about-tab': () => (
+    <EditorChrome>
+      <div style={{ width: 280, height: '100%', overflowY: 'auto', borderRight: '1px solid var(--sidebar-border)', background: 'var(--sidebar-bg)' }}>
+        <AboutTab wasmStatus="loading" />
+      </div>
+    </EditorChrome>
+  ),
+  header: () => (
+    <EditorChrome>
+      <div className="top-bars">
+        <ProjectTopBar
+          projectName="Research Paper"
+          onChooseNewProject={() => {}}
+          onShare={() => {}}
+        />
+        <DocumentTopBar
+          currentFilePath="index.qmd"
+          onToggleFullscreenPreview={() => {}}
+          isFullscreenPreview={false}
+          // The sidebar toggle is permanent chrome (Phase 5 review); the
+          // header route has no sidebar, so a static open state + dummy ref.
+          sidebarOpen={true}
+          onToggleSidebar={() => {}}
+          sidebarToggleRef={{ current: null }}
+        />
+      </div>
+      {/* The toggle's aria-controls points at the drawer's id; in the
+          real app the drawer always exists, so the route stubs it
+          (axe's aria-valid-attr-value flags a dangling reference). */}
+      <div id="sidebar-drawer" hidden />
+    </EditorChrome>
+  ),
+  'import-button': () => <ImportButtonPage />,
+  'import-button-loading': () => <ImportButtonPage loading />,
+  'import-dialog': () => <ImportDialogPage mode="proposal" />,
+  'import-dialog-collision': () => <ImportDialogPage mode="collision" />,
+  'import-dialog-too-large': () => <ImportDialogPage mode="too-large" />,
+  'import-dialog-unsupported': () => <ImportDialogPage mode="unsupported" />,
+  'import-dialog-importing': () => <ImportDialogPage mode="importing" />,
+  'import-dialog-loading-pandoc': () => <ImportDialogPage mode="loading-pandoc" />,
+  'import-dialog-writing': () => <ImportDialogPage mode="writing" />,
+  'import-dialog-report': () => <ImportDialogPage mode="report" />,
+  'import-dialog-failure': () => <ImportDialogPage mode="failure" />,
+  'import-dialog-offline': () => <ImportDialogPage mode="offline" />,
+  'import-dialog-write-failure': () => <ImportDialogPage mode="write-failure" />,
+  'download-as': () => <DownloadAsPage interactive />,
+  'download-as-progress': () => (
+    <DownloadAsPage
+      status={{ phase: 'working', clickId: 1, format: HARNESS_DOCX, stage: 'loading', load: { phase: 'download', loaded: 6_500_000, total: 16_700_000 } }}
+    />
+  ),
+  'download-as-done': () => <DownloadAsPage status={harnessDone} />,
+  // A document that is a chapter of a book: the menu offers "Download book as" and "This chapter only".
+  'download-as-book': () => <DownloadAsPage interactive book={HARNESS_BOOK} formats={[HARNESS_DOCX, HARNESS_EPUB]} />,
+  'download-as-book-progress': () => (
+    <DownloadAsPage
+      book={HARNESS_BOOK}
+      formats={[HARNESS_DOCX, HARNESS_EPUB]}
+      status={{ phase: 'working', clickId: 1, format: HARNESS_EPUB, stage: 'chapter', chapter: { index: 2, total: 3, file: 'report.qmd' } }}
+    />
+  ),
+  'download-as-failed': () => (
+    <DownloadAsPage
+      status={{
+        phase: 'failed',
+        clickId: 1,
+        format: HARNESS_DOCX,
+        state: 'pandoc-error',
+        notices: [],
+        diagnostics: [{ origin: 'rust', kind: 'error', code: 'Q-20-3', title: 'pandoc failed', problem: 'exit status: 83' }],
+      }}
+    />
+  ),
+  'download-as-disabled': () => (
+    <DownloadAsPage disabledReason="Download is unavailable: documents with format latex can't be converted in the browser.">
+      <div style={{ height: 240 }}>
+        <NeitherView formatKey="latex" />
+      </div>
+    </DownloadAsPage>
+  ),
+  'download-as-only': () => (
+    <DownloadAsPage>
+      <div style={{ height: 240 }}>
+        <DownloadOnlyView format={HARNESS_DOCX} busy={false} onDownload={() => {}} />
+      </div>
+    </DownloadAsPage>
+  ),
+  notifications: () => (
+    <EditorChrome>
+      <EphemeralSessionBanner />
+      <Toast message="Auto-saved" visible={true} onHide={() => {}} duration={1_000_000} />
+      <UpdateAvailableToast prompt={pendingPrompt} />
+    </EditorChrome>
   ),
 };
 

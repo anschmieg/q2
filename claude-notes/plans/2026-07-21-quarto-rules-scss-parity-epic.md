@@ -1,14 +1,17 @@
-# Epic: Port TS Quarto `_quarto-rules.scss` to Q2 for HTML DOM parity
+---
+title: 'Epic: Port TS Quarto `_quarto-rules.scss` to Q2 for HTML DOM parity'
+date: 2026-07-21
+description: 'Epic for closing gaps between Q2''s HTML stylesheets and TS Quarto''s `_quarto-rules.scss`, by auditing each selector and porting only rules whose target DOM Q2 already emits.'
+---
 
 **Epic:** bd-4doe9lvt
 **Audit task:** bd-eias3e39
 **Discovered from:** bd-btjkyylx (title-block bottom-margin, PR #406)
-**Date:** 2026-07-21
 
 ## Overview
 
 TS Quarto's `src/resources/formats/html/_quarto-rules.scss` (774 lines,
-~80 top-level selectors) is the HTML format's base rule layer. **Q2 has no
+\~80 top-level selectors) is the HTML format's base rule layer. **Q2 has no
 single counterpart layer.** Its rules were ported into Q2 piecemeal — into
 `resources/scss/bootstrap/_bootstrap-rules.scss` and
 `resources/scss/html/templates/title-block.scss` (and a few dedicated layers
@@ -39,7 +42,7 @@ features.
 
 ## Phase 1 — Audit (bd-eias3e39)
 
-For each of the ~80 top-level selectors in `_quarto-rules.scss`:
+For each of the \~80 top-level selectors in `_quarto-rules.scss`:
 
 - [x] Is the rule **already present** in Q2's SCSS? (grep
       `_bootstrap-rules.scss`, `title-block.scss`, `copy-code.scss`,

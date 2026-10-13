@@ -14,12 +14,17 @@
 //! ListingRenderTransform) to consume.
 //!
 //! Item discovery (D10): no filesystem walk. Each listing's
-//! `contents:` glob is matched against
-//! [`crate::project::index::ProjectIndex::profiles`], trying both
-//! host-directory-relative and project-relative path views. This
-//! gives identical behavior on native and WASM, naturally excludes
-//! files outside the project's render set, and naturally excludes
-//! the host page itself.
+//! `contents:` glob is resolved to a project-relative pattern
+//! against the directory of the file it was written in
+//! ([`crate::project::listing::glob_resolve`]; GH #456,
+//! bd-v7ixzsp5) and matched single-view against
+//! [`crate::project::index::ProjectIndex::profiles`]. This gives
+//! identical behavior on native and WASM, naturally excludes files
+//! outside the project's render set, and naturally excludes the
+//! host page itself. Patterns whose normalization escapes the
+//! project root match nothing and emit `Q-12-17` here (this
+//! transform owns the diagnostic; the profile stage drops them
+//! silently).
 //!
 //! TODO(bd-0fd0): when a Lua filter slot lands between generate and
 //! render transforms, serialize the resolved listings into
@@ -28,13 +33,29 @@
 //! `RenderContext` is the only data path between this transform
 //! and `ListingRenderTransform`.
 
+use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::pandoc::Pandoc;
+use quarto_source_map::SourceInfo;
+
+use std::collections::BTreeSet;
 
 use crate::Result;
-use crate::project::discovery::{glob_match_path_or_dir, path_to_forward_slashes, relative_to_dir};
+use crate::document_profile::DocumentProfile;
+use crate::glob::{
+    BaseDirContext, GlobOptions, PatternSet, has_metacharacters, join_and_normalize,
+    path_to_forward_slashes,
+};
+use crate::project::index::ProjectIndex;
+use crate::project::listing::config::is_markdown_document_path;
 use crate::project::listing::filter::apply_filters;
+use crate::project::listing::glob_resolve::resolve_content_globs;
+use crate::project::listing::helpers::is_remote_src;
+use crate::project::listing::record::{overlay_record, parse_record, record_item};
 use crate::project::listing::sort::apply_sort;
-use crate::project::listing::{ListingContents, ResolvedListing, hydrate_item, parse_listings};
+use crate::project::listing::{
+    ItemTarget, ListingContents, ListingItem, ResolvedListing, flattened_prose_diagnostics,
+    hydrate_item, parse_listings,
+};
 use crate::render::RenderContext;
 use crate::transform::{AstTransform, TransformPhase};
 use crate::transforms::is_feature_disabled;
@@ -101,42 +122,288 @@ impl AstTransform for ListingGenerateTransform {
 
         let mut resolved: Vec<ResolvedListing> = Vec::with_capacity(listings.len());
 
+        let base_ctx = BaseDirContext {
+            source_context: ctx.source_context,
+            project_dir: &ctx.project.dir,
+            fallback_dir: &host_dir_str,
+        };
+
         for listing in listings {
-            let mut items = Vec::new();
+            // Q-12-23: a literal YAML-file entry is Q1's third item
+            // source (bd-hj1ehfn8), not a glob that matched nothing.
+            // Partition it out so it neither resolves nor trips Q-12-19.
+            let mut contents: Vec<ListingContents> = Vec::with_capacity(listing.contents.len());
+            for entry in &listing.contents {
+                match entry {
+                    ListingContents::Glob { pattern, source }
+                        if !has_metacharacters(pattern)
+                            && matches!(
+                                std::path::Path::new(pattern)
+                                    .extension()
+                                    .and_then(|e| e.to_str()),
+                                Some("yml" | "yaml")
+                            ) =>
+                    {
+                        diags.push(yaml_contents_unsupported(pattern, source));
+                    }
+                    other => contents.push(other.clone()),
+                }
+            }
+
+            // Resolve each glob against the directory of the file
+            // it was written in (provenance-based; GH #456).
+            let resolution = resolve_content_globs(
+                &contents,
+                ctx.source_context,
+                &ctx.project.dir,
+                &host_dir_str,
+            );
+            for escaped in &resolution.escaped {
+                diags.push(
+                    DiagnosticMessageBuilder::warning(format!(
+                        "Listing `contents:` pattern `{}` points outside the project \
+                         directory and matches nothing.",
+                        escaped.raw
+                    ))
+                    .with_code("Q-12-17")
+                    .with_location(escaped.source.clone())
+                    .problem("The pattern's `..` segments climb above the project root.")
+                    .add_info(
+                        "Listing contents are limited to files inside the project. \
+                         Adjust the pattern so it stays within the project directory.",
+                    )
+                    .build(),
+                );
+            }
+
+            // Compile the full set once for the global negation
+            // check, and each positive pattern individually: item
+            // collection orders by the FIRST pattern that matches a
+            // candidate (Q1's glob-major semantics,
+            // bd-listing-declared-order-3ixcvc4o), and the Q-12-19
+            // matched-nothing diagnostic credits EVERY pattern a
+            // candidate matches. Resolution already validated these
+            // patterns, so the compiles cannot fail; an empty set on
+            // the impossible path simply matches nothing.
+            let empty_set = || PatternSet::compile(&[], &GlobOptions::LISTING).unwrap();
+            let patterns = resolution
+                .compile(&GlobOptions::LISTING)
+                .unwrap_or_else(|_| empty_set());
+            let positives: Vec<_> = resolution.positives().collect();
+            let positive_sets: Vec<PatternSet> = positives
+                .iter()
+                .map(|(glob, _)| {
+                    PatternSet::compile(std::slice::from_ref(*glob), &GlobOptions::LISTING)
+                        .unwrap_or_else(|_| empty_set())
+                })
+                .collect();
+            let mut matched_any = vec![false; positive_sets.len()];
+
+            // Patterns the glob engine rejected (bd-mt7a6uc4).
+            // Before, these matched nothing in silence — the same
+            // failure mode #456 fixed for asterisk-corrupted globs.
+            for invalid in &resolution.invalid {
+                diags.push(
+                    crate::glob::diagnostics::invalid_pattern(
+                        "Q-12-18",
+                        "Listing `contents:`",
+                        &invalid.raw,
+                        &invalid.message,
+                        &invalid.source,
+                    )
+                    .build(),
+                );
+            }
+
+            // Candidate-major collection, pattern-major order: tag
+            // each item with the index of its first matching
+            // pattern, then stable-sort by that index. Exclusions
+            // stay global — a `!` entry excludes a candidate no
+            // matter where it appears in `contents:`.
+            let mut ordered: Vec<((usize, u8), ListingItem)> = Vec::new();
+            // Which kinds of item this listing ended up with — the
+            // only consumer is the default-sort decision below
+            // (bd-listing-inline-records-order-eq8n2usm). Recorded
+            // during construction, like Q1's `sources` set, so that
+            // `include:`/`exclude:` filters cannot change it.
+            let mut sources: BTreeSet<ListingItemSource> = BTreeSet::new();
             if let Some(index) = ctx.project_index.as_deref() {
                 for profile in index.profiles() {
                     let candidate_path_str = path_to_forward_slashes(&profile.source_path);
                     if candidate_path_str == host_path_str {
                         continue;
                     }
-                    let host_relative_candidate =
-                        relative_to_dir(&candidate_path_str, &host_dir_str);
-                    if matches_any_glob(
-                        &listing.contents,
-                        &candidate_path_str,
-                        host_relative_candidate.as_deref(),
-                    ) {
-                        items.push(hydrate_item(profile));
+                    if patterns.excluded(&candidate_path_str) {
+                        continue;
                     }
+                    if !item_visible(profile) {
+                        continue;
+                    }
+                    let mut first_match: Option<usize> = None;
+                    for (i, set) in positive_sets.iter().enumerate() {
+                        if set.matches(&candidate_path_str) {
+                            matched_any[i] = true;
+                            first_match.get_or_insert(i);
+                        }
+                    }
+                    if let Some(pattern_idx) = first_match {
+                        sources.insert(ListingItemSource::Document);
+                        diags.extend(flattened_prose_diagnostics(profile, None));
+                        ordered.push(((pattern_idx, 1), hydrate_item(profile)));
+                    }
+                }
+            }
+
+            // Second item source: inline records
+            // (bd-listing-inline-contents-tyy446ze, plan §D2–D4).
+            // `globs_before` is the record's declared position, on
+            // the SAME scale as a glob item's `pattern_idx` above:
+            // the ordinal a positive pattern declared at this point
+            // would get in `resolution.positives()`. A negated
+            // pattern, or one dropped as escaped (Q-12-17) or invalid
+            // (Q-12-18), contributes no `pattern_idx` and so must not
+            // advance this counter either — otherwise the two indices
+            // drift apart and a record can sort after items it was
+            // written before (review fix, task 5 round 1).
+            //
+            // `resolution.entry_index` gives this structurally — the
+            // outcome resolution itself recorded for each raw entry,
+            // aligned 1:1 with `contents`'s `Glob` entries in
+            // declared order — rather than reconstructed afterward by
+            // matching raw pattern text or `SourceInfo` (both proved
+            // unreliable: the same text can escape from one declaring
+            // file and resolve fine from another, and `SourceInfo`
+            // can be a shared constant in programmatic/test
+            // construction — review fix, task 5 round 2).
+            // `positive_ordinal_by_glob_idx[j]` is the ordinal
+            // `resolution.globs[j]` would get in `positives()`, or
+            // `None` if it's negated.
+            let mut positive_ordinal_by_glob_idx: Vec<Option<usize>> =
+                Vec::with_capacity(resolution.globs.len());
+            {
+                let mut next_positive = 0usize;
+                for g in &resolution.globs {
+                    if g.negated {
+                        positive_ordinal_by_glob_idx.push(None);
+                    } else {
+                        positive_ordinal_by_glob_idx.push(Some(next_positive));
+                        next_positive += 1;
+                    }
+                }
+            }
+            // Starts at 1, not 0, when `contents:` held only
+            // negations and `resolve_content_globs` injected a
+            // synthesized default positive pattern: that pattern has
+            // no declared position of its own, stands for the
+            // implicit "everything", and is defined to precede every
+            // declared entry (team-lead ruling, task 5 round 2) — so
+            // a record declared after the negation sorts after the
+            // default's items, not before them.
+            let mut globs_before = usize::from(resolution.injected_default_positive);
+            let mut raw_ordinal = 0usize;
+            for entry in &contents {
+                let value = match entry {
+                    ListingContents::Glob { .. } => {
+                        if let Some(Some(glob_idx)) = resolution.entry_index.get(raw_ordinal)
+                            && let Some(ordinal) = positive_ordinal_by_glob_idx[*glob_idx]
+                        {
+                            globs_before = ordinal + 1;
+                        }
+                        raw_ordinal += 1;
+                        continue;
+                    }
+                    ListingContents::Inline(value) => value,
+                };
+                let rec = parse_record(value, &mut diags);
+                let base_dir = base_ctx.base_dir_for(&rec.source);
+                let item = match rec.path.clone() {
+                    None => {
+                        sources.insert(ListingItemSource::Metadata);
+                        record_item(rec, ItemTarget::None, &base_dir)
+                    }
+                    Some((raw, path_source)) => match resolve_record_path(
+                        &raw,
+                        &path_source,
+                        &base_ctx,
+                        ctx.project_index.as_deref(),
+                        &mut diags,
+                    ) {
+                        RecordPath::Document(profile) => {
+                            if !item_visible(profile) {
+                                continue;
+                            }
+                            sources.insert(ListingItemSource::MetadataDocument);
+                            diags.extend(flattened_prose_diagnostics(profile, Some(&rec.info)));
+                            overlay_record(hydrate_item(profile), rec, &base_dir)
+                        }
+                        RecordPath::Href(href) => {
+                            sources.insert(ListingItemSource::Metadata);
+                            record_item(rec, ItemTarget::Href(href), &base_dir)
+                        }
+                    },
+                };
+                ordered.push(((globs_before, 0), item));
+            }
+            ordered.sort_by_key(|(key, _)| *key);
+            let mut items: Vec<ListingItem> = ordered.into_iter().map(|(_, item)| item).collect();
+
+            // A pattern that compiled, stayed in the project, and
+            // still matched no document is almost always a Q1
+            // assumption about `*` (D5/D7). Checked before
+            // `include:`/`exclude:` filters run, so this reports on
+            // the *glob*, not on a filter that emptied the set.
+            for (i, (glob, source)) in positives.iter().enumerate() {
+                if !matched_any[i] {
+                    diags.push(
+                        crate::glob::diagnostics::matched_nothing(
+                            "Q-12-19",
+                            "Listing `contents:`",
+                            &glob.pattern,
+                            source,
+                        )
+                        .add_info(
+                            "Patterns resolve against the directory of the file they are \
+                             written in; a leading `/` anchors at the project root.",
+                        )
+                        .build(),
+                    );
                 }
             }
 
             apply_filters(&mut items, &listing.include, &listing.exclude);
 
             if let Some(sort) = listing.sort.as_ref() {
+                // `sort: false` parses to an empty spec, which
+                // `apply_sort` treats as a no-op — declared
+                // `contents:` order flows through untouched.
                 apply_sort(&mut items, sort, &mut diags);
-            } else {
-                // Default sort: date descending. Matches Q1 default
-                // for the `default` and `grid` types; `table` keeps
-                // insertion order unless the author overrides.
-                use crate::project::listing::config::{ListingSort, ListingType, SortDirection};
-                if !matches!(listing.kind, ListingType::Table) {
-                    let default_sort = vec![ListingSort {
-                        field: "date".to_string(),
-                        direction: SortDirection::Desc,
-                    }];
-                    apply_sort(&mut items, &default_sort, &mut diags);
-                }
+            } else if sources.iter().any(|s| s.arms_default_sort()) {
+                // Default sort (Q1 parity): `order asc, title asc`,
+                // uniformly across listing types — Q1 applies its
+                // default whenever `title` is among the hydrated
+                // fields, which holds for every built-in type
+                // (table included). Items without `order:` sort
+                // after curated ones, in title order
+                // (bd-listing-declared-order-3ixcvc4o).
+                //
+                // Withheld when no item source arms it — see
+                // `ListingItemSource::arms_default_sort`. A listing
+                // built purely from inline records then keeps the
+                // order the author wrote, which is what `ordered`
+                // already holds
+                // (bd-listing-inline-records-order-eq8n2usm).
+                use crate::project::listing::config::{ListingSort, SortDirection};
+                let default_sort = vec![
+                    ListingSort {
+                        field: "order".to_string(),
+                        direction: SortDirection::Asc,
+                    },
+                    ListingSort {
+                        field: "title".to_string(),
+                        direction: SortDirection::Asc,
+                    },
+                ];
+                apply_sort(&mut items, &default_sort, &mut diags);
             }
 
             if let Some(max) = listing.max_items {
@@ -148,8 +415,22 @@ impl AstTransform for ListingGenerateTransform {
             // else copies it into the output tree. Register a copy
             // intent per project-relative item image; they flush
             // with the host page's other copies.
+            //
+            // bd-yqlbfrln: not in VFS-root mode (the hub-client).
+            // There the only allowed write root is the synthetic
+            // artifacts root, so a `{output_dir}/{img}` destination
+            // fails the OutputSink check and the whole page render
+            // errors out. The hub's asset walker serves `<img src>`
+            // straight from the VFS, as it does for body images
+            // (see `ResourceCollectorTransform`), so nothing is lost
+            // by skipping.
+            let vfs_root_mode = ctx
+                .resource_resolver
+                .as_ref()
+                .is_some_and(|r| r.is_vfs_root_mode());
             for item in &items {
-                if let Some(img) = item.image.as_deref()
+                if !vfs_root_mode
+                    && let Some(img) = item.image.as_deref()
                     && !crate::project::listing::helpers::is_external_src(img)
                 {
                     ctx.resource_copies.push(crate::render::ResourceCopyIntent {
@@ -171,26 +452,158 @@ impl AstTransform for ListingGenerateTransform {
     }
 }
 
-/// True iff `candidate` (in either path view) matches *any* glob in
-/// `contents`. Inline-record entries are skipped (the parser already
-/// emitted `Q-12-2`).
-fn matches_any_glob(
-    contents: &[ListingContents],
-    project_relative: &str,
-    host_relative: Option<&str>,
-) -> bool {
-    contents.iter().any(|c| match c {
-        ListingContents::Glob(pattern) => {
-            // Try host-relative first (Q1 default `*.qmd` is host-
-            // relative). If that misses, try project-relative for
-            // explicit patterns like `posts/**/*.qmd`. The dir-aware
-            // variant lets a bare `contents: posts` match everything
-            // under the directory (Q1 parity, bd-9arwdicv).
-            host_relative.is_some_and(|hr| glob_match_path_or_dir(pattern, hr))
-                || glob_match_path_or_dir(pattern, project_relative)
+/// Where a listing item came from.
+///
+/// Mirrors Q1's `ListingItemSource`
+/// (`src/project/types/website/listing/website-listing-read.ts`), and
+/// exists for exactly one reason: to decide whether a listing that
+/// declared no `sort:` gets the default one. Nothing else branches on
+/// it, so it deliberately does not travel on `ListingItem`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ListingItemSource {
+    /// A project document matched by a `contents:` glob — Q1's
+    /// `ListingItemSource.document`.
+    Document,
+    /// An inline record whose `path:` resolved to a project document —
+    /// Q1's `metadataDocument` upgrade (`website-listing-read.ts:1044`).
+    MetadataDocument,
+    /// An inline record not backed by a project document: no `path:`,
+    /// an external URL, a non-markdown path, or a path naming nothing
+    /// the project renders — Q1's plain `metadata`
+    /// (`website-listing-read.ts:1008`).
+    Metadata,
+}
+
+impl ListingItemSource {
+    /// Whether an item from this source arms the default
+    /// `order asc, title asc` sort for its listing.
+    ///
+    /// Q1 applies that default only when the listing's sources include
+    /// `document` or `metadataDocument`
+    /// (`website-listing-read.ts:645-648`); a metadata-only listing is
+    /// returned untouched (`:286-288`), so the order the author wrote
+    /// in `contents:` survives. q2 applied the default unconditionally
+    /// and silently alphabetised hand-curated card lists — records have
+    /// no front matter, hence no `order:`, so every item tied on the
+    /// primary key and fell through to `title asc`
+    /// (bd-listing-inline-records-order-eq8n2usm).
+    ///
+    /// **The `match` is exhaustive on purpose — no wildcard arm.** The
+    /// bug above was not a coding error in either the record path or
+    /// the sort path; it was the *interaction* between a newly added
+    /// item source and a pre-existing default, which no phase of
+    /// either plan owned. A new source variant should not compile
+    /// until someone answers this question for it.
+    fn arms_default_sort(self) -> bool {
+        match self {
+            Self::Document | Self::MetadataDocument => true,
+            Self::Metadata => false,
         }
-        ListingContents::Inline(_) => false,
-    })
+    }
+}
+
+/// Whether a document may appear as a listing item.
+///
+/// Listings do not filter drafts today (Q1 does). bd-zeormbsa
+/// introduces the shared `is_linkable` predicate on `ProjectIndex`;
+/// this is the one seam it replaces — the glob path and the record
+/// `path:` path both go through it, so the two can never disagree.
+fn item_visible(_profile: &DocumentProfile) -> bool {
+    true
+}
+
+enum RecordPath<'a> {
+    Document(&'a DocumentProfile),
+    Href(String),
+}
+
+/// Resolve a record's `path:` (Q1 `listItemFromMeta`, plan §D4).
+fn resolve_record_path<'a>(
+    raw: &str,
+    source: &SourceInfo,
+    base_ctx: &BaseDirContext<'_>,
+    index: Option<&'a ProjectIndex>,
+    diags: &mut Vec<DiagnosticMessage>,
+) -> RecordPath<'a> {
+    // Remote only — a leading `/` is the *project root* here and must
+    // fall through to `join_and_normalize` (plan §D4).
+    if is_remote_src(raw) {
+        return RecordPath::Href(raw.to_string());
+    }
+    let base_dir = base_ctx.base_dir_for(source);
+    let Some(resolved) = join_and_normalize(&base_dir, raw) else {
+        diags.push(
+            crate::glob::diagnostics::escapes_project("Q-12-17", "Listing record", raw, source)
+                .build(),
+        );
+        return RecordPath::Href(raw.to_string());
+    };
+    if !is_markdown_document_path(&resolved) {
+        return RecordPath::Href(raw.to_string());
+    }
+    match index.and_then(|i| i.lookup_by_source(std::path::Path::new(&resolved))) {
+        Some(profile) => RecordPath::Document(profile),
+        None => {
+            diags.push(record_path_not_found(
+                raw, &resolved, &base_dir, source, index,
+            ));
+            RecordPath::Href(raw.to_string())
+        }
+    }
+}
+
+fn record_path_not_found(
+    raw: &str,
+    resolved: &str,
+    base_dir: &str,
+    source: &SourceInfo,
+    index: Option<&ProjectIndex>,
+) -> DiagnosticMessage {
+    let against = if base_dir.is_empty() {
+        "the project root".to_string()
+    } else {
+        format!("`{base_dir}/`")
+    };
+    let mut b = DiagnosticMessageBuilder::warning(format!(
+        "Listing record `path: {raw}` names no project document"
+    ))
+    .with_code("Q-12-20")
+    .with_location(source.clone())
+    .problem(format!(
+        "Resolved to `{resolved}` (relative to {against}, where the listing is declared), \
+         which is not a document this project renders. The item keeps the link as written, \
+         so it may be broken."
+    ))
+    .add_info(
+        "Paths resolve against the directory of the file the listing is written in; \
+         a leading `/` anchors at the project root.",
+    );
+    let want = std::path::Path::new(resolved)
+        .file_name()
+        .and_then(|f| f.to_str());
+    if let Some(candidate) = index.and_then(|i| {
+        i.profiles()
+            .iter()
+            .find(|p| p.source_path.file_name().and_then(|f| f.to_str()) == want)
+            .map(|p| path_to_forward_slashes(&p.source_path))
+    }) {
+        b = b.add_hint(format!("Did you mean `{candidate}`?"));
+    }
+    b.build()
+}
+
+fn yaml_contents_unsupported(pattern: &str, source: &SourceInfo) -> DiagnosticMessage {
+    DiagnosticMessageBuilder::warning(format!(
+        "Listing `contents:` entry `{pattern}` is a YAML file, which is not supported yet"
+    ))
+    .with_code("Q-12-23")
+    .with_location(source.clone())
+    .problem(
+        "Quarto 1 reads a YAML file in `contents:` as a list of listing records. Quarto 2 \
+         does not yet (tracked as bd-hj1ehfn8); the entry is skipped.",
+    )
+    .add_hint("Move the records inline under `contents:` — each `- title: …` map becomes one item.")
+    .build()
 }
 
 #[cfg(test)]
@@ -231,39 +644,12 @@ mod tests {
         ConfigValue::new_map(map_entries, SourceInfo::for_test())
     }
 
-    /// A bare directory entry (`contents: posts`) matches everything
-    /// under the directory, in both path views; segment-exact, so a
-    /// sibling `posts-archive/` never matches. See bd-9arwdicv.
-    #[test]
-    fn matches_any_glob_bare_directory() {
-        let contents = vec![ListingContents::Glob("posts".to_string())];
-        assert!(matches_any_glob(
-            &contents,
-            "posts/welcome/index.qmd",
-            Some("posts/welcome/index.qmd"),
-        ));
-        // Project-relative fallback (host in a sub-directory).
-        assert!(matches_any_glob(&contents, "posts/welcome/index.qmd", None));
-        assert!(!matches_any_glob(
-            &contents,
-            "posts-archive/old.qmd",
-            Some("posts-archive/old.qmd"),
-        ));
-        // A literal file entry still matches itself exactly.
-        let file_entry = vec![ListingContents::Glob("posts/welcome/index.qmd".to_string())];
-        assert!(matches_any_glob(
-            &file_entry,
-            "posts/welcome/index.qmd",
-            None
-        ));
-    }
-
     fn make_profile(source: &str, output_href: &str, title: &str) -> DocumentProfile {
         DocumentProfile {
             source_path: PathBuf::from(source),
             output_href: output_href.to_string(),
             format_id: "html".to_string(),
-            title: Some(title.to_string()),
+            title: Some(crate::document_profile::text(title)),
             ..DocumentProfile::default()
         }
     }
@@ -277,6 +663,21 @@ mod tests {
         let mut p = make_profile(source, output_href, title);
         p.date = Some(date.to_string());
         p
+    }
+
+    fn make_profile_with_order(
+        source: &str,
+        output_href: &str,
+        title: &str,
+        order: i32,
+    ) -> DocumentProfile {
+        let mut p = make_profile(source, output_href, title);
+        p.order = Some(order);
+        p
+    }
+
+    fn titles(resolved: &[ResolvedListing]) -> Vec<String> {
+        resolved[0].items.iter().map(|i| i.title_text()).collect()
     }
 
     fn make_project(
@@ -293,6 +694,8 @@ mod tests {
                 .map(|p| DocumentInfo::from_path(format!("/project/{}", p.source_path.display())))
                 .collect(),
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         };
         let index = Arc::new(ProjectIndex::new(profiles));
         (project, index)
@@ -321,6 +724,77 @@ mod tests {
             .await
             .unwrap();
         (ctx.resolved_listings, ctx.diagnostics)
+    }
+
+    /// Like `run_transform`, but attaches a resource resolver and
+    /// returns the copy intents the transform registered.
+    async fn resource_copies_with_resolver(
+        resolver: Option<crate::resource_resolver::ResourceResolverContext>,
+    ) -> Vec<crate::render::ResourceCopyIntent> {
+        let mut ast = Pandoc {
+            meta: map(vec![("listing", map(vec![("contents", s("posts"))]))]),
+            blocks: vec![],
+        };
+        let mut first =
+            make_profile_with_date("posts/first.qmd", "posts/first.html", "First", "2026-01-15");
+        // Document-relative, as an author writes it; hydration
+        // rebases it to the project-relative `posts/cover.png`.
+        first.image = Some("cover.png".to_string());
+        let (project, index) = make_project("index.qmd", vec![first]);
+        let doc = DocumentInfo::from_path("/project/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ctx.resource_resolver = resolver;
+        ListingGenerateTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        ctx.resource_copies
+    }
+
+    // bd-qv2lsab0: natively, a front-matter `image:` is copied to the
+    // matching project-relative position under the output dir.
+    #[tokio::test]
+    async fn item_image_copy_intent_targets_output_dir_natively() {
+        let copies = resource_copies_with_resolver(Some(
+            crate::resource_resolver::ResourceResolverContext::website(
+                "/project/_site",
+                "/project/_site/index.html",
+                "site_libs",
+                "index",
+            ),
+        ))
+        .await;
+        assert_eq!(copies.len(), 1, "copies: {:?}", copies);
+        assert_eq!(copies[0].src, PathBuf::from("/project/posts/cover.png"));
+        assert_eq!(
+            copies[0].dest,
+            PathBuf::from("/project/_site/posts/cover.png")
+        );
+    }
+
+    // bd-yqlbfrln: in the hub-client the only allowed write root is
+    // the synthetic VFS artifacts root, so `output_dir.join(img)`
+    // (`/project/_site/...`) fails the OutputSink allowed-root check
+    // and takes the whole page render down with it. The hub's asset
+    // walker reads `<img src>` straight from the VFS, exactly as it
+    // does for body images (see `ResourceCollectorTransform`), so no
+    // copy intent is needed there.
+    #[tokio::test]
+    async fn item_image_copy_intent_skipped_in_vfs_root_mode() {
+        let copies = resource_copies_with_resolver(Some(
+            crate::resource_resolver::ResourceResolverContext::vfs_root(
+                "/.quarto/project-artifacts",
+            ),
+        ))
+        .await;
+        assert!(
+            copies.is_empty(),
+            "vfs_root mode must not register copy intents; got {:?}",
+            copies
+        );
     }
 
     // 28. generate_skips_when_no_listing_key
@@ -392,7 +866,7 @@ mod tests {
         .await;
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].items.len(), 1);
-        assert_eq!(resolved[0].items[0].title, "Keep");
+        assert_eq!(resolved[0].items[0].title_text(), "Keep");
     }
 
     // 31. generate_sorts_via_sort_field — date desc explicit.
@@ -416,9 +890,9 @@ mod tests {
         .await;
         assert_eq!(resolved[0].items.len(), 3);
         // Newest first.
-        assert_eq!(resolved[0].items[0].title, "C");
-        assert_eq!(resolved[0].items[1].title, "B");
-        assert_eq!(resolved[0].items[2].title, "A");
+        assert_eq!(resolved[0].items[0].title_text(), "C");
+        assert_eq!(resolved[0].items[1].title_text(), "B");
+        assert_eq!(resolved[0].items[2].title_text(), "A");
     }
 
     // 32. generate_excludes_host_page_itself — covered in #29 above
@@ -444,10 +918,10 @@ mod tests {
         )
         .await;
         assert_eq!(resolved[0].items.len(), 2);
-        let titles: Vec<&str> = resolved[0].items.iter().map(|i| i.title.as_str()).collect();
-        assert!(titles.contains(&"A"));
-        assert!(titles.contains(&"B"));
-        assert!(!titles.contains(&"C"));
+        let titles: Vec<String> = resolved[0].items.iter().map(|i| i.title_text()).collect();
+        assert!(titles.contains(&"A".to_string()));
+        assert!(titles.contains(&"B".to_string()));
+        assert!(!titles.contains(&"C".to_string()));
     }
 
     // Project-relative explicit glob from a host that's at root.
@@ -470,9 +944,9 @@ mod tests {
         )
         .await;
         assert_eq!(resolved[0].items.len(), 2);
-        let titles: Vec<&str> = resolved[0].items.iter().map(|i| i.title.as_str()).collect();
-        assert!(titles.contains(&"A"));
-        assert!(titles.contains(&"B"));
+        let titles: Vec<String> = resolved[0].items.iter().map(|i| i.title_text()).collect();
+        assert!(titles.contains(&"A".to_string()));
+        assert!(titles.contains(&"B".to_string()));
     }
 
     #[tokio::test]
@@ -496,26 +970,178 @@ mod tests {
         .await;
         assert_eq!(resolved[0].items.len(), 2);
         // Sort by date desc + truncate → C, B (A drops off).
-        assert_eq!(resolved[0].items[0].title, "C");
-        assert_eq!(resolved[0].items[1].title, "B");
+        assert_eq!(resolved[0].items[0].title_text(), "C");
+        assert_eq!(resolved[0].items[1].title_text(), "B");
     }
 
+    // Q1 parity (bd-listing-declared-order-3ixcvc4o): absent `sort:`
+    // applies `order asc, title asc` — NOT date desc. Every item
+    // carries a date, and the dates contradict both the order: values
+    // and the titles, so a date-driven default cannot produce the
+    // expected sequence.
     #[tokio::test]
-    async fn default_sort_is_date_desc_for_default_type() {
+    async fn default_sort_is_order_asc_then_title_asc() {
+        let with_order = |source: &str, href: &str, title: &str, date: &str, order: i32| {
+            let mut p = make_profile_with_date(source, href, title, date);
+            p.order = Some(order);
+            p
+        };
         let (resolved, _) = run_transform(
             map(vec![("listing", s("default"))]),
             "posts/index.qmd",
             vec![
-                make_profile_with_date("posts/a.qmd", "posts/a.html", "A", "2026-01-01"),
-                make_profile_with_date("posts/b.qmd", "posts/b.html", "B", "2026-03-01"),
-                make_profile_with_date("posts/c.qmd", "posts/c.html", "C", "2026-02-01"),
+                make_profile_with_date("posts/a.qmd", "posts/a.html", "Delta", "2026-04-01"),
+                with_order("posts/b.qmd", "posts/b.html", "Zulu", "2026-01-01", 1),
+                make_profile_with_date("posts/c.qmd", "posts/c.html", "Alpha", "2026-02-01"),
+                with_order("posts/d.qmd", "posts/d.html", "Mike", "2026-03-01", 2),
             ],
         )
         .await;
-        // No explicit sort → default = date desc.
-        assert_eq!(resolved[0].items[0].title, "B");
-        assert_eq!(resolved[0].items[1].title, "C");
-        assert_eq!(resolved[0].items[2].title, "A");
+        // order: 1 first, order: 2 second, then order-less items by
+        // title asc (missing order values sort last).
+        assert_eq!(titles(&resolved), ["Zulu", "Mike", "Alpha", "Delta"]);
+    }
+
+    // The default sort is uniform across listing types (Q1 applies it
+    // whenever `title` is among the hydrated fields, which holds for
+    // every built-in type — including table).
+    #[tokio::test]
+    async fn table_type_gets_default_sort_too() {
+        let (resolved, _) = run_transform(
+            map(vec![("listing", map(vec![("type", s("table"))]))]),
+            "posts/index.qmd",
+            vec![
+                make_profile_with_order("posts/a.qmd", "posts/a.html", "Second", 2),
+                make_profile_with_order("posts/b.qmd", "posts/b.html", "First", 1),
+            ],
+        )
+        .await;
+        assert_eq!(titles(&resolved), ["First", "Second"]);
+    }
+
+    // `sort: true` is Q1's "apply the default sort" — identical to an
+    // absent `sort:` key, and NOT a sort by a field named "true".
+    #[tokio::test]
+    async fn sort_true_behaves_like_absent_sort() {
+        let (resolved, diags) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![("type", s("default")), ("sort", b(true))]),
+            )]),
+            "posts/index.qmd",
+            vec![
+                make_profile_with_order("posts/a.qmd", "posts/a.html", "Second", 2),
+                make_profile_with_order("posts/b.qmd", "posts/b.html", "First", 1),
+            ],
+        )
+        .await;
+        assert!(
+            !diags.iter().any(|d| d.code.as_deref() == Some("Q-12-3")),
+            "sort: true must not diagnose; got {:?}",
+            diags
+        );
+        assert_eq!(titles(&resolved), ["First", "Second"]);
+    }
+
+    // bd-listing-declared-order-3ixcvc4o: with `sort: false`, explicit
+    // `contents:` entries render in declared order (Q1 semantics), not
+    // in project-index order.
+    #[tokio::test]
+    async fn sort_false_preserves_declared_contents_order() {
+        let (resolved, _) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![
+                    ("type", s("default")),
+                    ("sort", b(false)),
+                    ("contents", arr(vec![s("bravo.qmd"), s("alpha.qmd")])),
+                ]),
+            )]),
+            "index.qmd",
+            vec![
+                // Index order is alphabetical — the opposite of the
+                // declared order — to prove the reordering happens.
+                make_profile("alpha.qmd", "alpha.html", "Alpha"),
+                make_profile("bravo.qmd", "bravo.html", "Bravo"),
+            ],
+        )
+        .await;
+        assert_eq!(titles(&resolved), ["Bravo", "Alpha"]);
+    }
+
+    // Q1's rule generalizes to wildcard patterns: items are ordered by
+    // the index of the first pattern that matches them; within one
+    // pattern, project-index order.
+    #[tokio::test]
+    async fn contents_ordered_by_first_matching_pattern_index() {
+        let (resolved, _) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![
+                    ("type", s("default")),
+                    ("sort", b(false)),
+                    ("contents", arr(vec![s("z.qmd"), s("a*.qmd")])),
+                ]),
+            )]),
+            "index.qmd",
+            vec![
+                make_profile("a1.qmd", "a1.html", "A1"),
+                make_profile("a2.qmd", "a2.html", "A2"),
+                make_profile("z.qmd", "z.html", "Zed"),
+            ],
+        )
+        .await;
+        assert_eq!(titles(&resolved), ["Zed", "A1", "A2"]);
+    }
+
+    // An item matched by several patterns belongs to the FIRST one and
+    // appears exactly once.
+    #[tokio::test]
+    async fn item_matching_multiple_patterns_appears_once_at_first_pattern() {
+        let (resolved, _) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![
+                    ("type", s("default")),
+                    ("sort", b(false)),
+                    ("contents", arr(vec![s("b.qmd"), s("*.qmd")])),
+                ]),
+            )]),
+            "index.qmd",
+            vec![
+                make_profile("a.qmd", "a.html", "Aye"),
+                make_profile("b.qmd", "b.html", "Bee"),
+            ],
+        )
+        .await;
+        assert_eq!(titles(&resolved), ["Bee", "Aye"]);
+    }
+
+    // Q-12-19 ("matched nothing") must credit EVERY pattern an item
+    // matches, not just the first-match winner: `b*.qmd`'s only match
+    // is claimed by `b.qmd` for ordering purposes, but it still
+    // matched something.
+    #[tokio::test]
+    async fn q_12_19_silent_when_matches_claimed_by_earlier_pattern() {
+        let (resolved, diags) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![
+                    ("type", s("default")),
+                    ("sort", b(false)),
+                    ("contents", arr(vec![s("b.qmd"), s("b*.qmd")])),
+                ]),
+            )]),
+            "index.qmd",
+            vec![make_profile("b.qmd", "b.html", "Bee")],
+        )
+        .await;
+        assert_eq!(titles(&resolved), ["Bee"]);
+        assert!(
+            !diags.iter().any(|d| d.code.as_deref() == Some("Q-12-19")),
+            "no matched-nothing diag expected; got {:?}",
+            diags
+        );
     }
 
     #[tokio::test]
@@ -551,5 +1177,535 @@ mod tests {
         // The pre-populated empty resolved listing wasn't overwritten.
         assert_eq!(ctx.resolved_listings.len(), 1);
         assert!(ctx.resolved_listings[0].items.is_empty());
+    }
+
+    // bd-listing-inline-contents-tyy446ze Task 5: records in the
+    // generate transform.
+    use crate::project::listing::{ItemOrigin, ItemTarget};
+
+    fn contents_listing(entries: Vec<ConfigValue>) -> ConfigValue {
+        map(vec![(
+            "listing",
+            map(vec![("id", s("l")), ("contents", arr(entries))]),
+        )])
+    }
+    fn contents_listing_unsorted(entries: Vec<ConfigValue>) -> ConfigValue {
+        map(vec![(
+            "listing",
+            map(vec![
+                ("id", s("l")),
+                ("sort", b(false)),
+                ("contents", arr(entries)),
+            ]),
+        )])
+    }
+    fn codes(diags: &[quarto_error_reporting::DiagnosticMessage]) -> Vec<&str> {
+        diags.iter().filter_map(|d| d.code.as_deref()).collect()
+    }
+
+    #[tokio::test]
+    async fn record_without_path_becomes_unlinked_item_with_custom_fields() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![
+                ("title", s("Get started")),
+                ("icon", s("bi-rocket-takeoff")),
+                ("link", s("download.qmd")),
+            ])]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        let item = &resolved[0].items[0];
+        assert_eq!(item.title_text(), "Get started");
+        assert_eq!(item.target, ItemTarget::None);
+        assert_eq!(item.origin, ItemOrigin::Record);
+        assert_eq!(
+            item.extra
+                .get("link")
+                .and_then(|v| v.as_plain_text())
+                .as_deref(),
+            Some("download.qmd")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_path_overlays_the_named_document() {
+        let mut doc = make_profile("download.qmd", "download.html", "Download stub");
+        doc.description = Some(crate::document_profile::text("from the document"));
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![
+                ("title", s("Get started")),
+                ("path", s("download.qmd")),
+            ])]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home"), doc],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        let item = &resolved[0].items[0];
+        assert_eq!(item.title_text(), "Get started");
+        assert_eq!(
+            crate::document_profile::plain(&item.description).as_deref(),
+            Some("from the document")
+        );
+        assert_eq!(
+            item.target,
+            ItemTarget::document("download.qmd", "download.html")
+        );
+        assert_eq!(item.origin, ItemOrigin::RecordOverDocument);
+    }
+
+    #[tokio::test]
+    async fn record_path_resolves_against_the_host_directory() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![("path", s("../rootpost.qmd"))])]),
+            "sub/index.qmd",
+            vec![
+                make_profile("sub/index.qmd", "sub/index.html", "Sub"),
+                make_profile("rootpost.qmd", "rootpost.html", "Root Post"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(resolved[0].items[0].title_text(), "Root Post");
+        assert_eq!(
+            resolved[0].items[0].target,
+            ItemTarget::document("rootpost.qmd", "rootpost.html")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_path_to_unknown_document_warns_q_12_20_and_keeps_href() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![
+                ("title", s("Typo")),
+                ("path", s("downlaod.qmd")),
+            ])]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("guide/downlaod.qmd", "guide/downlaod.html", "Elsewhere"),
+            ],
+        )
+        .await;
+        assert_eq!(codes(&diags), vec!["Q-12-20"]);
+        let hint = format!("{:?}", diags[0]);
+        assert!(
+            hint.contains("guide/downlaod.qmd"),
+            "did-you-mean names the same-named document: {hint}"
+        );
+        assert_eq!(
+            resolved[0].items[0].target,
+            ItemTarget::Href("downlaod.qmd".to_string())
+        );
+        assert_eq!(resolved[0].items[0].title_text(), "Typo");
+    }
+
+    #[tokio::test]
+    async fn record_path_external_url_and_non_document_are_literal_hrefs() {
+        let (resolved, diags) = run_transform(
+            contents_listing_unsorted(vec![
+                map(vec![
+                    ("title", s("Site")),
+                    ("path", s("https://example.com/")),
+                ]),
+                map(vec![
+                    ("title", s("Report")),
+                    ("path", s("files/report.pdf")),
+                ]),
+            ]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            resolved[0].items[0].target,
+            ItemTarget::Href("https://example.com/".to_string())
+        );
+        assert_eq!(
+            resolved[0].items[1].target,
+            ItemTarget::Href("files/report.pdf".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn record_path_with_leading_slash_anchors_at_the_project_root() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![("path", s("/rootpost.qmd"))])]),
+            "sub/index.qmd",
+            vec![
+                make_profile("sub/index.qmd", "sub/index.html", "Sub"),
+                make_profile("rootpost.qmd", "rootpost.html", "Root Post"),
+            ],
+        )
+        .await;
+        assert!(
+            diags.is_empty(),
+            "a leading `/` is the project root, not a remote URL; {diags:?}"
+        );
+        assert_eq!(
+            resolved[0].items[0].target,
+            ItemTarget::document("rootpost.qmd", "rootpost.html")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_path_escaping_the_project_warns_q_12_17() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![map(vec![
+                ("title", s("Out")),
+                ("path", s("../../x.qmd")),
+            ])]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert_eq!(codes(&diags), vec!["Q-12-17"]);
+        assert_eq!(
+            resolved[0].items[0].target,
+            ItemTarget::Href("../../x.qmd".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn records_keep_their_declared_position_under_sort_false() {
+        let (resolved, diags) = run_transform(
+            contents_listing_unsorted(vec![
+                map(vec![("title", s("First record"))]),
+                s("posts/*.qmd"),
+                map(vec![("title", s("Last record"))]),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["First record", "A", "Last record"]);
+    }
+
+    // bd-listing-inline-records-order-eq8n2usm. Q1 applies its default
+    // `order asc, title asc` sort only when a listing's item sources
+    // include `document` or `metadataDocument`
+    // (`website-listing-read.ts:645-648`). A listing built purely from
+    // inline records has neither — every record is plain `metadata` —
+    // so Q1 leaves `items` untouched and declared YAML order survives.
+    // q2 applied the default unconditionally, and since a record has no
+    // front matter it has no `order`, so every item tied on the primary
+    // key and fell through to `title asc`: the author's curated order
+    // was silently alphabetised.
+    #[tokio::test]
+    async fn all_record_listing_keeps_declared_order_under_default_sort() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![
+                map(vec![("title", s("Zulu"))]),
+                map(vec![("title", s("Alpha"))]),
+                map(vec![("title", s("Mike"))]),
+            ]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["Zulu", "Alpha", "Mike"]);
+    }
+
+    // The withholding is keyed on item *sources*, not on the absence of
+    // globs: a record whose `path:` resolves to a project document is
+    // Q1's `metadataDocument` (`website-listing-read.ts:1044`), which
+    // does qualify. So one such record re-arms the default sort for the
+    // whole listing — including the path-less records beside it.
+    #[tokio::test]
+    async fn record_path_to_a_document_re_arms_the_default_sort() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![
+                map(vec![("title", s("Zulu"))]),
+                map(vec![("title", s("Alpha")), ("path", s("posts/a.qmd"))]),
+                map(vec![("title", s("Mike"))]),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["Alpha", "Mike", "Zulu"]);
+    }
+
+    // A record `path:` that is NOT a markdown document stays Q1's plain
+    // `metadata` (it never reaches the `metadataDocument` upgrade), so
+    // it must not re-arm the sort. Same for an external URL.
+    #[tokio::test]
+    async fn record_href_paths_do_not_re_arm_the_default_sort() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![
+                map(vec![("title", s("Zulu")), ("path", s("assets/z.pdf"))]),
+                map(vec![
+                    ("title", s("Alpha")),
+                    ("path", s("https://example.com/a")),
+                ]),
+                map(vec![("title", s("Mike"))]),
+            ]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["Zulu", "Alpha", "Mike"]);
+    }
+
+    // A glob item is Q1's `document` source, so a mixed listing keeps
+    // the default sort — records alphabetise among the glob's documents
+    // exactly as in Q1. This is the deliberate limit of the fix: it
+    // restores Q1 parity, it does not extend declared-position ordering
+    // past what Q1 does.
+    #[tokio::test]
+    async fn mixed_record_and_glob_listing_still_gets_the_default_sort() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![
+                map(vec![("title", s("Zulu"))]),
+                s("posts/*.qmd"),
+                map(vec![("title", s("Alpha"))]),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "Post One"),
+                make_profile("posts/b.qmd", "posts/b.html", "Post Two"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            titles(&resolved),
+            vec!["Alpha", "Post One", "Post Two", "Zulu"]
+        );
+    }
+
+    // Withholding the *default* sort must not withhold an *explicit*
+    // one: Q1's condition is `!listingHydrated.sort`, so an author who
+    // writes `sort:` on an all-records listing still gets it applied.
+    #[tokio::test]
+    async fn explicit_sort_still_applies_to_an_all_record_listing() {
+        let (resolved, diags) = run_transform(
+            map(vec![(
+                "listing",
+                map(vec![
+                    ("id", s("l")),
+                    ("sort", arr(vec![s("title asc")])),
+                    (
+                        "contents",
+                        arr(vec![
+                            map(vec![("title", s("Zulu"))]),
+                            map(vec![("title", s("Alpha"))]),
+                            map(vec![("title", s("Mike"))]),
+                        ]),
+                    ),
+                ]),
+            )]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["Alpha", "Mike", "Zulu"]);
+    }
+
+    #[tokio::test]
+    async fn record_and_glob_naming_the_same_document_yield_two_items() {
+        let (resolved, _) = run_transform(
+            contents_listing_unsorted(vec![
+                map(vec![("title", s("Featured")), ("path", s("posts/a.qmd"))]),
+                s("posts/*.qmd"),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            titles(&resolved),
+            vec!["Featured", "A"],
+            "Q1 parity: no dedupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn yaml_file_entry_warns_q_12_23_and_not_q_12_19() {
+        let (resolved, diags) = run_transform(
+            contents_listing(vec![s("items.yml"), s("posts/*.qmd")]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert_eq!(codes(&diags), vec!["Q-12-23"]);
+        assert_eq!(titles(&resolved), vec!["A"]);
+    }
+
+    #[tokio::test]
+    async fn record_near_miss_and_missing_title_surface_from_generate() {
+        let (_, diags) = run_transform(
+            contents_listing(vec![
+                map(vec![("titel", s("x"))]),
+                map(vec![("description", s("no title"))]),
+            ]),
+            "index.qmd",
+            vec![make_profile("index.qmd", "index.html", "Home")],
+        )
+        .await;
+        let mut got = codes(&diags);
+        got.sort_unstable();
+        assert_eq!(got, vec!["Q-12-21", "Q-12-21", "Q-12-22"]);
+    }
+
+    // Review fix (bd-listing-inline-contents-tyy446ze, task 5 round 1):
+    // a record's declared-position key must count only Glob entries
+    // that actually contribute a positive pattern to
+    // `resolution.positives()` — a negated pattern before the record
+    // must not advance its key, or the record sorts after a later
+    // positive glob's items under `sort: false`.
+    #[tokio::test]
+    async fn record_keeps_position_when_a_negated_pattern_precedes_it() {
+        let (resolved, diags) = run_transform(
+            contents_listing_unsorted(vec![
+                s("!posts/draft.qmd"),
+                map(vec![("title", s("Featured"))]),
+                s("posts/*.qmd"),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["Featured", "A"]);
+    }
+
+    // Same failure mode, different reason a leading pattern
+    // contributes nothing to `resolution.positives()`: it escapes the
+    // project root (Q-12-17) rather than being negated.
+    #[tokio::test]
+    async fn record_keeps_position_when_an_escaping_pattern_precedes_it() {
+        let (resolved, diags) = run_transform(
+            contents_listing_unsorted(vec![
+                s("../../x.qmd"),
+                map(vec![("title", s("Featured"))]),
+                s("posts/*.qmd"),
+            ]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("posts/a.qmd", "posts/a.html", "A"),
+            ],
+        )
+        .await;
+        assert_eq!(codes(&diags), vec!["Q-12-17"]);
+        assert_eq!(titles(&resolved), vec!["Featured", "A"]);
+    }
+
+    // Review fix (bd-listing-inline-contents-tyy446ze, task 5 round
+    // 2): a `contents:` that is only negations triggers
+    // `resolve_content_globs`'s injected default positive (Q1
+    // parity: the host directory's `*.qmd` siblings). The synthesized
+    // pattern has no declared position of its own — team-lead ruling:
+    // it stands for the implicit "everything" and is defined to
+    // precede every declared entry, so a record declared after the
+    // negation sorts *after* the default's items, not before them.
+    #[tokio::test]
+    async fn record_after_negation_only_prefix_sorts_after_the_injected_default() {
+        let (resolved, diags) = run_transform(
+            contents_listing_unsorted(vec![s("!draft.qmd"), map(vec![("title", s("Featured"))])]),
+            "index.qmd",
+            vec![
+                make_profile("index.qmd", "index.html", "Home"),
+                make_profile("a.qmd", "a.html", "A"),
+                make_profile("draft.qmd", "draft.html", "Draft"),
+            ],
+        )
+        .await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(titles(&resolved), vec!["A", "Featured"]);
+    }
+
+    // Review fix (task 5 round 2): the round-1 text-matching
+    // reconstruction misclassified a record's position when the SAME
+    // raw pattern text appeared twice with different provenance —
+    // once resolving fine (declared in `sub/index.qmd`, base dir
+    // `sub`), once escaping the project root (declared in
+    // `_quarto.yml`, base dir the project root). `take_first` matched
+    // the *first* occurrence regardless of which one actually
+    // escaped, crediting the escape to the wrong entry and letting
+    // the record jump ahead of an item it was written after. The
+    // structural fix (`GlobResolution::entry_index`) can't confuse
+    // the two: each raw entry's own outcome is recorded at resolution
+    // time, not reconstructed afterward by matching text.
+    #[tokio::test]
+    async fn record_position_unaffected_by_duplicate_pattern_text_with_different_provenance() {
+        use quarto_source_map::SourceContext;
+
+        let mut sc = SourceContext::new();
+        let sub_id = sc.add_file("/project/sub/index.qmd".to_string(), None);
+        let root_id = sc.add_file("/project/_quarto.yml".to_string(), None);
+        // Base dir "sub" — "../x.qmd" normalizes to "x.qmd" (valid).
+        let valid_source = SourceInfo::original(sub_id, 0, 10);
+        // Base dir "" (project root) — "../x.qmd" escapes.
+        let escaped_source = SourceInfo::original(root_id, 0, 10);
+
+        let contents = arr(vec![
+            ConfigValue::new_string("../x.qmd", valid_source),
+            map(vec![("title", s("Featured"))]),
+            ConfigValue::new_string("../x.qmd", escaped_source),
+        ]);
+        let meta = map(vec![(
+            "listing",
+            map(vec![
+                ("id", s("l")),
+                ("sort", b(false)),
+                ("contents", contents),
+            ]),
+        )]);
+
+        let mut ast = Pandoc {
+            meta,
+            blocks: vec![],
+        };
+        let (project, index) = make_project(
+            "sub/index.qmd",
+            vec![
+                make_profile("sub/index.qmd", "sub/index.html", "Sub"),
+                make_profile("x.qmd", "x.html", "X"),
+            ],
+        );
+        let doc = DocumentInfo::from_path("/project/sub/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ctx.source_context = Some(&sc);
+
+        ListingGenerateTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(codes(&ctx.diagnostics), vec!["Q-12-17"]);
+        // The valid "../x.qmd" (declared first) resolves to "x.qmd",
+        // the project's only positive pattern — its item sorts before
+        // the record declared after it; the escaping duplicate
+        // (declared last) contributes nothing.
+        assert_eq!(titles(&ctx.resolved_listings), vec!["X", "Featured"]);
     }
 }

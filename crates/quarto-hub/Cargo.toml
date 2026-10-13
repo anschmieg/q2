@@ -45,9 +45,9 @@ time = "0.3"
 # utf16-indexing: use UTF-16 code units for text indices, matching the JS/WASM client.
 # Without this, the Rust default is UnicodeCodePoint, which disagrees with JS on
 # non-BMP characters (emoji etc.) — each emoji is 1 code point but 2 UTF-16 code units.
-automerge = { version = "0.10.0", features = ["utf16-indexing"] }
-# Vendored samod fork carrying the synchronous AccessPolicy trait (long-term home).
-samod = { version = "0.12.3", git = "https://github.com/quarto-dev/samod.git", branch = "access-policy", features = ["tokio", "axum", "tungstenite"] }
+automerge = { version = "0.12.0", features = ["utf16-indexing"] }
+# samod fork carrying the synchronous AccessPolicy trait.
+samod = { version = "0.14.0", git = "https://github.com/quarto-dev/samod.git", branch = "access-policy", features = ["tokio", "axum", "tungstenite"] }
 
 # Async streams (for samod event handling)
 futures = "0.3"
@@ -72,6 +72,8 @@ clap = { workspace = true }
 
 # Utilities
 quarto-util = { workspace = true }
+# Shared canonicalize, so hub paths match the rest of q2's spelling
+quarto-system-runtime = { workspace = true }
 walkdir = "2"
 dirs = "6"
 
@@ -97,6 +99,11 @@ infer = "0.19"
 # RFC 3339 createdAt stamps on capture-doc meta (bd-eiku4ymo).
 chrono = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+# UDS transport (bd-kosgkxjt): peer credentials (uid), group
+# resolution, and chown for the socket lifecycle.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 # Phase 2 Bearer-auth integration tests: spin up a mock OIDC provider,
@@ -104,6 +111,15 @@ tempfile = "3"
 rsa = { version = "0.9", features = ["pem", "getrandom"] }
 base64 = "0.22"
 parking_lot = "0.12"
+# UDS transport tests (bd-mfapk5yl): websocket client over unix sockets,
+# matching the version quarto-hub-provider uses for BearerDialer.
+tokio-tungstenite = "0.27.0"
+tungstenite = "0.27.0"
+
+[target.'cfg(unix)'.dev-dependencies]
+# Signals (SIGTERM for graceful-shutdown tests) and setuid/setgid for the
+# root-gated cross-uid accept-check helpers.
+libc = "0.2"
 
 [lints]
 workspace = true

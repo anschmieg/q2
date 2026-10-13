@@ -5,7 +5,7 @@
 //! then inspects the produced theme CSS for brand-derived rules.
 //!
 //! This is the test that would have caught the
-//! `CompileThemeCssStage`-doesn't-fire incident (see CLAUDE.md
+//! `CompileThemeCssStage`-doesn't-fire incident (see AGENTS.md
 //! "End-to-end verification") for brand. Pure unit tests in
 //! `quarto-sass` can't see whether the pipeline actually wired
 //! `ThemeConfig::resolve` correctly; this test can.
@@ -139,7 +139,7 @@ fn brand_only_no_theme_key_still_renders_brand_layer() {
 /// Q1 auto-discovers `_brand.yml` from the project root; Q2 doesn't.
 /// The reasoning is that an unstyled page is a worse failure mode
 /// than a clear "you asked for brand but didn't say where it is"
-/// diagnostic — see CLAUDE.md "Debugging Approach" / "End-to-end
+/// diagnostic — see AGENTS.md "Debugging Approach" / "End-to-end
 /// verification". We can revisit auto-discovery once we have proper
 /// source-location diagnostics that point at the offending YAML.
 #[test]
@@ -176,4 +176,365 @@ fn theme_brand_without_brand_key_fails_loudly() {
         msg.to_lowercase().contains("brand"),
         "error message should mention brand, got: {msg}"
     );
+}
+
+// ── unified light/dark brand (bd-unified-brand-split-ep49amad, GH #580) ──
+
+/// Collect `(path, contents)` for every CSS file under the resources
+/// dir, so assertions can distinguish which *file* carries a value.
+fn css_files_by_path(resources_dir: &Path) -> Vec<(std::path::PathBuf, String)> {
+    walkdir::WalkDir::new(resources_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("css"))
+        .map(|e| {
+            let p = e.path().to_path_buf();
+            let contents = std::fs::read_to_string(&p).unwrap();
+            (p, contents)
+        })
+        .collect()
+}
+
+/// The exact reproduction from GH #580: a single-file render whose
+/// front matter names a `_brand.yml` that uses per-color `{light:,
+/// dark:}` values. The light value must land in the light stylesheet
+/// and the dark value in the dark one, matching what the two-file
+/// `brand: {light:, dark:}` form already does.
+#[test]
+fn unified_brand_light_dark_renders_both_stylesheets() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("_brand.yml"),
+        "color:\n  background:\n    light: \"#b22221\"\n    dark: \"#22b221\"\n",
+    );
+    write(
+        &root.join("index.qmd"),
+        "---\nformat: html\nbrand: _brand.yml\n---\n\nHello.\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("a unified light/dark brand must render (GH #580)");
+
+    let files = css_files_by_path(&result.resources_dir);
+    let light = files
+        .iter()
+        .find(|(_, css)| css.contains("--bs-body-bg: #b22221"))
+        .expect("some CSS file must carry the light background");
+    let dark = files
+        .iter()
+        .find(|(_, css)| css.contains("--bs-body-bg: #22b221"))
+        .expect("some CSS file must carry the dark background");
+    assert_ne!(
+        light.0, dark.0,
+        "light and dark variants must be separate CSS files"
+    );
+
+    // The dual-variant machinery must fully engage: attributed links,
+    // the trailing light-copy link (light is the author default for a
+    // unified brand), and the color-mode runtime.
+    let html = std::fs::read_to_string(&result.output_path).unwrap();
+    assert!(
+        html.contains(r#"class="quarto-color-scheme" id="quarto-bootstrap""#),
+        "attributed light link must be present"
+    );
+    assert!(
+        html.contains(r#"class="quarto-color-scheme quarto-color-alternate""#),
+        "attributed dark (alternate) link must be present"
+    );
+    assert!(
+        html.contains(r#"class="quarto-color-scheme-extra""#),
+        "light is the author default → trailing light-copy link"
+    );
+    assert!(
+        html.contains(r#"<meta name="color-scheme" content="light">"#),
+        "author-default-light meta hint"
+    );
+    assert!(
+        html.contains(r#"data-author-prefers-dark="false""#),
+        "color-mode script must be configured for light default"
+    );
+}
+
+/// Project-config shape from docs/guides/authoring/brand.qmd: the
+/// brand is named in `_quarto.yml`, and typography colors carry
+/// pairs too. Each hex must land only in its own variant's CSS.
+#[test]
+fn unified_brand_typography_colors_split_per_variant() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("_quarto.yml"),
+        "project:\n  type: default\nbrand: _brand.yml\n",
+    );
+    write(
+        &root.join("_brand.yml"),
+        concat!(
+            "color:\n",
+            "  background:\n",
+            "    light: \"#fefefd\"\n",
+            "    dark: \"#333231\"\n",
+            "typography:\n",
+            "  headings:\n",
+            "    color:\n",
+            "      light: \"#111143\"\n",
+            "      dark: \"#d0d0fe\"\n",
+        ),
+    );
+    write(
+        &root.join("index.qmd"),
+        "---\nformat: html\n---\n\n# Heading\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("project-level unified brand must render");
+
+    let files = css_files_by_path(&result.resources_dir);
+    let light = files
+        .iter()
+        .find(|(_, css)| css.contains("#fefefd"))
+        .expect("light background present in some CSS file");
+    let dark = files
+        .iter()
+        .find(|(_, css)| css.contains("#333231"))
+        .expect("dark background present in some CSS file");
+    assert_ne!(light.0, dark.0);
+    assert!(
+        light.1.contains("#111143") && !light.1.contains("#d0d0fe"),
+        "light headings color only in the light variant"
+    );
+    assert!(
+        dark.1.contains("#d0d0fe") && !dark.1.contains("#111143"),
+        "dark headings color only in the dark variant"
+    );
+}
+
+/// A unified brand with no dark values must NOT enable dark mode:
+/// single stylesheet, no attributed links, no color-mode runtime
+/// (Q1's `enablesDarkMode` counts only actual `dark:` keys).
+#[test]
+fn unified_brand_all_plain_stays_single_variant() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("_brand.yml"),
+        "color:\n  background: \"#fefefd\"\n  primary: \"#3366c1\"\n",
+    );
+    write(
+        &root.join("index.qmd"),
+        "---\nformat: html\nbrand: _brand.yml\n---\n\nHello.\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("plain brand must render");
+
+    let files = css_files_by_path(&result.resources_dir);
+    assert!(
+        !files
+            .iter()
+            .any(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("styles-dark.css")),
+        "no dark values → no dark stylesheet"
+    );
+    let html = std::fs::read_to_string(&result.output_path).unwrap();
+    assert!(
+        !html.contains("quarto-color-scheme"),
+        "no dark values → plain, attribute-free links"
+    );
+    assert!(
+        !html.contains("quarto-color-mode"),
+        "no dark values → no color-mode runtime"
+    );
+}
+
+/// The navbar dark-mode toggle must appear when the ONLY dark signal
+/// is unified brand content (no `theme: {light:, dark:}` pair) — the
+/// toggle decision may not be re-derived from config alone.
+#[test]
+fn unified_brand_enables_navbar_toggle() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("_quarto.yml"),
+        concat!(
+            "project:\n",
+            "  type: website\n",
+            "website:\n",
+            "  navbar:\n",
+            "    left:\n",
+            "      - href: index.qmd\n",
+            "        text: Home\n",
+            "brand: _brand.yml\n",
+        ),
+    );
+    write(
+        &root.join("_brand.yml"),
+        "color:\n  background:\n    light: \"#fefefd\"\n    dark: \"#333231\"\n",
+    );
+    write(
+        &root.join("index.qmd"),
+        "---\ntitle: Home\n---\n\n# Hello\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("website with unified brand must render");
+    let html = std::fs::read_to_string(&result.output_path).unwrap();
+    assert!(
+        html.contains(r#"class="quarto-color-scheme-toggle"#),
+        "navbar must carry the dark-mode toggle when brand content enables dark mode"
+    );
+}
+
+// ── GH #581: front-matter brand (bd-vk4olgv6) ───────────────────────
+
+/// The exact reproduction from GH #581: an inline `brand:` block in a
+/// single-file document's front matter. Front-matter strings default
+/// to markdown (`PandocInlines`), which the brand walker rejects with
+/// Q-14-1 — the block must instead stay plain YAML and render exactly
+/// as it does from `_quarto.yml`.
+#[test]
+fn front_matter_inline_brand_block_renders() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("index.qmd"),
+        "---\nformat: html\nbrand:\n  color:\n    background: \"#b22222\"\n---\n\nHello.\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("an inline brand block in front matter must render (GH #581)");
+
+    let css = read_css(&result.resources_dir);
+    assert!(
+        css.contains("#b22222"),
+        "front-matter brand background must reach the theme CSS"
+    );
+}
+
+/// GH #581, second half: `brand: _brand.yml` in front matter renders
+/// but used to emit a spurious Q-1-20 warning (the leading underscore
+/// read as an unclosed emphasis mark). The path is machine-facing —
+/// no markdown parse, no warning.
+#[test]
+fn front_matter_brand_file_renders_without_markdown_warning() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("_brand.yml"),
+        "color:\n  background: \"#b22222\"\n",
+    );
+    write(
+        &root.join("index.qmd"),
+        "---\nformat: html\nbrand: _brand.yml\n---\n\nHello.\n",
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("brand file named from front matter must render");
+
+    let css = read_css(&result.resources_dir);
+    assert!(css.contains("#b22222"), "brand must be applied");
+    let q_1_20: Vec<_> = result
+        .render_output
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("Q-1-20"))
+        .collect();
+    assert!(
+        q_1_20.is_empty(),
+        "no markdown-parse warning for the brand path; got {q_1_20:?}"
+    );
+}
+
+/// The `!md` escape hatch (user-approved scope of bd-vk4olgv6): an
+/// explicitly tagged markdown value under `brand.meta` beats the
+/// plain-YAML annotation at load time, and the brand walker projects
+/// it to plain text instead of failing the render with Q-14-1.
+#[test]
+fn front_matter_md_tagged_brand_meta_value_renders() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("index.qmd"),
+        concat!(
+            "---\n",
+            "format: html\n",
+            "brand:\n",
+            "  meta:\n",
+            "    name: !md \"Acme *Corp*\"\n",
+            "  color:\n",
+            "    background: \"#b22222\"\n",
+            "---\n",
+            "\n",
+            "Hello.\n",
+        ),
+    );
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let result = render_to_file(
+        &root.join("index.qmd"),
+        "html",
+        &RenderToFileOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .expect("!md-tagged brand.meta value must not fail the render");
+
+    let css = read_css(&result.resources_dir);
+    assert!(css.contains("#b22222"), "brand must still be applied");
 }

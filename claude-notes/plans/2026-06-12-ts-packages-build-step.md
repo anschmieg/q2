@@ -1,4 +1,11 @@
-# ts-packages build step for xtask build-all / verify (bd-6rczoll3)
+---
+title: 'ts-packages build step for xtask build-all / verify (bd-6rczoll3)'
+date: 2026-06-12
+description: 'Adds a `ts-packages` build step to `cargo xtask build-all` and `verify`, since the MCP server runs from `dist/` output that no step builds, and makes its build script work on Windows.'
+braid:
+  strand: bd-6rczoll3
+  priority: P1
+---
 
 ## Overview
 
@@ -31,7 +38,7 @@ Observed tree state at diagnosis time (2026-06-12): 7 of 9 ts-packages had no
      `--if-present` covers packages without a `build` script
      (`sync-test-harness`, `wasm-js-bridge`). Build **order doesn't matter**:
      since types resolve via `src/`, each package's `tsc` compiles without its
-     dependencies' `dist/` present.
+     dependencies\' `dist/` present.
 2. **build-all**: new step between `npm install` and the hub-client build,
    with a `--skip-ts-packages-build` flag.
 3. **verify**: new step 6 (before the hub-client build; `TOTAL_STEPS` 12→13,

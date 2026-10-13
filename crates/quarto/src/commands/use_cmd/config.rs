@@ -153,7 +153,11 @@ impl ProjectConfigFile {
             let parsed = parse_file(&text, &path.to_string_lossy()).map_err(|e| {
                 CommandFailure::new(
                     format!("Failed to parse {filename}"),
-                    format!("{}: {e}", path.display()),
+                    format!(
+                        "{}: {}",
+                        path.display(),
+                        quarto_core::config_sources::describe_yaml_error(&text, e)
+                    ),
                 )
             })?;
 
@@ -230,6 +234,28 @@ impl ProjectConfigFile {
         let Yaml::String(parsed) = &entry.value.yaml else {
             return None;
         };
+        // The two raw accessors below are safe *only* because of the
+        // byte-equality check on the next line. The accessor rule
+        // (audit findings section 1) otherwise forbids
+        // `start_offset()`/`end_offset()` on a span that might be a
+        // `Concat`, or a `Substring` over one: those report *content*
+        // coordinates, not file offsets — measured, findings section 8,
+        // fixture `C`: `start_offset() == 0` and `end_offset() ==`
+        // content length. On this path the shape is not that today —
+        // `parse_file` (`ProjectConfigFile::load`) parses the whole
+        // `_quarto.yml`, so `value_span` is an `Original` over its own
+        // file — but the check does not depend on that holding. Handed a
+        // `Concat`-derived span, `self.text[start..end]` would be an
+        // unrelated prefix of the file rather than the value's text, the
+        // comparison would fail, and the function would return `None`.
+        // So it refuses rather than mis-points. (The one coincidence the
+        // check cannot catch is a file whose first `end` bytes literally
+        // spell `parsed`.)
+        //
+        // That refusal is why the `map_offset`-hull simplification —
+        // declined by Plan 2 (R-8, hand-off item 1) — is declined
+        // **permanently** as of 2026-08-23 (Plan 3 Phase 8), with no
+        // strand: the function is limited, not wrong.
         let start = entry.value_span.start_offset();
         let end = entry.value_span.end_offset();
         if self.text.get(start..end)? == parsed.as_str() {
@@ -327,6 +353,16 @@ mod tests {
         let path = dir.path().join("_quarto.yml");
         std::fs::write(&path, text).unwrap();
         ProjectConfigFile::load(&path)
+    }
+
+    #[test]
+    fn yaml_syntax_error_names_the_position() {
+        // bd-x30aq7ae: the unclosed flow sequence fails at the `:` of
+        // `title:`; the position must survive into the prose.
+        let err = load_from("project:\n  type: [website\ntitle: x\n")
+            .expect_err("malformed YAML must be refused");
+        let text = err.0.to_text(None);
+        assert!(text.contains("(line 3, column 6)"), "{text}");
     }
 
     #[test]

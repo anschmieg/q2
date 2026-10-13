@@ -18,9 +18,15 @@
 .replay-drawer--expanded {
   height: 72px;
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  outline: none;
   display: flex;
   flex-direction: column;
+}
+
+/* The expanded drawer is focusable (tabIndex) — keep a visible keyboard
+   indicator, inset so the ring isn't clipped by surrounding overflow. */
+.replay-drawer--expanded:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 /* Toggle button — matches .section-header style from SidebarTabs */
@@ -72,9 +78,8 @@
 .replay-drawer__header {
   display: flex;
   align-items: center;
-  gap: 10px;
   height: 28px;
-  padding: 4px 10px 0;
+  padding: 0 0 0 8px;
   flex-shrink: 0;
 }
 
@@ -87,7 +92,7 @@
   background: none;
   border: none;
   padding: 0;
-  margin: -4px 0 0;
+  margin: 0 8px 0;
   align-self: stretch;
   cursor: pointer;
   min-width: 0;
@@ -97,7 +102,7 @@
   display: block;
   width: 160px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--replay-handle);
   transition: background 0.15s;
 }
@@ -111,12 +116,16 @@
   align-items: baseline;
   gap: 8px;
   margin-left: auto;
+  margin-inline-end: 8px;
+  text-overflow: ellipsis;
+  height: 20px;
+  overflow: hidden;
 }
 
 .replay-drawer__position {
   font-size: 11px;
   color: var(--editor-text-muted);
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
 }
 
 .replay-drawer__actor {
@@ -125,11 +134,11 @@
   gap: 4px;
   font-size: 11px;
   color: var(--editor-text-dim);
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   border: 1px solid var(--replay-actor-border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 0 4px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--alpha-white-05);
 }
 
 .replay-drawer__actor-dot {
@@ -185,7 +194,7 @@
   padding: 0;
   background: var(--editor-accent-bg);
   border: 1px solid var(--editor-accent-border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--editor-text-dim);
   font-size: 11px;
   cursor: pointer;
@@ -207,7 +216,7 @@
   width: auto;
   padding: 0 6px;
   font-size: 10px;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   margin-left: 3px;
 }
 
@@ -217,10 +226,10 @@
   padding: 0 10px;
   background: var(--editor-success-bg);
   border-color: var(--editor-success);
-  color: var(--editor-success);
+  color: var(--editor-success-text);
   font-size: 11px;
   font-weight: 600;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }
 
@@ -241,7 +250,7 @@
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
 }
 
 /* Transparent range input overlaid on waveform for interaction */
@@ -258,6 +267,13 @@
   background: transparent;
   outline: none;
   cursor: pointer;
+}
+
+/* The scrubber is a transparent overlay on the waveform; keyboard focus
+   rings the whole waveform area. */
+.replay-waveform__input:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
 }
 
 .replay-waveform__input::-webkit-slider-runnable-track {
@@ -291,27 +307,29 @@
   padding: 3px 8px;
   background: var(--replay-tooltip-bg);
   border: 1px solid var(--editor-header-border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--editor-text-dim);
   font-size: 11px;
   white-space: nowrap;
   pointer-events: none;
 }
 
-/* Attribution overlay toggle — sits flush-right in both collapsed and
-   expanded states. Off-state matches the dim transport-button look;
-   on-state lights up with the editor accent. */
-.replay-drawer__attribution {
+/* Mode pills — the Authors and Edit toggles in the bar's right-hand
+   cluster share one pill: off-state matches the dim transport-button
+   look; on-state lights up with the editor success colour, so "this
+   mode is on" reads the same for every pill. */
+.replay-drawer__pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
   height: 20px;
-  margin-right: 10px;
+  margin: 0 8px;
   padding: 0 8px;
-  background: var(--editor-accent-bg);
+  /* Off state: same surface as the inactive comment-mode toggles. */
+  background: var(--view-toggle-bg);
   border: 1px solid var(--editor-accent-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--editor-text-dim);
   font-size: 11px;
   font-weight: 500;
@@ -321,13 +339,13 @@
   user-select: none;
 }
 
-.replay-drawer__attribution:hover {
+.replay-drawer__pill:hover {
   color: var(--editor-text);
   border-color: var(--editor-text-dim);
 }
 
-.replay-drawer__attribution:disabled,
-.replay-drawer__attribution:disabled:hover {
+.replay-drawer__pill:disabled,
+.replay-drawer__pill:disabled:hover {
   cursor: not-allowed;
   opacity: 0.4;
   color: var(--editor-text-dim);
@@ -335,18 +353,20 @@
   background: var(--editor-accent-bg);
 }
 
-.replay-drawer__attribution--on {
-  color: var(--editor-success);
+.replay-drawer__pill--on {
+  color: var(--editor-success-text);
   border-color: var(--editor-success);
   background: var(--editor-success-bg);
 }
 
-.replay-drawer__attribution--on:hover {
+.replay-drawer__pill--on:hover {
   background: var(--editor-success);
-  color: var(--editor-bg);
+  /* Dark text on the solid green fill: --editor-bg was 3.02:1 in light
+     (WCAG 1.4.3 failure); #17212B is 4.95:1 on #72994E in both themes. */
+  color: var(--posit-blue-dark-3);
 }
 
-.replay-drawer__attribution-dot {
+.replay-drawer__pill-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
@@ -356,31 +376,42 @@
   transition: opacity 0.15s;
 }
 
-.replay-drawer__attribution--on .replay-drawer__attribution-dot {
+.replay-drawer__pill--on .replay-drawer__pill-dot {
   opacity: 1;
+}
+
+/* Adjacent pills (Edit, then Authors) — collapse the doubled gap. */
+.replay-drawer__pill-cell + .replay-drawer__pill-cell .replay-drawer__pill {
+  margin-inline-start: 0;
 }
 
 /* Rotating-gradient sweep around the pill while attribution data
    is being generated. A conic-gradient on a ::before pseudo-element
    sits one pixel outside the pill's border; the inner mask cuts the
    centre so only a ~1px ring shows. The `--angle` custom property is
-   registered via @property so the @keyframe interpolation produces
-   smooth motion (without @property the value would jump at 0/360).
+   registered via @property (inherits, so the JS-driven value set on
+   the button reaches the pseudo-element) and driven by a small rAF
+   loop in AttributionToggle that eases the angular velocity, so the
+   spin ramps up and down smoothly instead of hard start/stop.
 
    We intentionally keep the static border underneath — the rotating
    highlight rides on top, so the pill never looks "borderless" mid-
    animation if a browser ignores the pseudo-element. */
 @property --replay-drawer__attribution-angle {
   syntax: '<angle>';
-  inherits: false;
+  inherits: true;
   initial-value: 0deg;
 }
 
-.replay-drawer__attribution--generating {
+.replay-drawer__attribution--generating,
+.replay-drawer__attribution--on {
   position: relative;
 }
 
-.replay-drawer__attribution--generating::before {
+/* The multicolor ring: static while the overlay is on, spinning while
+   attribution data is generating. */
+.replay-drawer__attribution--generating::before,
+.replay-drawer__attribution--on::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -389,36 +420,108 @@
   /* Full-circle rainbow that rotates — the band itself is the
      indicator, no transparent gap. First and last stops match so
      the seam is invisible across the 0/360 boundary. */
-  background: conic-gradient(
-    from var(--replay-drawer__attribution-angle),
-    #ff3b30 0deg,
-    #ff9500 60deg,
-    #ffcc00 120deg,
-    #34c759 180deg,
-    #5ac8fa 240deg,
-    #5856d6 300deg,
-    #ff3b30 360deg
-  );
+  /* Muted palette: each actor color at ~65% alpha (transparency OK'd
+     here — the thin ring should blend with whatever is behind it). */
+  --ring-red: color-mix(in srgb, var(--attribution-red) 65%, transparent);
+  --ring-orange: color-mix(in srgb, var(--attribution-orange) 65%, transparent);
+  --ring-yellow: color-mix(in srgb, var(--attribution-yellow) 65%, transparent);
+  --ring-green: color-mix(in srgb, var(--attribution-green) 65%, transparent);
+  --ring-blue: color-mix(in srgb, var(--attribution-blue) 65%, transparent);
+  --ring-purple: color-mix(in srgb, var(--attribution-purple) 65%, transparent);
+  background: conic-gradient(from var(--replay-drawer__attribution-angle),
+      var(--ring-red) 0deg,
+      var(--ring-orange) 60deg,
+      var(--ring-yellow) 120deg,
+      var(--ring-green) 180deg,
+      var(--ring-blue) 240deg,
+      var(--ring-purple) 300deg,
+      var(--ring-red) 360deg);
   -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
+    linear-gradient(var(--black) 0 0) content-box,
+    linear-gradient(var(--black) 0 0);
   -webkit-mask-composite: xor;
-          mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-          mask-composite: exclude;
-  animation: replay-drawer__attribution-spin 2s linear infinite;
+  mask:
+    linear-gradient(var(--black) 0 0) content-box,
+    linear-gradient(var(--black) 0 0);
+  mask-composite: exclude;
   pointer-events: none;
 }
 
-@keyframes replay-drawer__attribution-spin {
-  to {
-    --replay-drawer__attribution-angle: 360deg;
-  }
+/* (No CSS animation here: AttributionToggle's rAF loop rotates the
+   angle with eased velocity, and skips motion entirely under
+   prefers-reduced-motion.) */
+
+/* Outstanding-comments count badge on the comments-mode toggle
+   (bd-0rsk07il, GH #445). One badge for the whole group; hidden at
+   zero (the element is simply not rendered). Reuses the view-toggle
+   palette so it reads as part of the control. */
+/* Pill container: a full-height cell (pill centered inside). */
+.replay-drawer__pill-cell {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .replay-drawer__attribution--generating::before {
-    animation: none;
-  }
+/* Expanded drawer: bottom border on the header's status / authors /
+   comments containers, separating them from the controls row below. */
+.replay-drawer--expanded .sync-status-badge,
+.replay-drawer--expanded .replay-drawer__pill-cell,
+.replay-drawer--expanded .comments-mode-box {
+  border-bottom: 1px solid var(--editor-header-border);
+}
+
+.replay-drawer--expanded .sync-status-badge {
+  border-end-start-radius: var(--radius-sm);
+}
+
+/* Document sync-status badge (statusSlot): full-height dividers on
+   both sides, dot on the right so it stays put as the text changes. */
+.replay-drawer .sync-status-badge {
+  align-self: stretch;
+  border-inline-end: 1px solid var(--editor-header-border);
+  flex-direction: row-reverse;
+}
+
+/* The left divider only when the drawer is expanded (collapsed, the
+   badge blends into the bar). */
+.replay-drawer--expanded .sync-status-badge {
+  border-inline-start: 1px solid var(--editor-header-border);
+}
+
+/* Comments toggle: its own bordered box, each button outlined, with a
+   "Comments" label to the right of the buttons. */
+.comments-mode-box {
+  align-self: stretch;
+  padding: 1px 8px;
+  border-inline-start: 1px solid var(--editor-header-border);
+  gap: 3px;
+}
+
+.comments-mode-box .view-toggle-btn {
+  border: 1px solid var(--editor-header-border);
+  width: 20px;
+  height: 20px;
+}
+
+.comments-mode-label {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--editor-text-dim);
+  user-select: none;
+}
+
+.comments-toggle-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--view-toggle-active-bg);
+  color: var(--view-toggle-active-text);
 }

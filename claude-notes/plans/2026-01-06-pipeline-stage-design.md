@@ -1,8 +1,12 @@
-# Plan: PipelineStage Abstraction for Full Render Pipeline
-
-**Issue**: k-m46n
-**Date**: 2026-01-06
-**Status**: Implementation Complete (Phase 3)
+---
+title: 'Plan: PipelineStage Abstraction for Full Render Pipeline'
+date: 2026-01-06
+description: 'Designs a `PipelineStage` abstraction and a runtime-checked data enum so that render stages can be composed into pipelines that work in both native and WASM builds.'
+status: done  # Implementation Complete (Phase 3)
+braid:
+  strand: k-m46n
+  priority: P1
+---
 
 ## Implementation Progress
 
@@ -37,7 +41,7 @@ The current Rust implementation has `TransformPipeline` which represents a seque
 - **AST transforms**: Callouts, cross-references, layout, etc. (current `TransformPipeline`)
 - **After AST**: Output rendering (HTML/PDF/etc.), template application, postprocessing, DOM manipulation
 
-The TypeScript Quarto has 10 major stages with ~78 internal filter steps. We need an explicit abstraction that can represent all of these stages, validate stage sequences, and enable orchestration of different pipelines for different file types.
+The TypeScript Quarto has 10 major stages with \~78 internal filter steps. We need an explicit abstraction that can represent all of these stages, validate stage sequences, and enable orchestration of different pipelines for different file types.
 
 ## Goals
 
@@ -79,7 +83,7 @@ From our [render pipeline analysis](../render-pipeline/single-document/README.md
 | 1 | CLI Entry | Raw args | RenderFlags, Services |
 | 2 | Main Coordinator | Flags | ProjectContext |
 | 3 | File Rendering Setup | ProjectContext | TempContext, Lifetime |
-| 4 | Render Context Creation | File path | ExecutionTarget, Format[], RenderContext[] |
+| 4 | Render Context Creation | File path | ExecutionTarget, `Format[]`, `RenderContext[]` |
 | 5 | Engine Selection | File + metadata | Engine, Target |
 | 6 | YAML Validation | Target | Validated metadata |
 | 7 | Engine Execution | Target | ExecuteResult (markdown + supporting files) |

@@ -20,7 +20,7 @@ import { Repo } from '@automerge/automerge-repo';
 import type { DocHandle, DocumentId } from '@automerge/automerge-repo';
 import { from as automergeFrom, save as automergeSerialize } from '@automerge/automerge';
 import { BrowserWebSocketClientAdapter } from '@automerge/automerge-repo-network-websocket';
-import { IndexedDBStorageAdapter } from '@automerge/automerge-repo-storage-indexeddb';
+import { repoStorageAdapter } from './ephemeralStorage';
 import { resolveSyncServerUrl } from '../utils/routing';
 import { fetchAuthMe } from './authService';
 import { CollectionConnectError } from './collectionConnectError';
@@ -38,6 +38,7 @@ import {
   updateProjectSummaryInSet,
   setProjectSetName,
   projectSetKey,
+  getProjectSetTombstones,
 } from '@quarto/quarto-automerge-schema';
 import type { CollectionPointerEntry } from './storage/types';
 
@@ -326,7 +327,9 @@ function acquireServer(syncServerUrl: string): ServerConnection {
     const wsAdapter = new BrowserWebSocketClientAdapter(resolved);
     const repo = new Repo({
       network: [wsAdapter],
-      storage: new IndexedDBStorageAdapter(),
+      // Ephemeral storage mode (q2 preview embed build) keeps the
+      // document cache in memory — see ephemeralStorage.ts.
+      storage: repoStorageAdapter(),
     });
     const conn: ServerConnection = {
       repo,
@@ -379,14 +382,18 @@ function releaseServer(syncServerUrl: string): void {
 // ============================================================================
 
 /**
- * True for the retriable failure shapes of `repo.find()`: the bare
- * "Document <id> is unavailable" rejection and our own AbortSignal
- * timeout. Same predicate family as quarto-sync-client's findDoc
- * (bd-jit6pdwq).
+ * True for the bare "Document <id> is unavailable" rejection of
+ * `repo.find()`: every connected peer answered that it lacks the doc
+ * (or there was no peer to ask). Same predicate family as
+ * quarto-sync-client's findDoc (bd-jit6pdwq).
  */
-function isRetriableFindError(err: unknown): boolean {
+function isUnavailableFindError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  if (/unavailable/i.test(message)) return true;
+  return /unavailable/i.test(message);
+}
+
+/** True for our own AbortSignal timeout on a `repo.find()` wait. */
+function isAbortOrTimeoutError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return (
     err.name === 'TimeoutError' ||
@@ -395,18 +402,9 @@ function isRetriableFindError(err: unknown): boolean {
   );
 }
 
-/** Race a handle's READY transition against a timeout. */
-function raceHandleReady(
-  handle: DocHandle<ProjectSetDocument>,
-  timeoutMs: number,
-): Promise<boolean> {
-  return Promise.race([
-    handle
-      .whenReady()
-      .then(() => true)
-      .catch(() => false),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-  ]);
+/** True for the retriable failure shapes of `repo.find()`. */
+function isRetriableFindError(err: unknown): boolean {
+  return isUnavailableFindError(err) || isAbortOrTimeoutError(err);
 }
 
 /**
@@ -449,11 +447,18 @@ async function classifyDisconnected(
  * "Document <id> is unavailable".
  *
  * Strategy: try once (bounded); on a retriable failure wait for a live
- * peer (bounded) — automerge-repo re-requests requested/unavailable
- * docs from newly-added peers (CollectionSynchronizer.addPeer →
- * beginSync), so a late-arriving doc still lands — then classify what
- * remains: no peer → auth-expired / offline / sync-unreachable via the
- * /auth/me probe; live peer but no doc → not-found.
+ * peer (bounded) — automerge-repo re-requests a still-wanted doc from
+ * newly-added peers (DocSynchronizer.addPeer), so a late-arriving doc
+ * still lands — then classify what remains: no peer → auth-expired /
+ * offline / sync-unreachable via the /auth/me probe; live peer that
+ * answers "doc-unavailable" → not-found; live peer that never answers
+ * inside the window → sync-unreachable.
+ *
+ * Since automerge-repo 2.6 a handle is only ever handed out ready:
+ * `find()` rejects with the "unavailable" shape once every peer has
+ * answered that it lacks the doc (`allowableStates` is no longer
+ * honoured), so the second attempt's verdict is read from its
+ * rejection rather than from a handle state.
  */
 async function findCollectionDoc(
   server: ServerConnection,
@@ -481,24 +486,23 @@ async function findCollectionDoc(
   }
 
   // A sync peer is connected; give the re-request a bounded window.
-  let handle: DocHandle<ProjectSetDocument>;
   try {
-    handle = await server.repo.find<ProjectSetDocument>(docId, {
-      allowableStates: ['ready', 'unavailable'],
+    return await server.repo.find<ProjectSetDocument>(docId, {
       signal: AbortSignal.timeout(tuning.docWaitMs),
     });
   } catch (err) {
-    // Stuck in 'requesting' past the deadline with a live peer: the
-    // server is connected but not answering.
+    // The live peer answered that it lacks the doc.
+    if (isUnavailableFindError(err)) {
+      throw new CollectionConnectError('not-found', docId, err);
+    }
+    // Still loading past the deadline with a live peer: the server is
+    // connected but not answering.
     throw new CollectionConnectError(
-      isRetriableFindError(err) ? 'sync-unreachable' : 'unknown',
+      isAbortOrTimeoutError(err) ? 'sync-unreachable' : 'unknown',
       docId,
       err,
     );
   }
-  if (handle.state === 'ready') return handle;
-  if (await raceHandleReady(handle, tuning.docWaitMs)) return handle;
-  throw new CollectionConnectError('not-found', docId, firstError);
 }
 
 /**
@@ -588,6 +592,9 @@ export async function createCollection(
     version: CURRENT_PROJECT_SET_SCHEMA_VERSION,
     ...(name !== undefined ? { name } : {}),
   } as Record<string, unknown>;
+  // Authorless by design (D8): project-set documents are not user content
+  // and have no attribution UI, so they get automerge's random actor and
+  // carry no author — exactly like pre-transition history.
   const doc = automergeFrom(initial);
   const handle = server.repo.import<ProjectSetDocument>(automergeSerialize(doc));
 
@@ -706,6 +713,8 @@ export function moveProjectBetweenCollections(
     if (!doc.projects[key]) {
       doc.projects[key] = copy;
     }
+    // The move re-adds the project here, winning over any tombstone.
+    if (doc.tombstones && key in doc.tombstones) delete doc.tombstones[key];
   });
   from.handle.change(doc => {
     removeProjectFromSet(doc, indexDocId);
@@ -808,6 +817,16 @@ export function getProject(indexDocId: string): ProjectSetEntry | undefined {
 }
 
 /**
+ * Deletion tombstones of the root set (map key -> ISO deletion timestamp).
+ * The reconciler compares these against a candidate IDB row's lastAccessed
+ * for latest-wins: a row at or older than its tombstone stays deleted.
+ */
+export function getRootTombstones(): Record<string, string> {
+  const doc = rootConnection()?.handle.doc();
+  return doc ? getProjectSetTombstones(doc) : {};
+}
+
+/**
  * Add a project to the root set.
  */
 export function addProject(
@@ -895,6 +914,8 @@ export function addProjectsBulk(
           addedAt: now,
           lastAccessed: entry.lastAccessed ?? now,
         };
+        // A (re-)add wins over any earlier deletion tombstone.
+        if (doc.tombstones && key in doc.tombstones) delete doc.tombstones[key];
         added++;
       }
     }

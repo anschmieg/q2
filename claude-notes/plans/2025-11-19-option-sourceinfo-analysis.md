@@ -1,4 +1,8 @@
-# Analysis: Is `Option<SourceInfo>` Sufficient?
+---
+title: 'Analysis: Is `Option<SourceInfo>` Sufficient?'
+date: 2025-11-19
+description: 'Analyzes whether passing a parent source location into the `read` function of the `qmd` reader can give metadata parse diagnostics accurate locations, and which call sites such an API change would touch.'
+---
 
 ## Proposed API Change
 
@@ -130,7 +134,7 @@ read(
    └─ Find <script> tag at bytes 0-40 in the substring
 ```
 
-### Step 3: Create SourceInfo for the <script> Node
+### Step 3: Create SourceInfo for the \<script> Node
 
 ```rust
 // node_to_source_info_with_context is called:
@@ -336,7 +340,7 @@ SourceInfo::substring(
 
 ## Call Site Update Effort
 
-Found ~18-20 call sites:
+Found \~18-20 call sites:
 - 17+ in qmd-syntax-helper (various conversion modules)
 - 1 in pico-quarto-render
 - 1 recursive call in meta.rs (the important one)
@@ -378,14 +382,14 @@ pub fn read_top_level<T: Write>(
 4. Simple contract: parent_source_info represents input_bytes
 
 **Caveats:**
-1. ~20 call sites to update (mechanical but tedious)
+1. \~20 call sites to update (mechanical but tedious)
 2. Must maintain contract: parent_source_info.length() == input_bytes.len()
 3. Small overhead: child SourceContext created but discarded
 4. Need comprehensive testing for nested cases
 
 ## Recommendation
 
-**Proceed with Option<SourceInfo> approach.**
+**Proceed with `Option<SourceInfo>` approach.**
 
 This is the fundamentally correct fix that:
 - Solves the problem completely

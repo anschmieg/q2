@@ -24,13 +24,19 @@ pub mod item;
 pub mod navbar;
 pub mod page_nav;
 pub mod render_html;
+pub mod repo_actions;
 pub mod sidebar;
 
 pub use footer::{FooterBorder, FooterRegion, PageFooter, resolve_page_footer};
-pub use item::NavigationItem;
-pub use navbar::{CollapseBelow, Navbar, NavbarTitle, TogglePosition, resolve_navbar};
+pub use item::{BareScalar, NavigationItem};
+pub use navbar::{
+    CollapseBelow, LogoVariant, Navbar, NavbarLogo, NavbarTitle, TogglePosition, resolve_navbar,
+};
 pub use page_nav::PageNavigation;
+pub use repo_actions::{
+    RepoActionLabels, RepoActionLink, RepoActionWarning, RepoActionsConfig, repo_action_links,
+};
 pub use sidebar::{
-    AutoSpec, Sidebar, SidebarEntry, SidebarStyle, SidebarTitle, resolve_active_state,
-    sidebar_for_page,
+    AutoSpec, Crumb, SectionTextConflict, Sidebar, SidebarEntry, SidebarStyle, SidebarTitle,
+    breadcrumb_trail, resolve_active_state, section_text_conflicts_per_sidebar, sidebar_for_page,
 };

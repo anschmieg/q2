@@ -351,13 +351,24 @@ fn run_list(providers: &[Box<dyn ArtifactProvider>], json: bool) {
     for p in providers {
         println!();
         println!("{} ({})", p.type_id(), p.display_name());
+        // Group by hierarchical path in order of first appearance
+        // (bd-q33ylfxf): the group label on its own line, its choices
+        // indented one level further. Top-level choices print unindented.
+        let mut current_path: Option<Vec<String>> = None;
         for c in p.choices() {
+            if current_path.as_ref() != Some(&c.path) {
+                if !c.path.is_empty() {
+                    println!("  {}", c.path.join(" / "));
+                }
+                current_path = Some(c.path.clone());
+            }
             let marker = if c.implemented {
                 ""
             } else {
                 " (not yet implemented)"
             };
-            println!("  {:<12} {}{}", c.id, c.description, marker);
+            let indent = if c.path.is_empty() { "  " } else { "    " };
+            println!("{indent}{:<12} {}{}", c.id, c.description, marker);
         }
     }
     println!();
@@ -466,8 +477,8 @@ mod interactive_tests {
     #[test]
     fn no_args_prompts_type_directory_title() {
         // Registry order of implemented choices is [default, website,
-        // blog]; select index 1 = website, type a directory, accept
-        // the default title.
+        // blog, presentation, book]; select index 1 = website, type a
+        // directory, accept the default title.
         let mut p = ScriptedPrompter::new(vec![1], vec![Some("mysite"), None]);
         let resolved = ProjectProvider
             .resolve_interactive(&args(&[]), Path::new("/x"), false, &mut p)
@@ -479,7 +490,10 @@ mod interactive_tests {
         );
         // Only implemented choices are offered.
         let labels: Vec<&str> = p.select_items[0].iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, ["Default", "Website", "Blog"]);
+        assert_eq!(
+            labels,
+            ["Default", "Website", "Blog", "Presentation", "Book"]
+        );
         // The accepted default title is the directory name, and the
         // interactive path emits no defaulted-title warning — the user
         // saw and accepted the default.
@@ -552,6 +566,26 @@ mod interactive_tests {
             .resolve_interactive(&args(&["manuscript", "d"]), Path::new("/x"), false, &mut p)
             .unwrap_err();
         assert!(err.0.to_text(None).contains("not yet implemented"));
+    }
+
+    #[test]
+    fn typed_hub_only_choice_errors_without_prompting_further() {
+        // bd-d147nkqx: the registry's hub-only choice is implemented
+        // but not offered on the CLI. Typing it must fail up front,
+        // before any prompt, with the hub-specific wording.
+        use quarto_project_create::{Surface, available_choices};
+        let hub_only = available_choices()
+            .into_iter()
+            .find(|c| c.implemented && !c.available_on(Surface::Cli))
+            .expect("registry has a hub-only choice");
+        let mut p = ScriptedPrompter::new(vec![], vec![]);
+        let err = ProjectProvider
+            .resolve_interactive(&args(&[&hub_only.id, "d"]), Path::new("/x"), false, &mut p)
+            .unwrap_err();
+        let text = err.0.to_text(None);
+        assert!(text.contains("Quarto Hub"), "error text: {text}");
+        assert!(!text.contains("not yet implemented"), "error text: {text}");
+        assert!(p.transcript.is_empty(), "transcript: {:?}", p.transcript);
     }
 
     #[test]

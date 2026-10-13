@@ -5,14 +5,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
 import ReplayDrawer from './ReplayDrawer';
 import type { ReplayState, ReplayControls } from '../hooks/useReplayMode';
 
-// Mock getActorId from automergeSync (now in @quarto/preview-runtime)
-let mockActorId: string | null = null;
+// Mock getAuthorId from automergeSync (now in @quarto/preview-runtime)
+let mockAuthorId: string | null = null;
 vi.mock('@quarto/preview-runtime', () => ({
-  getActorId: () => mockActorId,
+  getAuthorId: () => mockAuthorId,
 }));
 
 function makeState(overrides: Partial<ReplayState> = {}): ReplayState {
@@ -53,7 +53,7 @@ describe('ReplayDrawer', () => {
 
   beforeEach(() => {
     controls = makeControls();
-    mockActorId = null;
+    mockAuthorId = null;
   });
 
   afterEach(() => {
@@ -134,7 +134,7 @@ describe('ReplayDrawer', () => {
     });
 
     it('applies --me CSS class when currentActorId matches', () => {
-      mockActorId = 'abcdef0123456789abcdef0123456789';
+      mockAuthorId = 'abcdef0123456789abcdef0123456789';
       const identities = { 'abcdef0123456789abcdef0123456789': { name: 'Alice', color: '#E91E63' } };
       render(<ReplayDrawer state={activeState} controls={controls} identities={identities} />);
       const actorEl = screen.getByText('Alice');
@@ -142,7 +142,7 @@ describe('ReplayDrawer', () => {
     });
 
     it('does not apply --me CSS class when actor is not current user', () => {
-      mockActorId = 'different0123456789abcdef01234567';
+      mockAuthorId = 'different0123456789abcdef01234567';
       const identities = { 'abcdef0123456789abcdef0123456789': { name: 'Alice', color: '#E91E63' } };
       render(<ReplayDrawer state={activeState} controls={controls} identities={identities} />);
       const actorEl = screen.getByText('Alice');
@@ -150,14 +150,14 @@ describe('ReplayDrawer', () => {
     });
 
     it('applies --me CSS class with truncated hex when no identity', () => {
-      mockActorId = 'abcdef0123456789abcdef0123456789';
+      mockAuthorId = 'abcdef0123456789abcdef0123456789';
       render(<ReplayDrawer state={activeState} controls={controls} />);
       const actorEl = screen.getByText('abcdef01');
       expect(actorEl.className).toContain('replay-drawer__actor--me');
     });
 
     it('renders short hash when currentActorId does not match and no identities', () => {
-      mockActorId = 'different0123456789abcdef01234567';
+      mockAuthorId = 'different0123456789abcdef01234567';
       render(<ReplayDrawer state={activeState} controls={controls} />);
       expect(screen.getByText('abcdef01')).toBeDefined();
     });
@@ -165,6 +165,58 @@ describe('ReplayDrawer', () => {
     it('renders short hash when currentActorId is null', () => {
       render(<ReplayDrawer state={activeState} controls={controls} />);
       expect(screen.getByText('abcdef01')).toBeDefined();
+    });
+
+    // ── Mixed-history attribution (author-ID transition) ───────────
+    //
+    // A document can hold pre-transition changes (no author anywhere —
+    // the key falls back to the bare stable actor) and post-transition
+    // changes (key resolved from the author footer / actor→author index)
+    // by the SAME user. By D5 the author ID equals the legacy stable
+    // actor ID, so every step from both eras arrives here with the same
+    // attribution key — one identity entry, one palette color, and the
+    // "me" highlight on both sides of the boundary.
+    describe('mixed-history attribution (author-ID transition)', () => {
+      const KEY = 'abcdef0123456789abcdef0123456789';
+      const identities = { [KEY]: { name: 'Alice', color: '#E91E63' } };
+
+      it('renders steps from both eras as one continuous identity', () => {
+        mockAuthorId = KEY;
+        // Chunks as replay.ts's getMetadataAt resolves them: legacy steps
+        // (actor fallback) and post-transition steps (author) — the same
+        // string by D5.
+        const mixed = makeState({
+          isActive: true,
+          historyLength: 4,
+          currentIndex: 3,
+          currentContent: 'hello',
+          timestamp: 1710000000,
+          actor: KEY,
+          chunkActors: [
+            [{ actor: KEY, fraction: 1 }], // legacy step (actor fallback)
+            [{ actor: KEY, fraction: 1 }], // legacy step
+            [{ actor: KEY, fraction: 1 }], // post-transition (author footer)
+            [{ actor: KEY, fraction: 1 }], // post-transition (actor→author index)
+          ],
+        });
+        const { container } = render(
+          <ReplayDrawer state={mixed} controls={controls} identities={identities} />,
+        );
+
+        // One continuous color band: every actor-colored waveform rect uses
+        // the single identity entry's color.
+        const rects = container.querySelectorAll<SVGRectElement>(
+          '.replay-waveform rect:not([fill="#1f3460"]):not([fill^="rgba"])',
+        );
+        expect(rects.length).toBe(4);
+        for (const rect of rects) {
+          expect(rect.getAttribute('fill')).toBe('#E91E63');
+        }
+
+        // The current step highlights as "me" with the shared identity name.
+        const actorEl = screen.getByText('Alice');
+        expect(actorEl.className).toContain('replay-drawer__actor--me');
+      });
     });
 
     it('Apply button calls controls.apply()', () => {
@@ -384,7 +436,7 @@ describe('ReplayDrawer', () => {
       expect(pill.getAttribute('aria-busy')).toBe('true');
     });
 
-    it('title text follows the on/off state when enabled', () => {
+    it('tooltip text follows the on/off state when enabled', () => {
       const { rerender } = render(
         <ReplayDrawer
           state={makeState()}
@@ -393,7 +445,10 @@ describe('ReplayDrawer', () => {
           onAttributionChange={vi.fn()}
         />,
       );
-      expect(screen.getByLabelText(/Authors/).getAttribute('title')).toBe('Show authors overlay');
+      const pill = screen.getByLabelText(/Authors/);
+      fireEvent.focus(pill);
+      expect(screen.getByRole('tooltip').textContent).toBe('Show authors overlay');
+      fireEvent.blur(pill);
 
       rerender(
         <ReplayDrawer
@@ -403,10 +458,11 @@ describe('ReplayDrawer', () => {
           onAttributionChange={vi.fn()}
         />,
       );
-      expect(screen.getByLabelText(/Authors/).getAttribute('title')).toBe('Hide authors overlay');
+      fireEvent.focus(screen.getByLabelText(/Authors/));
+      expect(screen.getByRole('tooltip').textContent).toBe('Hide authors overlay');
     });
 
-    it('renders disabled with an explanatory title when attributionDisabled is true', () => {
+    it('renders disabled with an explanatory tooltip when attributionDisabled is true', () => {
       render(
         <ReplayDrawer
           state={makeState()}
@@ -418,7 +474,13 @@ describe('ReplayDrawer', () => {
       );
       const pill = screen.getByLabelText(/unavailable/);
       expect((pill as HTMLButtonElement).disabled).toBe(true);
-      expect(pill.getAttribute('title')).toMatch(/not available for this format/);
+      // Disabled buttons swallow pointer events, so the tooltip's hover
+      // handlers live on its wrapper span. Hover shows after a 400ms delay.
+      vi.useFakeTimers();
+      fireEvent.mouseOver(pill.parentElement!);
+      act(() => vi.advanceTimersByTime(450));
+      expect(screen.getByRole('tooltip').textContent).toMatch(/not available for this format/);
+      vi.useRealTimers();
     });
 
     it('suppresses on/generating modifier classes while disabled', () => {
@@ -450,6 +512,161 @@ describe('ReplayDrawer', () => {
       );
       fireEvent.click(screen.getByLabelText(/unavailable/));
       expect(onChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // bd-ew0vak6b: the Edit pill turns q2-preview block editing on/off.
+  // Same anatomy as the Authors pill; rendered only when both props are
+  // supplied. Labels: "Editing on" / "Editing off" / "Editing unavailable…".
+  describe('Edit toggle', () => {
+    it('is hidden when the props are not supplied', () => {
+      render(<ReplayDrawer state={makeState()} controls={controls} />);
+      expect(screen.queryByLabelText(/Editing/)).toBeNull();
+    });
+
+    it('renders in collapsed state when previewEditing + onPreviewEditingChange are passed', () => {
+      render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+        />,
+      );
+      expect(screen.getByLabelText(/Editing on/)).toBeDefined();
+    });
+
+    it('renders in expanded state', () => {
+      const activeState = makeState({
+        isActive: true,
+        historyLength: 100,
+        currentIndex: 42,
+        currentContent: 'hello',
+        timestamp: 1710000000,
+        actor: 'abcdef0123456789abcdef0123456789',
+        chunkActors: [],
+      });
+      render(
+        <ReplayDrawer
+          state={activeState}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+        />,
+      );
+      expect(screen.getByLabelText(/Editing on/)).toBeDefined();
+    });
+
+    it('reflects previewEditing via aria-pressed and the on-class', () => {
+      const { rerender } = render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+        />,
+      );
+      const on = screen.getByLabelText(/Editing on/);
+      expect(on.getAttribute('aria-pressed')).toBe('true');
+      expect(on.className).toContain('replay-drawer__edit--on');
+
+      rerender(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={false}
+          onPreviewEditingChange={vi.fn()}
+        />,
+      );
+      const off = screen.getByLabelText(/Editing off/);
+      expect(off.getAttribute('aria-pressed')).toBe('false');
+      expect(off.className).not.toContain('replay-drawer__edit--on');
+    });
+
+    it('clicking calls onPreviewEditingChange with the negation', () => {
+      const onChange = vi.fn();
+      const { rerender } = render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={onChange}
+        />,
+      );
+      fireEvent.click(screen.getByLabelText(/Editing on/));
+      expect(onChange).toHaveBeenCalledWith(false);
+
+      rerender(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={false}
+          onPreviewEditingChange={onChange}
+        />,
+      );
+      fireEvent.click(screen.getByLabelText(/Editing off/));
+      expect(onChange).toHaveBeenLastCalledWith(true);
+    });
+
+    it('clicking does not trigger replay enter', () => {
+      render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByLabelText(/Editing on/));
+      expect(controls.enter).not.toHaveBeenCalled();
+    });
+
+    it('renders disabled (no aria-pressed, no on-class) for unsupported formats', () => {
+      render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+          previewEditingDisabled={true}
+        />,
+      );
+      const pill = screen.getByLabelText(/Editing unavailable/) as HTMLButtonElement;
+      expect(pill.disabled).toBe(true);
+      expect(pill.getAttribute('aria-pressed')).toBeNull();
+      expect(pill.className).not.toContain('replay-drawer__edit--on');
+    });
+
+    it('does not fire onPreviewEditingChange when clicked while disabled', () => {
+      const onChange = vi.fn();
+      render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={onChange}
+          previewEditingDisabled={true}
+        />,
+      );
+      fireEvent.click(screen.getByLabelText(/Editing unavailable/));
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('renders before the Authors pill in the right-hand cluster', () => {
+      render(
+        <ReplayDrawer
+          state={makeState()}
+          controls={controls}
+          previewEditing={true}
+          onPreviewEditingChange={vi.fn()}
+          attributionOn={false}
+          onAttributionChange={vi.fn()}
+        />,
+      );
+      const edit = screen.getByLabelText(/Editing on/);
+      const authors = screen.getByLabelText(/Authors/);
+      // DOCUMENT_POSITION_FOLLOWING (4): `authors` comes after `edit`.
+      expect(edit.compareDocumentPosition(authors) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
   });
 });

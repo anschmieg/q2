@@ -1,8 +1,12 @@
-# Table Caption Post-Processing Approach - Analysis and Plan
-
-**Date**: 2025-10-27
-**Issue**: k-185 - Table caption parsing without blank line
-**Status**: Analysis complete, ready to implement
+---
+title: 'Table Caption Post-Processing Approach - Analysis and Plan'
+date: 2025-10-27
+description: 'Recommends fixing the Rust `pipe_table` handler to accept the `caption` node that tree-sitter already produces, rather than post-processing table rows that look like captions, which would be more complex and fragile.'
+status: approved  # Analysis complete, ready to implement
+braid:
+  strand: k-185
+  priority: P2
+---
 
 ## Executive Summary
 
@@ -53,7 +57,7 @@ Result: **Panics at line 195**: "Unexpected node in pipe_table: caption"
 2. Extract inlines from the `CaptionBlock` that `process_caption()` produces
 3. Store in existing `caption_inlines` variable
 
-**Code changes** (~5-10 lines):
+**Code changes** (\~5-10 lines):
 ```rust
 } else if node == "caption" {  // Changed from "table_caption"
     match child {
@@ -93,7 +97,7 @@ Result: **Panics at line 195**: "Unexpected node in pipe_table: caption"
 4. Extract that row, create Caption from its content
 5. Remove row from table body
 
-**Code changes** (~50-100 lines):
+**Code changes** (\~50-100 lines):
 ```rust
 // After processing all table rows, check if last row is actually a caption
 if let Some(last_row) = rows.last() {
@@ -120,7 +124,7 @@ if let Some(last_row) = rows.last() {
 - Avoids understanding tree-sitter internals (but we already do!)
 
 **Cons**:
-- Much more complex (~50-100 lines vs ~5-10 lines)
+- Much more complex (\~50-100 lines vs \~5-10 lines)
 - Fragile pattern matching (what if cell has multiple inlines?)
 - Discards working grammar improvements
 - Need to handle edge cases (empty caption, whitespace, etc.)

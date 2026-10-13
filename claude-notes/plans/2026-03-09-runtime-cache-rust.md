@@ -1,4 +1,8 @@
-# Plan: Runtime Cache — Rust Implementation (Phases 1-2)
+---
+title: 'Plan: Runtime Cache — Rust Implementation (Phases 1-2)'
+date: 2026-03-09
+description: 'Adds the cache methods, validation helpers and a `CacheError` variant to the `SystemRuntime` trait and the native runtime, with an optional `cache_dir`, so subsystems can store results on native builds.'
+---
 
 Parent plan: `claude-notes/plans/2026-03-09-runtime-cache.md`
 
@@ -189,7 +193,7 @@ used for future LRU eviction if needed.
 - [x] `test_cache_invalid_namespace_rejected` — namespace with `/` or `..` is
   rejected
 - [x] `test_cache_empty_value` — storing and retrieving empty bytes works
-- [x] `test_cache_large_value` — storing and retrieving a ~1MB value works
+- [x] `test_cache_large_value` — storing and retrieving a \~1MB value works
 - [x] `test_cache_binary_value` — non-UTF8 bytes roundtrip correctly
 - [x] `test_cache_creates_directories` — set creates namespace directory
   hierarchy if it doesn't exist
@@ -202,5 +206,5 @@ used for future LRU eviction if needed.
 ## Reference
 
 See parent plan (`claude-notes/plans/2026-03-09-runtime-cache.md`) for API
-design, conventions, and design decisions (async rationale, Vec<u8> rationale,
+design, conventions, and design decisions (async rationale, `Vec<u8>` rationale,
 atomic write rationale, etc.).

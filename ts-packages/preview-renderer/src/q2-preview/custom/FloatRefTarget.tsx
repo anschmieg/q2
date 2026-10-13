@@ -5,6 +5,7 @@ import type {
     InlineNode,
     NodeArgs,
     ParaBlock,
+    PlainBlock,
 } from '../../framework';
 import { Node } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
@@ -24,8 +25,12 @@ import { makeSlotSetter } from '../utils';
  * No classes added by the wrapper — the user's authored attr passes
  * through unchanged.
  *
- * `plain_data` (writer: `transforms/float_ref_target.rs:292-295`):
+ * `plain_data` (writer: `transforms/float_ref_target.rs:292-295`; keys
+ * mirrored from `crates/quarto-pandoc-types/resources/custom-node-schema.json`):
  *   - `ref_type`, `kind`, `identifier`, optional `order: { section, order }`.
+ *
+ * The key array below is asserted against the schema (both directions)
+ * by `schemaConformance.test.ts`'s T4.3.
  *
  * **Caption prefix format** (mirrors `prefix_caption` at
  * `crossref_render.rs:721-742`):
@@ -40,12 +45,9 @@ import { makeSlotSetter } from '../utils';
  *     silently. Match Rust behavior.
  */
 
-interface FloatRefTargetPlainData {
-    ref_type?: string;
-    kind?: string;
-    identifier?: string;
-    order?: { section?: number[]; order?: number };
-}
+export const FLOAT_REF_TARGET_PLAIN_DATA_KEYS = ['ref_type', 'kind', 'identifier', 'order'] as const;
+
+type FloatRefTargetPlainData = { [K in (typeof FLOAT_REF_TARGET_PLAIN_DATA_KEYS)[number]]?: unknown };
 
 export const FloatRefTarget = ({
     node,
@@ -59,9 +61,10 @@ export const FloatRefTarget = ({
     const affordanceAttr = isEditable ? { 'data-block-pool-id': poolId, tabIndex: -1 } : {};
 
     const plain = (node.plain_data ?? {}) as FloatRefTargetPlainData;
-    const refType = plain.ref_type ?? '';
-    const kind = plain.kind ?? '';
-    const number = plain.order?.order;
+    const refType = (plain.ref_type as string | undefined) ?? '';
+    const kind = (plain.kind as string | undefined) ?? '';
+    const order = plain.order as { section?: number[]; order?: number } | undefined;
+    const number = order?.order;
 
     const id = node.attr[0];
     const setSlot = makeSlotSetter(node, setLocalAst);
@@ -78,15 +81,21 @@ export const FloatRefTarget = ({
 
     // Compose the caption-prefix Str.
     const prefixText = composePrefixText(kind, number);
-    // Apply the prefix into the first Paragraph of caption_long (if any).
+    // Apply the prefix into the first inline-bearing block of caption_long
+    // (if any). That block is a Para for the div-form trailing paragraph
+    // and a Plain for Pandoc-native Figure / Table captions
+    // (`![cap](img){#fig-x}`, `: cap {#tbl-x}`); the prefix lands in
+    // either, mirroring crossref_render's `prefix_caption` (bd-n3sark9b —
+    // matching Para only used to drop the prefix for the Plain forms).
     // Returns the (virtually) prefixed blocks for rendering, plus a
     // pointer to the unmodified-source first inline so the per-inline
     // setLocalAst doesn't need to know about the synthetic prefix.
-    const firstCaptionPara =
-        captionLongBlocks.length > 0 && captionLongBlocks[0].t === 'Para'
-            ? (captionLongBlocks[0] as ParaBlock)
+    const firstCaptionBlock: ParaBlock | PlainBlock | undefined =
+        captionLongBlocks.length > 0 &&
+        (captionLongBlocks[0].t === 'Para' || captionLongBlocks[0].t === 'Plain')
+            ? (captionLongBlocks[0] as ParaBlock | PlainBlock)
             : undefined;
-    const remainingCaptionBlocks: BlockNode[] = firstCaptionPara
+    const remainingCaptionBlocks: BlockNode[] = firstCaptionBlock
         ? captionLongBlocks.slice(1)
         : captionLongBlocks;
 
@@ -101,40 +110,48 @@ export const FloatRefTarget = ({
     const replaceCaptionBlocks = (newBlocks: BlockNode[]) =>
         setSlot('caption_long')({ kind: 'blocks', value: newBlocks });
     const setFirstCaptionInline = (i: number) => (newInline: BlockNode | InlineNode) => {
-        if (!firstCaptionPara) return;
-        const nextInlines = firstCaptionPara.c.slice();
+        if (!firstCaptionBlock) return;
+        const nextInlines = firstCaptionBlock.c.slice();
         nextInlines[i] = newInline as InlineNode;
-        const nextPara: ParaBlock = { t: 'Para', c: nextInlines };
+        // Preserve the block type: a Plain caption stays Plain.
+        const nextBlock: ParaBlock | PlainBlock = { ...firstCaptionBlock, c: nextInlines };
         const nextCaption = captionLongBlocks.slice();
-        nextCaption[0] = nextPara;
+        nextCaption[0] = nextBlock;
         replaceCaptionBlocks(nextCaption);
     };
     const setRemainingCaptionBlock = (i: number) => (newBlock: BlockNode | InlineNode) => {
         const nextCaption = captionLongBlocks.slice();
-        const targetIdx = firstCaptionPara ? i + 1 : i;
+        const targetIdx = firstCaptionBlock ? i + 1 : i;
         nextCaption[targetIdx] = newBlock as BlockNode;
         replaceCaptionBlocks(nextCaption);
     };
 
-    // Caption JSX: <prefix>{first-Para inlines via Node} then remaining
-    // caption blocks via Node. Nothing is rendered if caption_long is
+    // Caption JSX: <prefix>{first-block inlines via Node} then remaining
+    // caption blocks via Node. A Para first block renders as <p>, a Plain
+    // one as bare inlines — the same distinction the native HTML writer
+    // draws inside <figcaption>. Nothing is rendered if caption_long is
     // empty.
+    const firstCaptionInlinesJsx = firstCaptionBlock ? (
+        <>
+            {prefixText}
+            {firstCaptionBlock.c.map((inl, i) => (
+                <Node
+                    key={i}
+                    node={inl}
+                    onNavigateToDocument={onNavigateToDocument}
+                    setLocalAst={setFirstCaptionInline(i)}
+                />
+            ))}
+        </>
+    ) : null;
     const captionJsx =
         captionLongBlocks.length === 0 ? null : (
             <>
-                {firstCaptionPara ? (
-                    <p>
-                        {prefixText}
-                        {firstCaptionPara.c.map((inl, i) => (
-                            <Node
-                                key={i}
-                                node={inl}
-                                onNavigateToDocument={onNavigateToDocument}
-                                setLocalAst={setFirstCaptionInline(i)}
-                            />
-                        ))}
-                    </p>
-                ) : null}
+                {firstCaptionBlock?.t === 'Para' ? (
+                    <p>{firstCaptionInlinesJsx}</p>
+                ) : (
+                    firstCaptionInlinesJsx
+                )}
                 {remainingCaptionBlocks.map((b, i) => (
                     <Node
                         key={i}

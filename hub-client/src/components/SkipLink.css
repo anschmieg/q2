@@ -1,0 +1,18 @@
+/* Skip link: visually hidden until focused (WCAG 2.4.1 Bypass Blocks). */
+
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: 8px;
+  z-index: var(--z-skip);
+  padding: 8px 16px;
+  background: var(--posit-blue);
+  color: var(--text-on-accent);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  font-size: 14px;
+  transition: top 0.15s ease;
+}
+
+.skip-link:focus-visible {
+  top: 0;
+}

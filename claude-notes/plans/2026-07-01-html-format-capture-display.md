@@ -1,8 +1,18 @@
-# Display executed code output in the default `format: html` preview
+---
+title: 'Display executed code output in the default `format: html` preview'
+date: 2026-07-01
+description: 'Makes the default `format: html` render show recorded engine output by threading captures through the WASM HTML branches, preview-runtime, and hub-client, which currently ignore them and render source only.'
+status: draft  # Planned — awaiting review. No implementation started.
+braid:
+  strand: bd-uy4uygha  # discovered-from bd-sfet3264
+  priority: P1
+---
 
-**Strand:** bd-uy4uygha (bug, P1; discovered-from bd-sfet3264).
-**Date:** 2026-07-01.
-**Status:** Planned — awaiting review. No implementation started.
+> **Note (2026-09-09, bd-kltzdhle):** the "plain `format: html` preview" this
+> plan refers to is no longer hub-client's default. q2-preview is the default
+> renderer for html documents; the full-DOM MorphIframe path is now reached only
+> with `format: q2-html-render` (or for non-html formats). See
+> `2026-09-09-hub-client-default-q2-preview.md`.
 
 ## Overview
 
@@ -39,7 +49,7 @@ branch drops them, and the TS default-HTML path never sends them.
    `render_project_active_page_to_response` (`lib.rs:1519`) is the same: its
    HTML `_ =>` arm (`lib.rs:1616`) builds a `RenderToHtmlRenderer` with no
    captures. Both HTML branches funnel through `render_qmd_to_html`
-   (`crates/quarto-core/src/pipeline.rs` ~833; the Pass-2 site is
+   (`crates/quarto-core/src/pipeline.rs` \~833; the Pass-2 site is
    `crates/quarto-core/src/project/pass2_renderer.rs:825`), which has **no
    captures channel**.
 
@@ -220,7 +230,7 @@ displays executed engine output end-to-end.
   (`crates/quarto-core/src/pipeline.rs:387-436`), splice insert `:431-433`.
 - `CaptureSpliceStage`: `crates/quarto-core/src/stage/stages/capture_splice.rs`.
 - HTML pipeline: `build_html_pipeline_stages_with_options`
-  (`crates/quarto-core/src/pipeline.rs:249-339`); `render_qmd_to_html` (~`:833`).
+  (`crates/quarto-core/src/pipeline.rs:249-339`); `render_qmd_to_html` (\~`:833`).
 - Pass-2 renderer: `crates/quarto-core/src/project/pass2_renderer.rs:727,825,991`.
 - Capture recording (cell alignment): `build_capture_pipeline_stages`
   (`crates/quarto-core/src/engine/preview_record.rs:109-117`).

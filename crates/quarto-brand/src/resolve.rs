@@ -100,13 +100,13 @@ fn ordered_chain(seen: &HashSet<String>, repeat: &str) -> String {
 
 // ── typography ──────────────────────────────────────────────────────
 
-impl Brand {
+impl<V> Brand<V> {
     /// Lookup a font slot by name. Returns the options for `base`,
     /// `headings`, `link`, `monospace`, `monospace-inline`, or
     /// `monospace-block`. For `monospace-{inline,block}` see
     /// [`effective_monospace_inline`] / [`effective_monospace_block`]
     /// which apply Q1's merge-with-generic-monospace semantics.
-    pub fn font_slot(&self, name: &str) -> Option<&BrandTypographyOptions> {
+    pub fn font_slot(&self, name: &str) -> Option<&BrandTypographyOptions<V>> {
         let t = self.typography.as_ref()?;
         match name {
             "base" => t.base.as_ref(),
@@ -127,7 +127,10 @@ impl Brand {
     /// Effective `monospace-inline` options: a merge of `monospace`
     /// (as defaults) with `monospace-inline` (overriding) — matching
     /// Q1's `{ ...monospace, ...monospaceInline }` spread.
-    pub fn effective_monospace_inline(&self) -> Option<BrandTypographyOptions> {
+    pub fn effective_monospace_inline(&self) -> Option<BrandTypographyOptions<V>>
+    where
+        V: Clone,
+    {
         merge_mono(
             self.font_slot("monospace"),
             self.font_slot("monospace-inline"),
@@ -136,7 +139,10 @@ impl Brand {
 
     /// Effective `monospace-block` options: a merge of `monospace`
     /// (as defaults) with `monospace-block` (overriding).
-    pub fn effective_monospace_block(&self) -> Option<BrandTypographyOptions> {
+    pub fn effective_monospace_block(&self) -> Option<BrandTypographyOptions<V>>
+    where
+        V: Clone,
+    {
         merge_mono(
             self.font_slot("monospace"),
             self.font_slot("monospace-block"),
@@ -146,10 +152,10 @@ impl Brand {
 
 /// Merge two optional font-options objects with the second winning
 /// per-field (Q1's spread semantics).
-fn merge_mono(
-    base: Option<&BrandTypographyOptions>,
-    over: Option<&BrandTypographyOptions>,
-) -> Option<BrandTypographyOptions> {
+fn merge_mono<V: Clone>(
+    base: Option<&BrandTypographyOptions<V>>,
+    over: Option<&BrandTypographyOptions<V>>,
+) -> Option<BrandTypographyOptions<V>> {
     match (base, over) {
         (None, None) => None,
         (Some(b), None) => Some(b.clone()),
@@ -172,7 +178,7 @@ fn merge_mono(
 
 // ── logo ────────────────────────────────────────────────────────────
 
-impl Brand {
+impl<V> Brand<V> {
     /// Lookup a logo by size keyword: `small`, `medium`, or `large`.
     pub fn logo(&self, name: &str) -> Option<&LogoEntry> {
         let l = self.logo.as_ref()?;
@@ -189,12 +195,34 @@ impl Brand {
         self.logo.as_ref()?.images.as_ref()?.get(name)
     }
 
+    /// Resolve a logo resource that may be a bare name referencing
+    /// `logo.images.*` instead of a literal path.
+    ///
+    /// Mirrors Q1's `getLogoResource` precedence (`core/brand/brand.ts`):
+    /// a `small`/`medium`/`large` value that is a bare path string is
+    /// first checked against `images` — a match wins — and only when no
+    /// image of that name exists is the string treated as a literal
+    /// path. An explicit `{path, alt}` value is never treated as a name
+    /// reference (only bare strings can name an image).
+    pub fn resolve_named_logo<'a>(
+        &'a self,
+        resource: &'a BrandLogoResource,
+    ) -> &'a BrandLogoResource {
+        if let BrandLogoResource::Path(name) = resource
+            && let Some(image) = self.logo_image(name)
+        {
+            return image;
+        }
+        resource
+    }
+
     /// Path of the favicon-best small logo. Returns `None` if no
     /// small logo is configured, or if `small` is a light/dark pair
     /// (caller decides which side to use).
     ///
     /// Mirrors Q1's `getFavicon(brand)` from `core/brand/brand.ts`.
     pub fn favicon(&self) -> Option<&str> {
-        self.logo("small").and_then(|l| l.single_path())
+        let resource = self.logo("small").and_then(|l| l.single())?;
+        Some(self.resolve_named_logo(resource).path())
     }
 }

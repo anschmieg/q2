@@ -1,10 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { initialsFor } from '../utils/facepile';
 // Side effects only: bundles Monaco + workers so no runtime CDN fetch occurs.
 import '../monacoSetup';
-import MonacoEditor from '@monaco-editor/react';
+import MonacoEditor, { DiffEditor } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 import type { ProjectEntry, FileEntry } from '@quarto/preview-renderer/types/project';
-import { isBinaryExtension, isTextExtension } from '@quarto/preview-renderer/types/project';
+import { isBinaryExtension, isImageExtension, isSourceFile, isTextExtension, normalizeProjectPath } from '@quarto/preview-renderer/types/project';
 import type { Route } from '../utils/routing';
 import { buildFullUrl, buildShareableUrl } from '../utils/routing';
 import {
@@ -12,17 +14,24 @@ import {
   createBinaryFile,
   deleteFile,
   renameFile,
+  createFolder,
+  deleteFolder,
   exportProjectAsZip,
   type EditorContentChange,
 } from '@quarto/preview-runtime';
-import { vfsAddFile, isWasmReady, clearCapture } from '@quarto/preview-runtime';
+import { vfsAddFile, isWasmReady, clearCapture, getFileContent } from '@quarto/preview-runtime';
 import { PreviewStatusBar } from './render/PreviewStatusBar';
 import { hasExecutableCells } from '../services/executableCells';
-import type { Diagnostic } from '@quarto/preview-renderer/types/diagnostic';
+import type { Diagnostic, RenderComment } from '@quarto/preview-renderer/types/diagnostic';
 import { useIntelligenceProviders } from '../hooks/useIntelligenceProviders';
 import { registerQmdLanguage } from './quartoTheme';
-import { processFileForUpload } from '../services/resourceService';
-import { buildDropMarkdown, resolveDefaultDestination } from './fileUpload';
+import { processFileForUpload, FILE_SIZE_LIMITS } from '../services/resourceService';
+import {
+  buildDropMarkdown,
+  resolveDefaultDestination,
+  classifyPastePayload,
+  createPasteImageHandler,
+} from './fileUpload';
 import { useProjectSearch } from '../services/search';
 import { usePresence } from '../hooks/usePresence';
 import { usePreference } from '../hooks/usePreference';
@@ -32,14 +41,39 @@ import { useSlideThumbnails } from '../hooks/useSlideThumbnails';
 import { useCursorToSlide } from '../hooks/useCursorToSlide';
 import { useReplayMode } from '../hooks/useReplayMode';
 import { useAutomergeSync } from '../hooks/useAutomergeSync';
+import { useSidebarDrawer } from '../hooks/useSidebarDrawer';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { useDocBranches } from '../hooks/useDocBranches';
+import { setActiveBranch, createBranch, mergeBranchToMain, deleteBranch } from '../services/branchService';
+import BranchBar from './BranchBar';
 import { diffToMonacoEdits } from '../utils/diffToMonacoEdits';
 import { diagnosticsToMarkers } from '../utils/diagnosticToMonaco';
+import EphemeralSessionBanner from './EphemeralSessionBanner';
 import FileSidebar from './FileSidebar';
 import NewFileDialog from './NewFileDialog';
+import NewFolderDialog from './NewFolderDialog';
+import PlaceFileDialog, { type PlaceFileRequest, type PlaceRequest } from './PlaceFileDialog';
+import ImportDialog from './ImportDialog';
+import { importAvailable, type ImportOutcome } from '../pandoc/importService';
+import { useImportFormats } from '../pandoc/useImportFormats';
+import { useWindowFileDrop } from '../hooks/useWindowFileDrop';
+import { routeDroppedEntries } from '../utils/routeDroppedEntries';
+import { commitImport, defaultImportStorageDeps } from '../services/importStorage';
+import SearchFilesDialog from './SearchFilesDialog';
+import type { MatchRange } from '../services/search';
+import { linkFromPaste } from '../utils/pasteLink';
+import { toggleWrap } from '../utils/markdownToggle';
+import { joinPath } from '../utils/uniquePath';
+import { collectDroppedEntries, type DroppedEntries } from '../utils/droppedEntries';
 import NewAssetDialog from './NewAssetDialog';
 import ShareDialog from './ShareDialog';
-import MinimalHeader from './MinimalHeader';
+import ProjectTopBar from './ProjectTopBar';
+import DocumentTopBar from './DocumentTopBar';
+import Tooltip from './Tooltip';
+import { PreviewIcon } from './icons';
+import SyncStatusBadge from './SyncStatusBadge';
 import SidebarTabs from './SidebarTabs';
+import SidebarDrawer from './SidebarDrawer';
 import OutlinePanel from './OutlinePanel';
 import ProjectTab from './tabs/ProjectTab';
 import StatusTab from './tabs/StatusTab';
@@ -47,14 +81,29 @@ import SettingsTab from './tabs/SettingsTab';
 import AboutTab from './tabs/AboutTab';
 import { useViewMode } from './ViewModeContext';
 import MarkdownSummary from './MarkdownSummary';
+import ImageViewer from './ImageViewer';
 import ReplayDrawer from './ReplayDrawer';
 import './Editor.css';
 import PreviewRouter from './render/PreviewRouter';
+import type { PreviewMode } from './render/getQ2Format';
+import { useDownloadAs } from '../pandoc/useDownloadAs';
+import { download as downloadStrings } from '../strings';
+import { fileSidebar, dialogs } from '../strings';
+import { getAncestorPaths } from '../utils/fileTree';
+import { sanitizeFilename } from '../services/resourceService';
+import { processAssetFiles } from './fileUpload/processAssetFiles';
 
 interface Props {
   project: ProjectEntry;
   files: FileEntry[];
+  /** Explicitly created folders (may be empty of files). */
+  folders?: string[];
   fileContents: Map<string, string>;
+  /**
+   * Path -> change counter for binary (image) documents. Bumped by App when
+   * a binary doc syncs or changes so the image viewer re-reads its bytes.
+   */
+  binaryFileVersions?: Map<string, number>;
   onDisconnect: () => void;
   onContentOperations: (path: string, changes: EditorContentChange[]) => void;
   /** Current route from URL */
@@ -77,6 +126,22 @@ interface Props {
   onRequestExecution?: (path: string) => string | null;
   /** Whether the project is connected to the sync server */
   isOnline: boolean;
+  /**
+   * `q2 preview --ui editor` without `--allow-edit` (bd-ov4gqk3m): edits
+   * sync live to everyone connected but are never written to disk.
+   * Drives the ephemeral-session banner. Absent/false on a real hub.
+   */
+  sessionEphemeral?: boolean;
+  /**
+   * Host-provided bar rendered under the top bar (bd-fxdcxbpq): the
+   * one-time invite welcome banner. Hidden in fullscreen preview.
+   */
+  banner?: ReactNode;
+  /**
+   * The local user's display name; embedded as `from=` in share links
+   * (bd-fxdcxbpq) so the invite landing can say who shared the document.
+   */
+  userName?: string;
 }
 
 // Map file extension to Monaco language ID
@@ -101,9 +166,12 @@ function getLanguageForFile(filePath: string): string {
     case 'yml':
       return 'yaml';
     case 'qmd':
-      return 'qmd';
     case 'md':
-      return 'markdown';
+      // .md is a renderable source file parsed with the qmd grammar
+      // (bd-6d2wj4zp Phase 5, D11) — giving it the qmd language wires
+      // up the same Monarch highlighting and the qmd-registered
+      // symbol/folding/semantic-token providers as .qmd.
+      return 'qmd';
     default:
       return 'markdown';
   }
@@ -115,6 +183,10 @@ const editorOptions = {
   minimap: { enabled: false },
   fontSize: 14,
   lineNumbers: 'on' as const,
+  // Size the number column near the document's actual digit count
+  // instead of Monaco's default 5-char reserve; the extra char over the
+  // digits acts as left padding (numbers are right-aligned).
+  lineNumbersMinChars: 4,
   wordWrap: 'on' as const,
   padding: { top: 16 },
   scrollBeyondLastLine: false,
@@ -137,7 +209,15 @@ const editorOptions = {
   'semanticHighlighting.enabled': true as const,
 };
 
-// Select the best default file: prefer index.qmd, then first .qmd, then first file
+// Select the best default file: prefer index.qmd, then first .qmd, then
+// index.md / first .md (bd-6d2wj4zp Phase 5 — .md is a source file, but
+// only a fallback: a synced .md may be a never-rendered README while a
+// .qmd is always deliberate content), then first file.
+/** Sanitize each segment of a dropped relative path, keeping its folders. */
+function sanitizeRelativePath(rel: string): string {
+  return rel.split('/').filter(Boolean).map(sanitizeFilename).join('/');
+}
+
 function selectDefaultFile(files: FileEntry[]): FileEntry | null {
   if (files.length === 0) return null;
 
@@ -149,13 +229,38 @@ function selectDefaultFile(files: FileEntry[]): FileEntry | null {
   const anyQmd = files.find(f => f.path.endsWith('.qmd'));
   if (anyQmd) return anyQmd;
 
+  // Then index.md at root, then any .md
+  const indexMd = files.find(f => f.path === 'index.md');
+  if (indexMd) return indexMd;
+  const anyMd = files.find(f => f.path.endsWith('.md'));
+  if (anyMd) return anyMd;
+
   // Fall back to first file
   return files[0];
 }
 
-export default function Editor({ project, files, fileContents, onDisconnect, onContentOperations, route, onNavigateToFile, identities, captures, executorsOnline, onRequestExecution, isOnline }: Props) {
+export default function Editor({ project, files, folders, fileContents, binaryFileVersions, onDisconnect, onContentOperations, route, onNavigateToFile, identities, captures, executorsOnline, onRequestExecution, isOnline, sessionEphemeral, banner, userName }: Props) {
   // View mode for pane sizing
   const { viewMode } = useViewMode();
+
+  // Editor/preview split (replaces the view-toggle segmented control):
+  // drag the pane divider to resize. Fraction of the main row given to
+  // the editor pane; session-only.
+  const [editorPaneFraction, setEditorPaneFraction] = useState(0.5);
+  const [isDraggingDivider, setIsDraggingDivider] = useState(false);
+  // True briefly while a split-preset button animates the divider to
+  // its target; drags stay instant (no transition).
+  const [splitAnimating, setSplitAnimating] = useState(false);
+  const splitAnimTimer = useRef<number | null>(null);
+  const handleSetSplitPreset = useCallback((fraction: number) => {
+    setEditorPaneFraction(fraction);
+    setSplitAnimating(true);
+    if (splitAnimTimer.current !== null) window.clearTimeout(splitAnimTimer.current);
+    splitAnimTimer.current = window.setTimeout(() => setSplitAnimating(false), 350);
+  }, []);
+  // Narrow-viewport sidebar drawer (Phase 5): ≤900px the sidebar leaves
+  // the flex row and becomes a modal overlay drawer.
+  const sidebarDrawer = useSidebarDrawer();
   const { effectiveTheme } = useTheme();
 
   // Full-text search index over the open project (Phase 1: client-side).
@@ -174,6 +279,18 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   }, [files, route]);
 
   const [currentFile, setCurrentFile] = useState<FileEntry | null>(getInitialFile);
+  // Image files open in the ImageViewer instead of Monaco. Their bytes live
+  // in a binary Automerge doc, so the text-oriented hooks (sync, presence,
+  // intelligence, replay, branches) are bound to `textFile`, which is null
+  // while an image is selected.
+  const currentFileIsImage = currentFile !== null && isImageExtension(currentFile.path);
+  const textFile = currentFile !== null && !isBinaryExtension(currentFile.path) ? currentFile : null;
+  // Text files that are not .qmd/.md (yml, css, json, ...) have no preview:
+  // the editor pane takes the whole main area and stays visible in every
+  // view mode; the divider and preview pane are not rendered.
+  const currentFileIsPlainText = textFile !== null && !isSourceFile(textFile.path);
+  // No preview pane for either -> split presets and comments modes are grayed out.
+  const previewUnavailable = currentFileIsImage || currentFileIsPlainText;
 
   // Ensure URL includes the current file path on initial render
   // This handles the case where the URL is just #/p/<id> and we select a default file
@@ -198,8 +315,27 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // useIntelligenceProviders below, once wasmStatus/editorReady exist).
   const getCurrentFilePath = useCallback(() => currentFilePathRef.current, []);
 
-  // Presence for collaborative cursors
-  const { remoteUsers, userCount, onEditorMount: onPresenceEditorMount } = usePresence(currentFile?.path ?? null);
+  // Local document branches ("forks") for the current file — behind an
+  // experimental, default-off preference. When the flag is off, the
+  // effective branch is forced to main so disabling it mid-branch can't
+  // leave the editor bound to an invisible branch doc.
+  const [documentBranchesEnabled] = usePreference('documentBranches');
+  const { branches, activeBranchId: rawActiveBranchId } = useDocBranches(textFile?.path ?? null);
+  const activeBranchId = documentBranchesEnabled ? rawActiveBranchId : null;
+
+  // "Compare with main" diff view — session-only, leaves when the branch
+  // or file changes (merge/delete reset activeBranchId, so those too).
+  const [comparingWithMain, setComparingWithMain] = useState(false);
+  useEffect(() => {
+    setComparingWithMain(false);
+  }, [activeBranchId, currentFile?.path]);
+
+  // Presence for collaborative cursors — disabled while on a local branch
+  // (the branch doc is invisible to peers, so cursors would be misleading)
+  const { remoteUsers, userCount, onEditorMount: onPresenceEditorMount } = usePresence(
+    textFile?.path ?? null,
+    { enabled: activeBranchId === null }
+  );
 
   // Intelligence for document outline
   const {
@@ -208,14 +344,14 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     error: intelligenceError,
     refresh: refreshIntelligence,
   } = useIntelligence({
-    path: currentFile?.path ?? null,
+    path: textFile?.path ?? null,
     enableSymbols: true,
   });
 
   // Replay mode for document history.
   // isActiveRef is updated synchronously in enter()/exit() — before React
   // re-renders — so it can guard handleEditorChange against stale closures.
-  const { state: replayState, controls: replayControls, isActiveRef: replayActiveRef } = useReplayMode(currentFile?.path ?? null);
+  const { state: replayState, controls: replayControls, isActiveRef: replayActiveRef } = useReplayMode(textFile?.path ?? null);
 
   // Bidirectional Automerge ↔ Monaco sync
   const {
@@ -226,11 +362,12 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     handleContentRewrite,
     onEditorMount: onSyncEditorMount,
   } = useAutomergeSync({
-    currentFile,
+    currentFile: textFile,
     fileContents,
     onContentOperations,
     replayActiveRef,
     replayIsActive: replayState.isActive,
+    activeBranchId,
   });
 
   // Keep current file path ref in sync for Monaco providers
@@ -249,6 +386,12 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // Scroll sync state (persisted in localStorage)
   const [scrollSyncEnabled, setScrollSyncEnabled] = usePreference('scrollSyncEnabled');
 
+  // q2-preview block editing on/off (bd-ew0vak6b) — the Edit pill in the
+  // replay bar. Persisted; `ReactPreview` reads the same preference
+  // directly (like `richText`) and forwards it to the iframe as
+  // `editingDisabled`, so nothing is threaded through PreviewRouter.
+  const [previewEditing, setPreviewEditing] = usePreference('previewEditing');
+
   // Attribution overlay — session-only useState (not persisted).
   // Owned here, surfaced via the toggle in the replay bar, and
   // threaded into ReactPreview where `useAttribution` consumes it
@@ -260,6 +403,11 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // three-way toggle in the replay bar, threaded into the q2-preview
   // iframe where CommentBlock consumes it.
   const [commentsMode, setCommentsMode] = useState<'expand' | 'show' | 'hide'>('show');
+  // Outstanding editorial comments on the active page (bd-0rsk07il,
+  // GH #445), reported by ReactPreview from the render pipeline's
+  // DocumentProfile summary. Drives the count badge on the
+  // comments-mode toggle in the replay bar.
+  const [outstandingCommentCount, setOutstandingCommentCount] = useState(0);
   // `useAttribution` (inside ReactPreview) reports whether it's
   // mid-build via `onAttributionGeneratingChange`; the flag drives
   // the rotating-gradient border on the Attribution pill so a slow
@@ -290,6 +438,9 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // Current document format (e.g., 'q2-slides', 'q2-debug', or null for default)
   const [currentFormat, setCurrentFormat] = useState<string | null>(null);
 
+  // The router's mode (react / dom / download / neither) and the "Download as" control it drives.
+  const [previewMode, setPreviewMode] = useState<PreviewMode>({ mode: 'dom' });
+
   // Handle format changes from PreviewRouter
   const handleFormatChange = useCallback((format: string | null) => {
     setCurrentFormat(format);
@@ -307,6 +458,59 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
 
   // New file dialog state (text-only after Phase C of generic-file-uploader plan)
   const [showNewFileDialog, setShowNewFileDialog] = useState(false);
+  // Parent folder for the new-folder dialog; null = dialog closed.
+  const [newFolderParent, setNewFolderParent] = useState<string | null>(null);
+  const [showSearchDialog, setShowSearchDialog] = useState(false);
+  // Match to select once the search-picked document is in the editor.
+  // Switching files remounts MonacoEditor, so the selection is applied
+  // from handleEditorMount, not synchronously.
+  const pendingMatchRef = useRef<{ path: string; match: MatchRange } | null>(null);
+
+  const selectMatchInEditor = useCallback((match: MatchRange) => {
+    // Deferred a frame: Monaco resets scroll/layout when it takes a new
+    // document value, and a reveal issued in the same frame is undone by
+    // that reset. The second frame guarantees layout has run.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        if (!editor || !model) return;
+        const start = model.getPositionAt(match.index);
+        const end = model.getPositionAt(match.index + match.length);
+        const range = {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        };
+        editor.setSelection(range);
+        editor.revealRangeInCenter(range, 1 /* ScrollType.Immediate */);
+        editor.focus();
+      })
+    );
+  }, []);
+
+  // Place-file dialog queue (moves and conflicting drops); the head is
+  // shown. Several dropped files can conflict at once, so they line up.
+  const [placeQueue, setPlaceQueue] = useState<PlaceRequest[]>([]);
+  const enqueuePlace = useCallback((req: PlaceRequest) => {
+    setPlaceQueue((q) => [...q, req]);
+  }, []);
+  const dequeuePlace = useCallback(() => {
+    setPlaceQueue((q) => q.slice(1));
+  }, []);
+
+  // Document import (P5). Offered where pandoc.wasm ships (not the `q2 preview` embed).
+  const importEnabled = importAvailable();
+  const importFormats = useImportFormats(importEnabled);
+
+  // Every folder in the project: explicitly created ones plus those
+  // implied by file paths. Feeds the folder pickers in both dialogs.
+  const allFolders = useMemo(() => {
+    const set = new Set<string>(folders ?? []);
+    for (const f of files) for (const a of getAncestorPaths(f.path)) set.add(a);
+    return Array.from(set).sort();
+  }, [files, folders]);
   // Initial filename for new file dialog (e.g., from clicking a link to a non-existent file)
   const [newFileInitialName, setNewFileInitialName] = useState<string>('');
 
@@ -328,6 +532,24 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // Editor drag-drop state for image insertion
   const [isEditorDragOver, setIsEditorDragOver] = useState(false);
   const pendingDropPositionRef = useRef<Monaco.IPosition | null>(null);
+
+  // Editor drag-drop/paste listeners are attached to Monaco's DOM node
+  // once, at mount, as these stable wrappers. The wrappers read the
+  // latest handlers from a ref (synced by an effect below), so handler
+  // identity can change with `currentFile`/`files` without the listeners
+  // ever being detached — previously a cleanup effect removed them on the
+  // first such change and nothing re-added them, so only the first drop
+  // after mount worked.
+  const editorDndHandlersRef = useRef<{
+    dragOver: (e: DragEvent) => void;
+    dragLeave: (e: DragEvent) => void;
+    drop: (e: DragEvent) => void;
+    paste: (e: ClipboardEvent) => void;
+  }>({ dragOver: () => {}, dragLeave: () => {}, drop: () => {}, paste: () => {} });
+  const stableEditorDragOver = useCallback((e: DragEvent) => editorDndHandlersRef.current.dragOver(e), []);
+  const stableEditorDragLeave = useCallback((e: DragEvent) => editorDndHandlersRef.current.dragLeave(e), []);
+  const stableEditorDrop = useCallback((e: DragEvent) => editorDndHandlersRef.current.drop(e), []);
+  const stableEditorPaste = useCallback((e: ClipboardEvent) => editorDndHandlersRef.current.paste(e), []);
 
   // Fullscreen preview mode
   const [isFullscreenPreview, setIsFullscreenPreview] = useState(false);
@@ -377,6 +599,13 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     setDiagnostics(newDiagnostics);
   }, []);
 
+  // Callback for when a preview render reports the active page's
+  // outstanding comments (bd-0rsk07il). Only the count is kept —
+  // the badge is the sole consumer today.
+  const handleCommentsChange = useCallback((comments: RenderComment[]) => {
+    setOutstandingCommentCount(comments.length);
+  }, []);
+
   // Callback for when preview WASM status changes
   const handleWasmStatusChange = useCallback((status: 'loading' | 'ready' | 'error', error: string | null) => {
     setWasmStatus(status);
@@ -401,16 +630,13 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     previewReplayScrollRef.current = fn;
   }, []);
 
-  // Update document title based on current file and project
-  useEffect(() => {
-    if (currentFile) {
-      // Extract just the filename from the path
-      const filename = currentFile.path.split('/').pop() || currentFile.path;
-      document.title = `${filename} — ${project.description} — Quarto Hub`;
-    } else {
-      document.title = `${project.description} — Quarto Hub`;
-    }
-  }, [currentFile, project.description]);
+  // Update document title based on current file and project.
+  // The hook restores the default "Quarto Hub" title on unmount (e.g.
+  // when exiting to the project selector).
+  const documentTitle = currentFile
+    ? `${currentFile.path.split('/').pop() || currentFile.path} — ${project.description} — Quarto Hub`
+    : `${project.description} — Quarto Hub`;
+  useDocumentTitle(documentTitle);
 
   // Toggle Monaco read-only mode during replay
   useEffect(() => {
@@ -424,6 +650,7 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   // untouched during replay so that when replay exits, the Automerge sync
   // effect's setContent(automergeContent) always produces a state change.
   const displayContent = replayState.isActive ? replayState.currentContent : content;
+  const downloadAs = useDownloadAs(currentFile?.path ?? null, displayContent, wasmStatus === 'ready', captures, identities);
 
   // When replay content changes, update Monaco and VFS for display.
   // Writing to VFS ensures the preview renderer sees historical content.
@@ -552,8 +779,8 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     if (newFilePath && newFilePath !== prevFilePath) {
       const targetFile = files.find(f => f.path === newFilePath);
       if (targetFile && targetFile.path !== currentFile?.path) {
-        // Don't switch to binary files
-        if (!isBinaryExtension(targetFile.path)) {
+        // Don't switch to binary files that have no viewer (images do)
+        if (!isBinaryExtension(targetFile.path) || isImageExtension(targetFile.path)) {
           setCurrentFile(targetFile);
           const fileContent = fileContents.get(targetFile.path);
           setContent(fileContent ?? '');
@@ -609,10 +836,76 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
 
   // Capture Monaco editor instance on mount
   const handleEditorMount = (editor: Monaco.editor.IStandaloneCodeEditor, monaco: typeof Monaco) => {
+    // Cmd/Ctrl+B toggles **bold** around the selection (or inserts an
+    // empty pair at the cursor).
+    const registerToggle = (id: string, label: string, key: number, marker: string) => {
+      editor.addAction({
+        id,
+        label,
+        keybindings: [monaco.KeyMod.CtrlCmd | key],
+        run: (ed) => {
+          const model = ed.getModel();
+          const sel = ed.getSelection();
+          if (!model || !sel) return;
+          const selected = model.getValueInRange(sel);
+          const m = marker.length;
+          const before = model.getValueInRange({
+            startLineNumber: sel.startLineNumber,
+            startColumn: Math.max(1, sel.startColumn - m),
+            endLineNumber: sel.startLineNumber,
+            endColumn: sel.startColumn,
+          });
+          const after = model.getValueInRange({
+            startLineNumber: sel.endLineNumber,
+            startColumn: sel.endColumn,
+            endLineNumber: sel.endLineNumber,
+            endColumn: sel.endColumn + m,
+          });
+          const r = toggleWrap(selected, marker, before, after);
+          const range = {
+            startLineNumber: sel.startLineNumber,
+            startColumn: sel.startColumn - r.extendBefore,
+            endLineNumber: sel.endLineNumber,
+            endColumn: sel.endColumn + r.extendAfter,
+          };
+          ed.executeEdits(id, [{ range, text: r.text, forceMoveMarkers: true }]);
+          // Re-select the inner text (or place the cursor between the markers).
+          const startCol = range.startColumn + r.selectStart;
+          const singleLine = sel.startLineNumber === sel.endLineNumber;
+          ed.setSelection({
+            startLineNumber: sel.startLineNumber,
+            startColumn: startCol,
+            endLineNumber: singleLine ? sel.startLineNumber : sel.endLineNumber,
+            endColumn: singleLine
+              ? range.startColumn + r.selectEnd
+              : sel.endColumn + r.extendAfter - (r.text.length - r.selectEnd),
+          });
+        },
+      });
+    };
+    registerToggle('qmd.toggleBold', 'Toggle bold', monaco.KeyCode.KeyB, '**');
+
     editorRef.current = editor;
     monacoRef.current = monaco;
     onSyncEditorMount(editor);
     onPresenceEditorMount(editor);
+
+    // Compact the gutter when the editor gets narrow (split dragged
+    // small): drop the line numbers and folding arrows, keeping a
+    // sliver of decoration lane as padding.
+    let gutterCompact: boolean | null = null;
+    const applyNarrowLayout = (width: number) => {
+      const compact = width < 400;
+      if (compact === gutterCompact) return;
+      gutterCompact = compact;
+      editor.updateOptions(
+        compact
+          ? { lineNumbers: 'off', folding: false, lineDecorationsWidth: 4 }
+          : { lineNumbers: 'on', folding: true, lineDecorationsWidth: 10 },
+      );
+    };
+    applyNarrowLayout(editor.getLayoutInfo().width);
+    editor.onDidLayoutChange((info) => applyNarrowLayout(info.width));
 
     // Register intelligence providers (symbols, folding, semantic tokens).
     // The getter uses a ref so it always returns the current file path.
@@ -658,16 +951,30 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
       }
     });
 
-    // Attach drag-drop handlers to editor container
+    // Attach drag-drop and paste handlers to editor container
     const domNode = editor.getDomNode();
     if (domNode) {
-      domNode.addEventListener('dragover', handleEditorDragOver);
-      domNode.addEventListener('dragleave', handleEditorDragLeave);
-      domNode.addEventListener('drop', handleEditorDrop);
+      domNode.addEventListener('dragover', stableEditorDragOver);
+      domNode.addEventListener('dragleave', stableEditorDragLeave);
+      domNode.addEventListener('drop', stableEditorDrop);
+      // Capture phase: the paste event targets Monaco's hidden textarea,
+      // and Monaco's own listener (which preventDefaults and re-implements
+      // text paste) sits on that textarea — capture on the container runs
+      // first, so image payloads can be intercepted (bd-706b0ixu).
+      domNode.addEventListener('paste', stableEditorPaste, true);
     }
 
     // Signal that editor is ready for scroll sync
     setEditorReady(true);
+
+    // A search result picked while another file was open: the editor
+    // remounts per file (see the MonacoEditor `key`), so the match is
+    // applied here, once the new instance holds the picked document.
+    const pending = pendingMatchRef.current;
+    if (pending && pending.path === currentFile?.path) {
+      pendingMatchRef.current = null;
+      selectMatchInEditor(pending.match);
+    }
   };
 
   // Handle symbol click from outline panel - navigate editor to symbol location
@@ -688,10 +995,9 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
   const handleSelectFile = useCallback((file: FileEntry) => {
     // Block file switching during replay mode
     if (replayState.isActive) return;
-    // Don't switch to binary files in the editor
-    if (isBinaryExtension(file.path)) {
-      // For now, just ignore binary file selection
-      // Future: could show a preview panel for images
+    // Images open in the ImageViewer; other binary files (pdf, fonts,
+    // media) have no viewer yet, so selecting them is a no-op.
+    if (isBinaryExtension(file.path) && !isImageExtension(file.path)) {
       return;
     }
 
@@ -704,6 +1010,19 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     // Update URL without adding history entry (sidebar navigation)
     onNavigateToFile(file.path, { replace: true });
   }, [fileContents, onNavigateToFile, replayState.isActive]);
+
+  // Search result picked: open the file and highlight the first match.
+  const handleSelectSearchResult = useCallback(
+    (file: FileEntry, match: MatchRange | null) => {
+      const alreadyOpen = currentFile?.path === file.path;
+      handleSelectFile(file);
+      if (!match) return;
+      if (alreadyOpen) selectMatchInEditor(match);
+      else pendingMatchRef.current = { path: file.path, match };
+    },
+    [currentFile?.path, handleSelectFile, selectMatchInEditor]
+  );
+
 
   // Handle opening a file in a new browser tab
   const handleOpenInNewTab = useCallback((file: FileEntry) => {
@@ -735,13 +1054,36 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     setShowShareDialog(true);
   }, []);
 
-  // Build shareable URL for the current file
+  // Build shareable URL for the current file, with the display-only
+  // invite-landing preview (bd-fxdcxbpq): file name, sibling files, and
+  // contributor initials from the index doc's identity map.
   const shareableUrl = currentFile
     ? buildShareableUrl(
         project.indexDocId,
         project.syncServer,
         project.description,
-        currentFile.path
+        currentFile.path,
+        {
+          from: userName,
+          preview: {
+            kind: 'project',
+            fileName: currentFile.path,
+            topFiles: files
+              .filter((f) => f.path !== currentFile.path)
+              .slice(0, 2)
+              .map((f) => f.path),
+            fileCount: files.length,
+            contributorInitials: [
+              ...new Set(
+                [userName, ...Object.values(identities ?? {}).map((i) => i.name)].filter(
+                  (n): n is string => !!n,
+                ),
+              ),
+            ]
+              .map((n) => initialsFor(n))
+              .slice(0, 4),
+          },
+        }
       )
     : undefined;
 
@@ -779,6 +1121,120 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     // Note: we don't clear pendingDropPositionRef here — editor-drop image
     // uploads happen inside handleUploadAsset and clear it after insertion.
   }, []);
+
+  // Handle creating a new text file
+  const handleCreateTextFile = useCallback(async (rawPath: string, initialContent: string) => {
+    const path = normalizeProjectPath(rawPath);
+    try {
+      await createFile(path, initialContent);
+      // Select the newly created file
+      const newFile: FileEntry = { path, docId: '' }; // docId will be set by automerge
+      setCurrentFile(newFile);
+      setContent(initialContent);
+    } catch (err) {
+      console.error('Failed to create file:', err);
+    }
+  }, []);
+
+  // Handle uploading an asset (text files go through text creation,
+  // everything else becomes a binary file). `targetPath` is the already-
+  // validated final path (e.g. "_quarto/grammars/toml/toml.wasm").
+  const handleUploadAsset = useCallback(async (file: File, targetPath: string) => {
+    try {
+      // Text files must be created as text documents so the editor can display them
+      if (isTextExtension(targetPath)) {
+        const textContent = await file.text();
+        handleCreateTextFile(targetPath, textContent);
+        return;
+      }
+
+      const { content: binaryContent, mimeType } = await processFileForUpload(file);
+      const result = await createBinaryFile(targetPath, binaryContent, mimeType);
+
+      // If this is an image and we have a pending drop position (editor drop),
+      // insert a markdown image reference at the drop point.
+      if (file.type.startsWith('image/') && pendingDropPositionRef.current && editorRef.current) {
+        const position = pendingDropPositionRef.current;
+        // result.path is the final project-root-relative path (it can be
+        // hash-suffix renamed on conflict); relativize it against the
+        // current file so the markdown reference resolves.
+        const markdown = buildDropMarkdown('image', currentFile?.path ?? null, result.path);
+
+        editorRef.current.executeEdits('image-drop', [{
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+          text: markdown,
+          forceMoveMarkers: true,
+        }]);
+
+        pendingDropPositionRef.current = null;
+      }
+    } catch (err) {
+      console.error('Failed to upload file:', err);
+      pendingDropPositionRef.current = null;
+    }
+  }, [handleCreateTextFile, currentFile]);
+
+  // Files dropped onto the sidebar tree, the editor, or anywhere else in the window: added
+  // directly, no dialog — unless the name is already taken (in the project or earlier in the
+  // batch), in which case the place-file dialog asks for a folder/name, exactly as a conflicting
+  // internal move does. Files failing the size/empty checks are skipped with a console warning.
+  // Importable documents dropped at the top level (not inside a dropped folder) go to the import
+  // queue first (I5); the rest take the upload path.
+  const handleDropFiles = useCallback(
+    (dropped: DroppedEntries, destination: string) => {
+      const { imports, uploads: entries } = routeDroppedEntries(dropped, {
+        formats: replayState.isActive ? null : importFormats,
+        destination,
+      });
+      for (const { file, folder } of imports) enqueuePlace({ kind: 'import', file, folder });
+      const taken = new Set(files.map((f) => f.path));
+      // Dropped directories become folders even when empty, so the tree
+      // mirrors what was dropped.
+      for (const folder of entries.folders) {
+        try {
+          createFolder(joinPath(destination, sanitizeRelativePath(folder)));
+        } catch (err) {
+          console.error('Failed to create folder:', err);
+        }
+      }
+      const byFile = new Map(entries.files.map((e) => [e.file, e.relativePath]));
+      for (const { file, error } of processAssetFiles(entries.files.map((e) => e.file))) {
+        if (error) {
+          console.warn(`[sidebar drop] skipped ${file.name}: ${error}`);
+          continue;
+        }
+        const rel = sanitizeRelativePath(byFile.get(file) ?? file.name);
+        const path = joinPath(destination, rel);
+        if (taken.has(path)) {
+          const slash = rel.lastIndexOf('/');
+          const folder = joinPath(destination, slash >= 0 ? rel.slice(0, slash) : '');
+          enqueuePlace({ kind: 'add', file, folder, name: slash >= 0 ? rel.slice(slash + 1) : rel });
+          continue;
+        }
+        taken.add(path);
+        void handleUploadAsset(file, path);
+      }
+    },
+    [files, handleUploadAsset, enqueuePlace, importFormats, replayState.isActive]
+  );
+
+  // Window-level fallback: a file dropped where no component handles it (top bar, preview pane,
+  // image viewer, no file open, a dialog's backdrop) is routed like an editor drop instead of
+  // letting the browser navigate to it. In replay mode the drop is taken and ignored.
+  useWindowFileDrop({
+    enabled: importEnabled,
+    onDrop: (entries) => {
+      if (replayState.isActive) return;
+      handleDropFiles(entries, resolveDefaultDestination({ selection: currentFile?.path ?? null }));
+    },
+  });
+
+
 
   // Editor drag-drop handlers for image/file insertion
   const handleEditorDragOver = useCallback((e: DragEvent) => {
@@ -856,82 +1312,110 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
       pendingDropPositionRef.current = target?.position ?? editorRef.current.getPosition();
     }
 
-    setAssetInitialFiles(files);
-    // Default the upload next to the document being edited, so the common
-    // case yields a same-directory reference.
-    setAssetDestination(resolveDefaultDestination({ selection: currentFile?.path ?? null }));
-    setShowNewAssetDialog(true);
-  }, [currentFile]);
+    // Add next to the document being edited, so the common case yields a
+    // same-directory reference. Same direct-add path as a sidebar drop
+    // (folders walked too): no dialog unless a name is already taken.
+    const destination = resolveDefaultDestination({ selection: currentFile?.path ?? null });
+    if (e.dataTransfer) {
+      void collectDroppedEntries(e.dataTransfer).then((entries) => handleDropFiles(entries, destination));
+    }
+  }, [currentFile, handleDropFiles]);
 
-  // Cleanup editor drag-drop listeners on unmount. Note: intelligence-provider
-  // disposal lives in useIntelligenceProviders (mount-only) — it must NOT be
-  // coupled to `handleEditorDrop`, whose identity changes with `currentFile`.
+  // Clipboard image paste (bd-706b0ixu, see
+  // claude-notes/plans/2026-08-27-paste-image-clipboard.md): silent
+  // ingest — content-hash-named file next to the current document, then
+  // a markdown reference at the cursor. Every dep reads through a ref or
+  // a stable callback, so both callbacks below are identity-stable and
+  // the DOM listener can be attached once at editor mount.
+  const pasteImageIngest = useMemo(
+    () =>
+      createPasteImageHandler({
+        getCurrentFilePath,
+        getEditor: () => {
+          const editor = editorRef.current;
+          if (!editor) return null;
+          return {
+            getSelection: () => editor.getSelection(),
+            getTextInRange: (range) =>
+              editor.getModel()?.getValueInRange(range) ?? '',
+            replaceRange: (range, text) => {
+              // Monaco's onChange fires synchronously from executeEdits,
+              // updating both React state and CRDT via the splice path.
+              editor.executeEdits('image-paste', [
+                { range, text, forceMoveMarkers: true },
+              ]);
+            },
+          };
+        },
+        processFile: processFileForUpload,
+        createBinaryFile,
+        maxFileSize: FILE_SIZE_LIMITS.MAX_FILE_SIZE,
+        onError: (message) => console.error(message),
+      }),
+    [getCurrentFilePath]
+  );
+
+  const handleEditorPaste = useCallback(
+    (e: ClipboardEvent) => {
+      const clipboard = e.clipboardData;
+      if (!clipboard) return;
+      const files = Array.from(clipboard.files);
+
+      // Pasting a URL over selected text wraps the selection as a link.
+      const editor = editorRef.current;
+      const selection = editor?.getSelection();
+      if (editor && selection && files.length === 0) {
+        const selected = editor.getModel()?.getValueInRange(selection) ?? '';
+        const link = linkFromPaste(selected, clipboard.getData('text/plain'));
+        if (link) {
+          e.preventDefault();
+          e.stopPropagation();
+          editor.executeEdits('paste-link', [{ range: selection, text: link, forceMoveMarkers: true }]);
+          return;
+        }
+      }
+
+      if (
+        classifyPastePayload({
+          files: files.map((f) => ({ name: f.name, type: f.type, size: f.size })),
+          text: clipboard.getData('text/plain'),
+        }) !== 'take-over'
+      ) {
+        return; // text and mixed payloads: Monaco's paste handling runs
+      }
+      // Taking over: stop Monaco's own handler (it would insert the
+      // filename rider as stray text) before the async ingest starts.
+      e.preventDefault();
+      e.stopPropagation();
+      void pasteImageIngest(files);
+    },
+    [pasteImageIngest]
+  );
+
+  // Keep the stable listener wrappers pointing at the latest handlers.
+  useEffect(() => {
+    editorDndHandlersRef.current = {
+      dragOver: handleEditorDragOver,
+      dragLeave: handleEditorDragLeave,
+      drop: handleEditorDrop,
+      paste: handleEditorPaste,
+    };
+  }, [handleEditorDragOver, handleEditorDragLeave, handleEditorDrop, handleEditorPaste]);
+
+  // Detach the editor drag-drop/paste listeners on unmount only. Note:
+  // intelligence-provider disposal lives in useIntelligenceProviders
+  // (mount-only).
   useEffect(() => {
     return () => {
       const domNode = editorRef.current?.getDomNode();
       if (domNode) {
-        domNode.removeEventListener('dragover', handleEditorDragOver);
-        domNode.removeEventListener('dragleave', handleEditorDragLeave);
-        domNode.removeEventListener('drop', handleEditorDrop);
+        domNode.removeEventListener('dragover', stableEditorDragOver);
+        domNode.removeEventListener('dragleave', stableEditorDragLeave);
+        domNode.removeEventListener('drop', stableEditorDrop);
+        domNode.removeEventListener('paste', stableEditorPaste, true);
       }
     };
-  }, [handleEditorDragOver, handleEditorDragLeave, handleEditorDrop]);
-
-  // Handle creating a new text file
-  const handleCreateTextFile = useCallback(async (path: string, initialContent: string) => {
-    try {
-      await createFile(path, initialContent);
-      // Select the newly created file
-      const newFile: FileEntry = { path, docId: '' }; // docId will be set by automerge
-      setCurrentFile(newFile);
-      setContent(initialContent);
-    } catch (err) {
-      console.error('Failed to create file:', err);
-    }
-  }, []);
-
-  // Handle uploading an asset (text files go through text creation,
-  // everything else becomes a binary file). `targetPath` is the already-
-  // validated final path (e.g. "_quarto/grammars/toml/toml.wasm").
-  const handleUploadAsset = useCallback(async (file: File, targetPath: string) => {
-    try {
-      // Text files must be created as text documents so the editor can display them
-      if (isTextExtension(targetPath)) {
-        const textContent = await file.text();
-        handleCreateTextFile(targetPath, textContent);
-        return;
-      }
-
-      const { content: binaryContent, mimeType } = await processFileForUpload(file);
-      const result = await createBinaryFile(targetPath, binaryContent, mimeType);
-
-      // If this is an image and we have a pending drop position (editor drop),
-      // insert a markdown image reference at the drop point.
-      if (file.type.startsWith('image/') && pendingDropPositionRef.current && editorRef.current) {
-        const position = pendingDropPositionRef.current;
-        // result.path is the final project-root-relative path (it can be
-        // hash-suffix renamed on conflict); relativize it against the
-        // current file so the markdown reference resolves.
-        const markdown = buildDropMarkdown('image', currentFile?.path ?? null, result.path);
-
-        editorRef.current.executeEdits('image-drop', [{
-          range: {
-            startLineNumber: position.lineNumber,
-            startColumn: position.column,
-            endLineNumber: position.lineNumber,
-            endColumn: position.column,
-          },
-          text: markdown,
-          forceMoveMarkers: true,
-        }]);
-
-        pendingDropPositionRef.current = null;
-      }
-    } catch (err) {
-      console.error('Failed to upload file:', err);
-      pendingDropPositionRef.current = null;
-    }
-  }, [handleCreateTextFile, currentFile]);
+  }, [stableEditorDragOver, stableEditorDragLeave, stableEditorDrop, stableEditorPaste]);
 
   // Handle deleting a file
   const handleDeleteFile = useCallback((file: FileEntry) => {
@@ -947,8 +1431,40 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     }
   }, [currentFile, files]);
 
+  // Open the new-file dialog seeded with `folder` ('' = project root).
+  const handleNewFileIn = useCallback((folder: string) => {
+    setNewFileInitialName(folder ? `${folder}/` : '');
+    setShowNewFileDialog(true);
+  }, []);
+
+  // Open the new-folder dialog for `parent` ('' = project root).
+  const handleNewFolder = useCallback((parent: string) => {
+    setNewFolderParent(parent);
+  }, []);
+
+  const handleCreateFolder = useCallback((path: string) => {
+    try {
+      createFolder(path);
+    } catch (err) {
+      console.error('Failed to create folder:', err);
+    }
+  }, []);
+
+  // Forget an explicitly created folder. FileSidebar only offers this for
+  // folders with nothing under them, so no files are affected.
+  const handleDeleteFolder = useCallback((path: string) => {
+    if (!window.confirm(fileSidebar.confirmDeleteFolder(path))) return;
+    try {
+      deleteFolder(path);
+    } catch (err) {
+      console.error('Failed to delete folder:', err);
+    }
+  }, []);
+
   // Handle renaming a file
-  const handleRenameFile = useCallback((file: FileEntry, newPath: string) => {
+  const handleRenameFile = useCallback((file: FileEntry, rawNewPath: string) => {
+    const newPath = normalizeProjectPath(rawNewPath);
+    if (!newPath || newPath === file.path) return;
     try {
       renameFile(file.path, newPath);
       // If we renamed the current file, update the reference
@@ -962,58 +1478,129 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
     }
   }, [currentFile]);
 
+  // Move a folder and everything under it into `destination`. Refused (with
+  // an alert, like a failed rename) if any file would land on an existing
+  // one; otherwise each file is renamed and explicit folder markers follow.
+  const handleMoveFolder = useCallback(
+    (folder: string, destination: string) => {
+      const name = folder.split('/').pop() || folder;
+      const newFolder = joinPath(destination, name);
+      const prefix = `${folder}/`;
+      const moving = files.filter((f) => f.path.startsWith(prefix));
+      const existing = new Set(files.map((f) => f.path));
+      const renames = moving.map((f) => [f, `${newFolder}/${f.path.slice(prefix.length)}`] as const);
+      if (renames.some(([, to]) => existing.has(to))) {
+        alert(dialogs.moveFile.errorFolderConflict(newFolder));
+        return;
+      }
+      for (const [f, to] of renames) handleRenameFile(f, to);
+      for (const marker of allFolders) {
+        if (marker === folder || marker.startsWith(prefix)) {
+          try {
+            createFolder(`${newFolder}${marker.slice(folder.length)}`);
+            deleteFolder(marker);
+          } catch (err) {
+            console.error('Failed to move folder marker:', err);
+          }
+        }
+      }
+    },
+    [files, allFolders, handleRenameFile]
+  );
+
+  // The Import button's picker: one dialog per file, queued behind whatever is open. The folder is
+  // where the current file lives (the project root with no file open), like an asset upload.
+  const handleImportPick = useCallback(
+    (file: File) => {
+      if (replayState.isActive) return;
+      enqueuePlace({ kind: 'import', file, folder: resolveDefaultDestination({ selection: currentFile?.path ?? null }) });
+    },
+    [replayState.isActive, enqueuePlace, currentFile]
+  );
+
+  // Store an import's images, then its qmd, and on success open the qmd the way a created text file
+  // opens (`handleCreateTextFile`'s pattern, plus the URL update `handleSelectFile` makes): the
+  // file isn't in `fileContents` yet, so `handleSelectFile` would show it empty.
+  const handleCommitImport = useCallback(
+    async (outcome: Extract<ImportOutcome, { ok: true }>, qmdPath: string) => {
+      const result = await commitImport(outcome, qmdPath, defaultImportStorageDeps());
+      if (result.ok) {
+        setCurrentFile({ path: result.qmdPath, docId: result.qmdDocId });
+        setContent(result.qmd);
+        setDiagnostics([]);
+        setUnlocatedErrors([]);
+        onNavigateToFile(result.qmdPath, { replace: true });
+      }
+      return result;
+    },
+    [onNavigateToFile, setContent]
+  );
+
+  // Place-file dialog confirmed: move an existing file or add a new one.
+  const handlePlaceConfirm = useCallback(
+    (request: PlaceFileRequest, newPath: string) => {
+      if (request.kind === 'move') handleRenameFile(request.file, newPath);
+      else void handleUploadAsset(request.file, newPath);
+    },
+    [handleRenameFile, handleUploadAsset]
+  );
+
   return (
     <div className="editor-container">
-      {!isFullscreenPreview && (
-        <div className="header-wrapper">
-          <MinimalHeader
-            currentFilePath={currentFile?.path ?? null}
-            projectName={project.description}
-            onChooseNewProject={onDisconnect}
-            onShare={handleShare}
-            onToggleFullscreenPreview={handleToggleFullscreenPreview}
-            isFullscreenPreview={isFullscreenPreview}
-            isOnline={isOnline}
-          />
-          {replayState.isActive && (
-            <div className="replay-mode-banner">REPLAY MODE</div>
-          )}
-        </div>
-      )}
-
-      {!isFullscreenPreview && unlocatedErrors.length > 0 && (
-        <div className="diagnostics-banner">
-          {unlocatedErrors.map((diag, i) => (
-            <div key={i} className={`diagnostic-item diagnostic-${diag.kind}`}>
-              {diag.code && <span className="diagnostic-code">[{diag.code}]</span>}
-              <span className="diagnostic-title">{diag.title}</span>
-              {diag.problem && <span className="diagnostic-problem">: {diag.problem}</span>}
-            </div>
-          ))}
-        </div>
-      )}
-
-      <main className={`editor-main view-mode-${viewMode}`}>
+      <div className="editor-columns">
+        {/* Project column: project-scoped chrome (top bar, sidebar).
+            The whole column is inside SidebarDrawer, so at ≤900px
+            it becomes the off-canvas drawer in one piece. */}
         {!isFullscreenPreview && (
-          <SidebarTabs disabled={replayState.isActive}>
+          <SidebarDrawer drawer={sidebarDrawer}>
+          <div className="project-column">
+            <ProjectTopBar
+              projectName={project.description}
+              onChooseNewProject={onDisconnect}
+              onShare={handleShare}
+            />
+            <SidebarTabs
+              disabled={replayState.isActive}
+              headerExtras={(id) =>
+                id === 'files' ? (
+                  <SyncStatusBadge
+                    scope="project"
+                    currentFilePath={currentFile?.path ?? null}
+                    dotPosition="end"
+                  />
+                ) : null
+              }
+            >
             {(activeTab) => {
               switch (activeTab) {
                 case 'files':
                   return (
-                    <FileSidebar
-                      files={files}
-                      currentFile={currentFile}
-                      onSelectFile={handleSelectFile}
-                      onNewFile={handleNewFile}
-                      onUploadFiles={handleUploadFiles}
-                      onDeleteFile={handleDeleteFile}
-                      onRenameFile={handleRenameFile}
-                      onOpenInNewTab={handleOpenInNewTab}
-                      onCopyLink={handleCopyLink}
-                      currentFormat={currentFormat}
-                      searchFiles={searchFiles}
-                      fileContents={fileContents}
-                    />
+                    <>
+                      <FileSidebar
+                        files={files}
+                        folders={folders}
+                        currentFile={currentFile}
+                        onSelectFile={handleSelectFile}
+                        onNewFile={handleNewFile}
+                        onNewFileIn={handleNewFileIn}
+                        onNewFolder={handleNewFolder}
+                        onDeleteFolder={handleDeleteFolder}
+                        onMoveFile={(file, preset) => enqueuePlace({ kind: 'move', file, ...preset })}
+                        onUploadFiles={handleUploadFiles}
+                        onDropFiles={handleDropFiles}
+                        onMoveFolder={handleMoveFolder}
+                        onDeleteFile={handleDeleteFile}
+                        onRenameFile={handleRenameFile}
+                        onOpenInNewTab={handleOpenInNewTab}
+                        onCopyLink={handleCopyLink}
+                        onOpenSearch={() => setShowSearchDialog(true)}
+                        importDocument={
+                          importEnabled
+                            ? { formats: importFormats, disabled: replayState.isActive, onPick: handleImportPick }
+                            : undefined
+                        }
+                      />
+                    </>
                   );
                 case 'outline':
                   return (
@@ -1029,7 +1616,6 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
                   return (
                     <ProjectTab
                       project={project}
-                      onChooseNewProject={onDisconnect}
                       onExportZip={exportProjectAsZip}
                     />
                   );
@@ -1057,11 +1643,86 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
               }
             }}
           </SidebarTabs>
+          </div>
+          </SidebarDrawer>
         )}
+
+        {/* Document column: document-scoped chrome (top bar, panes, bottom bar) */}
+        <div className="document-column">
         {!isFullscreenPreview && (
-          <div className={`pane editor-pane${isEditorDragOver ? ' drag-over' : ''}`}>
+          <div className="header-wrapper">
+            <DocumentTopBar
+              currentFilePath={currentFile?.path ?? null}
+              currentFormat={currentFormat}
+              onToggleFullscreenPreview={handleToggleFullscreenPreview}
+              isFullscreenPreview={isFullscreenPreview}
+              sidebarOpen={sidebarDrawer.sidebarVisible}
+              onToggleSidebar={sidebarDrawer.toggle}
+              sidebarToggleRef={sidebarDrawer.toggleRef}
+              splitFraction={editorPaneFraction}
+              onSetSplit={handleSetSplitPreset}
+              splitDisabled={previewUnavailable}
+              downloadAs={
+                downloadAs.available && currentFile && isSourceFile(currentFile.path)
+                  ? {
+                      ...downloadAs,
+                      disabledReason:
+                        previewMode.mode === 'neither' ? downloadStrings.neitherDescription(previewMode.formatKey) : undefined,
+                    }
+                  : undefined
+              }
+            />
+            {replayState.isActive && (
+              <div className="replay-mode-banner">REPLAY MODE</div>
+            )}
+          </div>
+        )}
+
+        {!isFullscreenPreview && sessionEphemeral && <EphemeralSessionBanner />}
+
+        {/* Invite welcome banner (bd-fxdcxbpq) or other host-provided chrome. */}
+        {!isFullscreenPreview && banner}
+
+        {!isFullscreenPreview && unlocatedErrors.length > 0 && (
+          <div className="diagnostics-banner">
+            {unlocatedErrors.map((diag, i) => (
+              <div key={i} className={`diagnostic-item diagnostic-${diag.kind}`}>
+                {diag.code && <span className="diagnostic-code">[{diag.code}]</span>}
+                <span className="diagnostic-title">{diag.title}</span>
+                {diag.problem && <span className="diagnostic-problem">: {diag.problem}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className={`editor-main view-mode-${viewMode}${isDraggingDivider ? ' dragging-divider' : ''}${splitAnimating ? ' split-animating' : ''}`}
+        >
+        {/* Image files: the viewer takes the whole editor + preview area */}
+        {currentFileIsImage && currentFile && (
+          <ImageViewer
+            key={currentFile.path}
+            path={currentFile.path}
+            version={binaryFileVersions?.get(currentFile.path) ?? 0}
+          />
+        )}
+        {!currentFileIsImage && (
+        <>
+        {(!isFullscreenPreview || currentFileIsPlainText) && (
+          <div
+            className={`pane editor-pane${isEditorDragOver ? ' drag-over' : ''}`}
+            style={
+              currentFileIsPlainText
+                ? { flex: '1 1 0%' }
+                : viewMode === 'both'
+                  ? { flex: `${editorPaneFraction} 1 0%` }
+                  : undefined
+            }
+          >
             {/* Show MarkdownSummary overlay in preview mode */}
-            {viewMode === 'preview' && (
+            {viewMode === 'preview' && !currentFileIsPlainText && (
               <div className="markdown-summary-overlay">
                 <MarkdownSummary
                   content={displayContent}
@@ -1073,11 +1734,42 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
                 />
               </div>
             )}
-            {/* Always render Monaco but hide in preview mode */}
-            <div style={{ display: viewMode === 'preview' ? 'none' : 'block', height: '100%' }}>
+            {/* Local branch bar (fork / switch / merge-to-main) */}
+            {documentBranchesEnabled && currentFile && !isBinaryExtension(currentFile.path) && (viewMode !== 'preview' || currentFileIsPlainText) && (
+              <BranchBar
+                branches={branches}
+                activeBranchId={activeBranchId}
+                disabled={replayState.isActive}
+                onSwitch={(id) => setActiveBranch(currentFile.path, id)}
+                onFork={(name) => createBranch(currentFile.path, name || undefined)}
+                onMerge={(id) => mergeBranchToMain(currentFile.path, id)}
+                onDelete={(id) => deleteBranch(currentFile.path, id)}
+                comparing={comparingWithMain}
+                onToggleCompare={() => setComparingWithMain((c) => !c)}
+              />
+            )}
+            {/* Always render Monaco but hide in preview mode (plain-text files have no preview) */}
+            <div style={{ display: viewMode === 'preview' && !currentFileIsPlainText ? 'none' : 'block', flex: 1, minHeight: 0 }}>
+              {comparingWithMain && activeBranchId !== null && currentFile ? (
+                <DiffEditor
+                  key={`diff::${currentFile.path}::${activeBranchId}`}
+                  height="100%"
+                  language={getLanguageForFile(currentFile.path)}
+                  theme={effectiveTheme === 'dark' ? 'quarto-dark' : 'quarto-light'}
+                  original={getFileContent(currentFile.path) ?? ''}
+                  modified={content}
+                  options={{ readOnly: true, renderSideBySide: true, minimap: { enabled: false } }}
+                />
+              ) : (
               <MonacoEditor
-                // Use key to force remount when switching files (resets editor state cleanly)
-                key={currentFile?.path ?? ''}
+                // Key forces remount when switching files or branches
+                // (resets editor state cleanly)
+                key={`${currentFile?.path ?? ''}::${activeBranchId ?? 'main'}`}
+                // Blank fallback: monaco is bundled, so the only wait is the
+                // per-mount editor-instance creation (a frame or two) — the
+                // default "Loading..." text just flashes on every open and
+                // file switch.
+                loading=""
                 height="100%"
                 language={getLanguageForFile(currentFile?.path ?? '')}
                 theme={effectiveTheme === 'dark' ? 'quarto-dark' : 'quarto-light'}
@@ -1090,34 +1782,76 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
                 onMount={handleEditorMount}
                 options={editorOptions}
               />
+              )}
             </div>
           </div>
         )}
 
-        {/* Pane divider */}
-        {!isFullscreenPreview && (
-          <div className="pane-divider" />
+        {/* Pane divider — drag to resize the editor/preview split */}
+        {!isFullscreenPreview && !currentFileIsPlainText && (
+          <div
+            className="pane-divider"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize editor and preview panes"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setIsDraggingDivider(true);
+            }}
+            onPointerMove={(e) => {
+              if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+              const main = e.currentTarget.parentElement;
+              if (!main) return;
+              const rect = main.getBoundingClientRect();
+              const frac = (e.clientX - rect.left) / rect.width;
+              setEditorPaneFraction(Math.min(0.85, Math.max(0.15, frac)));
+            }}
+            onPointerUp={(e) => {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+              setIsDraggingDivider(false);
+            }}
+          />
         )}
 
-        <div className={`pane preview-pane${isFullscreenPreview ? ' fullscreen' : ''}`}>
+        {!currentFileIsPlainText && (
+        <div
+          className={`pane preview-pane${isFullscreenPreview ? ' fullscreen' : ''}`}
+          style={
+            viewMode === 'both' && !isFullscreenPreview
+              ? { flex: `${1 - editorPaneFraction} 1 0%` }
+              : undefined
+          }
+        >
           {isFullscreenPreview && (
-            <button
-              className="fullscreen-close-btn"
-              onClick={handleToggleFullscreenPreview}
-              aria-label="Exit fullscreen preview"
-            >
-              ✕
-            </button>
+            /* block: the tooltip anchor must not generate a box — the
+               button is position: fixed, and an in-flow anchor span
+               would leave an empty line at the top of the pane. */
+            <Tooltip content="Exit fullscreen preview" block>
+              <button
+                className="qh-icon-btn boxed fullscreen-close-btn"
+                onClick={handleToggleFullscreenPreview}
+                aria-label="Exit fullscreen preview"
+              >
+                <PreviewIcon />
+              </button>
+            </Tooltip>
           )}
-          <PreviewStatusBar
-            path={currentFile?.path ?? null}
-            executorsOnline={!!executorsOnline}
-            hasExecutableCells={hasExecutableCells(content)}
-            capture={currentFile ? captures?.[currentFile.path] : undefined}
-            onRun={(p) => { onRequestExecution?.(p); }}
-            onClear={(p) => clearCapture(p)}
-          />
+          {/* Hidden in fullscreen: the execution status strip would read
+              as a stray dark bar above the presented document. */}
+          {!isFullscreenPreview && (
+            <PreviewStatusBar
+              path={currentFile?.path ?? null}
+              executorsOnline={!!executorsOnline}
+              hasExecutableCells={hasExecutableCells(content)}
+              capture={currentFile ? captures?.[currentFile.path] : undefined}
+              onRun={(p) => { onRequestExecution?.(p); }}
+              onClear={(p) => clearCapture(p)}
+            />
+          )}
           <PreviewRouter
+            onPreviewModeChange={setPreviewMode}
+            projectKey={project.id}
             content={displayContent}
             currentFile={currentFile}
             files={files}
@@ -1129,6 +1863,7 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
             onFileChange={handlePreviewFileChange}
             onOpenNewFileDialog={handlePreviewOpenNewFileDialog}
             onDiagnosticsChange={handleDiagnosticsChange}
+            onCommentsChange={handleCommentsChange}
             onWasmStatusChange={handleWasmStatusChange}
             onRegisterScrollToLine={handleRegisterScrollToLine}
             onRegisterSetScrollRatio={handleRegisterSetScrollRatio}
@@ -1145,30 +1880,54 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
             onAttributionGeneratingChange={setAttributionGenerating}
           />
         </div>
-      </main>
+        )}
+        </>
+        )}
+        </main>
 
-      {/* Replay mode drawer */}
-      {!isFullscreenPreview && (
-        <ReplayDrawer
-          state={replayState}
-          controls={replayControls}
-          disabled={!!currentFile && isBinaryExtension(currentFile.path)}
-          identities={identities}
-          attributionOn={attributionOn}
-          onAttributionChange={setAttributionOn}
-          commentsMode={commentsMode}
-          onCommentsModeChange={setCommentsMode}
-          attributionGenerating={attributionGenerating}
-          attributionDisabled={
-            currentFormat !== 'q2-debug' && currentFormat !== 'q2-preview'
-          }
-        />
-      )}
+        {/* Document bottom bar: replay drawer. Stays mounted in
+            fullscreen preview so sync status and replay remain visible. */}
+        <div className="document-bottom-bar">
+          <ReplayDrawer
+            state={replayState}
+            controls={replayControls}
+            disabled={!!currentFile && isBinaryExtension(currentFile.path)}
+            identities={identities}
+            attributionOn={attributionOn}
+            onAttributionChange={setAttributionOn}
+            commentsMode={commentsMode}
+            onCommentsModeChange={setCommentsMode}
+            commentsDisabled={previewUnavailable}
+            previewEditing={previewEditing}
+            onPreviewEditingChange={setPreviewEditing}
+            // Only q2-preview has a block-edit surface (q2-debug ignores
+            // editingDisabled; slides have no editor).
+            // `currentFormat` is only reported by the preview router, which
+            // is not mounted for images / plain-text files, so it would keep
+            // the previous document's format — gate on previewUnavailable too.
+            previewEditingDisabled={previewUnavailable || currentFormat !== 'q2-preview'}
+            commentsCount={outstandingCommentCount}
+            attributionGenerating={attributionGenerating}
+            attributionDisabled={
+              previewUnavailable || (currentFormat !== 'q2-debug' && currentFormat !== 'q2-preview')
+            }
+            statusSlot={
+              <SyncStatusBadge
+                scope="document"
+                currentFilePath={currentFile?.path ?? null}
+                verbose
+              />
+            }
+          />
+        </div>
+        </div>
+      </div>
 
       {/* New text-file dialog */}
       <NewFileDialog
         isOpen={showNewFileDialog}
         existingPaths={files.map(f => f.path)}
+        folders={allFolders}
         onClose={() => {
           handleDialogClose();
           setNewFileInitialName(''); // Clear on close
@@ -1177,11 +1936,51 @@ export default function Editor({ project, files, fileContents, onDisconnect, onC
         initialFilename={newFileInitialName}
       />
 
+      {/* Search files dialog */}
+      <SearchFilesDialog
+        isOpen={showSearchDialog}
+        files={files}
+        searchFiles={searchFiles}
+        fileContents={fileContents}
+        onClose={() => setShowSearchDialog(false)}
+        onSelectFile={handleSelectSearchResult}
+      />
+
+      {/* Place-file dialog (move, or add a conflicting drop), or the import dialog: one queue, one dialog at a time */}
+      {placeQueue[0]?.kind === 'import' ? (
+        <ImportDialog
+          request={placeQueue[0]}
+          folders={allFolders}
+          existingPaths={files.map((f) => f.path)}
+          onClose={dequeuePlace}
+          commit={handleCommitImport}
+        />
+      ) : (
+        <PlaceFileDialog
+          request={placeQueue[0] ?? null}
+          folders={allFolders}
+          existingPaths={files.map((f) => f.path)}
+          onClose={dequeuePlace}
+          onConfirm={handlePlaceConfirm}
+        />
+      )}
+
+      {/* New folder dialog */}
+      <NewFolderDialog
+        isOpen={newFolderParent !== null}
+        parent={newFolderParent ?? ''}
+        existingFolders={allFolders}
+        existingPaths={files.map((f) => f.path)}
+        onClose={() => setNewFolderParent(null)}
+        onCreateFolder={handleCreateFolder}
+      />
+
       {/* Asset upload dialog */}
       <NewAssetDialog
         isOpen={showNewAssetDialog}
         existingPaths={files.map(f => f.path)}
         defaultDestination={assetDestination}
+        folders={allFolders}
         initialFiles={assetInitialFiles}
         onClose={handleAssetDialogClose}
         onUploadAsset={handleUploadAsset}

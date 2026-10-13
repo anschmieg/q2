@@ -47,7 +47,7 @@ vi.mock('@quarto/preview-runtime', () => ({
   incrementalWriteQmd: vi.fn(),
   applyNodeEdit: vi.fn(),
   parseQmdContentSync: vi.fn(() => ({ success: true, ast: '{}' })),
-  getActorId: () => 'actor-1',
+  getAuthorId: () => 'author-1',
   regenerateNestedBuffers: vi.fn(() => ({})),
   pipelineKindForFormat: (f: string) => (f === 'q2-preview' ? 'preview' : undefined),
 }));
@@ -118,6 +118,19 @@ describe('ReactPreview capture consumption (bd-sfet3264, Phase 1D)', () => {
     expect(getBinaryDocById).not.toHaveBeenCalled();
     for (const call of renderPageInProjectWithAttribution.mock.calls) {
       expect(call[3]).toBeUndefined();
+    }
+  });
+
+  it('requests the q2 preview default-format substitution (5th arg true) — bd-kltzdhle', async () => {
+    // hub-client routes `html` documents to ReactPreview as `q2-preview`;
+    // the WASM re-detects the format from the file, so every preview
+    // pipeline render must ask for `prefer_preview_format`, or a plain
+    // document would come back as `html` instead of `ast_json`.
+    render(<ReactPreview {...baseProps(undefined)} />);
+
+    await waitFor(() => expect(renderPageInProjectWithAttribution).toHaveBeenCalled());
+    for (const call of renderPageInProjectWithAttribution.mock.calls) {
+      expect(call[4]).toBe(true);
     }
   });
 });

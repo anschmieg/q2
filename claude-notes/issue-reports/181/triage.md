@@ -71,7 +71,7 @@ pandoc_block_quote: {Node pandoc_block_quote (0, 0) - (3, 0)}
       $$: {Node $$ (2, 2) - (2, 4)}
 ```
 
-There is exactly **one** `block_quote_marker` token for the entire blockquote — only the first line. The continuation `> ` characters on lines 1 and 2 are never matched as `block_continuation`; they fall inside `pandoc_display_math`'s body span, which is the literal byte range `(0, 2) - (2, 4)`.
+There is exactly **one** `block_quote_marker` token for the entire blockquote — only the first line. The continuation `> ` characters on lines 1 and 2 are never matched as `block_continuation`; they fall inside `pandoc_display_math`\'s body span, which is the literal byte range `(0, 2) - (2, 4)`.
 
 ### Root cause in `grammar.js`
 
@@ -121,7 +121,7 @@ Two viable approaches, both at the grammar layer:
 
 Either way: also verify `pandoc_math` (inline `$...$`) does not have a similar latent issue when an inline-math span gets soft-broken across a `> ` boundary. (Not investigated here — flagging for the implementor.)
 
-Once a fix lands, a round-trip regression test belongs in `crates/pampa/tests/roundtrip_tests/qmd-json-qmd` (per `crates/pampa/CLAUDE.md`) using `repro.qmd` as the input.
+Once a fix lands, a round-trip regression test belongs in `crates/pampa/tests/roundtrip_tests/qmd-json-qmd` (per `crates/pampa/AGENTS.md`) using `repro.qmd` as the input.
 
 ## Fix applied (this session)
 

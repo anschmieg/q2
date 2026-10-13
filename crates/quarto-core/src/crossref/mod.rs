@@ -37,8 +37,11 @@ pub const TRACE_KIND_CROSSREF_INDEX: &str = "CrossrefIndex";
 
 pub mod codeblock_shorthand;
 pub mod index;
+pub mod label_reinject;
 pub mod metadata;
+pub mod project_index;
 pub mod registry;
+pub mod section_number;
 pub mod target;
 
 #[cfg(test)]
@@ -47,6 +50,8 @@ mod roundtrip_tests;
 pub use index::{CrossrefEntry, CrossrefIndex, HeadingRecord, Order, PromisedId, PromisedIdSource};
 pub use metadata::{CrossrefMetadata, MetadataError};
 pub use registry::{RefTypeDef, RefTypeRegistry, RefTypeSource};
+pub(crate) use section_number::format_chapter_index;
+pub use section_number::format_section_number;
 pub use target::{
     CrossrefTargetView, crossref_target_view, crossref_target_view_inline, identifier_of,
     ref_type_of,
@@ -82,6 +87,22 @@ pub const PROOF: &str = "Proof";
 /// wrapping a `DisplayMath` inline. The specific numbering is stored in
 /// `plain_data.order` (set by the indexer); the id prefix is always `"eq"`.
 pub const EQUATION: &str = "Equation";
+
+/// The reserved attribute `CrossrefRenderTransform` writes on a rendered
+/// equation span (`Span#eq-… .quarto-math-with-attribute`) to carry the
+/// equation's number, as text (`"1"`).
+///
+/// This is the hand-off between format-agnostic numbering and
+/// format-specific *encoding* of the number: crossref-render leaves the
+/// `Math` text byte-identical to the source and records the number here;
+/// `EquationNumberStage` (which runs after user post filters) turns it into
+/// `\tag{N}` for MathJax/KaTeX, ` \qquad(N)` for engines that only read
+/// math, or a sibling label for MathML, and removes the attribute. Between
+/// the two, a Lua post filter can read, rewrite or delete
+/// `el.attributes["quarto-eq-number"]` — the supported way to customize
+/// equation numbers from a filter. Plan:
+/// `claude-notes/plans/2026-09-21-equation-numbering-and-mathml.md`.
+pub const EQ_NUMBER_ATTR: &str = "quarto-eq-number";
 
 /// The `type_name` used on `CustomNode` for resolved crossref references in
 /// the front-end AST.

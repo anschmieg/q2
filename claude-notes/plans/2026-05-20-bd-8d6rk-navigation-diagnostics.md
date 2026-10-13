@@ -1,7 +1,13 @@
-# bd-8d6rk — Navigation diagnostics: structured warnings with codes + locations
+---
+title: 'bd-8d6rk — Navigation diagnostics: structured warnings with codes + locations'
+date: 2026-05-20
+description: 'Replaces the plain-text navigation warnings for missing documents and unmatched sidebar `auto:` entries with structured diagnostics that carry codes Q-13-1 through Q-13-6, problem text, and hints.'
+status: draft  # Draft, awaiting user iteration
+braid:
+  strand: bd-8d6rk
+  priority: P2
+---
 
-**Status**: Draft, awaiting user iteration
-**Issue**: bd-8d6rk (P2, task)
 **Follow-up**: bd-qor9a (blocked by this) — fills in source locations once the
 sidebar/navbar parser stops stripping `SourceInfo`.
 
@@ -64,7 +70,7 @@ constructed with `::warning(title_string)`. That gives us:
 The structured `DiagnosticMessageBuilder` already exists
 (`crates/quarto-error-reporting/src/builder.rs`) and is used by most other
 subsystems (markdown Q-1-* / Q-2-*, listing Q-12-*, yaml validation
-Q-1-1*). Listing's Q-12-15/Q-12-16 are good shape templates for what we
+Q-1-1\*). Listing's Q-12-15/Q-12-16 are good shape templates for what we
 want here: a title, a `with_code`, a `problem`, an `add_hint`, a catalog
 entry naming the docs URL.
 
@@ -82,7 +88,7 @@ warning strings twice.
 `location` stays `None` on every diagnostic emitted in this issue. The
 follow-up plugs it in.
 
-## New error subsystem: navigation (Q-13-*)
+## New error subsystem: navigation (Q-13-\*)
 
 The catalog currently has subsystems: `cli`, `internal`, `listing`,
 `lua`, `markdown`, `template`, `writer`, `xml`, `yaml`. Listing's
@@ -250,7 +256,7 @@ discovered-from issue if user wants to track the docs work separately.
 
 ## What is *not* in scope for bd-8d6rk
 
-- Threading `SourceInfo` through to the diagnostics' `location` field.
+- Threading `SourceInfo` through to the diagnostics\' `location` field.
   That requires the navigation parser to stop calling `as_plain_text()`
   on href strings, which is exactly what bd-qor9a does.
 - Changing the path-resolution rule (the actual bug). Diagnostics emitted

@@ -196,16 +196,10 @@ fn substitute_descriptions(
                         s.to_string()
                     }
                 }
-                _ => {
-                    diagnostics.push(make_q_12_13(&href));
-                    inner.to_string()
-                }
+                _ => keep_description_fallback(inner, &href, diagnostics),
             },
-            None => {
-                // Sibling missing.
-                diagnostics.push(make_q_12_13(&href));
-                inner.to_string()
-            }
+            // Sibling missing.
+            None => keep_description_fallback(inner, &href, diagnostics),
         };
 
         out.push_str(&replacement);
@@ -261,6 +255,12 @@ fn substitute_images(
             // Engine-rendered preview image found.
             let resolved = resolve_preview_url(host_path, &sibling_abs, &pi.src);
             build_thumbnail_img(&resolved, &pi, attrs)
+        } else if inner.contains("<img") {
+            // The envelope wraps the image L1 derived from the body
+            // (bd-listing-description-precedence-x4bh6w3m). It is the
+            // document's own image, so it beats the listing-wide
+            // `image-placeholder` default.
+            inner.to_string()
         } else if !b64_default.is_empty() {
             // Listing default URL configured. The b64 alphabet is
             // URL_SAFE_NO_PAD; decode and use as-is (it's a URL
@@ -330,7 +330,7 @@ fn escape_attr(s: &str) -> String {
 ///
 /// Returns the URL to embed in the host page's `<img src=...>`.
 fn resolve_preview_url(host_path: &Path, sibling_abs: &Path, preview_src: &str) -> String {
-    if is_absolute_url(preview_src) {
+    if quarto_util::is_external_url(preview_src) {
         return preview_src.to_string();
     }
     let host_dir = host_path.parent().unwrap_or(Path::new(""));
@@ -358,14 +358,6 @@ fn resolve_preview_url(host_path: &Path, sibling_abs: &Path, preview_src: &str) 
                 .join("/")
         },
     )
-}
-
-fn is_absolute_url(s: &str) -> bool {
-    s.starts_with("http://")
-        || s.starts_with("https://")
-        || s.starts_with("data:")
-        || s.starts_with("//")
-        || s.starts_with("mailto:")
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -407,6 +399,22 @@ fn read_or_cached(
     Ok(extraction)
 }
 
+/// L7 could not derive a description from the rendered sibling: keep
+/// the envelope's inner L1 fallback. Q-12-13 reports the fallback
+/// only when there is one — an item with no prose anywhere is routine
+/// and Q1 is silent about it, so an empty envelope stays quiet
+/// (bd-listing-default-no-derived-desc-m0wrr8ty).
+fn keep_description_fallback(
+    inner: &str,
+    href: &str,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> String {
+    if !inner.trim().is_empty() {
+        diagnostics.push(make_q_12_13(href));
+    }
+    inner.to_string()
+}
+
 fn make_q_12_13(href: &str) -> DiagnosticMessage {
     DiagnosticMessageBuilder::warning(format!(
         "Listing item from {href} produced no preview content; using static fallback description."
@@ -431,6 +439,22 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    /// bd-scheme-href-path-normalized-w5zya82r — a preview `src` with
+    /// any scheme is already absolute and passes through untouched.
+    #[test]
+    fn resolve_preview_url_passes_any_scheme_through() {
+        let host = Path::new("/site/index.html");
+        let sibling = Path::new("/site/posts/foo.html");
+        for src in [
+            "positron://settings/x",
+            "vscode://schemas/settings",
+            "data:image/png;base64,AAAA",
+            "https://example.com/x.png",
+        ] {
+            assert_eq!(resolve_preview_url(host, sibling, src), src);
+        }
+    }
+
     /// Build a minimal ProjectContext rooted in a tempdir.
     fn make_project(output_dir: &Path) -> ProjectContext {
         ProjectContext {
@@ -439,6 +463,8 @@ mod tests {
             is_single_file: false,
             files: vec![],
             output_dir: output_dir.to_path_buf(),
+
+            ..Default::default()
         }
     }
 
@@ -617,15 +643,17 @@ mod tests {
             .unwrap();
 
         let after = read_file(&host_path);
-        // Substituted text is "The quick brown fox" (19 chars,
-        // last word boundary ≤ 20). The full sentence should not
+        // Substituted text follows Q1's `truncateText(s, 20,
+        // "space")` (bd-listing-ellipsis-no-matching-l963osy1):
+        // first 20 chars "The quick brown fox ", drop one, cut at
+        // the last space, append `…`. The full sentence should not
         // appear.
         assert!(
-            after.contains("The quick brown fox"),
-            "expected truncated preview present; got: {after}"
+            after.contains("The quick brown…"),
+            "expected truncated preview with ellipsis present; got: {after}"
         );
         assert!(
-            !after.contains("jumps over the lazy"),
+            !after.contains("fox jumps over the lazy"),
             "expected post-truncation text absent; got: {after}"
         );
         assert!(diags.is_empty());
@@ -742,6 +770,67 @@ mod tests {
         );
         assert!(after.contains(r#"class="thumbnail-image""#));
         assert!(!after.contains("img-begin"));
+    }
+
+    // bd-listing-description-precedence-x4bh6w3m: a derived image is
+    // the document's own, so with no rendered preview it beats the
+    // listing-wide `image-placeholder` default.
+    #[test]
+    fn substitute_image_keeps_derived_img_over_listing_default() {
+        let temp = TempDir::new().unwrap();
+        let project = make_project(temp.path());
+        let host_path = temp.path().join("index.html");
+        let sibling_path = temp.path().join("posts").join("derived.html");
+
+        let b64 = URL_SAFE_NO_PAD.encode("assets/site/default.png".as_bytes());
+        let inner = r#"<img src="posts/body.png" class="thumbnail-image" alt="" loading="lazy">"#;
+        let host = format!(
+            "<html><body>{}</body></html>",
+            img_envelope("posts/derived.html", &b64, inner)
+        );
+        write_file(&host_path, &host);
+        // No `main.content` → no rendered preview image.
+        write_file(&sibling_path, r#"<html><body></body></html>"#);
+
+        let runtime = NativeRuntime::new();
+        let mut diags = vec![];
+        substitute_listing_placeholders(&project, &[host_path.clone()], &runtime, &mut diags)
+            .unwrap();
+
+        let after = read_file(&host_path);
+        assert!(after.contains(inner), "derived img kept; got: {after}");
+        assert!(!after.contains("default.png"), "default not used: {after}");
+        assert!(!after.contains("img-begin"));
+    }
+
+    // bd-listing-default-no-derived-desc-m0wrr8ty: an empty envelope
+    // (no L1 paragraph) whose rendered sibling has no paragraph either
+    // is routine — no Q-12-13, as in Q1.
+    #[test]
+    fn substitute_description_empty_envelope_without_preview_is_silent() {
+        let temp = TempDir::new().unwrap();
+        let project = make_project(temp.path());
+        let host_path = temp.path().join("index.html");
+        let sibling_path = temp.path().join("posts").join("empty.html");
+
+        let host = format!(
+            "<html><body><div class=\"listing-description\">{}</div></body></html>",
+            desc_envelope("posts/empty.html", 0, "")
+        );
+        write_file(&host_path, &host);
+        write_file(
+            &sibling_path,
+            r#"<html><body><main class="content"></main></body></html>"#,
+        );
+
+        let runtime = NativeRuntime::new();
+        let mut diags = vec![];
+        substitute_listing_placeholders(&project, &[host_path.clone()], &runtime, &mut diags)
+            .unwrap();
+
+        let after = read_file(&host_path);
+        assert!(!after.contains("desc-begin"), "{after}");
+        assert!(diags.is_empty(), "expected silence, got {diags:?}");
     }
 
     // L7 plan §"Tests" Phase 4 #33

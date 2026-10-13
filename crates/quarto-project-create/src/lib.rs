@@ -30,8 +30,9 @@ mod templates;
 mod types;
 
 pub use choices::{
-    ProjectChoice, ProjectTypeWithTemplate, available_choices, find_choice,
-    find_implemented_choice, implemented_choices,
+    ChoiceGroup, ProjectChoice, ProjectTypeWithTemplate, Surface, available_choices, choices_for,
+    choices_grouped_by_path, find_choice, find_choice_by_target, find_implemented_choice,
+    implemented_choices, path_description, seed_choices,
 };
 pub use scaffold::{
     ProjectScaffold, ScaffoldContent, ScaffoldFileDef, ScaffoldedFile, get_scaffold,
@@ -87,6 +88,9 @@ fn template_context(
     let first = today.checked_sub(time::Duration::days(3)).unwrap_or(today);
     ctx.insert("second-post-date", TemplateValue::String(iso_date(today)));
     ctx.insert("first-post-date", TemplateValue::String(iso_date(first)));
+    // Book scaffold creation date (book-projects P7), mirrors Q1's
+    // `book.ts` stamping `book.date` with today's date at scaffold time.
+    ctx.insert("date", TemplateValue::String(iso_date(today)));
     ctx
 }
 
@@ -660,6 +664,96 @@ mod render_tests {
     }
 
     #[test]
+    fn book_scaffold_produces_a_render_ready_file_set() {
+        // Book-projects P7: the "book" choice mirrors Q1's own default
+        // scaffold (book.ts's `create()`), with one deliberate
+        // deviation — Q2's citeproc filter only parses CSL-JSON
+        // (`pampa::citeproc_filter::load_bibliography`), so the
+        // starter bibliography ships as `references.json`, not Q1's
+        // `references.bib`.
+        let files = create_project_from_choice(
+            CreateFromChoiceOptions::new("book", "My Book")
+                .with_today(time::macros::date!(2026 - 09 - 26)),
+        )
+        .unwrap();
+
+        let paths: Vec<_> = files.iter().map(|f| norm(f.path())).collect();
+        assert_eq!(
+            paths,
+            [
+                "_quarto.yml",
+                "index.qmd",
+                "intro.qmd",
+                "summary.qmd",
+                "references.qmd",
+                "references.json",
+                "cover.png",
+            ]
+        );
+
+        // ---- _quarto.yml --------------------------------------------
+        let yml_src = file_content(&files, "_quarto.yml");
+        let yml = parse_yaml(yml_src);
+        assert_eq!(yml["project"]["type"].as_str(), Some("book"));
+        assert_eq!(yml["project"]["resources"][0].as_str(), Some("cover.png"));
+        assert_eq!(yml["book"]["title"].as_str(), Some("My Book"));
+        assert_eq!(yml["book"]["date"].as_str(), Some("2026-09-26"));
+        assert_eq!(
+            yml["book"]["chapters"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["index.qmd", "intro.qmd", "summary.qmd"]
+        );
+        assert_eq!(yml["book"]["references"].as_str(), Some("references.qmd"));
+        assert_eq!(yml["bibliography"].as_str(), Some("references.json"));
+        assert_eq!(yml["filters"][0].as_str(), Some("citeproc"));
+        assert_eq!(yml["format"]["html"]["theme"].as_str(), Some("cosmo"));
+
+        // ---- chapter numbering classes --------------------------------
+        // Preface and References are unnumbered via a first-heading
+        // class (Q1's own convention); intro/summary are ordinary
+        // numbered chapters.
+        let index = file_content(&files, "index.qmd");
+        assert!(index.starts_with("# Preface {.unnumbered}"));
+        let intro = file_content(&files, "intro.qmd");
+        assert!(intro.starts_with("# Introduction\n"));
+        assert!(intro.contains("@knuth84"));
+        let summary = file_content(&files, "summary.qmd");
+        assert!(summary.starts_with("# Summary\n"));
+        let references = file_content(&files, "references.qmd");
+        assert!(references.starts_with("# References {.unnumbered}"));
+        assert!(references.contains("::: {#refs}"));
+
+        // ---- references.json (CSL-JSON, not BibTeX) ------------------
+        let refs_json = file_content(&files, "references.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(refs_json).expect("references.json must be valid JSON");
+        assert_eq!(parsed[0]["id"].as_str(), Some("knuth84"));
+
+        // ---- cover.png (binary) ---------------------------------------
+        let (bytes, mime) = binary_file(&files, "cover.png");
+        assert_eq!(mime, "image/png");
+        assert!(
+            bytes.len() > 1000 && bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "cover.png must carry real PNG bytes"
+        );
+
+        // No template residue anywhere.
+        for f in &files {
+            if let ScaffoldedFile::Text { path, content } = f {
+                assert!(
+                    !content.contains('$') && !content.contains("<%"),
+                    "template residue in {}:\n{content}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn blog_scaffold_defaults_today_to_now() {
         // Without an explicit `today`, the crate stamps the current
         // date. Only sanity-check the shape (YYYY-MM-DD) and the
@@ -701,6 +795,174 @@ mod render_tests {
         let result =
             create_project_from_choice(CreateFromChoiceOptions::new("manuscript", "My Paper"));
         assert!(matches!(result.unwrap_err(), CreateError::InvalidConfig(_)));
+    }
+
+    // ----------------------------------------------------------------
+    // Hub-only choices (bd-d147nkqx)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn create_from_choice_is_surface_agnostic_for_hub_only_choices() {
+        // The crate never gates on surface — the CLI does, before
+        // calling in. Every hub-only choice must therefore scaffold.
+        let hub_only: Vec<_> = available_choices()
+            .into_iter()
+            .filter(|c| c.implemented && !c.available_on(Surface::Cli))
+            .collect();
+        assert!(!hub_only.is_empty(), "registry has no hub-only choice");
+        for choice in hub_only {
+            let files =
+                create_project_from_choice(CreateFromChoiceOptions::new(&choice.id, "Hub Title"))
+                    .unwrap_or_else(|e| panic!("hub-only choice '{}' failed: {e}", choice.id));
+            let paths: Vec<String> = files
+                .iter()
+                .map(|f| f.path().to_string_lossy().into_owned())
+                .collect();
+            for required in ["_quarto.yml", "index.qmd"] {
+                assert!(
+                    paths.iter().any(|p| p == required),
+                    "{}: missing {required} in {paths:?}",
+                    choice.id
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Presentation skeleton (bd-q33ylfxf)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn presentation_skeleton_substitutes_the_title_into_both_files() {
+        let files =
+            create_project_from_choice(CreateFromChoiceOptions::new("presentation", "Team Update"))
+                .unwrap();
+        let yml = file_content(&files, "_quarto.yml");
+        assert!(yml.contains("title: \"Team Update\""), "_quarto.yml: {yml}");
+        let index = file_content(&files, "index.qmd");
+        assert!(
+            index.contains("title: \"Team Update\""),
+            "index.qmd: {index}"
+        );
+        assert!(index.contains("  revealjs:"), "index.qmd: {index}");
+        // A skeleton: a few empty slides, no instructional prose.
+        assert!(index.matches("\n## ").count() >= 2, "index.qmd: {index}");
+        for f in &files {
+            if let ScaffoldedFile::Text { content, .. } = f {
+                assert!(!content.contains("$title$"), "template residue: {content}");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Seeded example projects (bd-3fwtdhil)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn example_scaffolds_keep_their_own_titles_and_ship_their_files() {
+        // The examples are instructional content with fixed titles; the
+        // name the user typed never appears, and no template residue does.
+        for choice in seed_choices() {
+            let files =
+                create_project_from_choice(CreateFromChoiceOptions::new(&choice.id, "Typed Name"))
+                    .unwrap_or_else(|e| panic!("{} failed: {e}", choice.id));
+            for f in &files {
+                if let ScaffoldedFile::Text { content, path } = f {
+                    assert!(
+                        !content.contains("Typed Name"),
+                        "{}: name leaked into {}",
+                        choice.id,
+                        path.display()
+                    );
+                    assert!(
+                        !content.contains("$title$"),
+                        "{}: template residue in {}",
+                        choice.id,
+                        path.display()
+                    );
+                } else {
+                    panic!("{}: examples are text only, got {:?}", choice.id, f.path());
+                }
+            }
+        }
+
+        // Every file an example links to ships with it.
+        let notes =
+            create_project_from_choice(CreateFromChoiceOptions::new("example-meeting-notes", "x"))
+                .unwrap();
+        assert!(file_content(&notes, "index.qmd").contains("(team-sync/2026-09-17.qmd)"));
+        assert!(file_content(&notes, "index.qmd").contains("tweaks.scss"));
+        assert!(
+            file_content(&notes, "_quarto-hub-templates/team-meeting.qmd")
+                .contains("template-name: \"Team meeting\"")
+        );
+
+        let site = create_project_from_choice(CreateFromChoiceOptions::new("example-website", "x"))
+            .unwrap();
+        let site_yml = file_content(&site, "_quarto.yml");
+        assert!(site_yml.contains("type: website"), "{site_yml}");
+        assert!(site_yml.contains("- features.qmd"), "{site_yml}");
+        assert!(site_yml.contains("- about.qmd"), "{site_yml}");
+        assert!(file_content(&site, "index.qmd").contains("(fork-icon.svg)"));
+
+        let article =
+            create_project_from_choice(CreateFromChoiceOptions::new("example-article", "x"))
+                .unwrap();
+        let article_qmd = file_content(&article, "index.qmd");
+        assert!(article_qmd.contains("(figure-1.svg)"), "{article_qmd}");
+        assert!(article_qmd.contains("filters: [quarto, citeproc]"));
+        assert!(article_qmd.contains("{#eq-copies}"));
+
+        let deck =
+            create_project_from_choice(CreateFromChoiceOptions::new("example-presentation", "x"))
+                .unwrap();
+        let deck_qmd = file_content(&deck, "index.qmd");
+        assert!(deck_qmd.contains("  revealjs:\n"), "{deck_qmd}");
+        assert!(deck_qmd.contains("theme: [default, styles.scss]"));
+        assert!(deck_qmd.contains("logo: quarto-icon.svg"));
+        assert!(deck_qmd.contains("(sample-chart.svg)"));
+        assert!(deck_qmd.contains("(fork-icon.svg)"));
+    }
+
+    #[test]
+    fn hub_placeholder_scaffold_is_the_welcome_tour_with_fixed_titles() {
+        // The hub-only template is a tour of Quarto Hub: its documents
+        // carry fixed titles and ignore the project name the user typed.
+        let files = create_project_from_choice(CreateFromChoiceOptions::new(
+            "hub-placeholder",
+            "Placeholder Title",
+        ))
+        .unwrap();
+        let mut paths: Vec<String> = files
+            .iter()
+            .map(|f| f.path().to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["_quarto.yml", "index.qmd", "qmd-changes.qmd"]);
+
+        let yml = file_content(&files, "_quarto.yml");
+        assert!(yml.contains("type: website"), "_quarto.yml: {yml}");
+        assert!(
+            yml.contains("title: \"Welcome to Quarto-Hub\""),
+            "_quarto.yml: {yml}"
+        );
+        let index = file_content(&files, "index.qmd");
+        assert!(
+            index.contains("title: \"Welcome to Quarto-Hub!\""),
+            "index.qmd: {index}"
+        );
+        // The tour links to its sibling page, which must ship with it.
+        assert!(index.contains("(./qmd-changes.qmd)"), "index.qmd: {index}");
+        assert!(file_content(&files, "qmd-changes.qmd").contains("title: QMD syntax changes"));
+        for f in &files {
+            if let ScaffoldedFile::Text { content, .. } = f {
+                assert!(
+                    !content.contains("Placeholder Title"),
+                    "name leaked: {content}"
+                );
+                assert!(!content.contains("$title$"), "template residue: {content}");
+            }
+        }
     }
 
     #[test]

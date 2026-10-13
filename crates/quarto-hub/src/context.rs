@@ -57,7 +57,7 @@ pub struct HubConfig {
     pub watch_debounce_ms: u64,
 
     /// Which files surface as watch events. See [`WatchFilter`].
-    /// Default: `WatchFilter::QmdOnly` (legacy hub behaviour).
+    /// Default: `WatchFilter::SourcesOnly` (hub behaviour: `.qmd` + `.md`).
     /// `quarto-preview` overrides this to `WatchFilter::PreviewBroad`
     /// so config + asset edits trigger re-render.
     pub watch_filter: WatchFilter,
@@ -133,6 +133,43 @@ pub struct HubConfig {
     /// sets `ReadOnly` unless `--allow-edit` is given, so browser-originated
     /// document changes can never modify the user's files.
     pub disk_write_policy: DiskWritePolicy,
+
+    /// User-facing line printed to stdout when Ctrl-C initiates
+    /// shutdown (bd-wj9smyxg).
+    ///
+    /// The hub's own "initiating graceful shutdown" line is
+    /// `tracing::info`, hidden at the CLI's default filter — so
+    /// without this the process just vanished. The signal-listener
+    /// task prints it (after a blank line) *before* forwarding the
+    /// shutdown signal: the print is on the shutdown critical path,
+    /// so teardown can never exit the process before the line
+    /// appears. (A detached listener task races exactly that and
+    /// lost in CI.) SIGTERM only logs.
+    ///
+    /// Default: `None` — nothing printed, library-embedding callers
+    /// keep stdout clean.
+    pub shutdown_message: Option<String>,
+
+    /// Unix domain socket transport (bd-kosgkxjt): when `Some`, the
+    /// hub listens **exclusively** on this filesystem socket and binds
+    /// no TCP listener. The CLI resolves a bare `--socket-path` to the
+    /// convention path before the server sees the config, so this is
+    /// always a concrete path. Unix only; `run_server_with` errors on
+    /// other platforms. Cannot be combined with `auth_config` (UDS is
+    /// unauthenticated local-trusted).
+    ///
+    /// Default: `None` — TCP+WS exactly as before.
+    pub socket_path: Option<PathBuf>,
+
+    /// Trusted-proxy shape: group granted access to the socket —
+    /// parent dir `0750` and socket `0660`, group-owned by this group
+    /// (when the hub created the dir). Requires `socket_path`.
+    pub socket_group: Option<String>,
+
+    /// Trusted-proxy shape: uids accepted at the accept-time peer-uid
+    /// check beyond the hub's own uid (the proxy's uid). Requires
+    /// `socket_path`.
+    pub socket_allow_uid: Vec<u32>,
 }
 
 impl Default for HubConfig {
@@ -153,6 +190,10 @@ impl Default for HubConfig {
             allow_insecure_auth: false,
             register_root_ws: true,
             disk_write_policy: DiskWritePolicy::default(),
+            shutdown_message: None,
+            socket_path: None,
+            socket_group: None,
+            socket_allow_uid: Vec::new(),
         }
     }
 }

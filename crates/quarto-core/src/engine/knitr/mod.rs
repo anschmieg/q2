@@ -93,6 +93,8 @@ pub static KNITR_RESOURCES: ResourceBundle = ResourceBundle::new("knitr", &KNITR
 use super::context::{ExecuteResult, ExecutionContext};
 use super::error::ExecutionError;
 use super::traits::ExecutionEngine;
+use crate::engine::LanguageClaim;
+use crate::extension::types::{FileClaim, ProcessorSpec};
 
 /// Knitr engine for R code execution.
 ///
@@ -124,6 +126,20 @@ impl KnitrEngine {
     /// Get the path to Rscript, if found.
     pub fn rscript_path(&self) -> Option<&Path> {
         self.rscript_path.as_deref()
+    }
+
+    /// Static, construction-free `spin` claim (Plan 7b Phase 5) — the same
+    /// data `file_claims()` returns, callable without `KnitrEngine::new()`
+    /// (which probes `PATH` for `Rscript`). Used by `builtin_file_claims()`
+    /// for discovery's gate 1.
+    ///
+    /// One entry covers both `.r` and `.R`: extensions are stored undotted
+    /// lowercase (case-insensitive lookup, see the julia-epic F5 commit).
+    pub fn static_file_claims() -> Vec<FileClaim> {
+        vec![FileClaim {
+            extension: "r".to_string(),
+            processor: Some(ProcessorSpec::Spin),
+        }]
     }
 }
 
@@ -183,13 +199,16 @@ impl ExecutionEngine for KnitrEngine {
             cwd: working_dir.clone(),
             params: None,
             resource_dir: resource_dir.to_path_buf(),
-            // Languages that Quarto handles (knitr passes them through unchanged)
-            handled_languages: vec!["ojs".to_string(), "mermaid".to_string(), "dot".to_string()],
+            // Languages that Quarto handles (knitr passes them through unchanged).
+            // Populated from ExecutionContext so multi-engine sequences can extend
+            // this set with languages owned by other engines.
+            handled_languages: ctx.handled_languages.clone(),
         };
 
         // Step 7: Build call options
         let call_options = CallROptions {
             quiet: ctx.quiet,
+            project_env: ctx.project_env.clone(),
             ..Default::default()
         };
 
@@ -205,8 +224,10 @@ impl ExecutionEngine for KnitrEngine {
         // Step 9: Post-process markdown (fix .rmarkdown references)
         let markdown = postprocess_markdown(&result.markdown, &ctx.source_path);
 
-        // Step 10: Convert includes
-        let includes = convert_includes(&result.includes);
+        // Step 10: Convert includes (an unreadable include file is a Q-18-2
+        // warning, drained by the stage)
+        let mut warnings = Vec::new();
+        let includes = convert_includes(&result.includes, self.name(), &mut warnings);
 
         // Step 11: Build and return result
         Ok(ExecuteResult {
@@ -215,6 +236,9 @@ impl ExecutionEngine for KnitrEngine {
             filters: result.filters,
             includes,
             needs_postprocess: result.post_process,
+            html_dependencies: Vec::new(),
+            warnings,
+            ..Default::default()
         })
     }
 
@@ -222,8 +246,41 @@ impl ExecutionEngine for KnitrEngine {
         true
     }
 
+    /// Deliberate q2 design choice: knitr claims `r` as Primary(1), and additionally
+    /// claims the `Interop` set — languages knitr can execute in-session via
+    /// `knit_engines` (reticulate for python, eng_sql for sql, shell engines for
+    /// bash/sh). `Interop` fires only when knitr is already in the sequence (via its
+    /// `r` Primary claim), so a knitr-only `{r}+{python}` doc routes python to knitr
+    /// via reticulate, while an explicit `[knitr, jupyter]` hands python to jupyter
+    /// (T2 explicit Fallback > T3 Interop). See `claude-notes/designs/engine-resolution.md`
+    /// §3.1 and §4.4.
+    fn claims_language(&self, language: &str, _first_class: Option<&str>) -> LanguageClaim {
+        match language {
+            "r" => LanguageClaim::Primary(1),
+            // The Interop set is knitr's `knit_engines` in-session capability
+            // (reticulate/eng_sql/shell), ceded to a dedicated engine when one is
+            // present. Pinned, not guessed: Q1 ships verified knitr support for
+            // each of these (knitr-fixup.lua for sql, reticulate for python, etc.).
+            "python" | "sql" | "bash" | "sh" => LanguageClaim::Interop(0),
+            _ => LanguageClaim::None,
+        }
+    }
+
+    /// Pure Rust, always static. See `test_knitr_try_claims_language_answers_statically`.
+    fn try_claims_language(
+        &self,
+        language: &str,
+        first_class: Option<&str>,
+    ) -> Option<LanguageClaim> {
+        Some(self.claims_language(language, first_class))
+    }
+
     fn is_available(&self) -> bool {
         self.rscript_path.is_some()
+    }
+
+    fn file_claims(&self) -> Vec<FileClaim> {
+        Self::static_file_claims()
     }
 
     fn intermediate_files(&self, input_path: &Path) -> Vec<PathBuf> {
@@ -250,9 +307,19 @@ impl ExecutionEngine for KnitrEngine {
 
 /// Build format configuration from execution context.
 ///
-/// Creates a [`KnitrFormatConfig`] with settings appropriate for the target format.
+/// Creates a [`KnitrFormatConfig`] with settings appropriate for the target format,
+/// then overlays the document's merged `execute:` scope on top (bd-nn2fou8h).
+///
+/// Before that overlay this function ignored the document entirely, so
+/// `execute: echo: false` was not merely dropped — the hardcoded
+/// `echo: true` default actively overrode it, and every document-scope
+/// execute option was inert for knitr (GH issue #523).
 fn build_format_config(ctx: &ExecutionContext) -> KnitrFormatConfig {
-    KnitrFormatConfig::with_defaults(&ctx.format)
+    let mut config = KnitrFormatConfig::with_defaults(&ctx.format);
+    if let Some(scope) = ctx.execute_scope.as_ref() {
+        config.execute.overlay_document_scope(scope);
+    }
+    config
 }
 
 /// Post-process knitr markdown output.
@@ -280,9 +347,16 @@ fn postprocess_markdown(markdown: &str, source_path: &Path) -> String {
 
 /// Convert knitr includes to PandocIncludes.
 ///
-/// Reads include file contents and converts them to the PandocIncludes format
-/// used by the rest of the pipeline.
-fn convert_includes(includes: &Option<KnitrIncludes>) -> crate::stage::PandocIncludes {
+/// Reads the contents of every file each slot names, in order, into the
+/// `PandocIncludes` form the rest of the pipeline consumes. A file that
+/// cannot be read is skipped with a `Q-18-2` warning pushed to `warnings`
+/// (bd-gy2ozix3): silently dropping it would ship a page whose HTML
+/// dependencies never load, with nothing to explain why.
+fn convert_includes(
+    includes: &Option<KnitrIncludes>,
+    engine: &str,
+    warnings: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+) -> crate::stage::PandocIncludes {
     use crate::stage::PandocIncludes;
 
     let Some(inc) = includes else {
@@ -290,26 +364,33 @@ fn convert_includes(includes: &Option<KnitrIncludes>) -> crate::stage::PandocInc
     };
 
     let mut result = PandocIncludes::default();
-
-    // Read include file contents
-    if let Some(ref path) = inc.include_in_header
-        && let Ok(content) = std::fs::read_to_string(path)
-    {
-        result.header_includes.push(content);
-    }
-
-    if let Some(ref path) = inc.include_before_body
-        && let Ok(content) = std::fs::read_to_string(path)
-    {
-        result.include_before.push(content);
-    }
-
-    if let Some(ref path) = inc.include_after_body
-        && let Ok(content) = std::fs::read_to_string(path)
-    {
-        result.include_after.push(content);
-    }
-
+    let mut slot = |name: &str, paths: &[PathBuf], out: &mut Vec<String>| {
+        for path in paths {
+            match std::fs::read_to_string(path) {
+                Ok(content) => out.push(content),
+                Err(cause) => {
+                    warnings.push(crate::engine::diagnostics::unreadable_include_diagnostic(
+                        engine, name, path, &cause,
+                    ))
+                }
+            }
+        }
+    };
+    slot(
+        "include-in-header",
+        &inc.include_in_header,
+        &mut result.header_includes,
+    );
+    slot(
+        "include-before-body",
+        &inc.include_before_body,
+        &mut result.include_before,
+    );
+    slot(
+        "include-after-body",
+        &inc.include_after_body,
+        &mut result.include_after,
+    );
     result
 }
 
@@ -327,6 +408,38 @@ mod tests {
     fn test_knitr_engine_can_freeze() {
         let engine = KnitrEngine::new();
         assert!(engine.can_freeze());
+    }
+
+    // --- Plan 7b Phase 5: builtin file claims. ---
+
+    #[test]
+    fn static_file_claims_returns_spin_claim() {
+        let claims = KnitrEngine::static_file_claims();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].extension, "r");
+        assert_eq!(
+            claims[0].processor,
+            Some(crate::extension::types::ProcessorSpec::Spin)
+        );
+    }
+
+    /// A spin `.R` converts via the default `markdown_for_file` dispatch
+    /// (native, no `Rscript` subprocess) — `KnitrEngine` overrides neither
+    /// `claims_file` nor `markdown_for_file` itself; the `file_claims()`
+    /// override is enough for the trait default to work.
+    #[test]
+    fn r_spin_converts_via_native_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("script.R");
+        std::fs::write(&file, "#' hello\n").unwrap();
+
+        let engine = KnitrEngine::new();
+        let runtime: std::sync::Arc<dyn quarto_system_runtime::SystemRuntime> =
+            std::sync::Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let (markdown, _source_info) = engine
+            .markdown_for_file(&file, &runtime)
+            .expect("spin .R must convert via native dispatch");
+        assert_eq!(markdown, "hello\n");
     }
 
     #[test]
@@ -385,6 +498,75 @@ mod tests {
     fn test_knitr_engine_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<KnitrEngine>();
+    }
+
+    // === Test Seam Row 1: KnitrEngine claim table ===
+
+    #[test]
+    fn test_knitr_claims_language_r_is_primary_1() {
+        let engine = KnitrEngine::new();
+        assert_eq!(engine.claims_language("r", None), LanguageClaim::Primary(1));
+    }
+
+    #[test]
+    fn test_knitr_claims_language_python_is_interop_0() {
+        let engine = KnitrEngine::new();
+        assert_eq!(
+            engine.claims_language("python", None),
+            LanguageClaim::Interop(0)
+        );
+    }
+
+    #[test]
+    fn test_knitr_claims_language_sql_is_interop_0() {
+        let engine = KnitrEngine::new();
+        assert_eq!(
+            engine.claims_language("sql", None),
+            LanguageClaim::Interop(0)
+        );
+    }
+
+    #[test]
+    fn test_knitr_claims_language_bash_is_interop_0() {
+        let engine = KnitrEngine::new();
+        assert_eq!(
+            engine.claims_language("bash", None),
+            LanguageClaim::Interop(0)
+        );
+    }
+
+    #[test]
+    fn test_knitr_claims_language_sh_is_interop_0() {
+        let engine = KnitrEngine::new();
+        assert_eq!(
+            engine.claims_language("sh", None),
+            LanguageClaim::Interop(0)
+        );
+    }
+
+    #[test]
+    fn test_knitr_claims_language_julia_is_none() {
+        let engine = KnitrEngine::new();
+        assert_eq!(engine.claims_language("julia", None), LanguageClaim::None);
+    }
+
+    // === Phase 4: builtins_answer_statically ===
+
+    /// KnitrEngine's `try_claims_language` must answer statically (`Some`),
+    /// equal to `claims_language`, for every representative language —
+    /// pure Rust, always static. Revert binding: without the override, the
+    /// trait default `None` (would-load) would sink every Pass-1 lift for a
+    /// doc that has knitr as a candidate (i.e. every doc).
+    #[test]
+    fn test_knitr_try_claims_language_answers_statically() {
+        let engine = KnitrEngine::new();
+        for lang in ["r", "python", "sql", "bash", "sh", "julia"] {
+            assert_eq!(
+                engine.try_claims_language(lang, None),
+                Some(engine.claims_language(lang, None)),
+                "try_claims_language must equal claims_language for {lang}"
+            );
+        }
     }
 
     // === Resource Tests ===
@@ -534,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_convert_includes_none() {
-        let result = convert_includes(&None);
+        let result = convert_includes(&None, "knitr", &mut Vec::new());
 
         assert!(result.header_includes.is_empty());
         assert!(result.include_before.is_empty());
@@ -543,13 +725,9 @@ mod tests {
 
     #[test]
     fn test_convert_includes_empty() {
-        let includes = KnitrIncludes {
-            include_in_header: None,
-            include_before_body: None,
-            include_after_body: None,
-        };
+        let includes = KnitrIncludes::default();
 
-        let result = convert_includes(&Some(includes));
+        let result = convert_includes(&Some(includes), "knitr", &mut Vec::new());
 
         assert!(result.header_includes.is_empty());
         assert!(result.include_before.is_empty());
@@ -571,12 +749,17 @@ mod tests {
         std::fs::write(&after_path, "<div>After</div>").unwrap();
 
         let includes = KnitrIncludes {
-            include_in_header: Some(header_path),
-            include_before_body: Some(before_path),
-            include_after_body: Some(after_path),
+            include_in_header: vec![header_path],
+            include_before_body: vec![before_path],
+            include_after_body: vec![after_path],
         };
 
-        let result = convert_includes(&Some(includes));
+        let mut warnings = Vec::new();
+        let result = convert_includes(&Some(includes), "knitr", &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "readable files raise no warning: {warnings:?}"
+        );
 
         assert_eq!(result.header_includes.len(), 1);
         assert_eq!(result.header_includes[0], "<style>body{}</style>");
@@ -586,19 +769,85 @@ mod tests {
         assert_eq!(result.include_after[0], "<div>After</div>");
     }
 
+    /// T7 (bd-gy2ozix3): an include file the engine named but Quarto
+    /// cannot read is skipped **with a `Q-18-2` warning** naming the slot and
+    /// the path — silently dropping it ships a page whose widgets never
+    /// hydrate, with no message.
     #[test]
-    fn test_convert_includes_missing_file() {
-        // Path to a file that doesn't exist
+    fn test_convert_includes_missing_file_warns_q_18_2() {
         let includes = KnitrIncludes {
-            include_in_header: Some(PathBuf::from("/nonexistent/header.html")),
-            include_before_body: None,
-            include_after_body: None,
+            include_in_header: vec![PathBuf::from("/nonexistent/header.html")],
+            include_before_body: Vec::new(),
+            include_after_body: Vec::new(),
         };
 
-        let result = convert_includes(&Some(includes));
+        let mut warnings = Vec::new();
+        let result = convert_includes(&Some(includes), "knitr", &mut warnings);
 
-        // Should gracefully handle missing file
         assert!(result.header_includes.is_empty());
+        assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
+        let warning = &warnings[0];
+        assert_eq!(warning.code.as_deref(), Some("Q-18-2"));
+        assert_eq!(
+            warning.kind,
+            quarto_error_reporting::DiagnosticKind::Warning
+        );
+        let text = warning.to_text(None);
+        assert!(
+            text.contains("/nonexistent/header.html"),
+            "names the path: {text}"
+        );
+        assert!(text.contains("include-in-header"), "names the slot: {text}");
+        assert!(text.contains("knitr"), "names the engine: {text}");
+    }
+
+    /// One warning per unreadable file; readable siblings still land.
+    #[test]
+    fn test_convert_includes_partial_read_keeps_good_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let good = temp_dir.path().join("good.html");
+        std::fs::write(&good, "<b>ok</b>").unwrap();
+
+        let includes = KnitrIncludes {
+            include_after_body: vec![
+                PathBuf::from("/nonexistent/a"),
+                good,
+                PathBuf::from("/nonexistent/b"),
+            ],
+            ..Default::default()
+        };
+
+        let mut warnings = Vec::new();
+        let result = convert_includes(&Some(includes), "knitr", &mut warnings);
+
+        assert_eq!(result.include_after, vec!["<b>ok</b>".to_string()]);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|w| w.code.as_deref() == Some("Q-18-2")));
+    }
+
+    /// T3 (bd-gy2ozix3): several files in one slot are read in order.
+    #[test]
+    fn test_convert_includes_multiple_header_files_in_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let first = temp_dir.path().join("first.html");
+        std::fs::write(&first, "<script src=\"a.js\"></script>").unwrap();
+        let second = temp_dir.path().join("second.html");
+        std::fs::write(&second, "<script src=\"b.js\"></script>").unwrap();
+
+        let includes = KnitrIncludes {
+            include_in_header: vec![first, second],
+            ..Default::default()
+        };
+
+        let result = convert_includes(&Some(includes), "knitr", &mut Vec::new());
+
+        assert_eq!(
+            result.header_includes,
+            vec![
+                "<script src=\"a.js\"></script>".to_string(),
+                "<script src=\"b.js\"></script>".to_string()
+            ]
+        );
     }
 
     // === Integration Tests (require R installation) ===

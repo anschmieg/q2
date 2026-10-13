@@ -146,9 +146,23 @@ pub fn run() -> Result<()> {
     }
 
     check_cmake();
+    check_node();
     check_pandoc();
+    check_deno();
+    check_wasm_opt();
 
     Ok(())
+}
+
+/// Check that the `node` on PATH satisfies the repo's pin (`engines.node` in
+/// the root `package.json`, mirrored in `.nvmrc`). Warn-only here; `cargo
+/// xtask verify` enforces it. See `node_version.rs` for why the pin needs
+/// enforcing at all (bd-lh30hlvd).
+fn check_node() {
+    match crate::verify::find_project_root() {
+        Ok(root) => crate::node_version::report_dev_setup(&root),
+        Err(e) => println!("\n  Warning: cannot locate the project root to check Node: {e:#}"),
+    }
 }
 
 /// Check for cmake (required — `cargo build --workspace` pulls in
@@ -207,7 +221,86 @@ fn cmake_install_hints() -> &'static [&'static str] {
     }
 }
 
+/// Check for wasm-opt (required — `npm run build:wasm` runs `wasm-opt -Oz`
+/// on the hub-client WASM after wasm-bindgen; live-share payload plan
+/// Phase 1). Not cargo-installed: the `wasm-opt` crate builds all of
+/// binaryen from C++ source, which is a heavy install when every platform
+/// already packages the binary.
+fn check_wasm_opt() {
+    let Ok(output) = Command::new("wasm-opt").arg("--version").output() else {
+        warn_wasm_opt_missing();
+        return;
+    };
+    if !output.status.success() {
+        warn_wasm_opt_missing();
+        return;
+    }
+
+    let first_line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("wasm-opt")
+        .trim()
+        .to_string();
+    println!("\n  {first_line} — detected");
+}
+
+fn warn_wasm_opt_missing() {
+    println!(
+        "\n  Warning: wasm-opt not found. `npm run build:wasm` (hub-client) will fail.\n  \
+         wasm-opt ships with binaryen. Install:"
+    );
+    for line in wasm_opt_install_hints() {
+        println!("    {line}");
+    }
+}
+
+/// Platform-specific binaryen install commands. Order matters: preferred first.
+fn wasm_opt_install_hints() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &["npm install -g binaryen", "scoop install binaryen"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["brew install binaryen", "npm install -g binaryen"]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &[
+            "apt install binaryen          # Debian/Ubuntu",
+            "dnf install binaryen          # Fedora/RHEL",
+            "npm install -g binaryen       # any OS with node",
+        ]
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        &["npm install -g binaryen"]
+    }
+}
+
+/// The pandoc-hybrid (docx/pptx) leg's floor — a distinct, stricter
+/// requirement from the `3.6` pampa-comparison floor below, since it
+/// exercises Lua filter APIs pampa's own tests don't touch. Named (not an
+/// inline literal) so `cargo xtask lint`'s `pandoc-pin-agreement` rule can
+/// reconcile it against `PANDOC_PIN` in
+/// `crates/quarto-core/src/pandoc_filters/mod.rs` and the CI workflows'
+/// `PANDOC_VERSION` — see
+/// `claude-notes/plans/2026-09-18-pandoc-hybrid-P4-implementation.md`
+/// Task 7 / Findings for Gordon, item 11(b).
+pub(crate) const PANDOC_HYBRID_MIN_VERSION: (u32, u32) = (3, 11);
+
 /// Check for Pandoc 3.6+ (optional — needed only for pampa comparison tests).
+///
+/// Also advises (still warn-only) on the separate, stricter
+/// [`PANDOC_HYBRID_MIN_VERSION`] floor the docx/pptx Pandoc-hybrid leg
+/// requires — that leg's own `L`-tier tests hard-panic on that floor
+/// directly (`quarto_core::pandoc_filters::harness::assert_pandoc_available`),
+/// so this stays advisory rather than promoted to a hard failure: most
+/// `cargo xtask dev-setup` runs are not working on that leg, and a hard
+/// failure here would block unrelated setup steps (cargo-nextest,
+/// wasm-bindgen-cli, ...) for every contributor whose local pandoc happens
+/// to be between 3.6 and 3.11.
 fn check_pandoc() {
     let output = Command::new("pandoc").arg("--version").output();
 
@@ -221,17 +314,55 @@ fn check_pandoc() {
 
     let version_str = String::from_utf8_lossy(&output.stdout);
     let is_good = pandoc_version_at_least(&version_str, 3, 6);
+    let first_line = version_str.lines().next().unwrap_or("unknown version");
 
     if is_good {
         println!("\n  pandoc — suitable version detected");
     } else {
-        // Extract first line for display (e.g. "pandoc 3.1.3")
-        let first_line = version_str.lines().next().unwrap_or("unknown version");
         println!(
             "\n  Warning: {first_line} detected — pampa comparison tests require 3.6+.\n  \
              Four tests will fail. Update from https://pandoc.org/installing.html"
         );
     }
+
+    let (hybrid_major, hybrid_minor) = PANDOC_HYBRID_MIN_VERSION;
+    if !pandoc_version_at_least(&version_str, hybrid_major, hybrid_minor) {
+        println!(
+            "\n  Note: {first_line} detected — the Pandoc-hybrid docx/pptx render leg \
+             requires {hybrid_major}.{hybrid_minor}+.\n  \
+             Only relevant if you're working on that leg; its own tests will panic naming \
+             this floor. Update from https://pandoc.org/installing.html"
+        );
+    }
+}
+
+/// Check for Deno (optional — needed for `quarto-engine-host-deno` tests and the
+/// Deno engine execution path). Warn-only; does NOT auto-install.
+fn check_deno() {
+    let Ok(output) = Command::new("deno").arg("--version").output() else {
+        println!(
+            "\n  Warning: deno not found. Engine-host-deno tests and the Deno execution\n  \
+             path will be skipped or unavailable.\n  \
+             Install: brew install deno  (macOS) or https://deno.land/"
+        );
+        return;
+    };
+    if !output.status.success() {
+        println!(
+            "\n  Warning: `deno --version` returned non-zero. Engine-host-deno\n  \
+             integration will be unavailable.\n  \
+             Install: brew install deno  (macOS) or https://deno.land/"
+        );
+        return;
+    }
+
+    let first_line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("deno")
+        .trim()
+        .to_string();
+    println!("\n  {first_line} — detected");
 }
 
 /// Parse the first line of `pandoc --version` output into `(major, minor)`.
@@ -253,7 +384,11 @@ pub(crate) fn parse_pandoc_version(version_output: &str) -> (u32, u32) {
 }
 
 /// Check if a parsed pandoc `--version` output is at least `major.minor`.
-fn pandoc_version_at_least(version_output: &str, min_major: u32, min_minor: u32) -> bool {
+pub(crate) fn pandoc_version_at_least(
+    version_output: &str,
+    min_major: u32,
+    min_minor: u32,
+) -> bool {
     parse_pandoc_version(version_output) >= (min_major, min_minor)
 }
 

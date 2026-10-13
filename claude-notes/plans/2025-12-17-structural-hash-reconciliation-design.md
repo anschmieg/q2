@@ -1,8 +1,13 @@
-# Structural Hash-Based AST Reconciliation Design
+---
+title: 'Structural Hash-Based AST Reconciliation Design'
+date: 2025-12-17
+description: 'Designs a reconciliation step that keeps unchanged AST nodes from the original document and swaps in only the changed nodes after engine execution, using structural hashes as virtual keys in the style of React reconciliation.'
+status: done  # Implemented (2025-12-18)
+braid:
+  strand: k-xvte
+  priority: P2
+---
 
-**Date**: 2025-12-17
-**Issue**: k-xvte
-**Status**: Implemented (2025-12-18)
 **Parent issue**: k-6daf (Good source location tracking after engine outputs)
 **Related**: claude-notes/plans/2025-12-15-engine-output-source-location-reconciliation.md
 
@@ -31,7 +36,7 @@ We do **NOT** "transfer source locations" between ASTs. Instead, we **selectivel
 ### Concrete Example
 
 **Pre-engine (AST-A):**
-```markdown
+````markdown
 ## Hello
 
 foo.
@@ -41,10 +46,10 @@ print("Hello world")
 ```
 
 bar.
-```
+````
 
 **Post-engine (AST-B):**
-```markdown
+````markdown
 ## Hello
 
 foo.
@@ -54,7 +59,7 @@ Hello world
 ```
 
 bar.
-```
+````
 
 **Reconciled result:**
 ```
@@ -695,12 +700,12 @@ fn apply_container_reconciliation(
 
 When a container's hash changes because a child changed:
 
-- Original Div: contains [Para("foo"), CodeBlock({py}, "...")]
-- Executed Div: contains [Para("foo"), CodeBlock({}, "output")]
+- Original Div: contains `[Para("foo"), CodeBlock(\{py\}, "...")]`
+- Executed Div: contains `[Para("foo"), CodeBlock(\{\}, "output")]`
 
 The Div's hash changes (because children hashes changed), but we want to:
 1. Keep the Div's source location (it's the same Div structurally)
-2. Keep Para("foo")'s source location (it hasn't changed)
+2. Keep Para("foo")\'s source location (it hasn't changed)
 3. Use the executed CodeBlock (it changed)
 
 The `RecurseIntoContainer` alignment achieves this by:
@@ -886,9 +891,9 @@ We iterate executed blocks **in order**, and for each, find the **first unused**
 
 | exec_idx | exec_hash | Available originals | Chosen | Decision |
 |----------|-----------|---------------------|--------|----------|
-| 0 | H1 | [0, 2] | 0 | `KeepOriginal(0)` |
+| 0 | H1 | `[0, 2]` | 0 | `KeepOriginal(0)` |
 | 1 | C2 | — | — | `UseExecuted(1)` |
-| 2 | H1 | [2] (0 used) | 2 | `KeepOriginal(2)` |
+| 2 | H1 | `[2]` (0 used) | 2 | `KeepOriginal(2)` |
 
 Result: Each "Hello." paragraph keeps its own original source location.
 

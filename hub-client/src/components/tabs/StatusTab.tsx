@@ -7,6 +7,7 @@
  */
 
 import type { PresenceState } from '../../services/presenceService';
+import { common, tabs } from '../../strings';
 import './StatusTab.css';
 
 type WasmStatus = 'loading' | 'ready' | 'error';
@@ -17,6 +18,10 @@ interface StatusTabProps {
   userCount: number;
   remoteUsers: PresenceState[];
   isOnline: boolean;
+  /** Recovery action for a WASM boot failure; defaults to a page reload
+   *  (the renderer initializes at Editor mount, so a reload is the honest
+   *  in-place retry). */
+  onRetry?: () => void;
 }
 
 export default function StatusTab({
@@ -24,32 +29,42 @@ export default function StatusTab({
   wasmError,
   userCount,
   remoteUsers,
+  onRetry,
 }: StatusTabProps) {
   return (
     <div className="status-tab">
       <div className="status-tab-section">
-        <label className="section-label">Renderer</label>
+        <label className="section-label">{tabs.status.rendererLabel}</label>
         <div className={`status-indicator ${wasmStatus}`}>
           <span className="status-dot" />
           <span className="status-text">
-            {wasmStatus === 'loading' && 'Loading WASM...'}
-            {wasmStatus === 'ready' && 'Ready'}
-            {wasmStatus === 'error' && 'Error'}
+            {wasmStatus === 'loading' && tabs.status.loadingWasm}
+            {wasmStatus === 'ready' && tabs.status.ready}
+            {wasmStatus === 'error' && tabs.status.error}
           </span>
         </div>
         {wasmStatus === 'error' && wasmError && (
-          <div className="status-error">{wasmError}</div>
+          <div className="status-error">
+            {wasmError}
+            <button
+              type="button"
+              className="qh-error-action"
+              onClick={onRetry ?? (() => window.location.reload())}
+            >
+              {common.reload}
+            </button>
+          </div>
         )}
       </div>
 
       <div className="status-tab-section">
-        <label className="section-label">Collaborators</label>
+        <label className="section-label">{tabs.status.collaboratorsLabel}</label>
         {userCount === 0 ? (
-          <div className="no-users">No other users connected</div>
+          <div className="no-users">{tabs.status.noOthers}</div>
         ) : (
           <div className="user-list">
             <div className="user-count-summary">
-              {userCount} other{userCount === 1 ? '' : 's'} here
+              {tabs.status.othersHere(userCount)}
             </div>
             <ul className="user-names">
               {remoteUsers.map((user) => (

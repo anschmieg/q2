@@ -11,7 +11,7 @@
 // ============================================================================
 
 /** Current schema version for IndexDocument. */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /** Current schema version for ProjectSetDocument. */
 export const CURRENT_PROJECT_SET_SCHEMA_VERSION = 1;
@@ -54,12 +54,23 @@ export interface CaptureRef {
  * `captures` is a sidecar map (V2+) keyed by the same paths used in
  * `files`. Entries are absent until an engine capture is recorded for
  * the path; the q2 preview server writes them and the SPA reads them.
+ *
+ * `folders` (V3+) records folders that exist independently of any file
+ * under them. Folders implied by file paths are never listed here; the
+ * set only makes *empty* folders representable. Keys are slash-separated
+ * paths relative to the project root, with no leading or trailing slash.
  */
 export interface IndexDocument {
   files: Record<string, string>; // path -> docId mapping
-  version?: number; // schema version (2 = current)
-  identities?: Record<string, ActorIdentity>; // actorId -> identity
+  version?: number; // schema version (3 = current)
+  // Attribution key -> identity (D4): authorId for post-transition changes;
+  // legacy actorId keys remain readable — readers resolve
+  // `change.author ?? getAuthorForActor(doc, change.actor) ?? change.actor`,
+  // and by D5 the author ID equals the legacy stable actor ID, so one user's
+  // key is continuous across the transition with no re-keying migration.
+  identities?: Record<string, ActorIdentity>;
   captures?: Record<string, CaptureRef>; // path -> capture sidecar entry (V2+)
+  folders?: Record<string, true>; // explicitly created folders (V3+)
 }
 
 /**
@@ -70,6 +81,7 @@ export interface IndexDocument {
  *   V0 → V1: initialize `identities`, set `version = 1`.
  *   V1 → V2: bump `version = 2`. No structural change — `captures` is
  *            absent until a capture is recorded.
+ *   V2 → V3: initialize `folders`, set `version = 3`.
  *
  * Any preexisting `captures` sidecar (e.g. on a doc mis-tagged as V1)
  * is preserved through the bump.
@@ -91,6 +103,14 @@ export function migrateIndexDocument(doc: IndexDocument): boolean {
   if (doc.version === 1) {
     // V1 → V2 (sidecar capture map; no structural change needed)
     doc.version = 2;
+    changed = true;
+  }
+  if (doc.version === 2) {
+    // V2 → V3 (explicit-folder set)
+    if (!doc.folders) {
+      doc.folders = {};
+    }
+    doc.version = 3;
     changed = true;
   }
   return changed;
@@ -180,6 +200,16 @@ export interface ProjectSetDocument {
    * collections existed; the UI supplies a default until the user names it.
    */
   name?: string;
+  /**
+   * Deletion tombstones: map key -> ISO timestamp of the deletion, written
+   * by `removeProjectFromSet` and cleared by `addProjectToSet`. An entry
+   * absent from `projects` is ambiguous without these — "never synced" and
+   * "deleted" look identical — so reconcilers compare the tombstone against
+   * a candidate's lastAccessed and let the latest one win. Optional:
+   * documents created before tombstones existed simply lack the map until
+   * the first deletion lazily initializes it.
+   */
+  tombstones?: Record<string, string>;
 }
 
 /**
@@ -211,17 +241,31 @@ export function addProjectToSet(
 ): boolean {
   const key = projectSetKey(entry.indexDocId);
   const timestamp = now ?? new Date().toISOString();
+
+  // A (re-)add wins over any earlier deletion tombstone — latest-wins.
+  let changed = false;
+  if (doc.tombstones && key in doc.tombstones) {
+    delete doc.tombstones[key];
+    changed = true;
+  }
+
   const existing = doc.projects[key];
 
   if (existing) {
     // Update mutable fields if changed
-    let changed = false;
     if (existing.description !== entry.description) {
       existing.description = entry.description;
       changed = true;
     }
     if (existing.syncServer !== entry.syncServer) {
       existing.syncServer = entry.syncServer;
+      changed = true;
+    }
+    // Adopt an incoming cached summary only when the entry has none:
+    // freshness updates are owned by updateProjectSummaryInSet, so a
+    // re-add must never clobber a live summary with a stale copy.
+    if (!existing.summary && entry.summary) {
+      existing.summary = structuredClone(entry.summary);
       changed = true;
     }
     return changed;
@@ -231,6 +275,10 @@ export function addProjectToSet(
     indexDocId: entry.indexDocId,
     syncServer: entry.syncServer,
     description: entry.description,
+    // Carry the cached peek summary when the caller has one ("Add to
+    // collection" copies an entry the sender already summarized) so
+    // invite previews and peeks work before the project's next open.
+    ...(entry.summary && { summary: structuredClone(entry.summary) }),
     addedAt: timestamp,
     lastAccessed: timestamp,
   };
@@ -238,21 +286,34 @@ export function addProjectToSet(
 }
 
 /**
- * Remove a project from a ProjectSetDocument.
- * Must be called inside an Automerge `change()` callback.
+ * Remove a project from a ProjectSetDocument, leaving a deletion tombstone
+ * (the key's deletion timestamp) so reconcilers can apply latest-wins
+ * against stale local copies. Must be called inside an Automerge `change()`
+ * callback.
  *
  * @returns true if the entry was removed
  */
 export function removeProjectFromSet(
   doc: ProjectSetDocument,
   indexDocId: string,
+  now?: string,
 ): boolean {
   const key = projectSetKey(indexDocId);
-  if (doc.projects[key]) {
-    delete doc.projects[key];
-    return true;
-  }
-  return false;
+  if (!doc.projects[key]) return false;
+  delete doc.projects[key];
+  if (!doc.tombstones) doc.tombstones = {};
+  doc.tombstones[key] = now ?? new Date().toISOString();
+  return true;
+}
+
+/**
+ * Read the deletion-tombstone map (key -> ISO deletion timestamp), or an
+ * empty object when the document predates tombstones.
+ */
+export function getProjectSetTombstones(
+  doc: ProjectSetDocument,
+): Record<string, string> {
+  return doc.tombstones ?? {};
 }
 
 /**
@@ -428,6 +489,20 @@ const BINARY_EXTENSIONS = new Set([
   'tif',
   // Documents
   'pdf',
+  // Import sources (document import I21): stored as-is via Add asset and
+  // by import when EMF/WMF conversion fails. No viewer, so selecting one
+  // is a no-op like pdf. Mirror of `BINARY_EXTENSIONS` in
+  // crates/quarto-hub/src/resource.rs.
+  'docx',
+  'odt',
+  'rtf',
+  'epub',
+  'pptx',
+  'emf',
+  'wmf',
+  // hephaestus plot documents (bd-sxiv2tio). Mirror of
+  // `BINARY_EXTENSIONS` in crates/quarto-hub/src/resource.rs.
+  'hep',
   // Fonts
   'woff',
   'woff2',
@@ -440,6 +515,22 @@ const BINARY_EXTENSIONS = new Set([
   'webm',
   'ogg',
   'wav',
+]);
+
+/**
+ * Image extensions a browser `<img>` can display. Subset of
+ * `BINARY_EXTENSIONS`; drives the hub-client image viewer and the
+ * sidebar's image icon / drag type.
+ */
+const IMAGE_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+  'ico',
+  'bmp',
 ]);
 
 /**
@@ -461,6 +552,25 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 /**
+ * Normalize a project-relative path to the canonical form used as a key
+ * in `IndexDocument.files` / `.folders`: forward slashes only, no
+ * leading or trailing slash, no empty or `.` segments, trimmed.
+ *
+ * Every mutation that takes a path (create, upload, rename, move, folder
+ * create/delete) runs through this so `folder/a.qmd` and `/folder/a.qmd`
+ * can never coexist as two different folders. `..` segments are left in
+ * place for the caller's validator to reject; they are not resolved.
+ */
+export function normalizeProjectPath(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((seg) => seg !== '' && seg !== '.')
+    .join('/');
+}
+
+/**
  * Get file extension from path (lowercase, without dot).
  */
 export function getFileExtension(path: string): string {
@@ -476,6 +586,14 @@ export function getFileExtension(path: string): string {
 export function isBinaryExtension(path: string): boolean {
   const ext = getFileExtension(path);
   return BINARY_EXTENSIONS.has(ext);
+}
+
+/**
+ * Check if a file path is an image a browser can display inline (by extension).
+ */
+export function isImageExtension(path: string): boolean {
+  const ext = getFileExtension(path);
+  return IMAGE_EXTENSIONS.has(ext);
 }
 
 /**
@@ -505,6 +623,14 @@ export function inferMimeType(path: string): string {
     tif: 'image/tiff',
     // Documents
     pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    odt: 'application/vnd.oasis.opendocument.text',
+    rtf: 'application/rtf',
+    epub: 'application/epub+zip',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    emf: 'image/emf',
+    wmf: 'image/wmf',
+    hep: 'application/vnd.hephaestus.plot',
     // Fonts
     woff: 'font/woff',
     woff2: 'font/woff2',

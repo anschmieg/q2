@@ -89,6 +89,92 @@ mod tests {
         assert!(ERROR_CATALOG.get("Q-999-999").is_none()); // quarto-error-code-audit-ignore
     }
 
+    // bd-6d2wj4zp: Q-2-40 catalog presence (`.md` engine-ignored warning).
+    #[test]
+    fn error_catalog_has_q_2_40() {
+        let info = ERROR_CATALOG
+            .get("Q-2-40")
+            .expect("Q-2-40 must be in the catalog");
+        assert_eq!(info.subsystem, "markdown");
+        assert_eq!(
+            info.title,
+            "Engine Specification Ignored for Markdown Input"
+        );
+        assert!(
+            info.message_template.contains("never execute engines"),
+            "Q-2-40 message must state the policy; got: {}",
+            info.message_template
+        );
+    }
+
+    // bd-cx1det1y: Q-2-36/37/38 catalog presence (backfill — these corpus
+    // codes shipped without catalog entries).
+    #[test]
+    fn error_catalog_has_q_2_36() {
+        let info = ERROR_CATALOG
+            .get("Q-2-36")
+            .expect("Q-2-36 must be in the catalog");
+        assert_eq!(info.subsystem, "markdown");
+        assert_eq!(
+            info.title,
+            "Old-style knitr chunk options are not supported"
+        );
+        assert!(
+            info.message_template.contains("#| key: value"),
+            "Q-2-36 message must point at the body-options syntax; got: {}",
+            info.message_template
+        );
+    }
+
+    #[test]
+    fn error_catalog_has_q_2_37() {
+        let info = ERROR_CATALOG
+            .get("Q-2-37")
+            .expect("Q-2-37 must be in the catalog");
+        assert_eq!(info.subsystem, "markdown");
+        assert_eq!(info.title, "Line break in link destination");
+        assert!(
+            info.message_template.contains("line break"),
+            "Q-2-37 message must name the line-break restriction; got: {}",
+            info.message_template
+        );
+    }
+
+    #[test]
+    fn error_catalog_has_q_2_38() {
+        let info = ERROR_CATALOG
+            .get("Q-2-38")
+            .expect("Q-2-38 must be in the catalog");
+        assert_eq!(info.subsystem, "markdown");
+        assert_eq!(info.title, "Unclosed Attribute Specifier");
+        assert!(
+            info.message_template.contains("closing '}'"),
+            "Q-2-38 message must mention the missing closing brace; got: {}",
+            info.message_template
+        );
+    }
+
+    #[test]
+    fn error_catalog_has_q_2_54() {
+        let info = ERROR_CATALOG
+            .get("Q-2-54")
+            .expect("Q-2-54 must be in the catalog");
+        assert_eq!(info.subsystem, "markdown");
+        assert_eq!(info.title, "Pandoc definition lists are not supported");
+        assert!(
+            info.message_template
+                .contains("literal text instead of a definition"),
+            "Q-2-54 message must describe the fallback; got: {}",
+            info.message_template
+        );
+        assert!(
+            info.message_template
+                .contains("qmd-syntax-helper convert -r definition-lists"),
+            "Q-2-54 message must name the conversion rule; got: {}",
+            info.message_template
+        );
+    }
+
     // L8 / bd-rqgx: Q-12-14 catalog presence.
     #[test]
     fn error_catalog_has_q_12_14() {
@@ -263,6 +349,49 @@ mod tests {
                 .is_some_and(|u| u.ends_with("Q-15-1")),
             "Q-15-1 docs_url must end with the code; got: {:?}",
             info.docs_url
+        );
+    }
+
+    /// T6.9 (P5 Task 6): the wire-format shim's two new warning codes exist,
+    /// carry `subsystem == "pandoc"` (the same subsystem P4 Task 6
+    /// established for `Q-20-1..4`), and follow the canonical
+    /// `https://quarto.org/docs/errors/pandoc/<code>` docs_url shape.
+    ///
+    /// Revert hunk: changing either entry's `subsystem` to something else
+    /// (e.g. `"lua"`) makes the corresponding `assert_eq!` RED.
+    #[test]
+    fn test_pandoc_shim_codes() {
+        for code in ["Q-20-5", "Q-20-6", "Q-20-7"] {
+            let info = ERROR_CATALOG
+                .get(code)
+                .unwrap_or_else(|| panic!("{code} must be in the catalog"));
+            assert_eq!(info.subsystem, "pandoc");
+            assert!(
+                info.docs_url
+                    .as_deref()
+                    .is_some_and(|u| u == format!("https://quarto.org/docs/errors/pandoc/{code}")),
+                "{code} docs_url must be the canonical pandoc-subsystem shape; got: {:?}",
+                info.docs_url
+            );
+        }
+    }
+
+    /// T1.6 (P7-foundation Task 1): the multi-format render warning's code
+    /// exists, carries `subsystem == "pandoc"`, and follows the canonical
+    /// `https://quarto.org/docs/errors/pandoc/<code>` docs_url shape.
+    ///
+    /// Revert hunk: changing the entry's `docs_url` to another subsystem's
+    /// URL shape (e.g. the `lua` subsystem's) makes the `assert!` RED.
+    #[test]
+    fn test_multi_format_warning_catalog_entry() {
+        let code = "Q-20-8";
+        let info = ERROR_CATALOG
+            .get(code)
+            .unwrap_or_else(|| panic!("{code} must be in the catalog"));
+        assert_eq!(info.subsystem, "pandoc");
+        assert_eq!(
+            info.docs_url.as_deref(),
+            Some("https://quarto.org/docs/errors/pandoc/Q-20-8")
         );
     }
 

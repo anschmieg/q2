@@ -113,10 +113,12 @@ impl PipelineObserver for CaptureCollector {
 /// extensions, etc.) automatically flow into capture recording — no
 /// drift between the server-side record path and the in-browser
 /// replay path.
-fn build_capture_pipeline_stages(
-    engine_registry: Option<EngineRegistry>,
-) -> Vec<Box<dyn PipelineStage>> {
-    let mut stages = build_html_pipeline_stages_with_options(None, engine_registry);
+///
+/// The engine registry is no longer a stage-level concern (Task 8 of
+/// ts-engine-extensions); `record_capture` sets `ctx.registry` directly
+/// on the `StageContext` after construction.
+fn build_capture_pipeline_stages() -> Vec<Box<dyn PipelineStage>> {
+    let mut stages = build_html_pipeline_stages_with_options(None);
     if let Some(idx) = stages.iter().position(|s| s.name() == "engine-execution") {
         stages.truncate(idx + 1);
     }
@@ -138,7 +140,7 @@ pub async fn record_capture(
     path: &std::path::Path,
     project: &ProjectContext,
     runtime: Arc<dyn SystemRuntime>,
-    engine_registry: Option<EngineRegistry>,
+    engine_registry: Option<Arc<EngineRegistry>>,
 ) -> Result<Vec<EngineCapture>, PipelineError> {
     let content = runtime
         .file_read(path)
@@ -154,8 +156,15 @@ pub async fn record_capture(
 
     let mut ctx = StageContext::new(runtime, format, project.clone(), document)?
         .with_observer(Arc::new(collector));
+    // Apply the engine registry override when supplied (test seam); otherwise
+    // the project's default registry (already on ctx.registry from
+    // StageContext::new()) is used.  This mirrors the run_pipeline pattern:
+    // StageContext::new() sets the default; callers override via the field.
+    if let Some(reg) = engine_registry {
+        ctx.registry = reg;
+    }
 
-    let stages = build_capture_pipeline_stages(engine_registry);
+    let stages = build_capture_pipeline_stages();
     let pipeline =
         Pipeline::new(stages).expect("preview-record pipeline stages should be compatible");
 
@@ -175,7 +184,7 @@ pub async fn record_capture(
 /// check serializes the same AST and compares byte-for-byte against
 /// the existing capture's `input_qmd`.
 fn build_pre_engine_pipeline_stages() -> Vec<Box<dyn PipelineStage>> {
-    let mut stages = build_html_pipeline_stages_with_options(None, None);
+    let mut stages = build_html_pipeline_stages_with_options(None);
     if let Some(idx) = stages
         .iter()
         .position(|s| s.name() == "pre-engine-sugaring")
@@ -221,11 +230,21 @@ pub async fn compute_input_qmd(
     let input = PipelineData::LoadedSource(LoadedSource::new(path.to_path_buf(), content));
     let final_data = pipeline.run(input, &mut ctx).await?;
 
-    let doc_ast = final_data.into_document_ast().ok_or_else(|| {
+    let mut doc_ast = final_data.into_document_ast().ok_or_else(|| {
         PipelineError::other(
             "pre-engine pipeline did not produce DocumentAst — unexpected output kind".to_string(),
         )
     })?;
+
+    // nested-cell-masking (spec § "The engine capture — asymmetric, by
+    // necessity" / `compute_input_qmd`'s three-consumer table): these bytes
+    // must match what `EngineExecutionStage` hands the engine as
+    // `input_qmd` — masked. The two consumers that read this function's
+    // output directly (the staleness compare in `capture_driver.rs` and the
+    // cache key in `cache.rs`) both want masked bytes; only
+    // `write_review_file` (`quarto-hub-provider/src/execute.rs`) unmasks,
+    // and it does so itself after calling this function.
+    crate::engine::nested_cell_mask::mask(&mut doc_ast.ast);
 
     let mut buf = Vec::new();
     pampa::writers::qmd::write(&doc_ast.ast, &mut buf).map_err(|diagnostics| {
@@ -269,6 +288,18 @@ mod tests {
             out.push_str("\n<!-- test-passthrough -->\n");
             Ok(ExecuteResult::passthrough(&out))
         }
+
+        fn claims_language(
+            &self,
+            language: &str,
+            _first_class: Option<&str>,
+        ) -> crate::engine::LanguageClaim {
+            if language == "test-passthrough" {
+                crate::engine::LanguageClaim::Primary(1)
+            } else {
+                crate::engine::LanguageClaim::None
+            }
+        }
     }
 
     /// Write a fixture file and discover its single-file project context.
@@ -309,7 +340,7 @@ mod tests {
         let mut registry = EngineRegistry::new();
         registry.register(Arc::new(PassthroughTestEngine));
 
-        let result = record_capture(&path, &project, runtime, Some(registry))
+        let result = record_capture(&path, &project, runtime, Some(Arc::new(registry)))
             .await
             .expect("pipeline runs cleanly with test engine");
 
@@ -358,7 +389,7 @@ mod tests {
         let mut registry = EngineRegistry::new();
         registry.register(Arc::new(PassthroughTestEngine));
 
-        let result = record_capture(&path, &project, runtime, Some(registry))
+        let result = record_capture(&path, &project, runtime, Some(Arc::new(registry)))
             .await
             .expect("pipeline runs");
         let capture = result.first().expect("capture present");
@@ -413,6 +444,18 @@ mod tests {
             out.push_str("\n![](doc_files/figure-html/fig.png)\n");
             Ok(ExecuteResult::new(out).with_supporting_files(vec![self.doc_dir.join("doc_files")]))
         }
+
+        fn claims_language(
+            &self,
+            language: &str,
+            _first_class: Option<&str>,
+        ) -> crate::engine::LanguageClaim {
+            if language == "test-figures" {
+                crate::engine::LanguageClaim::Primary(1)
+            } else {
+                crate::engine::LanguageClaim::None
+            }
+        }
     }
 
     #[tokio::test]
@@ -430,7 +473,7 @@ mod tests {
             doc_dir: path.parent().unwrap().to_path_buf(),
         }));
 
-        let captures = record_capture(&path, &project, runtime, Some(registry))
+        let captures = record_capture(&path, &project, runtime, Some(Arc::new(registry)))
             .await
             .expect("pipeline runs");
         let capture = captures.first().expect("capture present");
@@ -469,7 +512,7 @@ mod tests {
         let mut registry = EngineRegistry::new();
         registry.register(Arc::new(PassthroughTestEngine));
 
-        let captures = record_capture(&path, &project, runtime.clone(), Some(registry))
+        let captures = record_capture(&path, &project, runtime.clone(), Some(Arc::new(registry)))
             .await
             .expect("record_capture");
         let capture = captures.first().expect("capture present");
@@ -482,6 +525,52 @@ mod tests {
         assert_eq!(
             computed_str, capture.input_qmd,
             "compute_input_qmd must yield the same bytes the engine receives"
+        );
+    }
+
+    /// T20 (hunk H10): `compute_input_qmd` must mask executable fence
+    /// openers nested inside a *displayed* code block — the same masked
+    /// bytes the engine-execution loop hands to the engine as `input_qmd`
+    /// (once H8 lands there too). `compute_input_qmd_matches_capture_input_qmd`
+    /// above uses a fixture with **no** display block, so it stays green
+    /// through a regression here; this fixture adds one, closing that gap.
+    ///
+    /// The first assertion (masked marker present) is what makes this test
+    /// genuinely red today: neither `compute_input_qmd` nor `record_capture`
+    /// masks anything yet, so today's bytes carry the bare `{r}` opener, not
+    /// `q2-nested-executable`. The second assertion protects the
+    /// fully-implemented invariant (compute == capture) once H8 and H10 both
+    /// land.
+    #[tokio::test]
+    async fn compute_input_qmd_masks_nested_display_fence() {
+        let (_tmp, path, project, runtime) = fixture(
+            "---\nengine: test-passthrough\n---\n\n```{test-passthrough}\nSENTINEL\n```\n\n```markdown\n```{r}\n1 + 1\n```\n```\n",
+        );
+
+        let mut registry = EngineRegistry::new();
+        registry.register(Arc::new(PassthroughTestEngine));
+
+        let captures = record_capture(&path, &project, runtime.clone(), Some(Arc::new(registry)))
+            .await
+            .expect("record_capture");
+        let capture = captures.first().expect("capture present");
+
+        let computed = compute_input_qmd(&path, &project, runtime)
+            .await
+            .expect("compute_input_qmd");
+        let computed_str = String::from_utf8(computed).expect("UTF-8");
+
+        assert!(
+            computed_str.contains("q2-nested-executable"),
+            "compute_input_qmd must mask the nested `{{r}}` opener inside the \
+             display block so quarto-preview's staleness compare and cache key \
+             see masked bytes (spec: \"The engine capture — asymmetric, by \
+             necessity\"); got:\n{computed_str}"
+        );
+        assert_eq!(
+            computed_str, capture.input_qmd,
+            "compute_input_qmd must yield the same (masked) bytes the engine \
+             receives, even for docs with a display block"
         );
     }
 

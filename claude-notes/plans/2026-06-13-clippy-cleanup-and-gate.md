@@ -1,4 +1,11 @@
-# Clean up clippy debt and gate clippy in CI (bd-3zst4hwy)
+---
+title: 'Clean up clippy debt and gate clippy in CI (bd-3zst4hwy)'
+date: 2026-06-13
+description: 'Clears the accumulated clippy violations across the workspace and adds a `-D warnings` clippy gate to CI and `cargo xtask verify` so the workspace stays clean.'
+braid:
+  strand: bd-3zst4hwy
+  priority: P2
+---
 
 ## Overview
 
@@ -41,17 +48,17 @@ By lint:
 | collapsible_match | 2 | yes |
 | unreadable_literal, unnecessary_map_or, single_component_path_imports, should_implement_trait, print_literal, naive_bytecount | 1 each | mixed |
 
-> ⚠️ Earlier raw counts of ~560 / ~1811 were an artifact of running
+> ⚠️ Earlier raw counts of \~560 / \~1811 were an artifact of running
 > clippy with `-W clippy::all`, which **re-enables the deliberately
 > allowed** architectural lints. Those stay allowed; do not "fix" them.
 
 ### Judgment-call lints (per the agreed policy: `#[allow]` + note, file
 follow-ups only if a real refactor is warranted)
 
-- `should_implement_trait` @ `quarto-source-map/src/source_info.rs:163`
+- `should_implement_trait` \@ `quarto-source-map/src/source_info.rs:163`
   — an inherent method shadowing a trait method name; likely a
   deliberate API. `#[allow]` with a note unless trivially renameable.
-- `naive_bytecount` @ `xtask/src/braid_snapshot.rs:60`,
+- `naive_bytecount` \@ `xtask/src/braid_snapshot.rs:60`,
   `xtask/src/create_worktree.rs:1132` — would pull in the `bytecount`
   crate for a dev-tool line count; `#[allow]` (not worth a dep).
 

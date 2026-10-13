@@ -32,8 +32,10 @@
 
 use std::collections::HashMap;
 
+use quarto_pandoc_types::ConfigValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use yaml_rust2::Yaml;
 
 /// Complete format configuration for knitr execution.
 ///
@@ -261,7 +263,7 @@ impl KnitrFormatConfig {
                 from: Some("markdown".to_string()),
                 ..Default::default()
             },
-            execute: ExecuteConfig::with_defaults(),
+            execute: ExecuteConfig::with_defaults_for_format(output_format),
             render: RenderConfig::default(),
             identifier: None,
             metadata: None,
@@ -271,6 +273,26 @@ impl KnitrFormatConfig {
 }
 
 impl ExecuteConfig {
+    /// Create execution config with format-aware defaults.
+    ///
+    /// `default-image-extension` (`format-typst.ts`'s
+    /// `default-image-extension: svg`) is the only pandoc-hybrid-typst
+    /// Phase 1 execute default with a real knitr-side effect: knitr's R
+    /// plotting device picks the image extension when a chunk executes,
+    /// so it must be resolved *before* execution, not patched onto the
+    /// output afterward. `wrap: none` (the other format-typst.ts
+    /// default in the same registration) has no knitr consumer — nothing
+    /// in `execute.R`/`hooks.R` reads `format$pandoc$wrap` — so it stays
+    /// out of this config; it is handled entirely by the pandoc
+    /// invocation builder (`Format::pandoc_invocation_args`).
+    pub fn with_defaults_for_format(output_format: &str) -> Self {
+        let mut config = Self::with_defaults();
+        if output_format == "typst" {
+            config.fig_format = Some("svg".to_string());
+        }
+        config
+    }
+
     /// Create execution config with sensible defaults.
     ///
     /// These defaults match knitr's defaults and Quarto's conventions.
@@ -295,11 +317,214 @@ impl ExecuteConfig {
             extra: HashMap::new(),
         }
     }
+
+    /// Overlay the document's merged `execute:` scope onto these
+    /// defaults (bd-nn2fou8h).
+    ///
+    /// **Overlay, never replace.** `resources/rmd/execute.R` reads
+    /// several keys through `isTRUE(...)`, so an *absent* key there
+    /// means **false**, not "unset":
+    ///
+    /// ```r
+    /// warning = isTRUE(format$execute[["warning"]]),
+    /// include = isTRUE(format$execute[["include"]]),
+    /// ```
+    ///
+    /// [`Self::with_defaults`] exists precisely to supply those
+    /// `true`s. Handing R the document's `execute:` map verbatim would
+    /// therefore set `include` to false for every chunk and render a
+    /// blank document — which is why this method starts from the
+    /// defaults and only overwrites keys the document actually set.
+    ///
+    /// Keys are exactly the ones the R scripts read (`execute.R`
+    /// `opts_chunk`, `hooks.R`). `freeze` is deliberately not
+    /// forwarded: nothing on the R side consumes it — it is resolved
+    /// higher up, before an engine ever runs.
+    pub fn overlay_document_scope(&mut self, scope: &ConfigValue) {
+        if let Some(v) = number(scope, "fig-width") {
+            self.fig_width = Some(v);
+        }
+        if let Some(v) = number(scope, "fig-height") {
+            self.fig_height = Some(v);
+        }
+        if let Some(v) = number(scope, "fig-asp") {
+            self.fig_asp = Some(v);
+        }
+        if let Some(v) = number(scope, "fig-dpi") {
+            self.fig_dpi = Some(v as u32);
+        }
+        if let Some(v) = text(scope, "fig-format") {
+            self.fig_format = Some(v);
+        }
+        if let Some(v) = text(scope, "df-print") {
+            self.df_print = Some(v);
+        }
+        if let Some(v) = flag(scope, "eval") {
+            self.eval = Some(v);
+        }
+        if let Some(v) = flag(scope, "warning") {
+            self.warning = Some(v);
+        }
+        if let Some(v) = flag(scope, "error") {
+            self.error = Some(v);
+        }
+        if let Some(v) = flag(scope, "include") {
+            self.include = Some(v);
+        }
+        if let Some(v) = flag(scope, "enabled") {
+            self.enabled = Some(v);
+        }
+        if let Some(v) = flag(scope, "debug") {
+            self.debug = Some(v);
+        }
+        // Tri-state keys: a boolean or a keyword (`echo: fenced`,
+        // `output: asis`). `execute.R` compares both forms.
+        if let Some(v) = flag_or_keyword(scope, "echo") {
+            self.echo = Some(v);
+        }
+        if let Some(v) = flag_or_keyword(scope, "output") {
+            self.output = Some(v);
+        }
+        if let Some(v) = flag_or_keyword(scope, "cache") {
+            self.cache = Some(v);
+        }
+    }
+}
+
+fn flag(scope: &ConfigValue, key: &str) -> Option<bool> {
+    scope.get(key)?.as_bool()
+}
+
+/// A string-valued option. Uses `as_plain_text`, not `as_str`: a bare
+/// YAML string in document-metadata context is stored as
+/// `ConfigValueKind::PandocInlines`, for which `as_str` returns `None`
+/// and the option would be silently dropped (the `metadata-as-str`
+/// lint exists for exactly this trap).
+fn text(scope: &ConfigValue, key: &str) -> Option<String> {
+    scope.get(key)?.as_plain_text()
+}
+
+/// A numeric option, accepting both YAML integer and real spellings
+/// (`fig-width: 7` and `fig-width: 7.5`).
+fn number(scope: &ConfigValue, key: &str) -> Option<f64> {
+    let value = scope.get(key)?;
+    if let Some(i) = value.as_int() {
+        return Some(i as f64);
+    }
+    match value.as_yaml()? {
+        Yaml::Real(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// An option that is either a boolean or a keyword string, preserved
+/// as-is for the R side to compare (`echo: fenced`, `output: asis`).
+fn flag_or_keyword(scope: &ConfigValue, key: &str) -> Option<Value> {
+    let value = scope.get(key)?;
+    if let Some(b) = value.as_bool() {
+        return Some(Value::Bool(b));
+    }
+    value.as_plain_text().map(Value::String)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // === bd-nn2fou8h: document `execute:` scope overlay ===
+
+    /// A document `execute:` map, as the pipeline hands it to the
+    /// engine.
+    fn scope(yaml: &str) -> ConfigValue {
+        let parsed = quarto_yaml::parse(yaml).expect("test YAML parses");
+        let (config, _) = crate::cell_options::options_to_config(parsed);
+        config
+    }
+
+    fn overlaid(yaml: &str) -> ExecuteConfig {
+        let mut execute = ExecuteConfig::with_defaults();
+        execute.overlay_document_scope(&scope(yaml));
+        execute
+    }
+
+    /// The trap this method exists to avoid: `execute.R` reads
+    /// `include`/`warning` through `isTRUE()`, so dropping the
+    /// defaults for keys the document didn't mention would render a
+    /// blank document.
+    #[test]
+    fn test_overlay_preserves_defaults_for_untouched_keys() {
+        let execute = overlaid("echo: false");
+        assert_eq!(execute.echo, Some(Value::Bool(false)), "echo overridden");
+        assert_eq!(execute.include, Some(true), "include default preserved");
+        assert_eq!(execute.warning, Some(true), "warning default preserved");
+        assert_eq!(execute.eval, Some(true), "eval default preserved");
+        assert_eq!(execute.error, Some(false), "error default preserved");
+        assert_eq!(execute.fig_width, Some(7.0), "fig-width default preserved");
+    }
+
+    #[test]
+    fn test_overlay_reads_booleans() {
+        let execute = overlaid("warning: false\ninclude: false\nerror: true\neval: false");
+        assert_eq!(execute.warning, Some(false));
+        assert_eq!(execute.include, Some(false));
+        assert_eq!(execute.error, Some(true));
+        assert_eq!(execute.eval, Some(false));
+    }
+
+    /// `echo` and `output` are tri-state: the keyword forms must reach
+    /// R intact, because `execute.R` compares them by string
+    /// (`identical(format$execute[["echo"]], "fenced")`).
+    #[test]
+    fn test_overlay_preserves_keyword_forms() {
+        assert_eq!(
+            overlaid("echo: fenced").echo,
+            Some(Value::String("fenced".to_string()))
+        );
+        assert_eq!(
+            overlaid("output: asis").output,
+            Some(Value::String("asis".to_string()))
+        );
+        assert_eq!(overlaid("output: false").output, Some(Value::Bool(false)));
+    }
+
+    /// Numbers arrive as YAML integers or reals; both must land as
+    /// `f64` rather than being silently dropped.
+    #[test]
+    fn test_overlay_reads_numbers_in_both_spellings() {
+        let execute = overlaid("fig-width: 9.5\nfig-height: 4\nfig-dpi: 300");
+        assert_eq!(execute.fig_width, Some(9.5), "real");
+        assert_eq!(execute.fig_height, Some(4.0), "integer");
+        assert_eq!(execute.fig_dpi, Some(300));
+    }
+
+    #[test]
+    fn test_overlay_reads_strings() {
+        assert_eq!(
+            overlaid("df-print: kable").df_print,
+            Some("kable".to_string())
+        );
+        assert_eq!(
+            overlaid("fig-format: svg").fig_format,
+            Some("svg".to_string())
+        );
+    }
+
+    /// `freeze` is resolved before an engine runs and no R code reads
+    /// it, so it is deliberately not forwarded.
+    #[test]
+    fn test_overlay_does_not_forward_freeze() {
+        assert_eq!(overlaid("freeze: true").freeze, None);
+    }
+
+    /// The overlaid config still serializes under the kebab-case names
+    /// the R scripts index by.
+    #[test]
+    fn test_overlaid_config_serializes_with_kebab_case_keys() {
+        let json = serde_json::to_value(overlaid("echo: false\nfig-width: 9.5")).unwrap();
+        assert_eq!(json["echo"], Value::Bool(false));
+        assert_eq!(json["fig-width"], serde_json::json!(9.5));
+        assert_eq!(json["include"], Value::Bool(true));
+    }
 
     #[test]
     fn test_format_config_serialization() {
@@ -309,6 +534,35 @@ mod tests {
         assert!(json.contains("\"pandoc\""));
         assert!(json.contains("\"to\":\"html\""));
         assert!(json.contains("\"from\":\"markdown\""));
+    }
+
+    /// pandoc-hybrid-typst Phase 1 execute defaults: typst's
+    /// `default-image-extension: svg` (`format-typst.ts`) must reach
+    /// knitr's `fig_format` *before* code execution — knitr's R plotting
+    /// device picks the image extension at chunk-execution time, so this
+    /// can't be patched in afterward the way a Lua post-filter could.
+    /// Every other format keeps the pre-existing `"png"` default
+    /// unchanged.
+    ///
+    /// Revert hunk: reverting `with_defaults` to call
+    /// `ExecuteConfig::with_defaults()` unconditionally (dropping the
+    /// format-aware `with_defaults_for_format`) makes the typst half RED.
+    #[test]
+    fn test_typst_format_defaults_to_svg_figures() {
+        let config = KnitrFormatConfig::with_defaults("typst");
+        assert_eq!(config.execute.fig_format, Some("svg".to_string()));
+    }
+
+    #[test]
+    fn test_non_typst_formats_keep_png_figures() {
+        for fmt in ["html", "pdf", "docx", "pptx"] {
+            let config = KnitrFormatConfig::with_defaults(fmt);
+            assert_eq!(
+                config.execute.fig_format,
+                Some("png".to_string()),
+                "expected png fig-format default for {fmt}"
+            );
+        }
     }
 
     #[test]

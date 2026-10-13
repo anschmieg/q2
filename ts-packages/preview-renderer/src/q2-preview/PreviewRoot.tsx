@@ -146,8 +146,9 @@ export interface PreviewRootProps {
     /** Phase F.1: monotonic epoch — scroll fires when this advances. */
     pendingAnchorEpoch?: number;
     /**
-     * Reactji-authorship demo (2026-05-25 plan): viewer's Automerge
-     * actor id, provided via `CurrentActorContext` to user TSX.
+     * Reactji-authorship demo (2026-05-25 plan): viewer's attribution
+     * key (automerge author id; bare actor id only for pre-transition
+     * history), provided via `CurrentActorContext` to user TSX.
      */
     currentActor?: string | null;
     onNavigateToDocument?: (path: string, anchor: string | null) => void;
@@ -318,6 +319,8 @@ export function PreviewRoot(props: PreviewRootProps) {
     // ---------------------------------------------------------------------------
 
     // Keep editTarget in a ref so the layout effect reads it without depending on it.
+    // Re-pointed at `effectiveEditTarget` further down the render body (after the
+    // pool useMemo), so every post-render consumer sees render-consistent offsets.
     const editTargetRef = useRef<typeof editTarget>(editTarget);
     editTargetRef.current = editTarget;
 
@@ -1452,6 +1455,37 @@ export function PreviewRoot(props: PreviewRootProps) {
     renderedContentRef.current = props.renderedContent ?? '';
     nestedEditBuffersRef.current = props.nestedEditBuffers;
 
+    // bd-84ljmbaf (GH #420): re-anchor the edit target DURING render, not only in
+    // the self-heal layout effect. An external re-render (collaborator CRDT
+    // change) that shifts the active block's byte offsets would otherwise render
+    // one frame against the STALE anchorR0 — no block matches, the mounted
+    // editor unmounts, and the self-heal's re-anchor then mounts a FRESH one:
+    // a focus blip, caret reset, and (rich surface) loss of the uncommitted
+    // tiptap doc. Deriving the shifted anchors here makes the first post-change
+    // render match, so React reconciles the open editor in place. The layout
+    // effect still persists the re-anchor into state (a same-values follow-up
+    // render) and still owns the DROP path — findReanchorCandidate returns null
+    // exactly when it would there, leaving the target untouched for the effect
+    // to close.
+    const effectiveEditTarget = useMemo(() => {
+        if (editTarget === null) return null;
+        const cand = findReanchorCandidate(
+            pool,
+            props.renderedContent ?? '',
+            editTarget.anchorR0,
+            editTarget.anchorSlice,
+        );
+        if (cand && (cand.r0 !== editTarget.anchorR0 || cand.r1 !== editTarget.anchorR1)) {
+            return { ...editTarget, anchorR0: cand.r0, anchorR1: cand.r1 };
+        }
+        return editTarget;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [editTarget, pool, props.renderedContent]);
+    // Re-point the shared ref at the derived target so post-render consumers
+    // (commit destinations, the stale-unmount guards, the self-heal effect)
+    // agree with the offsets the dispatcher just rendered against.
+    editTargetRef.current = effectiveEditTarget;
+
     const astProps = parsed
         ? { ast: parsed }
         : { astJson: props.astJson };
@@ -1484,6 +1518,7 @@ export function PreviewRoot(props: PreviewRootProps) {
                 sourceNode: indexEntry.sourceNode,
                 reachabilityClass: indexEntry.reachabilityClass,
                 sourceEntry,
+                sourcePool: indexEntry.sourcePool,
             };
         },
         [pool, sourceIndex],
@@ -1529,7 +1564,7 @@ export function PreviewRoot(props: PreviewRootProps) {
                 commitTextEdit,
                 commitSubtreeEdit,
                 content: props.renderedContent,
-                editTarget,
+                editTarget: effectiveEditTarget,
                 setEditTarget,
                 editDraftRef,
                 pendingOpenSelectionRef,

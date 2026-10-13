@@ -4,6 +4,32 @@
  *
  * Shared cell-options facility: identify and extract the YAML options
  * block at the head of an executable code cell (bd-ohvl879u).
+ *
+ * PROVENANCE CONSTRAINT on the option-line syntax this module accepts
+ * (recorded 2026-08-23, provenance Plan 3 Phase 8; source:
+ * claude-notes/research/2026-08-21-provenance-audit-findings.md,
+ * section 6, "The workaround census"):
+ *
+ *   A language's option-line syntax may only *elide* spans, never
+ *   *transform* them, because every byte of the reassembled YAML must
+ *   be a real source byte.
+ *
+ * Every piece of the `SourceInfo::concat` built by
+ * `partition_cell_options` below is a `SourceInfo::substring` of the
+ * caller's `body_source` paired with its own `end - start` length, so
+ * content length equals source length piece by piece. That is what makes every marker shape
+ * `CommentSyntax` describes expressible — the prefix, and for
+ * block-comment languages the trailing suffix, are both *elided* — and
+ * what would make an escape, an entity, or any other decoding
+ * inexpressible. The claim ranges over every language this module
+ * supports, prefix-only and block-comment alike; it says nothing about
+ * languages q2 does not yet support.
+ *
+ * The constraint is RECORDED, NOT LIFTED. `quarto-source-map` 0.1.3's
+ * `ProvenanceBuilder` can express a deletion (`replacement(range, 0)`
+ * stores a zero-content piece), which is exactly what lifting it would
+ * take — but no language q2 supports needs a transforming option-line
+ * syntax, so there is no consumer and nothing here changes.
  */
 
 //! Cell-option partitioning for executable code cells.
@@ -82,6 +108,13 @@ pub fn comment_syntax_for(language: &str) -> CommentSyntax {
         "scala" | "csharp" | "fsharp" | "cpp" | "cc" | "java" | "groovy" | "kotlin" | "js"
         | "d3" | "node" | "sass" | "scss" | "go" | "asy" | "dot" | "ojs" | "rust" => ("//", None),
         "matlab" | "tikz" => ("%", None),
+        // Not in Q1's kLangCommentChars: mermaid's `%%` lives on the
+        // language handler (`comment: "%%"` in core/handlers/mermaid.ts)
+        // and in filters/modules/constants.lua, which is why the
+        // original port of this table missed it
+        // (bd-mermaid-cell-options-9wo3crl0). Distinct from matlab's
+        // single `%` — see `mermaid_and_matlab_markers_do_not_cross_talk`.
+        "mermaid" => ("%%", None),
         "c" | "css" => ("/*", Some("*/")),
         "sas" => ("*", Some(";")),
         "sql" | "mysql" | "psql" | "lua" | "haskell" => ("--", None),
@@ -219,8 +252,13 @@ pub fn partition_cell_options(
     }
 
     let yaml_parent = SourceInfo::concat(concat_pieces);
-    let options = quarto_yaml::parse_with_parent(&yaml_text, yaml_parent)
-        .map_err(CellOptionsError::InvalidYaml)?;
+    // An unclosed `[`/`{` is reported at end of input, i.e. on the first
+    // code line; pull it back onto the option lines (bd-x30aq7ae).
+    let options = quarto_yaml::parse_with_parent(&yaml_text, yaml_parent).map_err(|e| {
+        CellOptionsError::InvalidYaml(pampa::utils::yaml_syntax_error::clamp_error_to_content(
+            e, &yaml_text,
+        ))
+    })?;
 
     Ok(PartitionedCell {
         options: Some(options),
@@ -333,6 +371,7 @@ mod tests {
             ("java", "//"),
             ("matlab", "%"),
             ("tikz", "%"),
+            ("mermaid", "%%"),
             ("fortran", "!"),
             ("apl", "⍝"),
             ("stata", "*"),
@@ -341,6 +380,63 @@ mod tests {
             assert_eq!(syn.prefix, prefix, "prefix for {lang}");
             assert_eq!(syn.suffix, None, "suffix for {lang}");
         }
+    }
+
+    /// mermaid's `%%` and matlab/tikz's `%` are adjacent but must not
+    /// cross-talk: a mermaid option line read under matlab's syntax
+    /// sees `%| …` after stripping one `%`, which fails the `|` check,
+    /// and a matlab option line under mermaid's syntax fails the
+    /// prefix check. Neither direction silently half-parses
+    /// (bd-mermaid-cell-options-9wo3crl0).
+    #[test]
+    fn mermaid_and_matlab_markers_do_not_cross_talk() {
+        let mermaid = comment_syntax_for("mermaid");
+        let matlab = comment_syntax_for("matlab");
+
+        assert!(
+            option_content_ranges("%%| fig-cap: A caption.\n", &mermaid).is_some(),
+            "`%%|` must be an option line under mermaid syntax"
+        );
+        assert!(
+            option_content_ranges("%%| fig-cap: A caption.\n", &matlab).is_none(),
+            "`%%|` must NOT be an option line under matlab syntax"
+        );
+        assert!(
+            option_content_ranges("%| label: x\n", &matlab).is_some(),
+            "`%|` must be an option line under matlab syntax"
+        );
+        assert!(
+            option_content_ranges("%| label: x\n", &mermaid).is_none(),
+            "`%|` must NOT be an option line under mermaid syntax"
+        );
+    }
+
+    /// End-to-end partition on a mermaid cell: the leading `%%|` run
+    /// becomes the options document, the diagram source is what
+    /// remains, and a `%%|` line *below* the first code line stays in
+    /// the body as an ordinary mermaid comment.
+    #[test]
+    fn partition_mermaid_cell() {
+        let body = "%%| label: fig-x\n%%| fig-cap: A caption.\n\
+                    flowchart LR\n  A --> B\n%%| not an option\n";
+        let cell = partition("mermaid", body);
+        assert_eq!(cell.code, "flowchart LR\n  A --> B\n%%| not an option\n");
+        let options = cell.options.expect("mermaid cell has options");
+        assert!(options.is_hash());
+        assert_eq!(
+            options
+                .get_hash_value("label")
+                .and_then(|v| v.yaml.as_str().map(|s| s.to_string()))
+                .as_deref(),
+            Some("fig-x")
+        );
+        assert_eq!(
+            options
+                .get_hash_value("fig-cap")
+                .and_then(|v| v.yaml.as_str().map(|s| s.to_string()))
+                .as_deref(),
+            Some("A caption.")
+        );
     }
 
     #[test]

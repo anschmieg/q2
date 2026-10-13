@@ -1,7 +1,10 @@
-# tree-sitter-qmd Cleanup Plan
+---
+title: 'tree-sitter-qmd Cleanup Plan'
+date: 2025-10-31
+description: 'Removes the unused legacy inline grammar from the `tree-sitter-qmd` build and its exported `INLINE_LANGUAGE` API, since only the unified block grammar is parsed.'
+status: draft  # Planning
+---
 
-**Date**: 2025-10-31
-**Status**: Planning
 **Priority**: HIGH (prevents confusion)
 
 ## Current Situation - Summary
@@ -244,7 +247,7 @@ pub const NODE_TYPES: &str =
     include_str!("../../tree-sitter-markdown/src/node-types.json");
 ```
 
-**Note**: Rename exports to remove "_BLOCK" suffix since there's only one grammar now.
+**Note**: Rename exports to remove "\_BLOCK" suffix since there's only one grammar now.
 
 ### Phase 5: Update lib.rs Documentation
 
@@ -380,7 +383,7 @@ After each phase:
 ## Expected Benefits
 
 ### 1. Faster Builds
-- ~50% reduction in tree-sitter compilation time (rough estimate)
+- \~50% reduction in tree-sitter compilation time (rough estimate)
 - Fewer files to track for cargo rerun-if-changed
 
 ### 2. Clearer API
@@ -415,7 +418,7 @@ If something breaks:
 - Phase 8 (archive decision): 15 minutes
 - Phase 9 (README): 15 minutes
 - Testing after each phase: 30 minutes
-- **Total**: ~2-2.5 hours
+- **Total**: \~2-2.5 hours
 
 ## Success Criteria
 
@@ -443,7 +446,7 @@ After this cleanup, we could also:
    - `HIGHLIGHT_QUERY_BLOCK` → `HIGHLIGHT_QUERY`
    - `INJECTION_QUERY_BLOCK` → `INJECTION_QUERY`
    - `NODE_TYPES_BLOCK` → `NODE_TYPES`
-   - Recommendation: YES, removes "_BLOCK" suffix that's no longer meaningful
+   - Recommendation: YES, removes \"\_BLOCK\" suffix that's no longer meaningful
 
 3. **Do we need deprecation warnings?**
    - This is an internal crate (publish = false)

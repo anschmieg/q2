@@ -19,14 +19,14 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
+use quarto_core::project::render_scripts::RenderHost;
 use quarto_core::{
     BinaryDependencies, DocumentInfo, Format, HtmlRenderConfig, ProjectConfig, ProjectContext,
     QuartoError, RenderContext, RenderOptions, ResourceResolverContext, render_qmd_to_html,
     render_qmd_to_preview_ast,
 };
 use quarto_error_reporting::{
-    DiagnosticMessage, DiagnosticMessageBuilder, JsonDiagnostic, JsonPass1Failure,
-    diagnostic_to_json, with_source_file,
+    DiagnosticMessage, JsonDiagnostic, JsonPass1Failure, diagnostic_to_json, with_source_file,
 };
 use quarto_pandoc_types::ConfigValue;
 use quarto_sass::{
@@ -62,6 +62,8 @@ fn get_runtime_arc() -> &'static Arc<WasmRuntime> {
 /// This makes the following available in the VFS:
 /// - Bootstrap 5.3.1 SCSS files under `/__quarto_resources__/bootstrap/scss/`
 /// - Built-in extensions under `/__quarto_resources__/extensions/`
+/// - Vendored extension-subtree payloads under
+///   `/__quarto_resources__/extension-subtrees/`
 fn populate_vfs_with_embedded_resources(runtime: &WasmRuntime) {
     // Bootstrap SCSS resources
     let prefix = format!("{}/bootstrap/scss", RESOURCE_PATH_PREFIX);
@@ -74,6 +76,11 @@ fn populate_vfs_with_embedded_resources(runtime: &WasmRuntime) {
 
     // Built-in extensions
     populate_builtin_extensions(runtime);
+
+    // Vendored extension-subtree payloads (bd-13gnwplg's extension-subtree
+    // infrastructure): orange-book and julia-engine, one per-subtree
+    // `_extensions/` dir each — see `populate_extension_subtrees`.
+    populate_extension_subtrees(runtime);
 }
 
 /// Populate the VFS with built-in extensions from the embedded directory.
@@ -84,6 +91,39 @@ fn populate_builtin_extensions(runtime: &WasmRuntime) {
 
     let prefix = format!("{}/extensions", RESOURCE_PATH_PREFIX);
     populate_dir_recursive(runtime, &EXTENSIONS_DIR, &prefix);
+}
+
+/// Populate the VFS with vendored extension-subtree payloads. Mirrors
+/// [`populate_builtin_extensions`], but embeds **per-subtree `_extensions/`
+/// dirs only** — never the whole vendored repo (its tests/CI config would
+/// bloat the WASM blob; see `resources/extension-subtrees/README.md`).
+///
+/// One static per entry in
+/// [`quarto_core::extension::EXTENSION_SUBTREE_NAMES`], which is also what
+/// `builtin_extension_subtree_roots` reads on this target — keep the two in
+/// sync when adding a subtree.
+fn populate_extension_subtrees(runtime: &WasmRuntime) {
+    use include_dir::{Dir, include_dir};
+
+    // orange-book (quarto_core::extension::EXTENSION_SUBTREE_NAMES[0])
+    static ORANGE_BOOK_SUBTREE_DIR: Dir = include_dir!(
+        "$CARGO_MANIFEST_DIR/../../resources/extension-subtrees/orange-book/_extensions"
+    );
+    let orange_book_prefix = format!(
+        "{}/extension-subtrees/orange-book/_extensions",
+        RESOURCE_PATH_PREFIX
+    );
+    populate_dir_recursive(runtime, &ORANGE_BOOK_SUBTREE_DIR, &orange_book_prefix);
+
+    // julia-engine (quarto_core::extension::EXTENSION_SUBTREE_NAMES[1])
+    static JULIA_ENGINE_SUBTREE_DIR: Dir = include_dir!(
+        "$CARGO_MANIFEST_DIR/../../resources/extension-subtrees/julia-engine/_extensions"
+    );
+    let julia_engine_prefix = format!(
+        "{}/extension-subtrees/julia-engine/_extensions",
+        RESOURCE_PATH_PREFIX
+    );
+    populate_dir_recursive(runtime, &JULIA_ENGINE_SUBTREE_DIR, &julia_engine_prefix);
 }
 
 /// Recursively add all files from an embedded directory to the VFS.
@@ -600,6 +640,15 @@ struct RenderResponse {
     /// present.
     #[serde(skip_serializing_if = "Option::is_none")]
     ast_json: Option<String>,
+    /// The format the render actually ran with — `Format::target_format`
+    /// after detection and any `prefer_preview_format` substitution
+    /// (e.g. `q2-preview` for a document with no `format:` key rendered
+    /// with the knob on; `q2-html-render` or `pdf` for a render that
+    /// came back as `html`). Lets a host explain *why* a response
+    /// carries `html` rather than `ast_json` (bd-kltzdhle, D5) without
+    /// re-parsing the front matter in JS. `None` on error responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
     /// True when `ast_json` is a `format: revealjs` deck (preview
     /// pseudo-format `q2-slides`). The SPA renders the section AST with a
     /// reveal shell (`.reveal/.slides` + reveal.js) instead of the plain
@@ -638,6 +687,31 @@ struct RenderResponse {
     /// errors, single-doc renders without a `theme:` YAML key).
     #[serde(skip_serializing_if = "Option::is_none")]
     theme_fingerprint: Option<String>,
+    /// Editorial-comment summary for the active page (bd-0rsk07il,
+    /// GH #445): every outstanding comment from the page's Pass-1
+    /// `DocumentProfile`, in source order, with 1-based Monaco
+    /// positions (see `quarto_core::document_profile::JsonComment`).
+    /// The hub-client comment-toggle badge reads `comments.length`.
+    /// `None` when the document has no comments and on error
+    /// responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comments: Option<Vec<quarto_core::document_profile::JsonComment>>,
+}
+
+/// Build the `RenderResponse.comments` summary from a document
+/// profile: the transport form of each comment, or `None` when the
+/// profile is absent (pipeline stopped early) or has no comments
+/// (keeps the wire payload compact — consumers treat absent as
+/// zero).
+fn comments_to_json(
+    profile: Option<&quarto_core::document_profile::DocumentProfile>,
+    ctx: &SourceContext,
+) -> Option<Vec<quarto_core::document_profile::JsonComment>> {
+    let profile = profile?;
+    if profile.comments.is_empty() {
+        return None;
+    }
+    Some(profile.comments.iter().map(|c| c.to_json(ctx)).collect())
 }
 
 /// Create a minimal project context for WASM rendering.
@@ -649,6 +723,8 @@ fn create_wasm_project_context(path: &Path) -> ProjectContext {
         is_single_file: true,
         files: vec![DocumentInfo::from_path(path)],
         output_dir: dir,
+
+        ..Default::default()
     }
 }
 
@@ -681,12 +757,13 @@ fn map_format_for_preview(format_str: &str) -> &str {
 /// `q2-preview → html` (a normal HTML page) and `q2-slides → revealjs`
 /// (so the reveal deck **assembler** runs — note this is *not*
 /// `builtin_pseudo_format`'s `html` base, which would drop the deck).
-/// The developer views `q2-debug`/`q2-sandboxed-preview` fall back to `html`.
+/// The developer views `q2-debug`/`q2-sandboxed-preview`, and the
+/// hub-client full-DOM opt-out `q2-html-render`, fall back to `html`.
 /// Non-preview formats (including `revealjs` and `html` themselves)
 /// pass through unchanged so they render via their own HTML pipeline.
 fn coerce_format_for_print(format_str: &str) -> &str {
     match format_str {
-        "q2-preview" | "q2-debug" | "q2-sandboxed-preview" => "html",
+        "q2-preview" | "q2-debug" | "q2-sandboxed-preview" | "q2-html-render" => "html",
         "q2-slides" => "revealjs",
         other => other,
     }
@@ -1114,12 +1191,12 @@ pub async fn render_qmd_content(
 ///
 /// Phase 9 entry point used by the hub-client live preview.
 /// Equivalent to
-/// [`render_page_in_project_with_attribution(path, user_grammars, None, None)`](render_page_in_project_with_attribution).
+/// [`render_page_in_project_with_attribution(path, user_grammars, None, None, None)`](render_page_in_project_with_attribution).
 /// Kept as a separate entry point for callers that have no
 /// attribution payload or capture to ship and want the simpler signature.
 #[wasm_bindgen]
 pub async fn render_page_in_project(path: &str, user_grammars: Option<JsUserGrammars>) -> String {
-    render_page_in_project_with_attribution(path, user_grammars, None, None).await
+    render_page_in_project_with_attribution(path, user_grammars, None, None, None).await
 }
 
 /// Render a single page **in the context of its surrounding project**,
@@ -1157,7 +1234,7 @@ pub async fn render_page_in_project(path: &str, user_grammars: Option<JsUserGram
 ///
 /// `render_page_in_project(path, user_grammars)` is byte-identical
 /// to `render_page_in_project_with_attribution(path, user_grammars,
-/// None, None)` for every fixture. A regression on the all-`None`
+/// None, None, None)` for every fixture. A regression on the all-`None`
 /// branch would break *all* q2-preview renders, not just attributed
 /// or capture-spliced ones.
 ///
@@ -1177,6 +1254,16 @@ pub async fn render_page_in_project(path: &str, user_grammars: Option<JsUserGram
 ///   When present, the q2-preview pipeline's `CaptureSpliceStage`
 ///   folds the recorded engine output into the AST. `None` renders
 ///   code cells as source.
+/// * `prefer_preview_format` - When `Some(true)`, apply the `q2 preview`
+///   default-format substitution ([`map_format_for_preview`]:
+///   `html → q2-preview`, `revealjs → q2-slides`) before dispatch, so a
+///   document with no `format:` key renders through the q2-preview
+///   pipeline and returns `ast_json`. This is how hub-client makes
+///   q2-preview its default renderer (bd-kltzdhle) while keeping
+///   [`RenderHost::HubClient`] — [`render_page_for_preview`] hard-codes
+///   the native-preview host, which would wrongly suppress the Q-5-12
+///   render-scripts warning in the browser. `None` / `Some(false)` keep
+///   the detected format: byte-identical to the pre-knob behaviour.
 ///
 /// [`PreBuiltAttributionProvider`]:
 ///     quarto_core::attribution::PreBuiltAttributionProvider
@@ -1192,7 +1279,12 @@ pub async fn render_page_in_project_with_attribution(
     // output is spliced in *without* losing attribution. `None` is
     // byte-identical to the pre-feature behaviour for every existing caller.
     capture_gz_json: Option<Vec<u8>>,
+    // bd-kltzdhle: `Option<bool>` rather than `bool` so a JS caller that
+    // omits the argument (`undefined`) is explicitly `None` → `false`,
+    // instead of relying on the ToInt32 coercion of `undefined`.
+    prefer_preview_format: Option<bool>,
 ) -> String {
+    let prefer_preview_format = prefer_preview_format.unwrap_or(false);
     let runtime = get_runtime();
     let path_buf = std::path::PathBuf::from(path);
     let path = path_buf.as_path();
@@ -1235,7 +1327,7 @@ pub async fn render_page_in_project_with_attribution(
             &content,
             &project,
             user_grammars,
-            false,
+            prefer_preview_format,
             captures,
             attribution_json,
             None,
@@ -1260,7 +1352,8 @@ pub async fn render_page_in_project_with_attribution(
         &content,
         project,
         user_grammars,
-        false,
+        prefer_preview_format,
+        RenderHost::HubClient,
         captures,
         attribution_json,
     )
@@ -1273,9 +1366,11 @@ pub async fn render_page_in_project_with_attribution(
 /// `html`) renders through the q2-preview pipeline and returns
 /// `ast_json`. Explicit non-html formats are honoured as-is.
 ///
-/// The `q2 preview` CLI calls this entry point; hub-client keeps
-/// using [`render_page_in_project`] so its existing format dispatch
-/// is unchanged.
+/// The `q2 preview` SPA calls this entry point. hub-client gets the
+/// same substitution through the `prefer_preview_format` argument of
+/// [`render_page_in_project_with_attribution`] instead (bd-kltzdhle):
+/// this entry point hard-codes [`RenderHost::NativePreview`], which is
+/// only right for the SPA.
 ///
 /// Phase C.4 (bd-kw93.3): if `capture_gz_json` is provided — gzipped
 /// JSON bytes of a [`EngineCapture`], the same wire format Phase C.1
@@ -1349,6 +1444,7 @@ pub async fn render_page_for_preview(
         project,
         user_grammars,
         true,
+        RenderHost::NativePreview,
         captures,
         None,
     )
@@ -1371,30 +1467,664 @@ pub async fn render_page_for_preview(
 fn parse_capture_from(
     capture_gz_json: Option<Vec<u8>>,
 ) -> Result<Vec<quarto_trace::EngineCapture>, String> {
-    use std::io::Read;
+    quarto_core::pandoc_request::captures::parse_capture_gz(capture_gz_json.as_deref())
+}
 
-    let Some(bytes) = capture_gz_json else {
-        return Ok(Vec::new());
-    };
-    if bytes.is_empty() {
-        return Ok(Vec::new());
+// ============================================================================
+// PANDOC REQUEST EXPORTS (pandoc-wasm epic, request phase R2)
+// ============================================================================
+//
+// The Rust side builds everything one pandoc.wasm run needs (argv, env,
+// files, resource bytes) and hands it to the host as data; see
+// `claude-notes/designs/pandoc-wasm-architecture.md`. Unlike every other
+// export, `render_pandoc_request` and `get_pandoc_share_tree` return JS
+// objects, not JSON strings, because they carry bytes: `serde-wasm-bindgen`
+// is not a dependency (it would turn `Vec<u8>` into number arrays), so the
+// scalar parts go through `JSON.parse` and the byte fields are built with
+// `js_sys::Uint8Array` (a copy, never a view of wasm memory, so the host
+// may transfer it).
+
+/// `[{ path, bytes: Uint8Array }]`.
+fn request_files_to_js(files: &[quarto_core::pandoc_request::RequestFile]) -> js_sys::Array {
+    let out = js_sys::Array::new();
+    for file in files {
+        let item = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&item, &"path".into(), &JsValue::from_str(&file.path));
+        let _ = js_sys::Reflect::set(
+            &item,
+            &"bytes".into(),
+            &js_sys::Uint8Array::from(file.bytes.as_slice()).into(),
+        );
+        out.push(&item);
     }
+    out
+}
 
-    let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut json = Vec::new();
-    decoder
-        .read_to_end(&mut json)
-        .map_err(|e| format!("ungzip failed: {}", e))?;
+/// The request as a JS object: every field JSON-compatible except `files` and
+/// `resource_refs`, whose bytes are `Uint8Array`s.
+fn pandoc_request_to_js(
+    request: &quarto_core::pandoc_request::PandocRequest,
+) -> Result<JsValue, JsValue> {
+    let mut value = serde_json::to_value(request).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("files");
+        object.remove("resource_refs");
+    }
+    let js = js_sys::JSON::parse(&value.to_string())?;
+    js_sys::Reflect::set(&js, &"files".into(), &request_files_to_js(&request.files))?;
+    js_sys::Reflect::set(
+        &js,
+        &"resource_refs".into(),
+        &request_files_to_js(&request.resource_refs),
+    )?;
+    Ok(js)
+}
 
-    match serde_json::from_slice::<Vec<quarto_trace::EngineCapture>>(&json) {
-        Ok(captures) => Ok(captures),
-        Err(array_err) => {
-            // Lenient fallback: a stale single-object capture doc.
-            match serde_json::from_slice::<quarto_trace::EngineCapture>(&json) {
-                Ok(single) => Ok(vec![single]),
-                Err(_) => Err(format!("JSON parse failed: {}", array_err)),
+/// The `render_pandoc_request` response envelope as a JS object.
+fn pandoc_request_envelope(
+    success: bool,
+    error: Option<String>,
+    diagnostics: Vec<JsonDiagnostic>,
+    request: Option<&quarto_core::pandoc_request::PandocRequest>,
+    unexecuted_cells: usize,
+    book: Option<&quarto_core::pandoc_request::render::BookOutcomeInfo>,
+) -> JsValue {
+    #[derive(Serialize)]
+    struct BookStats {
+        /// `book` (the whole book) or `chapter` (the active page alone).
+        scope: &'static str,
+        /// File-bearing items in the book's render list.
+        chapters: usize,
+    }
+    #[derive(Serialize)]
+    struct Stats {
+        /// Code cells with no cached result (shown as source).
+        unexecuted_cells: usize,
+        /// `null` outside a book project and on early failures.
+        book: Option<BookStats>,
+    }
+    #[derive(Serialize)]
+    struct Envelope {
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        diagnostics: Vec<JsonDiagnostic>,
+        stats: Stats,
+    }
+    let json = serde_json::to_string(&Envelope {
+        success,
+        error,
+        diagnostics,
+        stats: Stats {
+            unexecuted_cells,
+            book: book.map(|b| BookStats {
+                scope: match b.scope {
+                    quarto_core::pandoc_request::render::ResolvedBookScope::Book => "book",
+                    quarto_core::pandoc_request::render::ResolvedBookScope::Chapter => "chapter",
+                },
+                chapters: b.chapters,
+            }),
+        },
+    })
+    .unwrap();
+    let js = js_sys::JSON::parse(&json).unwrap();
+    if let Some(request) = request {
+        match pandoc_request_to_js(request) {
+            Ok(request_js) => {
+                let _ = js_sys::Reflect::set(&js, &"request".into(), &request_js);
+            }
+            Err(e) => {
+                let _ = js_sys::Reflect::set(&js, &"success".into(), &JsValue::FALSE);
+                let _ = js_sys::Reflect::set(
+                    &js,
+                    &"error".into(),
+                    &JsValue::from_str(&format!(
+                        "failed to build the pandoc request: {}",
+                        e.as_string().unwrap_or_default()
+                    )),
+                );
             }
         }
+    }
+    js
+}
+
+/// Build the pandoc request for the document at `path`, rendered to `format`
+/// (a key of [`get_pandoc_formats`]). Async because the pipeline is; once
+/// remote images land (R6) it also fetches. Returns the envelope
+/// `{ success, error?, diagnostics, stats: { unexecuted_cells, book }, request? }`;
+/// a document with errors and an active path absent from the VFS return no
+/// `request`. A document inside a `_quarto.yml` project renders as the
+/// project's active page (R7): the request carries that page alone, with the
+/// project's metadata and `format:` layers applied. For a book chapter
+/// requested as typst, pdf or epub with `options.scope` `'auto'` (the
+/// default) the request is the whole book (R9); docx and pptx, a page that is
+/// not a chapter and `scope: 'chapter'` stay chapter-alone. `stats.book` is
+/// `{ scope: 'book' | 'chapter', chapters }` in a book project, else `null`.
+///
+/// `options` (optional, trailing) is `{ scope?: 'auto' | 'chapter',
+/// attributionJson?: string (the active file's authorship, stamped onto docx
+/// comments and tracked changes; ignored by a whole-book request),
+/// capturesByPath?: Record<string, Uint8Array>, onProgress?: (index, total,
+/// file) => void | Promise<void> }`. `capturesByPath` maps a chapter's
+/// `/`-normalized path relative to the VFS project root to its capture blob
+/// (`capture_gz_json` serves the active page when the request is
+/// chapter-alone). `onProgress` is awaited before each chapter of a book
+/// render; the loop also yields to the event loop there, so an
+/// `abort_signal` abort lands between chapters. If `onProgress` rejects the
+/// call fails with that error.
+///
+/// `source_date_epoch` is seconds, as an `f64` because an `i64` would cross
+/// as a BigInt and a JS number would throw. `capture_gz_json` is read the way
+/// `render_page_for_preview` reads it and spliced in before engine execution;
+/// `stats.unexecuted_cells` counts the code cells it left without results.
+/// `abort_signal` ties the downloads of remote images to the click (D8.5).
+#[wasm_bindgen]
+pub async fn render_pandoc_request(
+    path: &str,
+    format: &str,
+    source_date_epoch: Option<f64>,
+    capture_gz_json: Option<Vec<u8>>,
+    typst_available_fonts: Option<Vec<String>>,
+    abort_signal: Option<JsValue>,
+    options: Option<JsValue>,
+) -> JsValue {
+    // Click-time snapshot: every read in this request, including the ones
+    // after the first remote-image `await`, goes through this copy, so the
+    // Automerge sync mutating the live VFS cannot change what the request
+    // carries. It is dropped when the call ends.
+    // `abort_signal` (an `AbortSignal`, optional) stops its remote-image
+    // downloads when the click is cancelled.
+    let snapshot = Arc::new(
+        get_runtime()
+            .snapshot()
+            .with_abort_signal(abort_signal.clone().unwrap_or(JsValue::UNDEFINED)),
+    );
+    let runtime = &*snapshot;
+    let path_buf = std::path::PathBuf::from(path);
+    let fail =
+        |message: String| pandoc_request_envelope(false, Some(message), Vec::new(), None, 0, None);
+    let options = match parse_request_options(options) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+
+    let content = match runtime.file_read(&path_buf) {
+        Ok(bytes) => bytes,
+        Err(e) => return fail(format!("Failed to read file: {}", e)),
+    };
+    let captures = match parse_capture_from(capture_gz_json) {
+        Ok(caps) => caps,
+        Err(e) => return fail(format!("Failed to parse capture: {}", e)),
+    };
+    let project = match ProjectContext::discover(&path_buf, runtime) {
+        Ok(p) => p,
+        Err(e) => return fail(format!("Failed to discover project context: {}", e)),
+    };
+
+    let hooks = JsBookHooks {
+        on_progress: options.on_progress,
+        abort_signal: abort_signal.unwrap_or(JsValue::UNDEFINED),
+        rejection: RefCell::new(None),
+    };
+    let mut outcome = quarto_core::pandoc_request::render::render_pandoc_request(
+        quarto_core::pandoc_request::render::PandocRequestInput {
+            path: &path_buf,
+            content: &content,
+            format,
+            project: &project,
+            source_date_epoch: source_date_epoch
+                .filter(|s| s.is_finite())
+                .map(|s| s as i64),
+            captures,
+            typst_available_fonts,
+            scope: options.scope,
+            captures_by_path: options.captures_by_path,
+            capture_error: None,
+            hooks: Some(&hooks),
+            // The hub prelude's resolver, as every other render installs it.
+            resolver: Some(ResourceResolverContext::vfs_root(
+                "/.quarto/project-artifacts",
+            )),
+            attribution: options.attribution_json.map(|json| {
+                Arc::new(quarto_core::attribution::PreBuiltAttributionProvider::new(
+                    json,
+                )) as Arc<dyn quarto_core::attribution::AttributionSourceProvider>
+            }),
+        },
+        Arc::clone(&snapshot) as Arc<dyn SystemRuntime>,
+    )
+    .await;
+
+    // Project render scripts cannot run in the browser. Unlike the preview's
+    // once-per-session warning, a download says so every time: its
+    // diagnostics are the click's whole report.
+    if !project.is_single_file {
+        outcome.diagnostics.extend(
+            quarto_core::project::render_scripts::render_scripts_unsupported_diagnostic(
+                RenderHost::HubClient,
+                &project.config,
+            ),
+        );
+    }
+
+    // Each chapter's diagnostics resolve against that chapter's own source
+    // context; the book-level ones (merged passes) stay unlocatable.
+    let mut diagnostics: Vec<JsonDiagnostic> = Vec::new();
+    if let Some(book) = &outcome.book {
+        for chapter in &book.chapter_diagnostics {
+            diagnostics.extend(diagnostics_to_json(
+                &chapter.diagnostics,
+                &chapter.source_context,
+            ));
+        }
+    }
+    diagnostics.extend(diagnostics_to_json(
+        &outcome.diagnostics,
+        &outcome.source_context,
+    ));
+    // A rejecting `onProgress` cancels the loop; its error is the result.
+    if let Some(rejection) = hooks.rejection.borrow_mut().take() {
+        return fail(format!("onProgress failed: {rejection}"));
+    }
+    pandoc_request_envelope(
+        outcome.request.is_some(),
+        outcome.error,
+        diagnostics,
+        outcome.request.as_ref(),
+        outcome.unexecuted_cells,
+        outcome.book.as_ref(),
+    )
+}
+
+/// The unpacked `options` object of [`render_pandoc_request`].
+struct RequestOptions {
+    scope: quarto_core::pandoc_request::render::BookScope,
+    captures_by_path: std::collections::BTreeMap<String, Vec<u8>>,
+    on_progress: Option<js_sys::Function>,
+    /// The transport JSON of `parse_qmd_to_ast_with_attribution`, for the
+    /// active file.
+    attribution_json: Option<String>,
+}
+
+/// Unpack by hand: `serde-wasm-bindgen` is not a dependency, and a
+/// `Uint8Array` is read with `Uint8Array::new` (an `instanceof` check can
+/// fail across realms).
+fn parse_request_options(options: Option<JsValue>) -> Result<RequestOptions, String> {
+    use quarto_core::pandoc_request::render::BookScope;
+    let mut out = RequestOptions {
+        scope: BookScope::Auto,
+        captures_by_path: Default::default(),
+        on_progress: None,
+        attribution_json: None,
+    };
+    let Some(options) = options.filter(|o| !o.is_undefined() && !o.is_null()) else {
+        return Ok(out);
+    };
+    if !options.is_object() {
+        return Err("options must be an object".to_string());
+    }
+    let get = |key: &str| js_sys::Reflect::get(&options, &key.into()).unwrap_or(JsValue::UNDEFINED);
+    let scope = get("scope");
+    if !scope.is_undefined() && !scope.is_null() {
+        out.scope = match scope.as_string().as_deref() {
+            Some("auto") => BookScope::Auto,
+            Some("chapter") => BookScope::Chapter,
+            _ => return Err("options.scope must be 'auto' or 'chapter'".to_string()),
+        };
+    }
+    let captures = get("capturesByPath");
+    if !captures.is_undefined() && !captures.is_null() {
+        if !captures.is_object() {
+            return Err("options.capturesByPath must be an object".to_string());
+        }
+        for key in js_sys::Object::keys(&captures.clone().into()).iter() {
+            let Some(name) = key.as_string() else {
+                continue;
+            };
+            let value = js_sys::Reflect::get(&captures, &key).unwrap_or(JsValue::UNDEFINED);
+            if value.is_undefined() || value.is_null() {
+                continue;
+            }
+            out.captures_by_path
+                .insert(name, js_sys::Uint8Array::new(&value).to_vec());
+        }
+    }
+    let attribution_json = get("attributionJson");
+    if !attribution_json.is_undefined() && !attribution_json.is_null() {
+        out.attribution_json = Some(
+            attribution_json
+                .as_string()
+                .ok_or_else(|| "options.attributionJson must be a string".to_string())?,
+        );
+    }
+    let on_progress = get("onProgress");
+    if !on_progress.is_undefined() && !on_progress.is_null() {
+        out.on_progress = Some(
+            on_progress
+                .dyn_into::<js_sys::Function>()
+                .map_err(|_| "options.onProgress must be a function".to_string())?,
+        );
+    }
+    Ok(out)
+}
+
+/// The chapter loop's host hook: reports progress, yields to the event loop
+/// (wasm futures with no real `await` never would, so neither a status update
+/// nor an `AbortSignal.abort()` could be delivered mid-loop), and cancels on
+/// abort or when `onProgress` rejects.
+struct JsBookHooks {
+    on_progress: Option<js_sys::Function>,
+    abort_signal: JsValue,
+    /// The message of a rejected `onProgress`, taken by the export.
+    rejection: RefCell<Option<String>>,
+}
+
+impl JsBookHooks {
+    fn aborted(&self) -> bool {
+        !self.abort_signal.is_undefined()
+            && !self.abort_signal.is_null()
+            && js_sys::Reflect::get(&self.abort_signal, &"aborted".into())
+                .map(|v| v.is_truthy())
+                .unwrap_or(false)
+    }
+}
+
+/// A macrotask turn: resolves from a `MessageChannel` message, not
+/// `setTimeout` (no timer clamping) and not `js_sys::Function::new_no_args`
+/// (that is `eval`).
+async fn yield_to_event_loop() {
+    let Ok(channel) = web_sys::MessageChannel::new() else {
+        return;
+    };
+    let (port1, port2) = (channel.port1(), channel.port2());
+    let receiver = port1.clone();
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        });
+        receiver.set_onmessage(Some(callback.unchecked_ref()));
+    });
+    if port2.post_message(&JsValue::NULL).is_ok() {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+    // An open port keeps a Node event loop alive.
+    port1.close();
+    port2.close();
+}
+
+#[async_trait::async_trait(?Send)]
+impl quarto_core::project::book::BookRenderHooks for JsBookHooks {
+    async fn before_chapter(
+        &self,
+        index: usize,
+        total: usize,
+        file: &str,
+    ) -> Result<(), quarto_core::project::book::Cancelled> {
+        use quarto_core::project::book::Cancelled;
+        if self.aborted() {
+            return Err(Cancelled);
+        }
+        if let Some(on_progress) = &self.on_progress {
+            let result = on_progress.call3(
+                &JsValue::UNDEFINED,
+                &JsValue::from_f64(index as f64),
+                &JsValue::from_f64(total as f64),
+                &JsValue::from_str(file),
+            );
+            let settled = match result {
+                Ok(value) => wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&value))
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = settled {
+                let message = e
+                    .dyn_ref::<js_sys::Error>()
+                    .map(|err| String::from(err.message()))
+                    .or_else(|| e.as_string())
+                    .unwrap_or_else(|| "unknown error".to_string());
+                *self.rejection.borrow_mut() = Some(message);
+                return Err(Cancelled);
+            }
+        }
+        yield_to_event_loop().await;
+        if self.aborted() {
+            return Err(Cancelled);
+        }
+        Ok(())
+    }
+}
+
+/// SHA-256 identifying the share tree (`request.share_tree_version`). The
+/// host re-reads [`get_pandoc_share_tree`] only when this changes.
+#[wasm_bindgen]
+pub fn get_pandoc_share_tree_version() -> String {
+    quarto_core::pandoc_request::share_tree_version().to_string()
+}
+
+/// `{ share_tree_version, files: [{ path, bytes: Uint8Array }] }`, paths
+/// relative to `request.share_tree_path`.
+#[wasm_bindgen]
+pub fn get_pandoc_share_tree() -> JsValue {
+    let files: Vec<quarto_core::pandoc_request::RequestFile> =
+        quarto_core::pandoc_request::share_tree_entries()
+            .iter()
+            .map(|e| quarto_core::pandoc_request::RequestFile {
+                path: e.rel_path.clone(),
+                bytes: e.bytes.to_vec(),
+            })
+            .collect();
+    let out = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &out,
+        &"share_tree_version".into(),
+        &JsValue::from_str(quarto_core::pandoc_request::share_tree_version()),
+    );
+    let _ = js_sys::Reflect::set(&out, &"files".into(), &request_files_to_js(&files));
+    out.into()
+}
+
+/// SHA-256 identifying the typst assets (`get_typst_assets`). Separate from
+/// the pandoc share tree: only a PDF compile reads them.
+#[wasm_bindgen]
+pub fn get_typst_assets_version() -> String {
+    quarto_core::pandoc_request::typst_assets_version().to_string()
+}
+
+/// `{ typst_assets_version, files: [{ path, bytes: Uint8Array }] }`: the
+/// vendored typst packages and Font Awesome fonts, paths relative to a
+/// package-cache root (`packages/preview/<name>/<version>/...`) and a font
+/// directory (`fonts/...`).
+#[wasm_bindgen]
+pub fn get_typst_assets() -> JsValue {
+    let files: Vec<quarto_core::pandoc_request::RequestFile> =
+        quarto_core::pandoc_request::typst_asset_entries()
+            .iter()
+            .map(|e| quarto_core::pandoc_request::RequestFile {
+                path: e.rel_path.clone(),
+                bytes: e.bytes.to_vec(),
+            })
+            .collect();
+    let out = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &out,
+        &"typst_assets_version".into(),
+        &JsValue::from_str(quarto_core::pandoc_request::typst_assets_version()),
+    );
+    let _ = js_sys::Reflect::set(&out, &"files".into(), &request_files_to_js(&files));
+    out.into()
+}
+
+/// The first line of the `.typ` a `post: compile_typst` request compiles:
+/// pins the document date to `source_date_epoch` (seconds, UTC) so the PDF
+/// does not depend on the clock. Empty when the epoch is out of range.
+#[wasm_bindgen]
+pub fn typst_date_prelude(source_date_epoch: f64) -> String {
+    quarto_core::pandoc_request::typst_date_prelude(source_date_epoch as i64).unwrap_or_default()
+}
+
+/// Classify a finished pandoc run. Returns JSON
+/// `{ success, diagnostics }`: on a zero exit the `Q-11-1` warnings found on
+/// stderr; otherwise the `Q-20-3` error carrying `json_path` (the request's
+/// virtual input path, not claimed to be retained) and the stderr verbatim.
+/// `status` is a description such as `"exit status: 64"`.
+#[wasm_bindgen]
+pub fn classify_pandoc_completion(
+    stage_name: &str,
+    success: bool,
+    status: &str,
+    stderr: &str,
+    json_path: &str,
+) -> String {
+    let _ = stage_name;
+    let diagnostics: Vec<DiagnosticMessage> = if success {
+        quarto_core::pandoc_filters::diagnostics::classify_pandoc_stderr(stderr)
+    } else {
+        vec![
+            quarto_core::pandoc_filters::diagnostics::nonzero_exit_diagnostic(
+                status,
+                stderr,
+                Path::new(json_path),
+                false,
+            ),
+        ]
+    };
+    serde_json::to_string(&serde_json::json!({
+        "success": success,
+        "diagnostics": diagnostics_to_json(&diagnostics, &SourceContext::default()),
+    }))
+    .unwrap()
+}
+
+/// JSON `{ formats: [{ key, label, extension, mime, available, hidden }] }`:
+/// the formats pandoc.wasm can produce, in menu order (D8). `hidden` rows are
+/// accepted by `render_pandoc_request` but not offered (none today; `pdf` was, until H8).
+#[wasm_bindgen]
+pub fn get_pandoc_formats() -> String {
+    serde_json::to_string(&serde_json::json!({
+        "formats": quarto_core::pandoc_request::formats::PANDOC_FORMATS,
+    }))
+    .unwrap()
+}
+
+// ============================================================================
+// DOCUMENT IMPORT (epic `2026-10-03-document-import-epic.md`, interface 2)
+// ============================================================================
+//
+// Thin wrappers over `quarto_core::import`. Rust owns everything about an import except
+// running pandoc and handling image bytes (I9): none of these takes or returns image bytes.
+
+/// JSON `{ formats: [{ id, label, extensions, mime_types }], max_source_bytes }`: the formats
+/// the importer reads and the source size cap. The single source for the picker's `accept`
+/// filter, drop interception and the size check (I19); TS keeps no copy.
+#[wasm_bindgen]
+pub fn get_import_formats() -> String {
+    quarto_core::import::formats::format_table_json().to_string()
+}
+
+fn import_diagnostics_json(diags: &[DiagnosticMessage]) -> serde_json::Value {
+    serde_json::to_value(diagnostics_to_json(diags, &SourceContext::default()))
+        .unwrap_or_else(|_| serde_json::json!([]))
+}
+
+/// Validate a source file and build its pandoc request. JSON
+/// `{ success, diagnostics, format?, request?, share_tree?, source_path? }`. The extension is
+/// checked first (Q-24-1, case-insensitive), then `size` (Q-24-2); with an empty `sha256_hex`
+/// that is all (validation only: no `request`). Otherwise `size` must be the length of the
+/// bytes actually read, and the response carries the request, the empty share tree it uses
+/// and the source's virtual path. `size` is an `f64` because a `u64` would cross as a BigInt.
+#[wasm_bindgen]
+pub fn prepare_import(file_name: &str, size: f64, sha256_hex: &str) -> String {
+    if !size.is_finite() || size < 0.0 {
+        let diags = vec![quarto_core::import::report::internal_error(
+            "the source's size is not a non-negative number",
+        )];
+        return serde_json::json!({
+            "success": false,
+            "diagnostics": import_diagnostics_json(&diags),
+        })
+        .to_string();
+    }
+    let outcome = quarto_core::import::request::prepare_import(file_name, size as u64, sha256_hex);
+    let mut out = serde_json::json!({
+        "success": outcome.success,
+        "diagnostics": import_diagnostics_json(&outcome.diagnostics),
+    });
+    if let Some(format) = outcome.format {
+        out["format"] = format.into();
+    }
+    if let Some(request) = &outcome.request {
+        out["request"] = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(tree) = &outcome.share_tree {
+        out["share_tree"] = serde_json::to_value(tree).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(path) = outcome.source_path {
+        out["source_path"] = path.into();
+    }
+    out.to_string()
+}
+
+/// Turn pandoc's JSON into qmd. JSON `{ success, diagnostics, qmd?, media_plan? }` with
+/// `media_plan: [{ pandoc_path, project_path }]`. `target_qmd_path` and every
+/// `project_path` are project-relative, `/`-separated, with no leading slash.
+/// `media_manifest_json` is the interface-2 manifest. `format` is the pandoc reader name
+/// `prepare_import` returned; it is optional and only `pptx` changes the output (I6).
+/// A fatal error (Q-24-12) is `success: false` with no `qmd`.
+#[wasm_bindgen]
+pub fn finish_import(
+    json_text: &str,
+    stderr: &str,
+    target_qmd_path: &str,
+    media_manifest_json: &str,
+    format: Option<String>,
+) -> String {
+    let outcome = quarto_core::import::finish_import(
+        json_text,
+        stderr,
+        target_qmd_path,
+        media_manifest_json,
+        format.as_deref(),
+    );
+    let mut out = serde_json::json!({
+        "success": outcome.success,
+        "diagnostics": import_diagnostics_json(&outcome.diagnostics),
+    });
+    if let Some(qmd) = outcome.qmd {
+        out["qmd"] = qmd.into();
+    }
+    if let Some(plan) = &outcome.media_plan {
+        out["media_plan"] = serde_json::to_value(plan).unwrap_or(serde_json::Value::Null);
+    }
+    out.to_string()
+}
+
+/// Turn a failed import run into Q-24 diagnostics. JSON `{ diagnostics }`. `kind` is the
+/// host's `RunFailureKind`; `status` is `null` when pandoc didn't exit (crash, timeout).
+#[wasm_bindgen]
+pub fn classify_import_failure(kind: &str, status: Option<i32>, stderr: &str) -> String {
+    let diagnostics = quarto_core::import::classify_import_failure(kind, status, stderr);
+    serde_json::json!({ "diagnostics": import_diagnostics_json(&diagnostics) }).to_string()
+}
+
+/// The project-aware format resolver (D8.7): the document's own `format:`
+/// keys (the first is its format), else the surrounding `_quarto.yml`'s, else
+/// `html`. JSON `{ success, error?, source, formats: [{ key, class }] }` with
+/// `source` one of `document | project | default` and `class` one of
+/// `preview | download | neither`.
+#[wasm_bindgen]
+pub fn resolve_pandoc_formats(path: &str) -> String {
+    match quarto_core::pandoc_request::formats::resolve_document_formats(
+        Path::new(path),
+        get_runtime(),
+    ) {
+        Ok(resolved) => {
+            let mut value = serde_json::to_value(&resolved).unwrap();
+            value["success"] = serde_json::Value::Bool(true);
+            value.to_string()
+        }
+        Err(error) => serde_json::json!({ "success": false, "error": error }).to_string(),
     }
 }
 
@@ -1550,11 +2280,15 @@ async fn render_single_doc_to_response(
 
     let warnings = diagnostics_to_json(&diagnostics, &source_context);
     let theme_fingerprint = extract_theme_fingerprint(&ctx.artifacts);
+    // bd-0rsk07il: the profile was bridged onto the RenderContext by
+    // `run_pipeline` (via the `UnwrapProfileStage` stash).
+    let comments = comments_to_json(ctx.document_profile.as_ref(), &source_context);
     serde_json::to_string(&RenderResponse {
         success: true,
         error: None,
         html,
         ast_json,
+        format: Some(format.target_format.clone()),
         is_slides: format.target_format == "q2-slides",
         untransformed_ast_json,
         diagnostics: None,
@@ -1565,6 +2299,7 @@ async fn render_single_doc_to_response(
         },
         pass1_failures: None,
         theme_fingerprint,
+        comments,
     })
     .unwrap()
 }
@@ -1601,6 +2336,11 @@ async fn render_project_active_page_to_response(
     mut project: ProjectContext,
     user_grammars: Option<JsUserGrammars>,
     prefer_preview_format: bool,
+    // bd-pq72bplh: which application is driving this render. Decides
+    // host-dependent diagnostics (Q-5-12) — deliberately separate from
+    // `prefer_preview_format`, which is about format substitution and
+    // only happens to correlate with the caller today.
+    host: RenderHost,
     // bd-lucp / bd-5yff4: recorded engine capture sequence attached to
     // the q2-preview pass-2 renderer (one per engine, in order).
     // `RenderToPreviewAstRenderer::with_captures` threads them into every
@@ -1665,6 +2405,9 @@ async fn render_project_active_page_to_response(
     // Captured before `format` is moved into the pipeline below; signals the
     // SPA to render the AST with a reveal shell (Phase 1P).
     let is_slides = format.target_format == "q2-slides";
+    // Likewise captured before the move: reported on the response so hosts
+    // can tell which format the render actually ran with (bd-kltzdhle).
+    let resolved_format = format.target_format.clone();
     let summary = match kind {
         Some("preview") => {
             let mut renderer = RenderToPreviewAstRenderer::new("/.quarto/project-artifacts");
@@ -1773,7 +2516,9 @@ async fn render_project_active_page_to_response(
     all_diags.extend(summary.project_diagnostics);
     // bd-w348iu63: project render scripts can't run in the browser —
     // surface a one-time warning instead of silently ignoring them.
-    if let Some(diag) = render_scripts_unsupported_diagnostic(&project.config) {
+    // bd-pq72bplh: host-dependent — `q2 preview`'s native server runs
+    // pre-render scripts at boot, so only the hub host warns.
+    if let Some(diag) = render_scripts_unsupported_once(host, &project.config) {
         all_diags.push(diag);
     }
     let warnings = diagnostics_to_json(&all_diags, &active_output.source_context);
@@ -1783,6 +2528,14 @@ async fn render_project_active_page_to_response(
     // stashed on `WasmPassTwoOutput`. Surviving both website-merge
     // and default-project-flush paths.
     let theme_fingerprint_from_output = active_output.theme_fingerprint.clone();
+
+    // bd-0rsk07il: the active page's profile travels on the Pass-2
+    // output (captured from the per-page RenderContext by the
+    // renderer); its comment summary rides the response.
+    let comments = comments_to_json(
+        active_output.document_profile.as_ref(),
+        &active_output.source_context,
+    );
 
     // Pass-1 failures for non-active-page files (bd-rqba). The
     // active page's own Pass-1 failure shortcuts above via
@@ -1831,6 +2584,7 @@ async fn render_project_active_page_to_response(
         error: None,
         html,
         ast_json,
+        format: Some(resolved_format),
         is_slides,
         untransformed_ast_json,
         diagnostics: None,
@@ -1845,36 +2599,34 @@ async fn render_project_active_page_to_response(
             Some(pass1_failures)
         },
         theme_fingerprint: theme_fingerprint_from_output,
+        comments,
     })
     .unwrap()
 }
 
-/// bd-w348iu63: once-per-session warning when the project declares
-/// `project.pre-render` / `project.post-render` scripts, which the
-/// browser preview cannot run (no subprocesses in WASM). Returns
-/// `None` when no scripts are configured or the warning already
-/// fired. WASM is single-threaded, but `AtomicBool` keeps the static
-/// safe by construction.
-fn render_scripts_unsupported_diagnostic(config: &ProjectConfig) -> Option<DiagnosticMessage> {
+/// bd-w348iu63 / bd-pq72bplh: once-per-session Q-5-12 warning when the
+/// project declares `project.pre-render` / `project.post-render`
+/// scripts the current host cannot run. The host-dependent decision
+/// and message live in
+/// [`quarto_core::project::render_scripts::render_scripts_unsupported_diagnostic`]
+/// (pure: [`RenderHost::NativePreview`] never warns, because `q2
+/// preview`'s native server ran the pre-render scripts at boot); this
+/// wrapper adds the once-per-session gate. Returns `None` when the
+/// host/config combination doesn't warrant a warning or the warning
+/// already fired. WASM is single-threaded, but `AtomicBool` keeps the
+/// static safe by construction.
+fn render_scripts_unsupported_once(
+    host: RenderHost,
+    config: &ProjectConfig,
+) -> Option<DiagnosticMessage> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
-    if config.pre_render_scripts.is_empty() && config.post_render_scripts.is_empty() {
-        return None;
-    }
+    let diag =
+        quarto_core::project::render_scripts::render_scripts_unsupported_diagnostic(host, config)?;
     if WARNED.swap(true, Ordering::Relaxed) {
         return None;
     }
-    Some(
-        DiagnosticMessageBuilder::warning("Project render scripts do not run in the hub preview")
-            .with_code("Q-5-12")
-            .problem(
-                "This project configures `project.pre-render` / `project.post-render` \
-                 scripts, which cannot run in the browser. The preview renders without \
-                 them; use `q2 render` on a machine with the interpreters installed to \
-                 run the scripts.",
-            )
-            .build(),
-    )
+    Some(diag)
 }
 
 /// Build a `success: false` response with no diagnostics.
@@ -1884,12 +2636,14 @@ fn error_response(msg: impl Into<String>) -> String {
         error: Some(msg.into()),
         html: None,
         ast_json: None,
+        format: None,
         is_slides: false,
         untransformed_ast_json: None,
         diagnostics: None,
         warnings: None,
         pass1_failures: None,
         theme_fingerprint: None,
+        comments: None,
     })
     .unwrap()
 }
@@ -1909,12 +2663,14 @@ fn render_error_response(e: QuartoError) -> String {
         error: Some(error_msg),
         html: None,
         ast_json: None,
+        format: None,
         is_slides: false,
         untransformed_ast_json: None,
         diagnostics,
         warnings: None,
         pass1_failures: None,
         theme_fingerprint: None,
+        comments: None,
     })
     .unwrap()
 }
@@ -1947,12 +2703,14 @@ fn pass_failure_response(
         )),
         html: None,
         ast_json: None,
+        format: None,
         is_slides: false,
         untransformed_ast_json: None,
         diagnostics,
         warnings: None,
         pass1_failures: None,
         theme_fingerprint: None,
+        comments: None,
     })
     .unwrap()
 }
@@ -1978,7 +2736,8 @@ pub fn get_builtin_template(name: &str) -> String {
 // with quarto-doctemplate (pure Rust — no JS bridge involved).
 
 use quarto_project_create::{
-    CreateFromChoiceOptions, ScaffoldedFile, create_project_from_choice, implemented_choices,
+    CreateFromChoiceOptions, ScaffoldedFile, Surface, choices_for, choices_grouped_by_path,
+    create_project_from_choice,
 };
 
 /// A project choice for JSON serialization.
@@ -1990,6 +2749,18 @@ struct JsonProjectChoice {
     name: String,
     /// Short description
     description: String,
+    /// Seeded into a new user's "Examples / Templates" collection (bd-3fwtdhil)
+    seed: bool,
+    /// Hierarchical group labels for the New menu (bd-q33ylfxf)
+    path: Vec<String>,
+}
+
+/// A described group of choices (bd-q33ylfxf): the New menu shows
+/// `description` as subtext under the group's item.
+#[derive(Serialize)]
+struct JsonChoiceGroup {
+    path: Vec<String>,
+    description: String,
 }
 
 /// Response for get_project_choices().
@@ -1997,6 +2768,8 @@ struct JsonProjectChoice {
 struct ProjectChoicesResponse {
     success: bool,
     choices: Vec<JsonProjectChoice>,
+    /// Only the groups the registry describes.
+    groups: Vec<JsonChoiceGroup>,
 }
 
 /// A project file for JSON serialization.
@@ -2062,18 +2835,32 @@ impl CreateProjectResponse {
 /// ```
 #[wasm_bindgen]
 pub fn get_project_choices() -> String {
-    let choices: Vec<JsonProjectChoice> = implemented_choices()
+    // The hub surface: every implemented choice, including the ones
+    // `q2 create project` deliberately hides (bd-d147nkqx).
+    let choices: Vec<JsonProjectChoice> = choices_for(Surface::Hub)
         .into_iter()
         .map(|c| JsonProjectChoice {
             id: c.id,
             name: c.name,
             description: c.description,
+            seed: c.seed,
+            path: c.path,
+        })
+        .collect();
+    let groups: Vec<JsonChoiceGroup> = choices_grouped_by_path(Surface::Hub)
+        .into_iter()
+        .filter_map(|g| {
+            g.description.map(|d| JsonChoiceGroup {
+                path: g.path,
+                description: d.to_string(),
+            })
         })
         .collect();
 
     serde_json::to_string(&ProjectChoicesResponse {
         success: true,
         choices,
+        groups,
     })
     .unwrap()
 }
@@ -2643,7 +3430,7 @@ pub async fn compile_scss(scss: &str, minified: bool, load_paths_json: &str) -> 
 
     // Compile SCSS
     match runtime.compile_sass(scss, &load_paths, minified).await {
-        Ok(css) => SassCompileResponse::ok(css),
+        Ok(out) => SassCompileResponse::ok(out.css),
         Err(e) => SassCompileResponse::error(&format!("{}", e)),
     }
 }
@@ -2710,7 +3497,7 @@ pub async fn compile_theme_css_by_name(theme_name: &str, minified: bool) -> Stri
 
     // Compile CSS
     match compile_theme_css(&theme_config, &context).await {
-        Ok(css) => SassCompileResponse::ok(css),
+        Ok(out) => SassCompileResponse::ok(out.css),
         Err(e) => SassCompileResponse::error(&format!("SASS compilation failed: {}", e)),
     }
 }
@@ -2751,7 +3538,7 @@ pub async fn compile_default_bootstrap_css(minified: bool) -> String {
 
     // Compile CSS
     match compile_theme_css(&theme_config, &context).await {
-        Ok(css) => SassCompileResponse::ok(css),
+        Ok(out) => SassCompileResponse::ok(out.css),
         Err(e) => SassCompileResponse::error(&format!("SASS compilation failed: {}", e)),
     }
 }

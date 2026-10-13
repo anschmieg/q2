@@ -1,0 +1,158 @@
+/**
+ * Modal Dialog
+ *
+ * Shared modal container for hub-client dialogs. Owns the WCAG 2.2
+ * dialog contract so individual dialogs cannot drift:
+ *
+ * - 4.1.2 Name/Role/Value: role="dialog", aria-modal="true", and
+ *   aria-labelledby pointing at the rendered title; the close button
+ *   always has an accessible name.
+ * - 2.1.1 Keyboard: Escape closes. Dialog-specific keys (e.g. Enter to
+ *   submit) are delegated via the onKeyDown prop.
+ * - 2.4.3 Focus Order: Tab/Shift+Tab cycle within the dialog while it
+ *   is open, and focus returns to the element that held it before the
+ *   dialog opened.
+ */
+
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import type { HTMLAttributes, KeyboardEvent, ReactNode } from 'react';
+import { common } from '../strings';
+
+export interface ModalDialogProps {
+  /** Visible title; also the dialog's accessible name. */
+  title: string;
+  onClose: () => void;
+  /** Extra class for the dialog element, e.g. 'new-file-dialog'. */
+  className?: string;
+  /**
+   * Dialog-specific key handling (e.g. Enter to submit). Escape and Tab
+   * are owned by ModalDialog.
+   *
+   * Contract for Enter-submit handlers: a handler that synchronously
+   * closes the dialog MUST call `e.preventDefault()`. Enter's default
+   * action is a synthesized click delivered after listeners and
+   * microtasks — by which point the close has run and this component has
+   * restored focus to the trigger, so the un-prevented click lands on
+   * the trigger and reopens the dialog (GH #635). Handlers should also
+   * ignore keydowns whose target is a button, or the button's own
+   * activation runs on top of the submit (Enter on Cancel would submit).
+   */
+  onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
+  /** Extra attributes forwarded to the dialog element (e.g. drag/drop handlers). */
+  dialogProps?: HTMLAttributes<HTMLDivElement>;
+  children?: ReactNode;
+}
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export default function ModalDialog({
+  title,
+  onClose,
+  className,
+  onKeyDown,
+  dialogProps,
+  children,
+}: ModalDialogProps) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Capture the element focused when the dialog opens and return focus
+  // to it when the dialog closes (unmounts). The capture must happen
+  // during render, not in an effect: an autoFocus child takes focus
+  // during commit, before effects run, and would otherwise be captured
+  // as the restore target (and it's detached by unmount, so focus would
+  // be lost to <body>).
+  const restoreFocusTo = useRef<Element | null>(null);
+
+  // Resolved on first commit from a hidden marker rendered in place (the
+  // dialog itself only exists once the target is known).
+  const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+  const anchorRef = useCallback((el: HTMLSpanElement | null) => {
+    if (!el) return;
+    setPortalTarget(
+      (el.closest('.editor-container, .projects-home, .dev-gallery-page') as HTMLElement | null) ??
+        document.body
+    );
+  }, []);
+  if (restoreFocusTo.current === null && typeof document !== 'undefined') {
+    restoreFocusTo.current = document.activeElement;
+  }
+  useEffect(() => {
+    const restoreTo = restoreFocusTo.current;
+    return () => {
+      if (!(restoreTo instanceof HTMLElement) || !restoreTo.isConnected) {
+        return;
+      }
+      // Defer past the commit: StrictMode's mount-time double-effect runs
+      // this cleanup while the dialog stays in the DOM (and the autoFocus
+      // child has just taken focus) — restoring there would steal focus
+      // straight back. A real unmount removes the dialog, so by microtask
+      // time the ref is detached and the restore fires only then.
+      queueMicrotask(() => {
+        if (dialogRef.current?.isConnected) return;
+        restoreTo.focus();
+      });
+    };
+  }, []);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') {
+      onClose();
+      return;
+    }
+    if (e.key === 'Tab') {
+      const focusables =
+        dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (!focusables || focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+    onKeyDown?.(e);
+  };
+
+  // Portal out of the opener's subtree: dialogs are opened from inside
+  // sticky headers and other stacking contexts (z-index'd sidebar chrome),
+  // where a fixed backdrop would be trapped beneath sibling layers. The
+  // target is the nearest themed surface (.editor-container / .projects-home
+  // / .dev-gallery-page — the scopes that carry the dark-mode token ramp),
+  // falling back to <body>; portaling straight to <body> would drop the
+  // dialog out of that ramp in dark mode.
+  if (!portalTarget) return <span ref={anchorRef} hidden />;
+  return createPortal(
+    <div className="qh-dialog-backdrop" onClick={onClose}>
+      <div
+        {...dialogProps}
+        ref={dialogRef}
+        className={`qh-dialog${className ? ` ${className}` : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="dialog-header">
+          <h2 id={titleId}>{title}</h2>
+          <button className="close-btn" onClick={onClose} aria-label={common.close}>
+            &times;
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+    ,
+    portalTarget
+  );
+}

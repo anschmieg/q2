@@ -29,6 +29,10 @@
 //! re-parse are collapsed into a single `Q-12-10` warning on the
 //! host page. Full source-info threading is tracked by `bd-0jyl`.
 //!
+//! `Q-12-24` fires when a custom template compiled to pure literal
+//! text or still contains EJS `<% … %>` markup; the listing is
+//! skipped.
+//!
 //! TODO(bd-0fd0): Today the resolved listings travel from generate
 //! to render via the typed `RenderContext::resolved_listings`
 //! field. When a Lua filter slot lands between generate and render,
@@ -37,17 +41,21 @@
 use std::path::{Path, PathBuf};
 
 use hashlink::LinkedHashMap;
-use quarto_doctemplate::{PartialResolver, Template, TemplateContext, project_listing_resolver};
+use quarto_doctemplate::{
+    PartialResolver, Template, TemplateContext, TemplateNode, project_listing_resolver,
+};
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::attr::AttrSourceInfo;
-use quarto_pandoc_types::block::{Block, Div};
+use quarto_pandoc_types::block::{Block, Div, RawBlock};
 use quarto_pandoc_types::pandoc::Pandoc;
 use quarto_source_map::{By, SourceInfo};
 
 use crate::Result;
+use crate::format::PipelineProfile;
 use crate::project::listing::ResolvedListing;
-use crate::project::listing::binding::build_listing_context;
-use crate::project::listing::config::ListingType;
+use crate::project::listing::binding::{build_listing_context, effective_fields};
+use crate::project::listing::config::{Listing, ListingType};
+use crate::project::listing::listjs;
 use crate::project::listing::templates::{builtins_resolver, top_level_template_source};
 use crate::render::RenderContext;
 use crate::transform::{AstTransform, TransformPhase};
@@ -114,12 +122,22 @@ impl AstTransform for ListingRenderTransform {
         // directory (Q1-parity).
         let host_input: PathBuf = ctx.document.input.clone();
 
+        // The List.js bootstrap is for rendered HTML pages (`q2 render`,
+        // `q2 preview --static`). The hub-client preview renders the AST
+        // itself and runs no List.js (bd-4dfdo8vi), and non-HTML writers
+        // would only drop it.
+        let emit_listjs = matches!(
+            ctx.pipeline_profile,
+            PipelineProfile::HtmlRender | PipelineProfile::RevealjsRender
+        );
+
         for r in &resolved {
-            render_one(ast, r, &host_dir, &host_input, &mut diags);
+            render_one(ast, r, &host_dir, &host_input, emit_listjs, &mut diags);
         }
 
-        // Register the vendored client-side JS artifacts so the
-        // sort/filter UI markup our templates emit is functional.
+        // Register the vendored client-side JS artifacts that the
+        // List.js bootstrap (see `listjs`) drives. Like Q1, every
+        // listing page links them, whatever its listings' types.
         // The `js:` key prefix is the convention `ApplyTemplateStage`
         // recognizes for auto-emitting `<script>` tags into the
         // rendered HTML; the resolver maps the relative path to
@@ -138,7 +156,7 @@ impl AstTransform for ListingRenderTransform {
 
 /// Bytes for the vendored `list.min.js` (third-party MIT) and
 /// `quarto-listing.js` (Q1-owned glue) — copied locally per
-/// CLAUDE.md §"External Sources Policy". The SCSS is *not* shipped
+/// AGENTS.md §"External Sources Policy". The SCSS is *not* shipped
 /// here; per L3 D5 the SCSS needs proper SassLayer integration with
 /// the existing theme-CSS pipeline, which is filed as a follow-up
 /// rather than wired in this commit.
@@ -169,6 +187,7 @@ fn render_one(
     r: &ResolvedListing,
     host_dir: &str,
     host_input: &Path,
+    emit_listjs: bool,
     diags: &mut Vec<DiagnosticMessage>,
 ) {
     // Build the binding. The host page's meta is used to extract
@@ -185,14 +204,15 @@ fn render_one(
     // collisions with files in the user's CWD are impossible.
     let markdown = match r.listing.kind {
         ListingType::Custom => match load_custom_template(r, host_input, diags) {
-            Some(custom) => compile_and_render(
+            Some(custom) => compile_template(
                 &r.listing.id,
                 &custom.source,
                 &custom.template_path,
                 &custom.resolver,
-                &template_ctx,
                 diags,
-            ),
+            )
+            .filter(|t| check_custom_template_is_templated(&r.listing.id, &custom, t, diags))
+            .and_then(|t| render_template(&r.listing.id, &t, &template_ctx, diags)),
             // No usable custom template — fall back to default. The
             // appropriate Q-12-* diagnostic was already emitted by
             // `load_custom_template`.
@@ -202,9 +222,32 @@ fn render_one(
     };
     let Some(markdown) = markdown else { return };
 
+    // Q1 parity (bd-listing-ellipsis-no-matching-l963osy1): every
+    // listing — built-in and custom alike — is followed by a hidden
+    // "No matching items" placeholder, mirroring Q1's
+    // `_pagination.ejs.md` partial (appended after the rendered
+    // template in `website-listing-template.ts`). The vendored
+    // quarto-listing.js reveals it when a filter/search matches
+    // nothing (the List.js init wiring that drives that is
+    // bd-nbv80e33). Emitted as a qmd div rather than raw HTML so
+    // Lua filters and AST transforms can see it. The text comes
+    // from the localized `listing-page-no-matches` term.
+    let no_matching = crate::language::LanguageTerms::from_meta(&ast.meta)
+        .and_then(|terms| {
+            terms
+                .get("listing-page-no-matches")
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "No matching items".to_string());
+    let markdown =
+        format!("{markdown}\n\n::: {{.listing-no-matching .d-none}}\n{no_matching}\n:::\n");
+
     // Re-parse the markdown. Discard the fresh SourceContext
     // (bd-0jyl tracks proper threading); collect any parse
-    // diagnostics into a single host-page warning.
+    // diagnostics into a single host-page diagnostic: a warning when
+    // the parse succeeded, an error when it failed and the listing is
+    // skipped (bd-8a9eum6p) — a page that silently ships without its
+    // listing is too easy to miss.
     let mut sink = std::io::sink();
     let parse_result = pampa::readers::qmd::read(
         markdown.as_bytes(),
@@ -214,7 +257,7 @@ fn render_one(
         true,
         None,
     );
-    let parsed_blocks: Vec<Block> = match parse_result {
+    let mut parsed_blocks: Vec<Block> = match parse_result {
         Ok((parsed, _ctx, parse_diags)) => {
             if !parse_diags.is_empty() {
                 push_diag(
@@ -231,7 +274,7 @@ fn render_one(
             parsed.blocks
         }
         Err(parse_diags) => {
-            push_diag(
+            push_error(
                 diags,
                 "Q-12-10",
                 format!(
@@ -248,70 +291,169 @@ fn render_one(
         }
     };
 
-    // Splice into the AST.
-    if !try_replace_explicit_slot(ast, &r.listing.id, &parsed_blocks) {
-        // No explicit slot — append a fresh wrapper Div.
-        let mut attrs = LinkedHashMap::new();
-        attrs.insert("data-listing-rendered".to_string(), "1".to_string());
-        ast.blocks.push(Block::Div(Div {
-            attr: (
-                r.listing.id.clone(),
-                vec!["quarto-listing".to_string()],
-                attrs,
-            ),
+    // The List.js bootstrap (bd-nbv80e33): the pagination `<nav>`
+    // (List.js looks for `.pagination` inside the container, so it has
+    // to be here) and the init script, after the no-matching
+    // placeholder as in Q1's `_pagination.ejs.md`. Q1 puts the script
+    // in the page header; inside the container it travels with the
+    // listing, and it waits for `DOMContentLoaded` either way.
+    if emit_listjs && listjs::supports_listjs(r.listing.kind) {
+        let fields = effective_fields(&r.listing, &r.items);
+        let raw_html = |text: String| {
+            Block::RawBlock(RawBlock {
+                format: "html".to_string(),
+                text,
+                source_info: SourceInfo::generated(By::programmatic_config()),
+            })
+        };
+        if let Some(nav) = listjs::pagination_nav(&r.listing, r.items.len()) {
+            parsed_blocks.push(raw_html(nav));
+        }
+        parsed_blocks.push(raw_html(listjs::init_script(
+            &r.listing,
+            &fields,
+            r.items.len(),
+        )));
+    }
+
+    // Splice into the AST: into the author's slot when there is one,
+    // else into a fresh container appended to the page. Either way the
+    // element ends up as Q1's `listing-<id>` with Q1's container
+    // classes. (Because the container never keeps the bare id, a slot
+    // that shares its id with the heading of the section it sits in no
+    // longer leaves two elements claiming one anchor; Q-12-25, which
+    // reported that, is no longer emitted — bd-nbv80e33.)
+    if try_replace_explicit_slot(ast, &r.listing, &parsed_blocks) == SlotOutcome::NotFound {
+        let mut div = Div {
+            attr: (String::new(), vec![], LinkedHashMap::new()),
             content: parsed_blocks,
             source_info: SourceInfo::generated(By::programmatic_config()),
             attr_source: AttrSourceInfo::empty(),
-        }));
+        };
+        mark_as_container(&mut div, &r.listing);
+        ast.blocks.push(Block::Div(div));
     }
 }
 
-/// Walk the host AST looking for a Div with the given id.
-/// Replaces its content + marks it with `data-listing-rendered="1"`.
-/// Returns `true` when a slot was found and updated.
+/// The marker attribute on a rendered listing container; it makes a
+/// second pass over the same document a no-op.
+const RENDERED_ATTR: &str = "data-listing-rendered";
+
+fn is_rendered_container(div: &Div) -> bool {
+    div.attr.2.get(RENDERED_ATTR).map(String::as_str) == Some("1")
+}
+
+/// Turn `div` into `listing`'s rendered container: Q1's id
+/// (`listing-<id>`) and classes (`quarto-listing`,
+/// `quarto-listing-container-<type>`, after any the author gave the
+/// slot), plus the idempotency marker.
+fn mark_as_container(div: &mut Div, listing: &Listing) {
+    div.attr.0 = listing.container_id();
+    for class in [
+        "quarto-listing".to_string(),
+        format!("quarto-listing-container-{}", listing.kind.name()),
+    ] {
+        if !div.attr.1.contains(&class) {
+            div.attr.1.push(class);
+        }
+    }
+    div.attr
+        .2
+        .insert(RENDERED_ATTR.to_string(), "1".to_string());
+}
+
+/// The class `SectionizeTransform` puts on the Div it wraps around a
+/// heading; the HTML writer turns such a Div into a `<section>`.
+const SECTION_CLASS: &str = "section";
+
+fn is_section(div: &Div) -> bool {
+    div.attr.1.iter().any(|c| c == SECTION_CLASS)
+}
+
+/// What a walk of the document found for one listing's id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SlotOutcome {
+    /// An author's slot was found and populated by this pass.
+    Filled,
+    /// A previous pass already rendered this listing — into the
+    /// author's slot or an appended container.
+    AlreadyRendered,
+    /// The document has no slot for this listing.
+    NotFound,
+}
+
+/// Walk the host AST for `listing`'s slot: a Div whose id is the
+/// listing's id. Fills it, renames it to the container id and marks it
+/// rendered (see [`mark_as_container`]).
 ///
 /// Recursion is needed because the SectionizeTransform (which runs
 /// in the Normalization phase, ahead of Navigation) wraps top-level
 /// headings in `Div .section` containers, so a user's
 /// `::: {#my-blog}` slot inside a section is no longer a top-level
-/// block by the time the listing renders. Q1 recurses too. Already-
-/// rendered slots short-circuit so the recursion is idempotent.
-fn try_replace_explicit_slot(ast: &mut Pandoc, id: &str, blocks: &[Block]) -> bool {
-    fill_in_blocks(&mut ast.blocks, id, blocks)
+/// block by the time the listing renders. Q1 recurses too.
+///
+/// Idempotency: a rendered container carries the container id, not
+/// the listing id, so finding *that* (with the marker) first means a
+/// previous pass already rendered this listing — whether into an
+/// author's slot or an appended container.
+fn try_replace_explicit_slot(ast: &mut Pandoc, listing: &Listing, blocks: &[Block]) -> SlotOutcome {
+    fill_in_blocks(&mut ast.blocks, listing, &listing.container_id(), blocks)
 }
 
-fn fill_in_blocks(blocks_in: &mut Vec<Block>, id: &str, payload: &[Block]) -> bool {
+fn fill_in_blocks(
+    blocks_in: &mut Vec<Block>,
+    listing: &Listing,
+    container_id: &str,
+    payload: &[Block],
+) -> SlotOutcome {
     for block in blocks_in.iter_mut() {
         if let Block::Div(div) = block {
             // `Attr` is the tuple `(id, classes, attributes)`.
-            if div.attr.0 == id {
-                // Idempotency: if we already populated this slot,
-                // skip the second pass.
-                let already_rendered =
-                    div.attr.2.get("data-listing-rendered").map(String::as_str) == Some("1");
-                if already_rendered {
-                    return true;
-                }
+            if div.attr.0 == container_id && is_rendered_container(div) {
+                return SlotOutcome::AlreadyRendered;
+            }
+            // A section Div is never the host, even when its id
+            // matches. It is not something an author wrote to hold a
+            // listing — it is the wrapper SectionizeTransform built
+            // around a heading, and it inherited that heading's
+            // auto-generated id. Since a heading's auto-id is its
+            // slugified text, `## Learn more` + `::: {#learn-more}`
+            // collides by construction; filling the section would
+            // replace the heading and every other block in it. Walk
+            // past it to the author's real slot nested inside.
+            //
+            // Nor is another listing's rendered container, which can
+            // carry this listing's id when the two ids are `x` and
+            // `listing-x`.
+            if div.attr.0 == listing.id && !is_section(div) && !is_rendered_container(div) {
                 div.content = payload.to_vec();
-                div.attr
-                    .2
-                    .insert("data-listing-rendered".to_string(), "1".to_string());
-                return true;
+                mark_as_container(div, listing);
+                return SlotOutcome::Filled;
             }
             // Recurse into the Div's content. Handles nested
             // sections (from SectionizeTransform) as well as nested
             // user Divs.
-            if fill_in_blocks(&mut div.content, id, payload) {
-                return true;
+            let inner = fill_in_blocks(&mut div.content, listing, container_id, payload);
+            if inner != SlotOutcome::NotFound {
+                return inner;
             }
         }
     }
-    false
+    SlotOutcome::NotFound
 }
 
 fn push_diag(diags: &mut Vec<DiagnosticMessage>, code: &str, message: impl Into<String>) {
     diags.push(
         DiagnosticMessageBuilder::warning(message)
+            .with_code(code)
+            .build(),
+    );
+}
+
+/// Like [`push_diag`], at error severity.
+fn push_error(diags: &mut Vec<DiagnosticMessage>, code: &str, message: impl Into<String>) {
+    diags.push(
+        DiagnosticMessageBuilder::error(message)
             .with_code(code)
             .build(),
     );
@@ -427,19 +569,17 @@ fn render_builtin(
     )
 }
 
-/// Compile a doctemplate source and render it against `template_ctx`.
-/// Compile / render / diagnostic-channel errors all surface as
-/// `Q-12-10` and return `None`; the caller skips the listing.
-fn compile_and_render<R: PartialResolver>(
+/// Compile a doctemplate source. Compile errors surface as `Q-12-10`
+/// and return `None`; the caller skips the listing.
+fn compile_template<R: PartialResolver>(
     listing_id: &str,
     source: &str,
     template_path: &Path,
     resolver: &R,
-    template_ctx: &TemplateContext,
     diags: &mut Vec<DiagnosticMessage>,
-) -> Option<String> {
-    let template = match Template::compile_with_resolver(source, template_path, resolver, 0) {
-        Ok(t) => t,
+) -> Option<Template> {
+    match Template::compile_with_resolver(source, template_path, resolver, 0) {
+        Ok(t) => Some(t),
         Err(e) => {
             push_diag(
                 diags,
@@ -449,9 +589,20 @@ fn compile_and_render<R: PartialResolver>(
                      Listing skipped."
                 ),
             );
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// Render a compiled template against `template_ctx`. Render /
+/// diagnostic-channel errors surface as `Q-12-10` and return `None`;
+/// the caller skips the listing.
+fn render_template(
+    listing_id: &str,
+    template: &Template,
+    template_ctx: &TemplateContext,
+    diags: &mut Vec<DiagnosticMessage>,
+) -> Option<String> {
     let (rendered, render_diags) = template.render_with_diagnostics(template_ctx);
     let markdown = match rendered {
         Ok(s) => s,
@@ -479,6 +630,66 @@ fn compile_and_render<R: PartialResolver>(
     Some(markdown)
 }
 
+/// Compile a doctemplate source and render it against `template_ctx`.
+/// Used by the built-ins; the custom path inserts
+/// [`check_custom_template_is_templated`] between the two halves.
+fn compile_and_render<R: PartialResolver>(
+    listing_id: &str,
+    source: &str,
+    template_path: &Path,
+    resolver: &R,
+    template_ctx: &TemplateContext,
+    diags: &mut Vec<DiagnosticMessage>,
+) -> Option<String> {
+    let template = compile_template(listing_id, source, template_path, resolver, diags)?;
+    render_template(listing_id, &template, template_ctx, diags)
+}
+
+/// `Q-12-24` guard (bd-custom-template-not-templated-e5t6m0i0): a
+/// custom template that compiled but contains no doctemplate
+/// directive at all — every top-level node is a `Literal` — would be
+/// spliced into the page unchanged, and a template that still holds
+/// Quarto 1 EJS `<% … %>` markup would leak it. The doctemplate
+/// grammar's only special character is `$`, so both cases compile
+/// "successfully"; this is the check the compiler cannot make.
+///
+/// Comments (`$-- …`) count as directives: they prove the author
+/// wrote doctemplate syntax. Returns `false` (after emitting the
+/// diagnostic) when the listing must be skipped.
+fn check_custom_template_is_templated(
+    listing_id: &str,
+    custom: &LoadedCustomTemplate,
+    template: &Template,
+    diags: &mut Vec<DiagnosticMessage>,
+) -> bool {
+    let has_directives = template
+        .nodes()
+        .iter()
+        .any(|n| !matches!(n, TemplateNode::Literal(_)));
+    let has_ejs_markup = custom.source.contains("<%");
+    if has_directives && !has_ejs_markup {
+        return true;
+    }
+    let why = if has_ejs_markup {
+        "contains `<% … %>` markup, which is Quarto 1 EJS syntax; \
+         Quarto 2 does not evaluate EJS"
+    } else {
+        "contains no doctemplate directives (`$var$`, `$for(…)$`, `$if(…)$`), \
+         so it would be copied into the page unchanged"
+    };
+    push_diag(
+        diags,
+        "Q-12-24",
+        format!(
+            "Listing `{listing_id}`: template `{}` {why}. Quarto 2 custom listing \
+             templates use doctemplate syntax; see the Listings guide, “Custom \
+             templates”. Listing skipped.",
+            custom.template_path.display()
+        ),
+    );
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,7 +698,7 @@ mod tests {
     use crate::project::index::ProjectIndex;
     use crate::project::listing::config::apply_type_defaults;
     use crate::project::listing::config::{Listing, ListingType};
-    use crate::project::listing::item::ListingItem;
+    use crate::project::listing::item::{ItemOrigin, ItemTarget, ListingItem};
     use crate::project::{DocumentInfo, ProjectConfig, ProjectContext};
     use crate::render::BinaryDependencies;
     use quarto_pandoc_types::ConfigValue;
@@ -502,14 +713,21 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path("/project/posts/index.qmd")],
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         }
     }
 
     fn make_item(title: &str, date: Option<&str>) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
-            description: Some(format!("{} description", title)),
+            description: Some(crate::document_profile::text(format!(
+                "{} description",
+                title
+            ))),
             author: Some("Jane".to_string()),
             authors: vec!["Jane".to_string()],
             date: date.map(String::from),
@@ -520,8 +738,12 @@ mod tests {
             image_lazy_loading: None,
             reading_time_minutes: Some(5),
             word_count: None,
-            source_path: PathBuf::from(format!("posts/{}.qmd", title)),
-            output_href: format!("posts/{}.html", title),
+            order: None,
+            target: ItemTarget::document(
+                format!("posts/{}.qmd", title),
+                format!("posts/{}.html", title),
+            ),
+            origin: ItemOrigin::Document,
             extra: BTreeMap::new(),
         }
     }
@@ -552,6 +774,8 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path(host_input)],
             output_dir: project_dir.join("_site"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path(host_input);
         let format = Format::html();
@@ -640,6 +864,44 @@ mod tests {
         }
     }
 
+    // bd-listing-table-fields-peg1w3b3: a table listing with an
+    // author-explicit `fields:` subset must render only those
+    // columns and must not emit per-item "Undefined variable"
+    // doctemplate diagnostics (previously surfaced as Q-12-10) for
+    // curated fields the items lack.
+    #[tokio::test]
+    async fn table_fields_subset_renders_single_column_without_diagnostics() {
+        let mut listing = make_listing(ListingType::Table);
+        listing.fields = vec!["title".to_string()];
+        listing.fields_explicit = true;
+        listing
+            .field_display_names
+            .insert("title".to_string(), "How To".to_string());
+        // Neither item has a date; both have author "Jane" (which
+        // must not leak into the single-column table).
+        let items = vec![make_item("alpha", None), make_item("beta", None)];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+        assert!(
+            diags.is_empty(),
+            "fields subset must not produce Q-12-10 diagnostics; got: {:?}",
+            diags
+        );
+        let rendered = format!("{:?}", ast);
+        assert!(
+            rendered.contains("How"),
+            "expected `How To` header in rendered table; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Jane"),
+            "author column leaked into a fields: [title] table; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Author"),
+            "Author header leaked into a fields: [title] table; got: {rendered}"
+        );
+    }
+
     // 33. render_emits_div_at_listing_id_slot
     #[tokio::test]
     async fn render_fills_explicit_slot() {
@@ -680,7 +942,7 @@ mod tests {
         let Block::Div(div) = &ast.blocks[0] else {
             panic!()
         };
-        assert_eq!(div.attr.0, "main-listing");
+        assert_eq!(div.attr.0, "listing-main-listing");
         assert!(div.attr.1.iter().any(|c| c == "quarto-listing"));
     }
 
@@ -1020,10 +1282,11 @@ mod tests {
              :::\n",
         );
         let mut listing = make_custom_listing("fields.template");
-        // apply_type_defaults for `Custom` leaves fields empty; set
-        // explicitly so this test exercises the binding the way an
-        // author would.
+        // Set `fields:` the way config parsing does for an author
+        // who wrote it (a custom listing without `fields:` gets
+        // every field its items carry, which would include author).
         listing.fields = vec!["title".to_string(), "date".to_string()];
+        listing.fields_explicit = true;
         let items = vec![make_item("alpha", Some("2026-01-01"))];
         let resolved = vec![ResolvedListing { listing, items }];
         let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
@@ -1150,40 +1413,161 @@ mod tests {
         );
     }
 
-    // L8 / bd-rqgx test #14:
-    // A `.ejs.md` template (genuine EJS syntax) emits Q-12-9 at
-    // parse-time (covered separately) and Q-12-10 at compile-time
-    // here. The listing falls back via the compile-error path
-    // (skip), not via the default-fallback path.
-    //
-    // (The parse-time Q-12-9 emitter lives in
-    // `project/listing/config.rs` and is exercised by config tests;
-    // L8 only verifies the runtime side: load + compile-fail.)
+    // bd-custom-template-not-templated-e5t6m0i0 test #1:
+    // A `$`-free template wrapped in a raw-HTML block compiles as a
+    // single literal and re-parses cleanly, so before the fix it was
+    // spliced into the page verbatim with no diagnostic at all.
     #[tokio::test]
-    async fn custom_template_with_ejs_md_extension_attempts_load_and_fails_compile() {
+    async fn custom_template_without_directives_emits_q_12_24_and_skips_listing() {
+        let (_tmp, root, host) = custom_template_project(
+            "welcome-card.ejs",
+            "```{=html}\n\
+             <div class=\"untemplated-marker\">\n\
+             <% for (const item of items) { %>\n\
+             <a href=\"<%= item.link %>\"><%= item.title %></a>\n\
+             <% } %>\n\
+             </div>\n\
+             ```\n",
+        );
+        let listing = make_custom_listing("welcome-card.ejs");
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        let q1224 = diags
+            .iter()
+            .find(|d| d.code.as_deref() == Some("Q-12-24"))
+            .unwrap_or_else(|| panic!("expected Q-12-24; got: {diags:?}"));
+        assert!(
+            q1224.title.contains("welcome-card.ejs") && q1224.title.contains("Quarto 1 EJS"),
+            "message must name the template and say EJS; got: {}",
+            q1224.title
+        );
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
+            "no compile/re-parse diagnostic expected; got: {diags:?}"
+        );
+        let serialized = format!("{:?}", ast);
+        assert!(
+            !serialized.contains("untemplated-marker") && !serialized.contains("<%"),
+            "expected the raw template NOT to be spliced; got: {serialized}"
+        );
+        assert!(
+            !serialized.contains("quarto-listing-default"),
+            "expected skip, not default fallback; got: {serialized}"
+        );
+    }
+
+    // test #2: a template with no `<%` and no `$` at all — plain
+    // static markdown — is also untemplated.
+    #[tokio::test]
+    async fn custom_template_plain_static_text_emits_q_12_24() {
+        let (_tmp, root, host) = custom_template_project(
+            "static.template",
+            "::: {.static-marker}\nNothing here varies.\n:::\n",
+        );
+        let listing = make_custom_listing("static.template");
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        let q1224 = diags
+            .iter()
+            .find(|d| d.code.as_deref() == Some("Q-12-24"))
+            .unwrap_or_else(|| panic!("expected Q-12-24; got: {diags:?}"));
+        assert!(
+            q1224.title.contains("contains no doctemplate directives"),
+            "got: {}",
+            q1224.title
+        );
+        assert!(!format!("{:?}", ast).contains("static-marker"));
+    }
+
+    // test #3: a half-ported template — real `$` directives plus
+    // leftover EJS — warns too (the sniff catches what the AST check
+    // cannot) and is skipped.
+    #[tokio::test]
+    async fn custom_template_half_ported_with_ejs_markup_emits_q_12_24() {
+        let (_tmp, root, host) = custom_template_project(
+            "half.template",
+            "::: {.half-ported-marker}\n$for(items)$\n- <%= item.title %> / $it.title$\n$endfor$\n:::\n",
+        );
+        let listing = make_custom_listing("half.template");
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        let q1224 = diags
+            .iter()
+            .find(|d| d.code.as_deref() == Some("Q-12-24"))
+            .unwrap_or_else(|| panic!("expected Q-12-24; got: {diags:?}"));
+        assert!(q1224.title.contains("Quarto 1 EJS"), "got: {}", q1224.title);
+        assert!(!format!("{:?}", ast).contains("half-ported-marker"));
+    }
+
+    // test #4: a template whose only directive is a comment still
+    // counts as a doctemplate (decision 3) — no Q-12-24, rendered.
+    #[tokio::test]
+    async fn custom_template_with_only_a_comment_directive_is_not_flagged() {
+        let (_tmp, root, host) = custom_template_project(
+            "commented.template",
+            "$-- deliberately static\n::: {.commented-marker}\nStatic body.\n:::\n",
+        );
+        let listing = make_custom_listing("commented.template");
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-24")),
+            "comment-only template must not be flagged; got: {diags:?}"
+        );
+        assert!(format!("{:?}", ast).contains("commented-marker"));
+    }
+
+    // test #5: a normal directive-bearing template is untouched by
+    // the new check (regression guard for the refactor).
+    #[tokio::test]
+    async fn custom_template_with_directives_is_not_flagged() {
+        let (_tmp, root, host) = custom_template_project(
+            "cards.template",
+            "::: {.cards-marker}\n$for(items)$\n- $it.title$\n$endfor$\n:::\n",
+        );
+        let listing = make_custom_listing("cards.template");
+        let items = vec![make_item("Hello", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-24")),
+            "got: {diags:?}"
+        );
+        let serialized = format!("{:?}", ast);
+        assert!(serialized.contains("cards-marker") && serialized.contains("Hello"));
+    }
+
+    // L8 / bd-rqgx test #14, revised for
+    // bd-custom-template-not-templated-e5t6m0i0:
+    // A `.ejs.md` template (genuine EJS syntax) emits Q-12-9 at
+    // parse-time (covered in config.rs) and, at render time, Q-12-24:
+    // the EJS contains no `$`, so it *compiles* as one literal — the
+    // untemplated check, not a compile error, is what catches it.
+    // The listing is skipped.
+    #[tokio::test]
+    async fn custom_template_with_ejs_md_extension_emits_q_12_24_and_skips_listing() {
         let (_tmp, root, host) = custom_template_project(
             "legacy.ejs.md",
-            // EJS-style markup — `<%= … %>` is not valid
-            // doctemplate syntax. The doctemplate parser will reject
-            // it with a `Q-10-*` error which the listing render path
-            // surfaces as Q-12-10.
             "<ul>\n<% items.forEach(function(item) { %>\n  \
              <li><%= item.title %></li>\n<% }); %>\n</ul>\n",
         );
-        let mut listing = make_custom_listing("legacy.ejs.md");
-        listing.template = Some(PathBuf::from("legacy.ejs.md"));
+        let listing = make_custom_listing("legacy.ejs.md");
         let items = vec![make_item("a", Some("2026-01-01"))];
         let resolved = vec![ResolvedListing { listing, items }];
-        let (_ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
-        // We expect a compile error (Q-12-10). The .ejs.md text is
-        // not valid doctemplate syntax; whether the parser emits
-        // exactly Q-10-N here is a doctemplate concern. What L8
-        // promises: a compile-or-render failure surfaces as Q-12-10
-        // and the listing is skipped.
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
         assert!(
-            diags.iter().any(|d| d.code.as_deref() == Some("Q-12-10")),
-            "expected Q-12-10 from EJS-syntax compile error; got: {diags:?}"
+            diags.iter().any(|d| d.code.as_deref() == Some("Q-12-24")),
+            "expected Q-12-24; got: {diags:?}"
         );
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
+            "the check runs before render/re-parse, so no Q-12-10; got: {diags:?}"
+        );
+        assert!(!format!("{:?}", ast).contains("<%"));
     }
 
     // L8 / bd-rqgx test #15:
@@ -1330,14 +1714,15 @@ mod tests {
         );
     }
 
-    // L7 plan §"Tests" Phase 2 #12. With a static image, the image
-    // envelope must NOT appear in the rendered output (the template's
-    // $if(image-html)$ branch fires, not $else$).
+    // L7 plan §"Tests" Phase 2 #12. With an authored image, the image
+    // envelope must NOT appear in the rendered output: the image is
+    // final (bd-listing-description-precedence-x4bh6w3m).
     #[tokio::test]
-    async fn render_omits_image_placeholder_when_l1_image_set() {
+    async fn render_omits_image_placeholder_when_image_authored() {
         let listing = make_listing(ListingType::Default);
         let mut item = make_item("foo", Some("2026-01-01"));
         item.image = Some("/img/foo.png".to_string());
+        item.image_source = crate::project::listing::FieldSource::Document;
         let items = vec![item];
         let resolved = vec![ResolvedListing { listing, items }];
         let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
@@ -1359,6 +1744,33 @@ mod tests {
         assert!(
             diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
             "expected no Q-12-10 from static-image branch; got: {diags:?}"
+        );
+    }
+
+    // A derived (L1 body) image renders directly *inside* the envelope,
+    // so it shows where L7 does not run (hub client) and L7 can still
+    // upgrade it to the rendered page's preview image.
+    #[tokio::test]
+    async fn render_wraps_derived_image_in_placeholder_envelope() {
+        let listing = make_listing(ListingType::Default);
+        let mut item = make_item("foo", Some("2026-01-01"));
+        item.image = Some("/img/foo.png".to_string());
+        item.image_source = crate::project::listing::FieldSource::Derived;
+        let items = vec![item];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+        let serialized = format!("{:?}", ast);
+        let begin = serialized
+            .find("img-begin(9CEB782EFEE6)")
+            .expect("envelope");
+        let img = serialized.find("/img/foo.png").expect("derived image");
+        let end = serialized
+            .find("img-end(9CEB782EFEE6)")
+            .expect("envelope end");
+        assert!(begin < img && img < end, "{serialized}");
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
+            "{diags:?}"
         );
     }
 
@@ -1466,6 +1878,101 @@ mod tests {
         out
     }
 
+    /// An item carrying every field the grid/default templates have a
+    /// slot for, each value tagged so a Debug dump of the AST shows
+    /// whether it rendered.
+    fn item_with_every_field(title: &str, image: bool) -> ListingItem {
+        let mut i = make_item(title, Some("2026-01-01"));
+        i.subtitle = Some(crate::document_profile::text(format!("SUB-{title}")));
+        i.author = Some(format!("AUTH-{title}"));
+        i.authors = vec![format!("AUTH-{title}")];
+        i.categories = vec![format!("CAT-{title}")];
+        if image {
+            i.image = Some(format!("/img/IMG-{title}.png"));
+        }
+        i
+    }
+
+    /// bd-p80b9jy9: the grid and default item templates gate every
+    /// field block on `show.<field>` (Q1's `fields.includes(...)`), so
+    /// an explicit `fields:` subset drops the image (and its
+    /// placeholder), subtitle, author, reading time and categories.
+    #[tokio::test]
+    async fn grid_and_default_render_only_explicit_fields() {
+        for kind in [ListingType::Grid, ListingType::Default] {
+            let mut listing = make_listing(kind);
+            listing.fields = ["date", "title", "description"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+            listing.fields_explicit = true;
+            let items = vec![
+                item_with_every_field("a", true),
+                item_with_every_field("b", false),
+            ];
+            let resolved = vec![ResolvedListing { listing, items }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?} diags: {diags:?}");
+            let rendered = format!("{ast:?}");
+            for absent in [
+                "IMG-a",
+                "listing-item-img-placeholder",
+                "SUB-a",
+                "AUTH-a",
+                "CAT-a",
+                // The class, quoted: Q1's metadata attrs still carry
+                // `data-listing-reading-time-sort` for List.js sorting
+                // whatever `fields:` shows (bd-nbv80e33).
+                "\"listing-reading-time\"",
+            ] {
+                assert!(
+                    !rendered.contains(absent),
+                    "{kind:?}: `{absent}` rendered although not in fields:\n{rendered}"
+                );
+            }
+            for present in ["listing-title", "listing-date", "listing-description"] {
+                assert!(
+                    rendered.contains(present),
+                    "{kind:?}: `{present}` missing:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// bd-p80b9jy9: without `fields:`, the defaulted field set keeps
+    /// every block, including the image and the placeholder for an
+    /// image-less item (Q1 parity).
+    #[tokio::test]
+    async fn grid_and_default_render_every_field_by_default() {
+        for kind in [ListingType::Grid, ListingType::Default] {
+            let listing = make_listing(kind);
+            let items = vec![
+                item_with_every_field("a", true),
+                item_with_every_field("b", false),
+            ];
+            let resolved = vec![ResolvedListing { listing, items }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?} diags: {diags:?}");
+            let rendered = format!("{ast:?}");
+            for present in [
+                "IMG-a",
+                "listing-item-img-placeholder",
+                "SUB-a",
+                "AUTH-a",
+                "CAT-a",
+                "listing-reading-time",
+                "listing-title",
+                "listing-date",
+                "listing-description",
+            ] {
+                assert!(
+                    rendered.contains(present),
+                    "{kind:?}: `{present}` missing:\n{rendered}"
+                );
+            }
+        }
+    }
+
     fn item_with_categories(title: &str, cats: &[&str]) -> ListingItem {
         let mut i = make_item(title, Some("2026-01-01"));
         i.categories = cats.iter().map(|s| s.to_string()).collect();
@@ -1542,5 +2049,688 @@ mod tests {
             0,
             "table listing must not emit per-item chips"
         );
+    }
+
+    #[tokio::test]
+    async fn unlinked_record_item_renders_title_without_anchor() {
+        let mut item = make_item("Card", None);
+        item.origin = ItemOrigin::Record;
+        item.target = ItemTarget::None;
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![item],
+        }];
+        let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+        assert!(diags.is_empty(), "{diags:?}");
+        let rendered = format!("{:?}", ast);
+        assert!(
+            rendered.contains("listing-title"),
+            "title heading present: {rendered}"
+        );
+        assert!(rendered.contains("Card"), "{rendered}");
+        assert!(
+            !rendered.contains("Link("),
+            "no Link inline without a target: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_item_still_renders_title_as_link() {
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![make_item("Doc", None)],
+        }];
+        let (ast, _) = run_transform(empty_pandoc(), resolved).await;
+        let rendered = format!("{:?}", ast);
+        assert!(
+            rendered.contains("Link("),
+            "document items keep their anchor: {rendered}"
+        );
+    }
+
+    // bd-listing-id-collides-with-heading-l57w41jl: a heading's
+    // auto-id is its slugified text, so `## Main listing` followed
+    // by `::: {#main-listing}` puts the author's slot inside a
+    // section Div that SectionizeTransform gave the very same id.
+    // The section must never be treated as the listing's host —
+    // filling it would replace the heading and every other block in
+    // the section.
+    //
+    // Fixtures are built by running the real `sectionize_blocks`,
+    // so they carry exactly the shape the Normalization phase
+    // produces ahead of us.
+
+    fn header(level: usize, text: &str) -> Block {
+        Block::Header(quarto_pandoc_types::block::Header {
+            level,
+            attr: (slug(text), vec![], LinkedHashMap::new()),
+            content: vec![quarto_pandoc_types::inline::Inline::Str(
+                quarto_pandoc_types::inline::Str {
+                    text: text.to_string(),
+                    source_info: SourceInfo::for_test(),
+                },
+            )],
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+        })
+    }
+
+    fn slug(text: &str) -> String {
+        text.to_lowercase().replace(' ', "-")
+    }
+
+    fn para(text: &str) -> Block {
+        Block::Paragraph(quarto_pandoc_types::block::Paragraph {
+            content: vec![quarto_pandoc_types::inline::Inline::Str(
+                quarto_pandoc_types::inline::Str {
+                    text: text.to_string(),
+                    source_info: SourceInfo::for_test(),
+                },
+            )],
+            source_info: SourceInfo::for_test(),
+        })
+    }
+
+    fn slot(id: &str) -> Block {
+        Block::Div(Div {
+            attr: (id.to_string(), vec![], LinkedHashMap::new()),
+            content: vec![],
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+        })
+    }
+
+    fn sectionized(blocks: Vec<Block>) -> Pandoc {
+        Pandoc {
+            meta: ConfigValue::default(),
+            blocks: pampa::transforms::sectionize_blocks(blocks),
+        }
+    }
+
+    /// Text of every Paragraph anywhere in the tree.
+    fn collect_para_text(blocks: &[Block], out: &mut Vec<String>) {
+        for b in blocks {
+            match b {
+                Block::Paragraph(p) => {
+                    let mut s = String::new();
+                    inlines_to_text(&p.content, &mut s);
+                    out.push(s);
+                }
+                Block::Div(d) => collect_para_text(&d.content, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn find_div<'a>(blocks: &'a [Block], id: &str) -> Option<&'a Div> {
+        for b in blocks {
+            if let Block::Div(d) = b {
+                if d.attr.0 == id {
+                    return Some(d);
+                }
+                if let Some(found) = find_div(&d.content, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    /// The author's slot inside the colliding section is the host;
+    /// the section's heading and prose survive untouched.
+    #[tokio::test]
+    async fn colliding_section_is_not_the_host_and_keeps_its_content() {
+        let listing = make_listing(ListingType::Default);
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let ast = sectionized(vec![
+            header(2, "Main listing"),
+            para("BEFORE the listing slot"),
+            slot("main-listing"),
+            para("AFTER the listing slot"),
+        ]);
+
+        let (ast, _) = run_transform(ast, resolved).await;
+
+        // The section survives, still a section, still unrendered.
+        let Block::Div(section) = &ast.blocks[0] else {
+            panic!(
+                "expected the section Div at index 0, got {:?}",
+                ast.blocks[0]
+            )
+        };
+        assert!(
+            section.attr.1.iter().any(|c| c == "section"),
+            "block 0 should still be the section Div, classes: {:?}",
+            section.attr.1
+        );
+        assert_eq!(
+            section.attr.2.get("data-listing-rendered"),
+            None,
+            "the section must not have been used as the listing host"
+        );
+
+        // Heading and both paragraphs are still there.
+        let mut headers = Vec::new();
+        collect_header_text(&section.content, &mut headers);
+        assert!(
+            headers.iter().any(|h| h == "Main listing"),
+            "the heading was destroyed; headers found: {:?}",
+            headers
+        );
+        let mut paras = Vec::new();
+        collect_para_text(&section.content, &mut paras);
+        for expected in ["BEFORE the listing slot", "AFTER the listing slot"] {
+            assert!(
+                paras.iter().any(|p| p == expected),
+                "`{expected}` was destroyed; paragraphs found: {:?}",
+                paras
+            );
+        }
+
+        // And the listing did render — into the author's slot,
+        // which is the *inner* Div carrying the id.
+        let inner = section
+            .content
+            .iter()
+            .find_map(|b| match b {
+                // The slot is renamed to the listing's container id.
+                Block::Div(d) if d.attr.0 == "listing-main-listing" => Some(d),
+                _ => None,
+            })
+            .expect("author's slot Div should still be a direct child of the section");
+        assert_eq!(
+            inner
+                .attr
+                .2
+                .get("data-listing-rendered")
+                .map(String::as_str),
+            Some("1"),
+            "the author's slot should be the host"
+        );
+        let titles = rendered_block_titles(inner);
+        assert!(
+            titles.iter().any(|t| t.contains('a')),
+            "expected item title `a` in the slot, got {:?}",
+            titles
+        );
+    }
+
+    /// A colliding section with no slot inside it is not a host
+    /// either: the listing falls through to the append path and the
+    /// section keeps its content.
+    #[tokio::test]
+    async fn colliding_section_without_a_slot_falls_through_to_append() {
+        let listing = make_listing(ListingType::Default);
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let ast = sectionized(vec![header(2, "Main listing"), para("Section prose")]);
+
+        let (ast, _) = run_transform(ast, resolved).await;
+
+        let Block::Div(section) = &ast.blocks[0] else {
+            panic!("expected the section Div at index 0")
+        };
+        let mut headers = Vec::new();
+        collect_header_text(&section.content, &mut headers);
+        assert!(
+            headers.iter().any(|h| h == "Main listing"),
+            "the heading was destroyed; headers found: {:?}",
+            headers
+        );
+        let mut paras = Vec::new();
+        collect_para_text(&section.content, &mut paras);
+        assert!(
+            paras.iter().any(|p| p == "Section prose"),
+            "section prose was destroyed; paragraphs: {:?}",
+            paras
+        );
+
+        // The listing got its own appended wrapper instead.
+        let appended = ast.blocks.last().unwrap();
+        let Block::Div(div) = appended else {
+            panic!("expected an appended Div")
+        };
+        assert_eq!(div.attr.0, "listing-main-listing");
+        assert!(div.attr.1.iter().any(|c| c == "quarto-listing"));
+    }
+
+    /// bd-nbv80e33: the rendered container is `listing-<id>` (Q1), so
+    /// a slot that shares its section's id no longer leaves two
+    /// elements claiming one anchor — and Q-12-25 is no longer emitted.
+    #[tokio::test]
+    async fn colliding_section_id_no_longer_collides_after_container_rename() {
+        let listing = make_listing(ListingType::Default);
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let ast = sectionized(vec![header(2, "Main listing"), slot("main-listing")]);
+
+        let (ast, diags) = run_transform(ast, resolved).await;
+
+        assert!(
+            !diags.iter().any(|d| d.code.as_deref() == Some("Q-12-25")),
+            "{diags:?}"
+        );
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter().filter(|id| *id == "main-listing").count(),
+            1,
+            "only the section keeps the bare id: {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+    }
+
+    fn collect_div_ids(blocks: &[Block], out: &mut Vec<String>) {
+        for b in blocks {
+            if let Block::Div(d) = b {
+                if !d.attr.0.is_empty() {
+                    out.push(d.attr.0.clone());
+                }
+                collect_div_ids(&d.content, out);
+            }
+        }
+    }
+
+    /// Control: a listing whose id differs from every section id is
+    /// business as usual — no diagnostic, slot filled.
+    #[tokio::test]
+    async fn non_colliding_section_id_emits_no_diagnostic() {
+        let mut listing = make_listing(ListingType::Default);
+        listing.id = "other-id".to_string();
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let ast = sectionized(vec![header(2, "Main listing"), slot("other-id")]);
+
+        let (ast, diags) = run_transform(ast, resolved).await;
+
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            diags
+        );
+        let slot = find_div(&ast.blocks, "listing-other-id").expect("slot should still exist");
+        assert_eq!(
+            slot.attr.2.get("data-listing-rendered").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-nbv80e33: List.js bootstrap.
+    // ─────────────────────────────────────────────────────────────
+
+    /// First Div (depth-first) carrying `class`.
+    fn find_div_with_class<'a>(blocks: &'a [Block], class: &str) -> Option<&'a Div> {
+        for b in blocks {
+            if let Block::Div(d) = b {
+                if d.attr.1.iter().any(|c| c == class) {
+                    return Some(d);
+                }
+                if let Some(found) = find_div_with_class(&d.content, class) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    /// List.js treats the element children of `.list` as the items, so
+    /// that is where Q1's `metadataAttrs` go — the `.quarto-post` for
+    /// the default layout, the outer `.g-col-1` for grid. The attrs
+    /// must survive the doctemplate → qmd re-parse as real attributes.
+    #[tokio::test]
+    async fn item_metadata_attrs_land_on_the_list_children() {
+        for kind in [ListingType::Default, ListingType::Grid] {
+            let items = vec![
+                item_with_categories("a", &["rust"]),
+                item_with_categories("b", &[]),
+            ];
+            let resolved = vec![ResolvedListing {
+                listing: make_listing(kind),
+                items,
+            }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?}: {diags:?}");
+            let list = find_div_with_class(&ast.blocks, "list")
+                .unwrap_or_else(|| panic!("{kind:?}: no .list div"));
+            let children: Vec<&Div> = list
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Div(d) => Some(d),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(children.len(), 2, "{kind:?}: {:?}", list.content);
+            assert_eq!(list.content.len(), 2, "{kind:?}: only item divs in .list");
+            for (i, child) in children.iter().enumerate() {
+                let attrs = &child.attr.2;
+                assert_eq!(
+                    attrs.get("data-index").map(String::as_str),
+                    Some(i.to_string().as_str()),
+                    "{kind:?} item {i}: {attrs:?}"
+                );
+                assert_eq!(
+                    attrs.get("data-listing-date-sort").map(String::as_str),
+                    Some("1767225600000"),
+                    "{kind:?} item {i}: {attrs:?}"
+                );
+            }
+            // btoa(encodeURIComponent("rust"))
+            assert_eq!(
+                children[0]
+                    .attr
+                    .2
+                    .get("data-categories")
+                    .map(String::as_str),
+                Some("cnVzdA=="),
+                "{kind:?}"
+            );
+            assert!(
+                !children[1].attr.2.contains_key("data-categories"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Run the transform twice over the same AST, as a re-render does.
+    async fn run_transform_twice(
+        ast: Pandoc,
+        resolved: Vec<ResolvedListing>,
+    ) -> (Pandoc, Vec<DiagnosticMessage>) {
+        let (ast, mut diags) = run_transform(ast, resolved.clone()).await;
+        let (ast, more) = run_transform(ast, resolved).await;
+        diags.extend(more);
+        (ast, diags)
+    }
+
+    /// Q1 (`website-listing-template.ts`, `processRendered`): the
+    /// listing's element is `listing-<id>` with classes
+    /// `quarto-listing` and `quarto-listing-container-<type>`.
+    #[tokio::test]
+    async fn implicit_container_gets_q1_id_and_classes() {
+        for (kind, name) in [
+            (ListingType::Default, "default"),
+            (ListingType::Grid, "grid"),
+            (ListingType::Table, "table"),
+        ] {
+            let resolved = vec![ResolvedListing {
+                listing: make_listing(kind),
+                items: vec![make_item("a", None)],
+            }];
+            let (ast, _) = run_transform(empty_pandoc(), resolved).await;
+            let div = find_div(&ast.blocks, "listing-main-listing")
+                .unwrap_or_else(|| panic!("{name}: no #listing-main-listing"));
+            assert!(div.attr.1.iter().any(|c| c == "quarto-listing"), "{name}");
+            assert!(
+                div.attr
+                    .1
+                    .iter()
+                    .any(|c| *c == format!("quarto-listing-container-{name}")),
+                "{name}: {:?}",
+                div.attr.1
+            );
+            assert!(find_div(&ast.blocks, "main-listing").is_none(), "{name}");
+        }
+    }
+
+    /// Q1 renames the author's `::: {#id}` slot to `listing-<id>` and
+    /// adds the container classes, keeping the author's own.
+    #[tokio::test]
+    async fn explicit_slot_is_renamed_and_gains_container_classes() {
+        let mut ast = pandoc_with_slot("main-listing");
+        if let Block::Div(d) = &mut ast.blocks[0] {
+            d.attr.1.push("mine".to_string());
+        }
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Grid),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform(ast, resolved).await;
+        assert_eq!(
+            ast.blocks.len(),
+            1,
+            "slot filled in place, nothing appended"
+        );
+        let Block::Div(div) = &ast.blocks[0] else {
+            panic!("expected the slot Div")
+        };
+        assert_eq!(div.attr.0, "listing-main-listing");
+        for class in ["mine", "quarto-listing", "quarto-listing-container-grid"] {
+            assert!(
+                div.attr.1.iter().any(|c| c == class),
+                "{class}: {:?}",
+                div.attr.1
+            );
+        }
+        assert_eq!(
+            div.attr.2.get("data-listing-rendered").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn renamed_containers_stay_idempotent_across_passes() {
+        // Implicit container.
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform_twice(empty_pandoc(), resolved.clone()).await;
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+        // Explicit slot.
+        let (ast, _) = run_transform_twice(pandoc_with_slot("main-listing"), resolved).await;
+        assert_eq!(ast.blocks.len(), 1, "{:?}", ast.blocks);
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+    }
+
+    /// A listing whose id is another listing's container id (`x` and
+    /// `listing-x`): neither may mistake the other's rendered
+    /// container for its own slot, in either order, on any pass.
+    #[tokio::test]
+    async fn listing_ids_that_prefix_each_other_render_separately() {
+        let mut a = make_listing(ListingType::Default);
+        a.id = "x".to_string();
+        let mut b = make_listing(ListingType::Default);
+        b.id = "listing-x".to_string();
+        for order in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+            let resolved: Vec<ResolvedListing> = order
+                .into_iter()
+                .map(|listing| ResolvedListing {
+                    listing,
+                    items: vec![make_item("a", None)],
+                })
+                .collect();
+            let (ast, _) = run_transform_twice(empty_pandoc(), resolved).await;
+            let mut ids = Vec::new();
+            collect_div_ids(&ast.blocks, &mut ids);
+            assert_eq!(
+                ids.iter().filter(|id| *id == "listing-x").count(),
+                1,
+                "{ids:?}"
+            );
+            assert_eq!(
+                ids.iter().filter(|id| *id == "listing-listing-x").count(),
+                1,
+                "{ids:?}"
+            );
+        }
+    }
+
+    /// The raw-HTML blocks directly inside the listing's container,
+    /// in order.
+    fn container_raw_html(ast: &Pandoc, container_id: &str) -> Vec<String> {
+        let div = find_div(&ast.blocks, container_id)
+            .unwrap_or_else(|| panic!("no #{container_id} in {:?}", ast.blocks));
+        div.content
+            .iter()
+            .filter_map(|b| match b {
+                Block::RawBlock(rb) if rb.format == "html" => Some(rb.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Like [`run_transform`], under a given pipeline profile.
+    async fn run_transform_with_profile(
+        ast: Pandoc,
+        resolved: Vec<ResolvedListing>,
+        profile: crate::format::PipelineProfile,
+    ) -> Pandoc {
+        let mut ast = ast;
+        let project = make_project();
+        let doc = DocumentInfo::from_path("/project/posts/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let index = Arc::new(ProjectIndex::new(Vec::<DocumentProfile>::new()));
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ctx.pipeline_profile = profile;
+        ctx.resolved_listings = resolved;
+        ListingRenderTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        ast
+    }
+
+    fn paged_listing(kind: ListingType) -> Vec<ResolvedListing> {
+        let mut listing = make_listing(kind);
+        listing.page_size = Some(1);
+        vec![ResolvedListing {
+            listing,
+            items: vec![make_item("a", None), make_item("b", None)],
+        }]
+    }
+
+    /// Default and grid listings carry the List.js bootstrap inside
+    /// their container, after the no-matching placeholder: the
+    /// pagination `<nav>` (List.js looks for `.pagination` inside the
+    /// container) and the init script.
+    #[tokio::test]
+    async fn default_and_grid_listings_carry_the_listjs_bootstrap() {
+        for kind in [ListingType::Default, ListingType::Grid] {
+            let (ast, diags) = run_transform(empty_pandoc(), paged_listing(kind)).await;
+            assert!(diags.is_empty(), "{kind:?}: {diags:?}");
+            let raw = container_raw_html(&ast, "listing-main-listing");
+            let [.., nav, script] = raw.as_slice() else {
+                panic!("{kind:?}: expected nav + script, got {raw:?}")
+            };
+            assert!(
+                nav.starts_with("<nav id=\"main-listing-pagination\""),
+                "{kind:?}: {nav}"
+            );
+            assert!(
+                script.contains(r#"new List("listing-main-listing", options)"#),
+                "{kind:?}: {script}"
+            );
+            assert!(script.contains(r#""page":1"#), "{kind:?}: {script}");
+            assert_eq!(
+                script.matches("<script>").count(),
+                1,
+                "{kind:?}: one script per listing"
+            );
+
+            // Both follow the no-matching placeholder.
+            let div = find_div(&ast.blocks, "listing-main-listing").unwrap();
+            let placeholder = div
+                .content
+                .iter()
+                .position(|b| matches!(b, Block::Div(d) if d.attr.1.iter().any(|c| c == "listing-no-matching")))
+                .expect("no-matching placeholder");
+            let nav_pos = div
+                .content
+                .iter()
+                .position(|b| matches!(b, Block::RawBlock(rb) if rb.text.starts_with("<nav")))
+                .unwrap();
+            assert!(placeholder < nav_pos, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_that_fits_one_page_gets_the_script_but_no_nav() {
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform(empty_pandoc(), resolved).await;
+        let raw = container_raw_html(&ast, "listing-main-listing").join("\n");
+        assert!(raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+        assert!(!raw.contains(r#""page""#), "{raw}");
+    }
+
+    /// Table listings have no `.list` yet (bd-bl1e00r6), and custom
+    /// listings are left to their template (design decision 3).
+    #[tokio::test]
+    async fn table_listing_gets_no_listjs_bootstrap() {
+        let (ast, _) = run_transform(empty_pandoc(), paged_listing(ListingType::Table)).await;
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn custom_listing_gets_no_listjs_bootstrap_even_with_a_list_element() {
+        let (_tmp, root, host) = custom_template_project(
+            "list.template",
+            "::: {.list}\n$for(items)$\n::: {.item}\n$it.title$\n:::\n\n$endfor$\n:::\n",
+        );
+        let mut listing = make_custom_listing("list.template");
+        listing.page_size = Some(1);
+        let resolved = vec![ResolvedListing {
+            listing,
+            items: vec![make_item("a", None), make_item("b", None)],
+        }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            find_div_with_class(&ast.blocks, "list").is_some(),
+            "custom template rendered"
+        );
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+    }
+
+    /// The hub-client preview renders the AST itself and does not run
+    /// List.js (bd-4dfdo8vi); the bootstrap is for rendered HTML only.
+    #[tokio::test]
+    async fn preview_profile_gets_no_listjs_bootstrap() {
+        use crate::format::PipelineProfile;
+        let ast = run_transform_with_profile(
+            empty_pandoc(),
+            paged_listing(ListingType::Default),
+            PipelineProfile::HtmlPreview,
+        )
+        .await;
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+        // The listing itself still renders.
+        assert!(find_div(&ast.blocks, "listing-main-listing").is_some());
     }
 }

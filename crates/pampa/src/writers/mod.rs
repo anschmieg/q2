@@ -6,6 +6,7 @@
 #[cfg(feature = "terminal-support")]
 pub mod ansi;
 pub(crate) mod block_attr;
+pub(crate) mod format_chars;
 pub mod html;
 pub(crate) mod html_source;
 pub mod incremental;
@@ -14,4 +15,5 @@ pub(crate) mod json_stream;
 pub mod native;
 pub mod plaintext;
 pub mod qmd;
+pub(crate) mod qmd_prepass;
 pub mod raw_json;

@@ -1,11 +1,12 @@
-# Date Parsing & Formatting for Q2 (title-block P4, bd-13f821l5)
-
-**Status: APPROVED (2026-07-17) — executing.** Carlos approved all
-open-question recommendations; final token scope (Carlos): implement
-every token that does not incur i18n/localization design cost —
-i.e. everything except locale-week `w ww wo gggg` (deferred to the
-localization design, likely tackled next) and named-timezone `z zzz`
-(deferred on tz-database dependency grounds).
+---
+title: 'Date Parsing & Formatting for Q2 (title-block P4, bd-13f821l5)'
+date: 2026-07-17
+description: 'Designs a shared date module that parses and formats `date` metadata and listing dates in a normalization transform, keeping doctemplates logic-less while offering Q1''s named styles and format tokens in English.'
+status: in-progress  # APPROVED (2026-07-17) — executing. Carlos approved all open-question recommendations; final token scope (Carlos): implement every token that does not incur i18n/localization design cost — i.e. everything except locale-week `w ww wo gggg` (deferred to the localization design, likely tackled next) and named-timezone `z zzz` (deferred on tz-database dependency grounds).
+braid:
+  strand: bd-13f821l5
+  priority: P2
+---
 
 Ancillary to the title-block parity epic plan
 (`2026-07-15-html-title-block-parity.md`, design decision Q4 and the
@@ -48,7 +49,7 @@ transform** that writes plain strings into metadata, keeping
 doctemplates logic-less — is not a compromise; it is structurally the
 same pipeline position Q1 uses. Everything downstream (built-in
 partials, user `template-partials`, the q2-preview React title block,
-listings' doctemplates) gets formatted dates for free.
+listings\' doctemplates) gets formatted dates for free.
 
 ## Q1 feature surface (source + docs study)
 
@@ -198,8 +199,8 @@ matter; both only touch meta). For each of `date`, `date-modified`:
 5. Format selection, matching Q1's precedence: field-local
    `format` > document `date-format` > default. Default is
    **`long` when the styled HTML title block is active**
-   (format-html + `title-block-style` ∉ {plain? see open question
-   Q-c, none}) and **`iso` otherwise** — Q1's
+   (format-html + `title-block-style` ∉ \{plain? see open question
+   Q-c, none\}) and **`iso` otherwise** — Q1's
    `documentTitleMetadata` rule plus its global iso normalization.
 
 ### 3. Listings and feeds consume the same module
@@ -212,7 +213,7 @@ matter; both only touch meta). For each of `date`, `date-modified`:
   time — the doctemplate listing templates keep interpolating plain
   strings, exactly like Q1's EJS.
 - Feeds keep RFC-2822 output (a machine format, not user-styled) but
-  `format_pub_date_rfc822`'s ad-hoc parse is replaced by
+  `format_pub_date_rfc822`\'s ad-hoc parse is replaced by
   `dates::parse_date`, closing the "two parsers drift" hole.
 
 ### 4. Preview (Q9) and testing

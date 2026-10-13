@@ -20,8 +20,12 @@
 //!
 //! - `page-footer: false` (affirmative disable).
 //! - `rendered.navigation.footer` already populated (user override).
-//! - `navigation.footer` absent.
+//! - `navigation.footer` absent, and either no `footer-actions` copy
+//!   to host or `page-footer: false` at either scope (top-level or
+//!   `website.page-footer`) — see [`FooterRenderTransform::transform`]
+//!   for the footer-synthesis and website-scope re-check.
 
+use quarto_config::resolve_website_value;
 use quarto_error_reporting::DiagnosticMessage;
 use quarto_navigation::{
     FooterRegion, NavigationItem, PageFooter, render_html::page_footer_to_html,
@@ -74,15 +78,49 @@ impl AstTransform for FooterRenderTransform {
             return Ok(());
         }
 
-        let Some(footer_cv) = ast.meta.get_path(&["navigation", "footer"]) else {
-            return Ok(());
+        // The repo-actions copy that belongs inside
+        // `.nav-footer-center` (bd-repo-actions-missing-99ezd2fe).
+        let actions_html = ast
+            .meta
+            .get_path(&["rendered", "navigation", "footer-actions"])
+            .and_then(|v| v.as_plain_text())
+            .filter(|s| !s.is_empty());
+
+        let mut footer = match ast.meta.get_path(&["navigation", "footer"]) {
+            Some(footer_cv) => PageFooter::from_config_value(footer_cv),
+            None => {
+                // Q1 `handleRepoLinks` builds the whole
+                // `<footer><div.nav-footer><div.nav-footer-center>`
+                // chain when none exists, purely to host the
+                // small-screen actions copy. With nothing to host,
+                // there is still no footer.
+                if actions_html.is_none() {
+                    return Ok(());
+                }
+                // Decision D-3. An absent `navigation.footer` has two
+                // very different causes: nothing was configured, or
+                // `page-footer: false` was — and `resolve_page_footer`
+                // erases the difference by returning `None` for both
+                // (`quarto-navigation/src/footer.rs:246-250`). The
+                // top-level gate above cannot see the website-scoped
+                // spelling, so re-check it here through the
+                // website-aware helper. Without this, the one config
+                // that explicitly asked for no footer gets one.
+                if resolve_website_value(&ast.meta, "page-footer").and_then(|v| v.as_bool())
+                    == Some(false)
+                {
+                    return Ok(());
+                }
+                PageFooter::default()
+            }
         };
+        footer.center_append = actions_html;
 
-        let mut footer = PageFooter::from_config_value(footer_cv);
-
-        // Rewrite hrefs in each Items region. Text and Empty regions
-        // pass through unchanged — body-content link rewriting is
-        // Phase 6's territory.
+        // Rewrite hrefs in each Items region, and Link/Image targets
+        // inside Text regions' parsed markdown
+        // (bd-root-relative-paths-design-fc5pvkcv, Case C — the AST
+        // body's Phase-6 rewriter never sees footer inlines, which
+        // live in metadata, so this transform owns their resolution).
         let mut local_diags = std::mem::take(&mut ctx.diagnostics);
         rewrite_region_hrefs(
             &mut footer.left,
@@ -121,8 +159,22 @@ fn rewrite_region_hrefs(
     index: Option<&ProjectIndex>,
     diagnostics: &mut Vec<DiagnosticMessage>,
 ) {
-    if let FooterRegion::Items(items) = region {
-        rewrite_items_hrefs(items, resolver, index, diagnostics);
+    match region {
+        FooterRegion::Items(items) => {
+            rewrite_items_hrefs(items, resolver, index, diagnostics);
+        }
+        FooterRegion::Text(cv) => {
+            // Handles both the common `PandocInlines` shape and
+            // multi-block `!md` text (`PandocBlocks`).
+            crate::transforms::navigation_href::rewrite_config_text(
+                cv,
+                resolver,
+                index,
+                &NavSurface::PageFooter,
+                diagnostics,
+            );
+        }
+        FooterRegion::Empty => {}
     }
 }
 
@@ -146,6 +198,16 @@ fn rewrite_items_hrefs(
                 diagnostics,
             );
         }
+        // An item's parsed-markdown `text:` carries Link/Image targets
+        // that resolve exactly like a Text region's
+        // (bd-page-footer-image-items-stmpikgo, defect 2).
+        crate::transforms::navigation_href::rewrite_item_text(
+            item,
+            resolver,
+            index,
+            &NavSurface::PageFooter,
+            diagnostics,
+        );
         // Footer items rarely nest `menu`, but the type allows it —
         // handle symmetrically with navbar.
         if !item.menu.is_empty() {
@@ -175,6 +237,8 @@ mod tests {
             is_single_file: true,
             files: vec![DocumentInfo::from_path("/project/doc.qmd")],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         }
     }
 
@@ -203,7 +267,7 @@ mod tests {
             source_path: PathBuf::from(source),
             output_href: output_href.to_string(),
             format_id: "html".to_string(),
-            title: Some(title.to_string()),
+            title: Some(crate::document_profile::text(title)),
             ..DocumentProfile::default()
         }
     }
@@ -233,6 +297,84 @@ mod tests {
             .await
             .unwrap();
         (ast.meta, ctx.diagnostics)
+    }
+
+    /// Like `run_with`, but wires a website resolver pinned at a
+    /// depth-1 page (`tools/converter.html`) so page-relative
+    /// resolution is observable.
+    async fn run_at_depth(
+        meta: ConfigValue,
+        index: Option<Arc<ProjectIndex>>,
+    ) -> (ConfigValue, Vec<DiagnosticMessage>) {
+        use crate::resource_resolver::ResourceResolverContext;
+        let mut ast = Pandoc {
+            meta,
+            blocks: vec![],
+        };
+        let project = make_test_project();
+        let doc = DocumentInfo::from_path("/project/tools/converter.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let resolver = ResourceResolverContext::website(
+            "/project/_site",
+            "/project/_site/tools/converter.html",
+            "site_libs",
+            "converter",
+        );
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_resource_resolver(resolver);
+        if let Some(idx) = index {
+            ctx = ctx.with_project_index(idx);
+        }
+        FooterRenderTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        (ast.meta, ctx.diagnostics)
+    }
+
+    /// A `ConfigValue` holding parsed markdown inlines — the shape
+    /// footer text regions actually take in production (both
+    /// `_quarto.yml` and document metadata parse markdown strings to
+    /// `PandocInlines`).
+    fn inlines_cv(inlines: Vec<quarto_pandoc_types::inline::Inline>) -> ConfigValue {
+        ConfigValue {
+            value: quarto_pandoc_types::config_value::ConfigValueKind::PandocInlines(inlines),
+            source_info: SourceInfo::for_test(),
+            merge_op: Default::default(),
+        }
+    }
+
+    fn footer_image(url: &str, alt: &str) -> quarto_pandoc_types::inline::Inline {
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        use quarto_pandoc_types::inline::{Image, Inline, Str};
+        Inline::Image(Image {
+            attr: Default::default(),
+            content: vec![Inline::Str(Str {
+                text: alt.to_string(),
+                source_info: SourceInfo::for_test(),
+            })],
+            target: (url.to_string(), String::new()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        })
+    }
+
+    fn footer_link(url: &str, text: &str) -> quarto_pandoc_types::inline::Inline {
+        use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+        use quarto_pandoc_types::inline::{Inline, Link, Str};
+        Inline::Link(Link {
+            attr: Default::default(),
+            content: vec![Inline::Str(Str {
+                text: text.to_string(),
+                source_info: SourceInfo::for_test(),
+            })],
+            target: (url.to_string(), String::new()),
+            source_info: SourceInfo::for_test(),
+            attr_source: AttrSourceInfo::empty(),
+            target_source: TargetSourceInfo::empty(),
+        })
     }
 
     // --- Phase 2 behavior preserved -------------------------------
@@ -327,12 +469,119 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Phase 3 test 42 — a string-valued region (Text) is NOT
-    /// scanned for .qmd links. Body-content link rewriting is Phase 6.
+    /// A `ConfigValue` holding parsed markdown blocks — the shape
+    /// multi-block `!md` footer text takes.
+    fn blocks_cv(blocks: Vec<quarto_pandoc_types::block::Block>) -> ConfigValue {
+        ConfigValue {
+            value: quarto_pandoc_types::config_value::ConfigValueKind::PandocBlocks(blocks),
+            source_info: SourceInfo::for_test(),
+            merge_op: Default::default(),
+        }
+    }
+
+    /// Phase 3 of bd-page-footer-image-items-stmpikgo: a
+    /// `PandocBlocks`-shaped Text region (multi-paragraph `!md` text)
+    /// resolves its Link/Image targets like the inline-shaped one.
     #[tokio::test]
-    async fn footer_render_leaves_text_regions_unchanged() {
+    async fn footer_render_text_region_blocks_resolve_at_depth() {
+        use quarto_pandoc_types::block::{Block, Paragraph};
         let footer = PageFooter {
-            center: FooterRegion::Text(s("See [docs](docs.qmd) here")),
+            center: FooterRegion::Text(blocks_cv(vec![
+                Block::Paragraph(Paragraph {
+                    content: vec![footer_image("/images/x.svg", "logo")],
+                    source_info: SourceInfo::for_test(),
+                }),
+                Block::Paragraph(Paragraph {
+                    content: vec![footer_link("docs.qmd", "docs")],
+                    source_info: SourceInfo::for_test(),
+                }),
+            ])),
+            ..PageFooter::default()
+        };
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["navigation", "footer"], footer.to_config_value());
+        let index = Arc::new(ProjectIndex::new(vec![profile(
+            "docs.qmd",
+            "docs.html",
+            "Docs",
+        )]));
+        let (out, diags) = run_at_depth(meta, Some(index)).await;
+        let html = out
+            .get_path(&["rendered", "navigation", "footer"])
+            .unwrap()
+            .as_plain_text()
+            .unwrap();
+        assert!(
+            html.contains("src=\"../images/x.svg\""),
+            "blocks-shaped text-region image must relativize; got: {}",
+            html
+        );
+        assert!(
+            html.contains("href=\"../docs.html\""),
+            "blocks-shaped text-region link must resolve; got: {}",
+            html
+        );
+        assert!(diags.is_empty(), "got diagnostics: {:?}", diags);
+    }
+
+    /// Defect 2 of bd-page-footer-image-items-stmpikgo: an *item's*
+    /// `text:` markdown resolves exactly like a Text region's — Image
+    /// targets relativize per page, `.qmd` links resolve through the
+    /// index. (Menu-child text is covered by the navbar test — the
+    /// footer emitter doesn't render dropdowns.)
+    #[tokio::test]
+    async fn footer_render_item_text_inlines_resolve_at_depth() {
+        let footer = PageFooter {
+            right: FooterRegion::Items(vec![NavigationItem {
+                text: Some(inlines_cv(vec![
+                    footer_image("/images/x.svg", "logo"),
+                    footer_link("docs.qmd", "docs"),
+                ])),
+                ..NavigationItem::default()
+            }]),
+            ..PageFooter::default()
+        };
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["navigation", "footer"], footer.to_config_value());
+        let index = Arc::new(ProjectIndex::new(vec![profile(
+            "docs.qmd",
+            "docs.html",
+            "Docs",
+        )]));
+        let (out, diags) = run_at_depth(meta, Some(index)).await;
+        let html = out
+            .get_path(&["rendered", "navigation", "footer"])
+            .unwrap()
+            .as_plain_text()
+            .unwrap();
+        assert!(
+            html.contains("src=\"../images/x.svg\""),
+            "item-text image must relativize from the depth-1 page; got: {}",
+            html
+        );
+        assert!(
+            html.contains("href=\"../docs.html\""),
+            "item-text .qmd link must resolve through the index; got: {}",
+            html
+        );
+        assert!(diags.is_empty(), "got diagnostics: {:?}", diags);
+    }
+
+    /// ~~Phase 3 test 42~~ — DELIBERATELY INVERTED by
+    /// bd-root-relative-paths-design-fc5pvkcv. The original test
+    /// pinned Text regions as pass-through on the theory that
+    /// "body-content link rewriting is Phase 6" — but Phase 6 walks
+    /// the AST body and never sees the footer HTML stashed in
+    /// metadata, so a `.qmd` link in a footer text region survived
+    /// into production output verbatim. Text-region links now resolve
+    /// exactly like Items-region hrefs.
+    ///
+    /// A bare *scalar* Text region (no parsed inlines) still passes
+    /// through: there are no Link nodes in a plain string.
+    #[tokio::test]
+    async fn footer_render_text_region_links_resolve_like_items() {
+        let footer = PageFooter {
+            center: FooterRegion::Text(inlines_cv(vec![footer_link("docs.qmd", "docs")])),
             ..PageFooter::default()
         };
         let mut meta = ConfigValue::default();
@@ -348,18 +597,83 @@ mod tests {
             .unwrap()
             .as_plain_text()
             .unwrap();
-        // The literal `docs.qmd` should still appear (rendered through
-        // the text-region emission path; markdown parsing is not
-        // Phase 3's job).
         assert!(
-            html.contains("docs.qmd"),
-            "text region should not be rewritten; got: {}",
+            html.contains("href=\"docs.html\""),
+            "text-region .qmd link must resolve to its output href; got: {}",
+            html
+        );
+        assert!(
+            !html.contains("docs.qmd\""),
+            "raw .qmd href must not survive; got: {}",
             html
         );
         assert!(
             diags.is_empty(),
             "text region rewrite should not emit diagnostics"
         );
+    }
+
+    /// Case C (bd-root-relative-paths-design-fc5pvkcv): a markdown
+    /// image in a footer Text region resolves page-relative — the
+    /// site-root form (`/images/x.svg`) and the bare project-root form
+    /// (`images/x.svg`) both emit `../images/x.svg` from a depth-1
+    /// page. This is the incentive-removal fix: config-declared
+    /// footer imagery no longer needs raw HTML.
+    #[tokio::test]
+    async fn footer_render_text_region_image_resolves_page_relative() {
+        let footer = PageFooter {
+            left: FooterRegion::Text(inlines_cv(vec![footer_image("/images/x.svg", "L")])),
+            center: FooterRegion::Text(inlines_cv(vec![footer_image("images/y.svg", "C")])),
+            ..PageFooter::default()
+        };
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["navigation", "footer"], footer.to_config_value());
+        let (out, diags) = run_at_depth(meta, None).await;
+        let html = out
+            .get_path(&["rendered", "navigation", "footer"])
+            .unwrap()
+            .as_plain_text()
+            .unwrap();
+        assert!(
+            html.contains("<img src=\"../images/x.svg\" alt=\"L\">"),
+            "site-root image must relativize from the depth-1 page; got: {}",
+            html
+        );
+        assert!(
+            html.contains("<img src=\"../images/y.svg\" alt=\"C\">"),
+            "project-root image must relativize identically; got: {}",
+            html
+        );
+        assert!(diags.is_empty(), "got diagnostics: {:?}", diags);
+    }
+
+    /// Text-region links relativize per page too: from a depth-1 page,
+    /// a `/index.qmd` (site-root) link resolves to `../index.html`.
+    #[tokio::test]
+    async fn footer_render_text_region_root_link_resolves_at_depth() {
+        let footer = PageFooter {
+            right: FooterRegion::Text(inlines_cv(vec![footer_link("/index.qmd", "root")])),
+            ..PageFooter::default()
+        };
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["navigation", "footer"], footer.to_config_value());
+        let index = Arc::new(ProjectIndex::new(vec![profile(
+            "index.qmd",
+            "index.html",
+            "Home",
+        )]));
+        let (out, diags) = run_at_depth(meta, Some(index)).await;
+        let html = out
+            .get_path(&["rendered", "navigation", "footer"])
+            .unwrap()
+            .as_plain_text()
+            .unwrap();
+        assert!(
+            html.contains("href=\"../index.html\""),
+            "site-root .qmd link must resolve page-relative; got: {}",
+            html
+        );
+        assert!(diags.is_empty(), "got diagnostics: {:?}", diags);
     }
 
     /// Phase 3 test 43 — unknown .qmd href in a footer item emits a
@@ -417,6 +731,103 @@ mod tests {
             .unwrap();
         assert!(html.contains("href=\"about.qmd\""));
         assert!(diags.is_empty());
+    }
+
+    // --- Phase 4 repo-actions footer copy + synthesis --------------
+
+    #[tokio::test]
+    async fn footer_actions_are_appended_to_a_configured_footer() {
+        // Same starting point as the existing `renders_footer_html`
+        // test (`footer_render.rs:386-392`): a configured footer whose
+        // center region already holds text.
+        let footer = PageFooter {
+            center: FooterRegion::Text(s("Copyright 2026")),
+            ..PageFooter::default()
+        };
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["navigation", "footer"], footer.to_config_value());
+        meta.insert_path(
+            &["rendered", "navigation", "footer-actions"],
+            s("<div class=\"toc-actions d-sm-block d-md-none\">ACTIONS</div>"),
+        );
+        let (meta, _) = run(meta).await;
+        let html = meta
+            .get_path(&["rendered", "navigation", "footer"])
+            .and_then(|v| v.as_plain_text())
+            .unwrap();
+        let center = html
+            .split("<div class=\"nav-footer-center\">")
+            .nth(1)
+            .unwrap();
+        assert!(center.contains("ACTIONS"));
+    }
+
+    /// Q1 synthesizes the whole footer chain purely to host the
+    /// small-screen copy (decision D-2).
+    #[tokio::test]
+    async fn footer_is_synthesized_when_only_actions_exist() {
+        let mut meta = config_map(vec![]);
+        meta.insert_path(
+            &["rendered", "navigation", "footer-actions"],
+            s("<div class=\"toc-actions\">ACTIONS</div>"),
+        );
+        let (meta, _) = run(meta).await;
+        let html = meta
+            .get_path(&["rendered", "navigation", "footer"])
+            .and_then(|v| v.as_plain_text())
+            .unwrap();
+        assert!(html.contains("<footer class=\"footer\""));
+        assert!(html.contains(
+            "<div class=\"nav-footer-center\"><div class=\"toc-actions\">ACTIONS</div></div>"
+        ));
+    }
+
+    /// Decision D-3: deliberate divergence — Q1 synthesizes a footer even
+    /// with `page-footer: false`. Top-level scope.
+    #[tokio::test]
+    async fn page_footer_false_suppresses_the_actions_copy() {
+        let mut meta = config_map(vec![("page-footer", b(false))]);
+        meta.insert_path(
+            &["rendered", "navigation", "footer-actions"],
+            s("<div class=\"toc-actions\">ACTIONS</div>"),
+        );
+        let (meta, _) = run(meta).await;
+        assert!(
+            meta.get_path(&["rendered", "navigation", "footer"])
+                .is_none()
+        );
+    }
+
+    /// The scope that the obvious implementation gets wrong (D-3).
+    /// `is_feature_disabled` reads the top level only, and website-scoped
+    /// `page-footer: false` reaches this transform as an *absent*
+    /// `navigation.footer` — indistinguishable from "no footer configured"
+    /// unless the synthesis branch checks the website scope itself.
+    #[tokio::test]
+    async fn website_scoped_page_footer_false_also_suppresses_the_copy() {
+        let mut meta = config_map(vec![(
+            "website",
+            config_map(vec![("page-footer", b(false))]),
+        )]);
+        meta.insert_path(
+            &["rendered", "navigation", "footer-actions"],
+            s("<div class=\"toc-actions\">ACTIONS</div>"),
+        );
+        let (meta, _) = run(meta).await;
+        assert!(
+            meta.get_path(&["rendered", "navigation", "footer"])
+                .is_none(),
+            "website.page-footer: false must not synthesize a footer"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_footer_and_no_actions_still_skips() {
+        let (meta, _) = run(config_map(vec![])).await;
+        assert!(
+            meta.get_path(&["rendered", "navigation", "footer"])
+                .is_none()
+        );
     }
 
     /// bd-swpy regression — footer item hrefs relativize to the

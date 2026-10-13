@@ -1,0 +1,405 @@
+/**
+ * Shared icon module — the single source for UI icons in hub-client.
+ *
+ * Contract:
+ * - Icons are **decorative**: every icon renders `aria-hidden="true"`.
+ *   Meaning is conveyed by the wrapping control's `aria-label` (icon-only
+ *   buttons) or by visible text next to the icon. Never give an icon its
+ *   own accessible name.
+ * - One visual style: 24×24 viewBox, `currentColor` stroke, stroke-width 2,
+ *   round caps/joins (the Lucide/Feather style already in use).
+ * - Sizes come from the `size` prop (default 16). Use 16 for toolbar/row
+ *   icons, 13 for compact list affordances, 12×10 layout glyphs are the
+ *   fixed-size exception (view-toggle and comments-mode pictograms).
+ * - Color is always `currentColor` — never hardcode a fill/stroke color;
+ *   the parent control's CSS owns color.
+ *
+ * When adding an icon: follow the style above, give it a doc comment
+ * naming the concept it represents, and render it in the DevHarness
+ * gallery (`#/dev/gallery`) so states are covered by visual baselines.
+ */
+
+import type { ReactNode } from 'react';
+
+export interface IconProps {
+  /** Width/height in px. Default 16. */
+  size?: number;
+}
+
+interface StrokeIconProps extends IconProps {
+  children: ReactNode;
+  /** Override stroke width (default 2). */
+  strokeWidth?: number;
+}
+
+/** Shared wrapper for the standard 24×24 stroke-icon style. */
+function StrokeIcon({ size = 16, strokeWidth = 2, children }: StrokeIconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** Document with a plus — "new file". */
+export function FilePlusIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+      <path d="M9 15h6" />
+      <path d="M12 12v6" />
+    </StrokeIcon>
+  );
+}
+
+/** Panel with a left section — "toggle sidebar". */
+export function PanelLeftIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+    </StrokeIcon>
+  );
+}
+
+/** Arrow rising out of a tray — "upload". */
+export function UploadIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </StrokeIcon>
+  );
+}
+
+/** Document with an arrow entering it — "import a document". */
+export function FileImportIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 2v6h6" />
+      <path d="M8 14h8" />
+      <path d="m13 11 3 3-3 3" />
+    </StrokeIcon>
+  );
+}
+
+/** Printer — "open printable version". */
+export function PrintIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <polyline points="6 9 6 2 18 2 18 9" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
+    </StrokeIcon>
+  );
+}
+
+/** Grid of four squares — "switch / all projects". */
+export function SwitchIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </StrokeIcon>
+  );
+}
+
+/** Connected nodes — "share". */
+export function ShareIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+      <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+    </StrokeIcon>
+  );
+}
+
+/** Outward corners — "fullscreen preview". */
+export function PreviewIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </StrokeIcon>
+  );
+}
+
+/** Three nodes with branch lines — "duplicate / fork". */
+export function ForkIcon({ size = 13 }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="18" cy="5" r="2.2" />
+      <circle cx="12" cy="19" r="2.2" />
+      <path d="M6 7.5v1.5c0 1.7 1.3 3 3 3h6c1.7 0 3-1.3 3-3V7.5M12 12v4.5" />
+    </StrokeIcon>
+  );
+}
+
+/** Magnifying glass — "peek / preview on hover". */
+export function PeekIcon({ size = 13 }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M15.5 15.5L21 21" />
+    </StrokeIcon>
+  );
+}
+
+/** Two people — "collection members". */
+export function PeopleIcon({ size = 12 }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="9" cy="8" r="3.4" />
+      <path d="M3 19c0-3 2.7-4.8 6-4.8s6 1.8 6 4.8" />
+      <circle cx="17" cy="9" r="2.6" />
+      <path d="M16.5 14.4c2.6.3 4.5 1.9 4.5 4.1" />
+    </StrokeIcon>
+  );
+}
+
+/** Opposing vertical arrows — "sort order". */
+export function SortIcon({ size = 13 }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M7 4v14M7 18l-3.5-3.5M7 18l3.5-3.5" />
+      <path d="M17 20V6M17 6l-3.5 3.5M17 6l3.5 3.5" />
+    </StrokeIcon>
+  );
+}
+
+/** Horizontal ellipsis — "more actions" (kebab/menu affordance). */
+export function MoreIcon({ size = 16 }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="5" cy="12" r="1" fill="currentColor" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" />
+      <circle cx="19" cy="12" r="1" fill="currentColor" />
+    </StrokeIcon>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* File-type icons (FileSidebar rows).                                */
+/* ------------------------------------------------------------------ */
+
+/** Outline paper sheet with the filled Quarto mark (four quadrant
+    slices, per public/quarto-icon.svg) in its body — .qmd/.md sources. */
+export function QmdFileIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+      <path d="M11.4 13.9 L11.4 10.1 A3.8 3.8 0 0 0 7.6 13.9 Z" fill="currentColor" stroke="none" />
+      <path d="M12.6 13.9 L16.4 13.9 A3.8 3.8 0 0 0 12.6 10.1 Z" fill="currentColor" stroke="none" />
+      <path d="M11.4 15.1 L7.6 15.1 A3.8 3.8 0 0 0 11.4 18.9 Z" fill="currentColor" stroke="none" />
+      <path d="M12.6 15.1 L12.6 18.9 A3.8 3.8 0 0 0 16.4 15.1 Z" fill="currentColor" stroke="none" />
+    </StrokeIcon>
+  );
+}
+
+/** Plain paper sheet — generic file. */
+export function FileTextIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+    </StrokeIcon>
+  );
+}
+
+/** Framed picture with sun and mountains — image files. */
+export function ImageFileIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+    </StrokeIcon>
+  );
+}
+
+/** Folder — file-tree directories. */
+export function FolderIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </StrokeIcon>
+  );
+}
+
+/** Folder with a plus — "new folder" action. */
+export function FolderPlusIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      <path d="M12 10v6" />
+      <path d="M9 13h6" />
+    </StrokeIcon>
+  );
+}
+
+/** Magnifying glass — search. */
+export function SearchIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
+    </StrokeIcon>
+  );
+}
+
+/** Chevron pointing down — dropdown triggers. */
+export function ChevronDownIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="m6 9 6 6 6-6" />
+    </StrokeIcon>
+  );
+}
+
+/** Arrow dropping into a tray — drop-target overlays. */
+export function DownloadIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </StrokeIcon>
+  );
+}
+
+/** Two overlapping sheets — "copy to clipboard". */
+export function CopyIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </StrokeIcon>
+  );
+}
+
+/** Check mark — "done" confirmation. */
+export function CheckIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <polyline points="20 6 9 17 4 12" />
+    </StrokeIcon>
+  );
+}
+
+/** Gear — config files (yaml/json). */
+export function GearIcon({ size }: IconProps) {
+  return (
+    <StrokeIcon size={size}>
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
+    </StrokeIcon>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout pictograms (fixed 12×10 viewBox) — view-toggle glyphs.      */
+/* ------------------------------------------------------------------ */
+
+interface LayoutGlyphProps {
+  children: ReactNode;
+}
+
+function LayoutGlyph({ children }: LayoutGlyphProps) {
+  return (
+    <svg width="12" height="10" viewBox="0 0 12 10" aria-hidden="true">
+      {children}
+    </svg>
+  );
+}
+
+/** Wide left pane, dim right pane — "expand markup". */
+export function LayoutMarkupIcon() {
+  return (
+    <LayoutGlyph>
+      <rect x="0.5" y="0.5" width="6" height="9" rx="1" fill="none" stroke="currentColor" />
+      <rect x="9.5" y="0.5" width="2" height="9" rx="1" fill="none" stroke="currentColor" opacity="0.35" />
+    </LayoutGlyph>
+  );
+}
+
+/** Two equal panes — "split equally". */
+export function LayoutSplitIcon() {
+  return (
+    <LayoutGlyph>
+      <rect x="0.5" y="0.5" width="4" height="9" rx="1" fill="none" stroke="currentColor" />
+      <rect x="7.5" y="0.5" width="4" height="9" rx="1" fill="none" stroke="currentColor" />
+    </LayoutGlyph>
+  );
+}
+
+/** Dim left pane, wide right pane — "expand preview". */
+export function LayoutPreviewIcon() {
+  return (
+    <LayoutGlyph>
+      <rect x="0.5" y="0.5" width="2" height="9" rx="1" fill="none" stroke="currentColor" opacity="0.35" />
+      <rect x="5.5" y="0.5" width="6" height="9" rx="1" fill="none" stroke="currentColor" />
+    </LayoutGlyph>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Comments-mode pictograms (fixed 12×10 viewBox) — replay drawer.    */
+/* ------------------------------------------------------------------ */
+
+/* Outline bubbles: geometry inset 0.5px so the 1px stroke stays inside
+   the 12×10 viewBox. */
+const BUBBLE_PATH =
+  'M1.5 0.5 H10.5 A1 1 0 0 1 11.5 1.5 V5.5 A1 1 0 0 1 10.5 6.5 H4.8 L2.5 8.8 V6.5 H1.5 A1 1 0 0 1 0.5 5.5 V1.5 A1 1 0 0 1 1.5 0.5 Z';
+const TALL_BUBBLE_PATH =
+  'M1.5 0.5 H10.5 A1 1 0 0 1 11.5 1.5 V7 A1 1 0 0 1 10.5 8 H4.8 L2.5 9.9 V8 H1.5 A1 1 0 0 1 0.5 7 V1.5 A1 1 0 0 1 1.5 0.5 Z';
+
+/** Tall comment bubble with a text divider — "expand all comments". */
+export function CommentsExpandIcon() {
+  return (
+    <LayoutGlyph>
+      <path d={TALL_BUBBLE_PATH} fill="none" stroke="currentColor" strokeLinejoin="round" />
+      <line x1="0.5" y1="4.25" x2="11.5" y2="4.25" stroke="currentColor" />
+    </LayoutGlyph>
+  );
+}
+
+/** Comment bubble — "show comment bubbles". */
+export function CommentsShowIcon() {
+  return (
+    <LayoutGlyph>
+      <path d={BUBBLE_PATH} fill="none" stroke="currentColor" strokeLinejoin="round" />
+    </LayoutGlyph>
+  );
+}
+
+/** Dim comment bubble with strike-through — "hide comment bubbles". */
+export function CommentsHideIcon() {
+  return (
+    <LayoutGlyph>
+      <path d={BUBBLE_PATH} fill="none" stroke="currentColor" strokeLinejoin="round" opacity="0.35" />
+      <line x1="1" y1="9" x2="11" y2="1" stroke="currentColor" strokeWidth="1.5" />
+    </LayoutGlyph>
+  );
+}

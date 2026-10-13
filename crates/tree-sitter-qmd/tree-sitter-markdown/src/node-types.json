@@ -607,6 +607,97 @@
     }
   },
   {
+    "type": "editorial_div",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "attribute_specifier",
+          "named": true
+        },
+        {
+          "type": "block_continuation",
+          "named": true
+        },
+        {
+          "type": "caption",
+          "named": true
+        },
+        {
+          "type": "delete_delimiter",
+          "named": true
+        },
+        {
+          "type": "edit_comment_delimiter",
+          "named": true
+        },
+        {
+          "type": "editorial_div",
+          "named": true
+        },
+        {
+          "type": "grid_table",
+          "named": true
+        },
+        {
+          "type": "highlight_delimiter",
+          "named": true
+        },
+        {
+          "type": "inline_ref_def",
+          "named": true
+        },
+        {
+          "type": "insert_delimiter",
+          "named": true
+        },
+        {
+          "type": "metadata",
+          "named": true
+        },
+        {
+          "type": "note_definition_fenced_block",
+          "named": true
+        },
+        {
+          "type": "pandoc_block_quote",
+          "named": true
+        },
+        {
+          "type": "pandoc_code_block",
+          "named": true
+        },
+        {
+          "type": "pandoc_div",
+          "named": true
+        },
+        {
+          "type": "pandoc_horizontal_rule",
+          "named": true
+        },
+        {
+          "type": "pandoc_list",
+          "named": true
+        },
+        {
+          "type": "pandoc_paragraph",
+          "named": true
+        },
+        {
+          "type": "pipe_table",
+          "named": true
+        },
+        {
+          "type": "section",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "highlight",
     "named": true,
     "fields": {},
@@ -916,6 +1007,10 @@
           "named": true
         },
         {
+          "type": "editorial_div",
+          "named": true
+        },
+        {
           "type": "grid_table",
           "named": true
         },
@@ -1029,6 +1124,32 @@
     "fields": {}
   },
   {
+    "type": "metadata",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "yaml",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "block_continuation",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "note_definition_fenced_block",
     "named": true,
     "fields": {},
@@ -1042,6 +1163,10 @@
         },
         {
           "type": "caption",
+          "named": true
+        },
+        {
+          "type": "editorial_div",
           "named": true
         },
         {
@@ -1117,6 +1242,10 @@
         },
         {
           "type": "caption",
+          "named": true
+        },
+        {
+          "type": "editorial_div",
           "named": true
         },
         {
@@ -1247,6 +1376,10 @@
         },
         {
           "type": "caption",
+          "named": true
+        },
+        {
+          "type": "editorial_div",
           "named": true
         },
         {
@@ -2542,6 +2675,10 @@
           "named": true
         },
         {
+          "type": "editorial_div",
+          "named": true
+        },
+        {
           "type": "grid_table",
           "named": true
         },
@@ -2909,10 +3046,6 @@
     "named": true
   },
   {
-    "type": "metadata",
-    "named": true
-  },
-  {
     "type": "numeric_character_reference",
     "named": true
   },
@@ -2978,6 +3111,10 @@
   },
   {
     "type": "task_list_marker_unchecked",
+    "named": true
+  },
+  {
+    "type": "yaml",
     "named": true
   },
   {

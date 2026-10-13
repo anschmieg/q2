@@ -16,6 +16,7 @@ import {
   touchProjectInSet,
   updateProjectSummaryInSet,
   setProjectSetName,
+  getProjectSetTombstones,
 } from './index.js';
 import type { ProjectSetDocument } from './index.js';
 
@@ -78,6 +79,70 @@ describe('ProjectSetDocument schema helpers', () => {
       });
 
       expect(result).toBe(false);
+    });
+
+    it('preserves a cached peek summary on the new entry (bd-fxdcxbpq)', () => {
+      // "Add to collection" copies an entry that may carry the sender's
+      // cached summary; dropping it here left collection entries with no
+      // file counts until the project was next opened, producing invite
+      // previews like "0 files" for a populated project.
+      const doc = emptyDoc();
+      const summary = {
+        fileCount: 12,
+        topFiles: ['report.qmd', 'data.csv'],
+        contributors: [{ name: 'Carlos', color: '#E91E63' }],
+        asOf: '2026-01-15T00:00:00.000Z',
+      };
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'My Project',
+        summary,
+      }, '2026-01-15T00:00:00.000Z');
+
+      expect(doc.projects['proj1'].summary).toEqual(summary);
+    });
+
+    it('adopts an incoming summary when the existing entry has none', () => {
+      const doc = emptyDoc();
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'My Project',
+      }, '2026-01-15T00:00:00.000Z');
+
+      const summary = { fileCount: 3, topFiles: ['a.qmd'], contributors: [], asOf: '2026-01-16T00:00:00.000Z' };
+      const result = addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'My Project',
+        summary,
+      });
+
+      expect(result).toBe(true);
+      expect(doc.projects['proj1'].summary).toEqual(summary);
+    });
+
+    it('does not clobber an existing summary on re-add (freshness is owned by updateProjectSummaryInSet)', () => {
+      const doc = emptyDoc();
+      const fresh = { fileCount: 12, topFiles: ['report.qmd'], contributors: [], asOf: '2026-01-16T00:00:00.000Z' };
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'My Project',
+        summary: fresh,
+      }, '2026-01-15T00:00:00.000Z');
+
+      const stale = { fileCount: 0, topFiles: [], contributors: [], asOf: '2026-01-01T00:00:00.000Z' };
+      const result = addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'My Project',
+        summary: stale,
+      });
+
+      expect(result).toBe(false);
+      expect(doc.projects['proj1'].summary).toEqual(fresh);
     });
 
     it('should update description if changed', () => {
@@ -168,6 +233,79 @@ describe('ProjectSetDocument schema helpers', () => {
       const result = removeProjectFromSet(doc, 'proj1');
       expect(result).toBe(true);
       expect(doc.projects['proj1']).toBeUndefined();
+    });
+  });
+
+  describe('tombstones', () => {
+    it('removeProjectFromSet records a deletion tombstone', () => {
+      const doc = emptyDoc();
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'To Remove',
+      });
+
+      const result = removeProjectFromSet(doc, 'automerge:proj1', '2026-08-21T10:00:00.000Z');
+
+      expect(result).toBe(true);
+      expect(doc.projects['proj1']).toBeUndefined();
+      expect(doc.tombstones).toEqual({ proj1: '2026-08-21T10:00:00.000Z' });
+      expect(getProjectSetTombstones(doc)).toEqual({ proj1: '2026-08-21T10:00:00.000Z' });
+    });
+
+    it('removeProjectFromSet of an absent project writes no tombstone', () => {
+      const doc = emptyDoc();
+
+      const result = removeProjectFromSet(doc, 'automerge:ghost');
+
+      expect(result).toBe(false);
+      expect(doc.tombstones).toBeUndefined();
+    });
+
+    it('addProjectToSet clears the tombstone — a re-add wins over the delete', () => {
+      const doc = emptyDoc();
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'Project',
+      });
+      removeProjectFromSet(doc, 'automerge:proj1', '2026-08-21T10:00:00.000Z');
+
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'Project',
+      });
+
+      expect(doc.projects['proj1']).toBeDefined();
+      expect(doc.tombstones).toEqual({});
+    });
+
+    it('addProjectToSet update path also clears a lingering tombstone', () => {
+      // Torn state after a concurrent add/delete merge: entry present AND
+      // tombstone present. The add heals it.
+      const doc = emptyDoc();
+      addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'Project',
+      });
+      doc.tombstones = { proj1: '2026-08-21T10:00:00.000Z' };
+
+      const result = addProjectToSet(doc, {
+        indexDocId: 'automerge:proj1',
+        syncServer: 'wss://sync.example.com',
+        description: 'Project',
+      });
+
+      expect(result).toBe(true); // clearing the tombstone counts as a change
+      expect(doc.tombstones).toEqual({});
+    });
+
+    it('getProjectSetTombstones returns {} for documents predating tombstones', () => {
+      const doc = emptyDoc();
+      expect(doc.tombstones).toBeUndefined();
+      expect(getProjectSetTombstones(doc)).toEqual({});
     });
   });
 

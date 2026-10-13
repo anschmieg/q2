@@ -11,25 +11,42 @@
 //! - `create-worktree`: Create git worktree with CLAUDE.local.md context stub
 //! - `braid-snapshot`: Write a backup-only `braid export` to `.braid/snapshot.jsonl`
 //! - `pandoc-check`: Check local pandoc against the pampa oracle tests
+//! - `render-corpus-diff`: Dev-only byte-identity corpus capture/diff harness
 //! - `test`: Run workspace tests with platform-appropriate crate exclusions
+//! - `ts-test`: Regenerate, build, and test a tree-sitter grammar with a per-checkout grammar cache
 //! - `verify`: Run full project verification (build + tests for Rust and hub-client)
 //! - `build-all`: Fresh-clone build orchestration (npm install + hub-client + Rust workspace)
 //! - `build-trace-viewer`: Build just the trace-viewer SPA
+//! - `build-hub-client-embed`: Build the hub-client editor bundle for `q2 preview --ui editor`
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
+//! - `build-engine-host-bundle`: Build the committed engine-host-deno.js bundle
+//! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
+//! - `pull-extension-subtree`: Sync vendored extension subtrees under `resources/extension-subtrees/`
 
 mod braid_snapshot;
+mod build_agents_docs;
 mod build_all;
+mod build_engine_host_bundle;
+mod build_hub_client_embed;
 mod build_hub_mcp_bundle;
 mod build_q2_preview_spa;
 mod build_trace_viewer;
+mod capture_import_recordings;
+mod capture_pandoc_goldens;
+mod capture_pandoc_recordings;
 mod create_worktree;
 mod dev_setup;
+mod gen_math_spec;
 mod lint;
+mod node_version;
 mod pandoc_check;
+mod pull_extension_subtree;
+mod render_corpus_diff;
 mod stage_doc_examples;
 mod switch_task;
 mod test;
+mod tree_sitter;
 mod treesitter_crlf;
 mod ts_packages;
 mod util;
@@ -48,7 +65,21 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum CaptureImportAction {
+    /// Rebuild each fixture's `source.<ext>` from `sources/` (run when a source changes).
+    Generate,
+}
+
+#[derive(Subcommand)]
 enum Command {
+    /// Regenerate crates/quarto-math/spec/commands.json from mitex's spec
+    /// dump plus spec/overrides.json (or verify it is current with --check).
+    GenMathSpec {
+        /// Only compare; exit non-zero when the committed file is stale.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Install required development tools.
     ///
     /// Checks for cargo-nextest and wasm-bindgen-cli (pinned version), installing any that are missing.
@@ -87,7 +118,7 @@ enum Command {
     /// The braid skein (CRDT) is the source of truth; this committed snapshot
     /// is for grep/diff/recovery only. It is STRICTLY ONE-DIRECTIONAL —
     /// never `braid import` it back, and on a git conflict regenerate rather
-    /// than hand-merge. See CLAUDE.md § Snapshot backup policy.
+    /// than hand-merge. See AGENTS.md § Snapshot backup policy.
     BraidSnapshot {},
 
     /// Switch the current worktree to a new sub-task branch (no new worktree).
@@ -135,10 +166,34 @@ enum Command {
         args: Vec<String>,
     },
 
+    /// Regenerate, build, and test a tree-sitter grammar in this checkout.
+    ///
+    /// Runs `tree-sitter generate`, `build`, and `test` in the grammar
+    /// directory with TREE_SITTER_LIBDIR pinned to
+    /// `<checkout>/target/tree-sitter-lib`, so the compiled grammar is never
+    /// shared with (or clobbered by) another checkout on this machine.
+    /// Extra arguments after `--` are forwarded to `tree-sitter test`
+    /// (e.g. `-- -i 'emphasis'`).
+    TsTest {
+        /// Which grammar to test.
+        #[arg(long, value_enum, default_value = "qmd")]
+        grammar: tree_sitter::Grammar,
+
+        /// Force `tree-sitter test` to recompile the grammar.
+        #[arg(long)]
+        rebuild: bool,
+
+        /// Extra arguments to pass to `tree-sitter test`.
+        #[arg(last = true)]
+        test_args: Vec<String>,
+    },
+
     /// Run full project verification (mirrors CI checks).
     ///
     /// This runs all build and test steps to ensure the entire project is healthy:
-    /// 1. Run custom lint checks (cargo xtask lint)
+    /// 0. Preflight: the `node` on PATH satisfies `engines.node` in package.json
+    ///    (fails early; override with Q2_ALLOW_NODE_MISMATCH=1 for experiments)
+    /// 1. Run custom lint checks (cargo xtask lint), hub-client lint:css, clippy
     /// 2. Check Rust formatting (cargo fmt --check)
     /// 3. Build all Rust crates (cargo build --workspace, with -D warnings)
     /// 4. Test tree-sitter grammars (tree-sitter test)
@@ -197,6 +252,17 @@ enum Command {
         #[arg(long)]
         skip_hub_mcp_tests: bool,
 
+        /// Skip the hub-client CSS lint (npm run lint:css). Independent of
+        /// --skip-hub-build: it runs in step 1 with the other fail-fast lints.
+        #[arg(long)]
+        skip_css_lint: bool,
+
+        /// Skip the strict claude-notes render (q2 render --strict
+        /// claude-notes) that runs right after the Rust build. Also skipped
+        /// by --skip-rust-build.
+        #[arg(long)]
+        skip_claude_notes_render: bool,
+
         /// Include hub-client e2e tests (slower, requires browser).
         #[arg(long)]
         e2e: bool,
@@ -217,6 +283,65 @@ enum Command {
     /// ceiling — the exact line in `test.rs` to bump. Never edits the file.
     PandocCheck {},
 
+    /// Dev-only `G`-tier capture of docx/pptx golden fixtures from a real,
+    /// pinned-release `quarto` (pandoc-hybrid epic, P7 Task 10).
+    ///
+    /// Requires a real `quarto` binary at exactly the pinned release
+    /// (`capture_pandoc_goldens::QUARTO_PINNED_VERSION`) on `PATH` — fails
+    /// loudly, never skips, if absent or at the wrong version. Renders each
+    /// fixture in `tests/fixtures/pandoc-goldens/` to docx and pptx,
+    /// extracts semantic content via `quarto-output-extract`, and writes the
+    /// result as a committed insta snapshot. Never invoked from `cargo
+    /// xtask verify` or CI.
+    CapturePandocGoldens {},
+
+    /// Dev-only capture of the exact inputs of real native pandoc runs
+    /// (pandoc.wasm epic, phase R0): renders each recording fixture to docx,
+    /// pptx, epub and typst with `QUARTO_PANDOC` set to
+    /// `scripts/pandoc-capture.sh`, then normalizes the captures into
+    /// `crates/quarto-core/tests/fixtures/pandoc-recordings/recordings/`.
+    /// Needs the pinned native pandoc on `PATH`. Unix only; never invoked
+    /// from `cargo xtask verify` or CI.
+    CapturePandocRecordings {},
+
+    /// Dev-only capture of native pandoc *reader* runs for document import
+    /// (plan P1 T2): runs the pinned pandoc over each checked-in
+    /// `source.<ext>` under `crates/quarto-core/tests/fixtures/import-recordings/`
+    /// with the import argv and writes `argv.json`, `pandoc.json`, `stderr.txt`,
+    /// `status.json`, `media/` and `manifest.json` beside it. `generate` first
+    /// rebuilds the binary sources from `sources/`. Needs the pinned native
+    /// pandoc on `PATH`. Unix only; never invoked from `cargo xtask verify` or CI.
+    CaptureImportRecordings {
+        #[command(subcommand)]
+        action: Option<CaptureImportAction>,
+    },
+
+    /// Byte-diff a rendered corpus between `--base <commit>` and `HEAD`.
+    ///
+    /// Dev-only, local-only (Tier `G`): builds two real `q2` binaries (one
+    /// from a throwaway detached worktree of `--base`, one from this
+    /// worktree's `HEAD`), renders `--corpus` (default `docs`) with each,
+    /// and byte-diffs the two output trees. Written for the pandoc-hybrid
+    /// epic's P1 no-regression bar (Task 8) but not specific to it. Never
+    /// run from `cargo xtask verify` or CI.
+    RenderCorpusDiff {
+        /// Commit-ish to check out into a throwaway worktree and compare
+        /// against HEAD.
+        #[arg(long)]
+        base: String,
+
+        /// Corpus to render, relative to the repo root.
+        #[arg(long, default_value = "docs")]
+        corpus: String,
+
+        /// Keep the capture directories (and, on a clean run, the
+        /// throwaway `--base` worktree) instead of cleaning them up. A
+        /// failing run always leaves its captures behind regardless of
+        /// this flag.
+        #[arg(long)]
+        keep: bool,
+    },
+
     /// Stage doc-example projects into the docs site for `.embed-example-iframe`.
     ///
     /// Renders each project listed in `examples/manifest.yml` with `q2` and
@@ -233,12 +358,52 @@ enum Command {
     /// build -p quarto-trace-server` (via `include_dir!`).
     BuildTraceViewer {},
 
+    /// Sync configured vendored extension subtrees (port of Q1's hidden
+    /// `pull-git-subtree` dev command).
+    ///
+    /// Fetches each subtree's remote and reconciles it into
+    /// `resources/extension-subtrees/<name>/`: `git subtree add --squash`
+    /// if no prior split is recorded, `git subtree pull --squash` if
+    /// upstream has new commits, otherwise a no-op.
+    ///
+    /// Dev/test seams: `QUARTO_SUBTREE_ROOT` operates on a repo other than
+    /// the real one, `--table` replaces the built-in subtree list with a
+    /// JSON file.
+    PullExtensionSubtree {
+        /// Name of the subtree to pull. Omit or pass `all` to pull every
+        /// configured subtree.
+        name: Option<String>,
+
+        /// Dev/test seam: replace the built-in subtree table with this
+        /// JSON file's contents.
+        #[arg(long)]
+        table: Option<std::path::PathBuf>,
+    },
+
+    /// Stage the docs-site llms.txt artifacts for `q2 docs llms`.
+    ///
+    /// Renders `docs/` and copies the llms-txt output (index, per-page
+    /// `.md` companions, llms-full.txt) into `agents-docs-dist/`, which
+    /// is generated and gitignored — regenerate with this command; never
+    /// commit it. The tree is picked up on the next `cargo build --bin
+    /// q2` (via `include_dir!`); without it the binary embeds a
+    /// placeholder. See bd-hwop1zii.
+    BuildAgentsDocs {},
+
     /// Build just the q2-preview SPA.
     ///
     /// Faster than `build-all` when only the SPA source has changed. The
     /// resulting `q2-preview-spa/dist/` is picked up on the next `cargo
     /// build -p quarto-preview` (via `include_dir!`).
     BuildQ2PreviewSpa {},
+
+    /// Build the hub-client editor bundle for `q2 preview --ui editor`.
+    ///
+    /// Produces `hub-client/dist-preview-embed/` (auth off, sync server
+    /// pinned to the relative `/ws`, PWA disabled) — picked up on the
+    /// next `cargo build -p quarto-preview` (via `include_dir!`, with
+    /// viewer-dist-identical files stripped at embed time).
+    BuildHubClientEmbed {},
 
     /// Build the self-contained hub MCP server bundle.
     ///
@@ -247,6 +412,15 @@ enum Command {
     /// build` does NOT refresh it; run this after changing
     /// quarto-hub-mcp / quarto-sync-client / quarto-automerge-schema.
     BuildHubMcpBundle {},
+
+    /// Build the committed engine-host-deno.js bundle (Plan 1b).
+    ///
+    /// Produces `ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js`
+    /// (esbuild, ESM, Deno-ready) — the artifact `quarto-core` embeds via
+    /// `include_str!` in `engine/ts_process.rs`. A plain `cargo build`
+    /// does NOT refresh it; run this after changing `quarto-engine-host-deno`,
+    /// `@quarto/api`, or `@quarto/types` sources.
+    BuildEngineHostBundle {},
 
     /// Fresh-clone build orchestration.
     ///
@@ -259,7 +433,8 @@ enum Command {
     /// 4. trace-viewer build (if present; Phase 4.3+)
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
-    /// 7. cargo build --workspace
+    /// 7. engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
+    /// 8. cargo build --workspace
     BuildAll {
         /// Skip `npm install`.
         #[arg(long)]
@@ -285,9 +460,17 @@ enum Command {
         #[arg(long)]
         skip_hub_mcp_bundle: bool,
 
+        /// Skip the engine-host-deno bundle build.
+        #[arg(long)]
+        skip_engine_host_bundle: bool,
+
         /// Skip the Rust workspace build.
         #[arg(long)]
         skip_rust_build: bool,
+
+        /// Skip staging + embedding the docs for `q2 docs llms`.
+        #[arg(long)]
+        skip_agents_docs: bool,
 
         /// Pass `--release` to `cargo build`.
         #[arg(long)]
@@ -300,6 +483,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::DevSetup {} => dev_setup::run(),
+        Command::GenMathSpec { check } => gen_math_spec::run(check),
         Command::Lint { verbose, quiet } => {
             let config = lint::LintConfig { verbose, quiet };
             lint::run(&config)
@@ -328,6 +512,15 @@ fn main() -> Result<()> {
             };
             test::run(&args, rustflags)
         }
+        Command::TsTest {
+            grammar,
+            rebuild,
+            test_args,
+        } => tree_sitter::run_ts_test(tree_sitter::TsTestArgs {
+            grammar,
+            rebuild,
+            test_args,
+        }),
         Command::Verify {
             skip_rust_build,
             skip_rust_tests,
@@ -341,6 +534,8 @@ fn main() -> Result<()> {
             skip_shared_package_tests,
             skip_q2_preview_spa_build,
             skip_hub_mcp_tests,
+            skip_css_lint,
+            skip_claude_notes_render,
             e2e,
             no_deny_warnings,
         } => {
@@ -357,16 +552,32 @@ fn main() -> Result<()> {
                 skip_shared_package_tests,
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_tests,
+                skip_css_lint,
+                skip_claude_notes_render,
                 include_e2e: e2e,
                 no_deny_warnings,
             };
             verify::run(&config)
         }
         Command::PandocCheck {} => pandoc_check::run(),
+        Command::CapturePandocGoldens {} => capture_pandoc_goldens::run(),
+        Command::CapturePandocRecordings {} => capture_pandoc_recordings::run(),
+        Command::CaptureImportRecordings { action } => {
+            capture_import_recordings::run(matches!(action, Some(CaptureImportAction::Generate)))
+        }
+        Command::RenderCorpusDiff { base, corpus, keep } => {
+            render_corpus_diff::run(render_corpus_diff::Args { base, corpus, keep })
+        }
+        Command::BuildAgentsDocs {} => build_agents_docs::run(),
         Command::StageDocExamples {} => stage_doc_examples::run(),
         Command::BuildTraceViewer {} => build_trace_viewer::run(),
+        Command::PullExtensionSubtree { name, table } => {
+            pull_extension_subtree::run(pull_extension_subtree::Args { name, table })
+        }
         Command::BuildQ2PreviewSpa {} => build_q2_preview_spa::run(),
+        Command::BuildHubClientEmbed {} => build_hub_client_embed::run(),
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
+        Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
         Command::BuildAll {
             skip_npm_install,
             skip_ts_packages_build,
@@ -374,16 +585,20 @@ fn main() -> Result<()> {
             skip_trace_viewer_build,
             skip_q2_preview_spa_build,
             skip_hub_mcp_bundle,
+            skip_engine_host_bundle,
             skip_rust_build,
+            skip_agents_docs,
             release,
         } => {
             let config = build_all::BuildAllConfig {
+                skip_agents_docs,
                 skip_npm_install,
                 skip_ts_packages_build,
                 skip_hub_build,
                 skip_trace_viewer_build,
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_bundle,
+                skip_engine_host_bundle,
                 skip_rust_build,
                 release,
             };

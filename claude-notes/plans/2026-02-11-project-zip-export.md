@@ -1,4 +1,8 @@
-# Project ZIP Export
+---
+title: 'Project ZIP Export'
+date: 2026-02-11
+description: 'Adds an Export ZIP action that packages all project files into a ZIP archive using `fflate`, exposed as a library function in `quarto-sync-client` and triggered as a browser download from hub-client.'
+---
 
 ## Overview
 
@@ -17,9 +21,9 @@ This allows users working in hub-client to export their projects and render/publ
 
 We need a JavaScript ZIP library that works in the browser. Options:
 
-- **fflate** (~29KB gzip) — Fast, modern, tree-shakeable, zero-dependency. Supports streaming compression. Well-maintained.
-- **JSZip** (~40KB gzip) — Widely used, Promise-based API. Heavier, older architecture.
-- **client-zip** (~5KB) — Minimal, uses Streams API. Limited features.
+- **fflate** (\~29KB gzip) — Fast, modern, tree-shakeable, zero-dependency. Supports streaming compression. Well-maintained.
+- **JSZip** (\~40KB gzip) — Widely used, Promise-based API. Heavier, older architecture.
+- **client-zip** (\~5KB) — Minimal, uses Streams API. Limited features.
 
 **Recommendation: fflate.** It's the fastest, has good tree-shaking (we only import what we need), zero dependencies, and works in both browser and Node.js contexts (good for quarto-sync-client being environment-agnostic).
 

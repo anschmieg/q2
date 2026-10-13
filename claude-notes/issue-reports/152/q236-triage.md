@@ -3,7 +3,7 @@
 - **GitHub:** https://github.com/quarto-dev/q2/issues/152
 - **Reporter:** @rundel (Colin Rundel), 2026-05-03 (first half closed via PR #154; this triage covers the second half flagged in the 2026-05-04 comment)
 - **Triage date:** 2026-05-14
-- **Worktree:** `.worktrees/issue-152` (branch `issue-152`, based on `bugfix/issue-184` @ `e2d224f6`)
+- **Worktree:** `.worktrees/issue-152` (branch `issue-152`, based on `bugfix/issue-184` \@ `e2d224f6`)
 - **Beads issue:** bd-XXXX (filed alongside this triage; see Outcome)
 - **Scope:** the *chunk-options* half of issue #152. The earlier table-captions half lives in `triage.md` / `repro.qmd` / `exp-*.qmd` in this directory (closed via #154). All Q-2-36 fixtures and docs use a `q236-` prefix to keep the two record-sets visually distinct.
 
@@ -13,7 +13,7 @@ Old-style knitr chunk headers (`{r echo=FALSE}`, `{r test}`, `{r, label="foo"}`,
 
 Reproduced all three behavioral classes at HEAD; the work crosses the **existing Q-2-8 warning site** in `crates/pampa/src/pandoc/treesitter.rs` and the **Merr error table** in `crates/pampa/resources/error-corpus/`. **No scanner change is required**, contrary to the Q-2-35 template originally suggested as the model. See *Approach* below.
 
-## Reproduction at HEAD (`bugfix/issue-184` @ `e2d224f6`)
+## Reproduction at HEAD (`bugfix/issue-184` \@ `e2d224f6`)
 
 All inputs share the same body (`1+1`) so any visible error is header-shaped. Fixtures: `q236-repro.qmd` (the reporter's exact case) and `q236-repro-variants.qmd` (all seven knitr forms + one Pandoc-form negative control).
 
@@ -140,5 +140,5 @@ cargo run --bin pampa -- -v /tmp/q236-bare.qmd 2>&1 | head -40
 
 - bd-7l1u — Q-2-35 (issue #184). Cited as template by the user; in practice Q-2-36 diverges (see *Approach*). Still the right reference for error-corpus mechanics, Merr `(state, sym)` mapping, and `widen_diagnostic_to_line` usage.
 - bd-f3pl — Q-2-152-tables (closed via #154). The first half of issue #152.
-- `crates/pampa/CLAUDE.md` — error-corpus authoring conventions.
+- `crates/pampa/AGENTS.md` — error-corpus authoring conventions.
 - `crates/tree-sitter-qmd/tree-sitter-markdown/CONTRIBUTING.md` — Known Limitations entries (precedent: Q-2-32 / Q-2-35).

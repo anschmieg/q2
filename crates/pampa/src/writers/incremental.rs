@@ -159,10 +159,60 @@ fn coarsen(
     for (result_idx, alignment) in plan.block_alignments.iter().enumerate() {
         let entry = match alignment {
             BlockAlignment::KeepBefore(orig_idx) => {
-                let span = block_source_span(&original_ast.blocks[*orig_idx]);
-                CoarsenedEntry::Verbatim {
-                    byte_range: span,
-                    orig_idx: *orig_idx,
+                // A kept block is Verbatim-copied out of `original_qmd`, so
+                // this arm needs the block's bytes — but `preimage_in` cannot
+                // promise them. A `Some(hull)` is an **offset claim, not a
+                // byte-identity claim**: for a contiguous `Concat` the hull's
+                // source run and the node's content run can have equal length
+                // and different bytes (a 1→1 fold), and no length or
+                // contiguity check can tell (quarto-source-map 0.1.3,
+                // `source_info.rs:410-425`). The `.get()` below therefore
+                // checks **bounds, not identity** — it only keeps a
+                // reversed or out-of-range slice from panicking.
+                //
+                // What makes this arm correct is the *baseline*, not the
+                // accessor: `original_ast` is always an untransformed,
+                // parent-less parse of `original_qmd` itself, so every body
+                // node is a plain `Original` in the target file and the hull
+                // is byte-identical after all. Both production callers supply
+                // that shape, but only one of them is **pinned by a test**:
+                //
+                // - **Pinned.** `apply_node_edit`
+                //   (`pampa/src/apply_node_edit.rs:120`) consumes
+                //   `capture_untransformed_ast_json`'s output, and that
+                //   artifact's pool shape is asserted by
+                //   `preview_untransformed_baseline_body_pool_is_all_original_own_file`
+                //   in `quarto-core/src/pipeline.rs`. This path inherits the
+                //   guard from the producer.
+                // - **Argued, not pinned.** `incremental_write_qmd`
+                //   (`wasm-quarto-hub-client/src/lib.rs:2952`) reaches its own
+                //   `qmd_to_pandoc(original_qmd.as_bytes())` on raw bytes. The
+                //   invariant is analogous — a fresh, parent-less parse of the
+                //   very text being sliced — but no test exercises it. If you
+                //   change that call, nothing will fail.
+                //
+                // The same split applies to the two sibling copy sites at
+                // `assemble_inline_content` and `assemble_recursed_container`
+                // below: all three arms sit on both paths.
+                //
+                // `preimage_in` still returns `None` for foreign provenance
+                // (include-spliced blocks) and gappy `Concat` spans; the old
+                // raw `start_offset()..end_offset()` fallback sliced
+                // `original_qmd` at the foreign file's offsets (bd-f6h40a9r).
+                // Rewrite such blocks instead.
+                match original_ast.blocks[*orig_idx]
+                    .source_info()
+                    .preimage_in(target_file_id)
+                {
+                    Some(span) if original_qmd.get(span.clone()).is_some() => {
+                        CoarsenedEntry::Verbatim {
+                            byte_range: span,
+                            orig_idx: *orig_idx,
+                        }
+                    }
+                    _ => CoarsenedEntry::Rewrite {
+                        new_idx: result_idx,
+                    },
                 }
             }
             BlockAlignment::UseAfter(_after_idx) => CoarsenedEntry::Rewrite {
@@ -253,6 +303,7 @@ fn assemble(
     new_ast: &Pandoc,
     coarsened: &[CoarsenedEntry],
 ) -> Result<String, Vec<quarto_error_reporting::DiagnosticMessage>> {
+    let target_file_id = derive_target_file_id(&original_ast.blocks);
     let mut result = String::new();
 
     // 2a. Metadata prefix
@@ -275,6 +326,7 @@ fn assemble(
                 prev_entry,
                 entry,
                 prev_block_text.as_deref(),
+                target_file_id,
             );
             result.push_str(separator);
         }
@@ -379,6 +431,7 @@ fn compute_separator<'a>(
     prev_entry: Option<&CoarsenedEntry>,
     curr_entry: &CoarsenedEntry,
     prev_block_text: Option<&str>,
+    target_file_id: FileId,
 ) -> &'a str {
     // Try to use original gap for consecutive blocks that preserve original positions
     let prev_orig_idx = match prev_entry {
@@ -393,11 +446,20 @@ fn compute_separator<'a>(
     };
     if let (Some(prev_idx), Some(curr_idx)) = (prev_orig_idx, curr_orig_idx)
         && curr_idx == prev_idx + 1
+        // Consecutive in original — use the original gap, but only when both
+        // block spans have a real preimage in the target file and the gap is
+        // well-formed. Raw offsets on foreign/Concat provenance sliced
+        // arbitrary bytes here (bd-f6h40a9r).
+        && let Some(prev_span) = original_ast.blocks[prev_idx]
+            .source_info()
+            .preimage_in(target_file_id)
+        && let Some(curr_span) = original_ast.blocks[curr_idx]
+            .source_info()
+            .preimage_in(target_file_id)
+        && prev_span.end <= curr_span.start
+        && let Some(gap) = original_qmd.get(prev_span.end..curr_span.start)
     {
-        // Consecutive in original — use original gap
-        let prev_span = block_source_span(&original_ast.blocks[prev_idx]);
-        let curr_span = block_source_span(&original_ast.blocks[curr_idx]);
-        return &original_qmd[prev_span.end..curr_span.start];
+        return gap;
     }
 
     // Standard separator — but check if previous block already ends with \n\n
@@ -467,6 +529,24 @@ fn ensure_trailing_newline<'a>(
 }
 
 /// Extract the byte range (start..end) from a Block's source_info.
+///
+/// **Violates the accessor rule, and is latent for the same reason the
+/// byte-copy arms are.** `start_offset()`/`end_offset()` are the pair that is
+/// *silently wrong* on a `Concat`: they report `0` and the content length,
+/// never the source hull. The failure here is worse than a wrong offset — the
+/// sole caller (`assemble`, at the `first_block_start` computation) tests
+/// `start > 0` to decide whether a front-matter region exists, so a `Concat`
+/// first block yields `0`, the branch is skipped, and **the front matter is
+/// silently dropped** from the incremental output.
+///
+/// It cannot happen today: every production `original_ast` is an
+/// untransformed, parent-less parse whose body is all `Original` — the
+/// invariant pinned by
+/// `preview_untransformed_baseline_body_pool_is_all_original_own_file` in
+/// `quarto-core/src/pipeline.rs`. Recorded rather than fixed: the fix returns
+/// `Option` and threads it through callers, which is outside Phase 1's
+/// guard-not-fix mandate. See Plan 3 § Evidence → Phase 1 ("Two accessor-rule
+/// violations, recorded not fixed") and the strand linked there.
 fn block_source_span(block: &Block) -> Range<usize> {
     let si = block.source_info();
     si.start_offset()..si.end_offset()
@@ -525,7 +605,9 @@ fn config_value_content_eq(a: &ConfigValue, b: &ConfigValue) -> bool {
 /// Compare two ConfigValueKind values for content equality.
 fn config_value_kind_content_eq(a: &ConfigValueKind, b: &ConfigValueKind) -> bool {
     match (a, b) {
-        (ConfigValueKind::Scalar(a), ConfigValueKind::Scalar(b)) => a == b,
+        (ConfigValueKind::Scalar { yaml: a, .. }, ConfigValueKind::Scalar { yaml: b, .. }) => {
+            a == b
+        }
         (ConfigValueKind::PandocInlines(a), ConfigValueKind::PandocInlines(b)) => {
             structural_eq_inlines(a, b)
         }
@@ -667,14 +749,19 @@ fn assemble_inline_splice(
         return Ok(None);
     };
 
-    // Assemble the new inline content
-    let inline_content = assemble_inline_content(
+    // Assemble the new inline content. `None` means some kept inline (or
+    // container boundary) has no usable preimage in the target file — the
+    // whole block falls back to re-serialization.
+    let Some(inline_content) = assemble_inline_content(
         original_qmd,
         orig_inlines,
         new_inlines,
         plan,
         target_file_id,
-    )?;
+    )?
+    else {
+        return Ok(None);
+    };
 
     Ok(Some(format!("{}{}{}", prefix, inline_content, suffix)))
 }
@@ -685,27 +772,55 @@ fn assemble_inline_splice(
 /// - KeepBefore: copying the original inline's bytes verbatim
 /// - UseAfter: writing the new inline to a string
 /// - RecurseIntoContainer: preserving delimiters, recursing into children
+///
+/// Returns `Ok(None)` when some kept inline or container boundary has no
+/// usable byte preimage in the target file — foreign provenance
+/// (include-spliced nodes), gappy Concats, or synthetic nodes. The caller
+/// must then fall back to re-serializing the whole block; slicing
+/// `original_qmd` at a foreign file's offsets copied wrong bytes or
+/// panicked (bd-f6h40a9r).
 fn assemble_inline_content(
     original_qmd: &str,
     orig_inlines: &[Inline],
     new_inlines: &[Inline],
     plan: &InlineReconciliationPlan,
     target_file_id: FileId,
-) -> Result<String, Vec<quarto_error_reporting::DiagnosticMessage>> {
+) -> Result<Option<String>, Vec<quarto_error_reporting::DiagnosticMessage>> {
     let mut result = String::new();
 
     for (result_idx, alignment) in plan.inline_alignments.iter().enumerate() {
         match alignment {
             InlineAlignment::KeepBefore(orig_idx) => {
-                // Use preimage_in so Concat/Generated inlines (which return the
-                // sentinel 0 from start_offset()/end_offset()) copy the correct
-                // byte hull rather than an empty slice. Falls back to
-                // inline_source_span for Original inlines (identical bytes).
-                let range = orig_inlines[*orig_idx]
+                // Copy site — the inline analogue of the `KeepBefore` block
+                // arm in `coarsen`: the resolved range's bytes are emitted as
+                // this inline's text.
+                //
+                // `preimage_in` gives a *position*, not an identity. It
+                // returns `None` for provenance in another file, for a gappy
+                // `Concat`, and for a `Substring` over a `Concat` — all cases
+                // where the splice cannot proceed, so we bail. What it does
+                // NOT do is certify that the bytes at a `Some(_)` range are
+                // this inline's content: for a contiguous `Concat` the hull is
+                // an offset claim only. (It is still the right accessor here —
+                // `start_offset()`/`end_offset()` report the sentinel 0 for a
+                // `Concat`-led inline, e.g. `Str "Table:"` parsing as
+                // `Concat[Original "Table" ++ Original ":"]`.)
+                //
+                // So this arm is safe only because the baseline is
+                // untransformed and parent-less — pinned by a test on the
+                // `apply_node_edit` path, argued but unpinned on the
+                // `incremental_write_qmd` path. See the long note at that
+                // block arm.
+                let Some(range) = orig_inlines[*orig_idx]
                     .source_info()
                     .preimage_in(target_file_id)
-                    .unwrap_or_else(|| inline_source_span(&orig_inlines[*orig_idx]));
-                result.push_str(&original_qmd[range]);
+                else {
+                    return Ok(None);
+                };
+                let Some(text) = original_qmd.get(range) else {
+                    return Ok(None);
+                };
+                result.push_str(text);
             }
             InlineAlignment::UseAfter(after_idx) => {
                 let text = write_inline_to_string(&new_inlines[*after_idx])?;
@@ -715,38 +830,55 @@ fn assemble_inline_content(
                 before_idx,
                 after_idx,
             } => {
-                let text = assemble_recursed_container(
+                let Some(text) = assemble_recursed_container(
                     original_qmd,
                     &orig_inlines[*before_idx],
                     &new_inlines[*after_idx],
                     plan.inline_container_plans.get(&result_idx),
                     target_file_id,
-                )?;
+                )?
+                else {
+                    return Ok(None);
+                };
                 result.push_str(&text);
             }
         }
     }
 
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// Assemble the text for a recursed container inline.
 ///
 /// Preserves the container's delimiters from the original source and
 /// recursively assembles the children from the nested plan.
+///
+/// Returns `Ok(None)` when the container or its boundary children have no
+/// usable byte preimage in the target file (foreign provenance, gappy
+/// Concat, synthetic nodes) — the caller falls back to re-serializing the
+/// whole block. The old raw-offset spans sliced `original_qmd` at another
+/// file's coordinates (bd-f6h40a9r).
 fn assemble_recursed_container(
     original_qmd: &str,
     orig_inline: &Inline,
     new_inline: &Inline,
     nested_plan: Option<&InlineReconciliationPlan>,
     target_file_id: FileId,
-) -> Result<String, Vec<quarto_error_reporting::DiagnosticMessage>> {
-    let orig_span = inline_source_span(orig_inline);
+) -> Result<Option<String>, Vec<quarto_error_reporting::DiagnosticMessage>> {
+    let Some(orig_span) = orig_inline.source_info().preimage_in(target_file_id) else {
+        return Ok(None);
+    };
 
     let Some(plan) = nested_plan else {
         // No nested plan — container content is structurally identical.
         // Keep the original container bytes verbatim.
-        return Ok(original_qmd[orig_span].to_string());
+        //
+        // Copy site (third of three, with the `KeepBefore` arms in `coarsen`
+        // and `assemble_inline_content`): here and at the `orig_children`
+        // early return below, `orig_span`'s bytes are emitted as the
+        // container's text. Same reasoning, and the same pinned/argued split
+        // by caller — see the long note at `coarsen`'s block arm.
+        return Ok(original_qmd.get(orig_span).map(str::to_string));
     };
 
     let orig_children = inline_children(orig_inline);
@@ -754,27 +886,49 @@ fn assemble_recursed_container(
 
     if orig_children.is_empty() {
         // No children to recurse into — keep original verbatim
-        return Ok(original_qmd[orig_span].to_string());
+        return Ok(original_qmd.get(orig_span).map(str::to_string));
     }
 
-    // Opening delimiter: bytes from container start to first child start
-    let first_child_start = inline_source_span(&orig_children[0]).start;
-    let opening = &original_qmd[orig_span.start..first_child_start];
-
-    // Closing delimiter: bytes from last child end to container end
-    let last_child_end = inline_source_span(orig_children.last().unwrap()).end;
-    let closing = &original_qmd[last_child_end..orig_span.end];
+    // Delimiters: bytes from container start to first child start, and from
+    // last child end to container end — both derived from preimages, with
+    // ordering guarded so a stray provenance can never produce a reversed
+    // slice.
+    let (Some(first_range), Some(last_range)) = (
+        orig_children[0].source_info().preimage_in(target_file_id),
+        orig_children
+            .last()
+            .unwrap()
+            .source_info()
+            .preimage_in(target_file_id),
+    ) else {
+        return Ok(None);
+    };
+    if orig_span.start > first_range.start
+        || last_range.end > orig_span.end
+        || first_range.start > last_range.end
+    {
+        return Ok(None);
+    }
+    let (Some(opening), Some(closing)) = (
+        original_qmd.get(orig_span.start..first_range.start),
+        original_qmd.get(last_range.end..orig_span.end),
+    ) else {
+        return Ok(None);
+    };
 
     // Recursively assemble children
-    let children_text = assemble_inline_content(
+    let Some(children_text) = assemble_inline_content(
         original_qmd,
         orig_children,
         new_children,
         plan,
         target_file_id,
-    )?;
+    )?
+    else {
+        return Ok(None);
+    };
 
-    Ok(format!("{}{}{}", opening, children_text, closing))
+    Ok(Some(format!("{}{}{}", opening, children_text, closing)))
 }
 
 // =============================================================================
@@ -868,6 +1022,14 @@ pub fn inline_children(inline: &Inline) -> &[Inline] {
 }
 
 /// Extract the byte range (start..end) from an Inline's source_info.
+///
+/// **Violates the accessor rule** in the same way as [`block_source_span`]:
+/// `start_offset()`/`end_offset()` are silently wrong on a `Concat`, reporting
+/// `0` and the content length rather than the source hull. Unlike that
+/// function this one has **no production caller** — it is `pub` and reached
+/// only from `tests/integration/inline_splice_safety_tests.rs` — so nothing
+/// currently inherits the risk. Use `preimage_in(target)` if you revive it.
+/// See Plan 3 § Evidence → Phase 1 and the strand linked there.
 pub fn inline_source_span(inline: &Inline) -> Range<usize> {
     let si = inline.source_info();
     si.start_offset()..si.end_offset()
@@ -1230,7 +1392,7 @@ fn audit_custom_node(
                     check_containment(par, child, "CustomNode.slot.Inline", findings);
                 }
                 if let Some(ref r) = child_range {
-                    check_tightness(inline_node_type(i), r, src, findings);
+                    check_tightness(inline_node_type(i), r, src, inline_own_text(i), findings);
                 }
                 audit_inline_node_children(i, child_range, target, src, findings);
             }
@@ -1285,7 +1447,13 @@ fn audit_inline_siblings(
             continue;
         }
         if let Some(ref r) = inline.source_info().preimage_in(target) {
-            check_tightness(inline_node_type(inline), r, src, findings);
+            check_tightness(
+                inline_node_type(inline),
+                r,
+                src,
+                inline_own_text(inline),
+                findings,
+            );
         }
     }
 
@@ -1486,7 +1654,8 @@ fn audit_attr_source(
             let Some(range) = si.preimage_in(target) else {
                 continue;
             };
-            check_tightness(label, &range, src, findings);
+            // `None`: an attr key/value must never retain boundary whitespace.
+            check_tightness(label, &range, src, None, findings);
             if let Some(ref par) = parent_range {
                 check_containment(par, &range, label, findings);
             }
@@ -1558,7 +1727,7 @@ fn classify_none_preimage(
     findings: &mut Vec<TilingFinding>,
 ) {
     match si {
-        SourceInfo::Generated { .. } if si.invocation_anchor().is_none() => {
+        SourceInfo::Generated(_) if si.invocation_anchor().is_none() => {
             findings.push(TilingFinding {
                 kind: TilingFindingKind::GeneratedNoInvocation,
                 message: format!("GeneratedNoInvocation: `{node_type}` has no Invocation anchor"),
@@ -1687,35 +1856,102 @@ fn check_containment(
 ///
 /// Inline level only. Newlines at boundaries are **not** violations
 /// (decided 2026-06-03 round-2 review). Empty ranges are vacuously tight.
+/// Count of U+00A0 (NO-BREAK SPACE) characters at one end of `text`.
+fn nbsp_run(text: &str, at_end: bool) -> usize {
+    if at_end {
+        text.chars().rev().take_while(|c| *c == '\u{a0}').count()
+    } else {
+        text.chars().take_while(|c| *c == '\u{a0}').count()
+    }
+}
+
+/// Count of space/tab bytes at one end of `range` within `src`.
+fn space_byte_run(src: &[u8], range: &std::ops::Range<usize>, at_end: bool) -> usize {
+    let Some(slice) = src.get(range.clone()) else {
+        return 0;
+    };
+    let is_ws = |b: &&u8| **b == b' ' || **b == b'\t';
+    if at_end {
+        slice.iter().rev().take_while(is_ws).count()
+    } else {
+        slice.iter().take_while(is_ws).count()
+    }
+}
+
+/// `own_text` is the node's own text, when it has one.
+///
+/// A boundary space is **not** a violation when it is the **abbreviation NBSP
+/// substitution**. Pandoc-parity abbreviation handling absorbs the `Space` after
+/// an abbreviation into the preceding `Str` as U+00A0, so the abbreviation cannot
+/// be separated from its referent — `e.g. ` becomes `Str("e.g.\u{a0}")` spanning
+/// five source bytes (`postprocess.rs`, the `ends_with_abbreviation` branch; the
+/// `\<space>` escape in `text_helpers.rs` does the same). Those bytes are the
+/// node's own, so there is nothing to report.
+///
+/// The exclusion is keyed to **exactly** that substitution, not to "the text has
+/// whitespace":
+///
+/// - the text's boundary characters must be U+00A0, and
+/// - **in matching quantity** — *n* NBSP characters account for exactly *n*
+///   source space/tab bytes.
+///
+/// So a `Str` retaining a *plain* space is still reported (no producer does
+/// that), and a range absorbing two trailing spaces against one NBSP is still
+/// reported (it is claiming a byte that is not its own). A different producer
+/// that starts retaining some other character fails loudly and names its
+/// document, rather than being silently forgiven.
+///
+/// Pass `None` to keep the check strict — attribute keys and values must never
+/// retain boundary whitespace, and passing their text would weaken exactly the
+/// assertion bd-1d6io exists to make.
 fn check_tightness(
     node_type: &str,
     range: &std::ops::Range<usize>,
     src: &[u8],
+    own_text: Option<&str>,
     findings: &mut Vec<TilingFinding>,
 ) {
     if range.is_empty() {
         return;
     }
     let (s, e) = (range.start, range.end);
-    for (boundary, byte_opt) in [
-        ("leading", src.get(s).copied()),
+    for (boundary, at_end, byte_opt) in [
+        ("leading", false, src.get(s).copied()),
         (
             "trailing",
+            true,
             if e > 0 { src.get(e - 1).copied() } else { None },
         ),
     ] {
-        if let Some(b) = byte_opt
-            && (b == b' ' || b == b'\t')
-        {
-            findings.push(TilingFinding {
-                kind: TilingFindingKind::TightnessViolation,
-                message: format!(
-                    "TightnessViolation: `{node_type}` [{}..{}] has {boundary} \
-                         space/tab byte ({:?})",
-                    s, e, b as char,
-                ),
-            });
+        let Some(b) = byte_opt else { continue };
+        if b != b' ' && b != b'\t' {
+            continue;
         }
+        // Sanctioned abbreviation NBSP substitution, exactly accounted for?
+        let nbsp = own_text.map_or(0, |t| nbsp_run(t, at_end));
+        if nbsp > 0 && space_byte_run(src, range, at_end) == nbsp {
+            continue;
+        }
+        findings.push(TilingFinding {
+            kind: TilingFindingKind::TightnessViolation,
+            message: format!(
+                "TightnessViolation: `{node_type}` [{}..{}] has {boundary} \
+                     space/tab byte ({:?})",
+                s, e, b as char,
+            ),
+        });
+    }
+}
+
+/// The node's own text, for [`check_tightness`]'s abbreviation-NBSP exclusion.
+/// `None` for everything whose range boundaries are delimiters rather than
+/// content (`Code`'s backticks, `Math`'s `$`, `RawInline`'s fence) — those can
+/// never present a boundary space, so there is nothing to exclude and passing
+/// their trimmed text would only risk masking a real violation.
+fn inline_own_text(inline: &Inline) -> Option<&str> {
+    match inline {
+        Inline::Str(s) => Some(s.text.as_str()),
+        _ => None,
     }
 }
 
@@ -1925,5 +2161,109 @@ mod tiling_auditor_tests {
             "non-overlapping Original siblings must not produce SiblingOverlap; got: {:#?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
         );
+    }
+
+    // ── check_tightness retained-whitespace exclusion ─────────────────────────
+    //
+    // The exclusion must key on the node's OWN TEXT, not on its type. If it
+    // ever degrades into "Str is exempt", the auditor goes blind to the whole
+    // Str family — so pin both directions directly on the private function.
+
+    #[test]
+    fn tightness_skipped_for_the_abbreviation_nbsp_substitution() {
+        let mut findings = Vec::new();
+        // Range covers "e.g. "; the Str kept that space as a NBSP.
+        check_tightness(
+            "Str",
+            &(0..5),
+            b"e.g. `code`",
+            Some("e.g.\u{a0}"),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "a Str retaining the boundary space must not be flagged; got: {:#?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn tightness_still_reported_when_node_text_drops_the_boundary_space() {
+        let mut findings = Vec::new();
+        // Same node type and same range shape, but the text does NOT end in
+        // whitespace — the node is claiming a byte that is not its own.
+        check_tightness("Str", &(0..5), b"abcd hello", Some("abcd"), &mut findings);
+        assert_eq!(
+            findings.len(),
+            1,
+            "a Str NOT retaining the boundary space must still be flagged; got: {:#?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+        );
+        assert_eq!(findings[0].kind, TilingFindingKind::TightnessViolation);
+    }
+
+    #[test]
+    fn tightness_reported_when_node_retains_a_plain_space_not_an_nbsp() {
+        // The exclusion is keyed to the abbreviation NBSP *substitution*, not to
+        // "the text has whitespace". A Str whose text ends in a plain space has
+        // no sanctioned producer, so it must still be flagged — otherwise the
+        // exclusion forgives an entire class it was never meant to cover.
+        let mut findings = Vec::new();
+        check_tightness("Str", &(0..5), b"abcd hello", Some("abcd "), &mut findings);
+        assert_eq!(
+            findings.len(),
+            1,
+            "a plain retained space is not the NBSP substitution and must be flagged; got: {:#?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn tightness_reported_when_the_range_absorbs_more_space_than_the_nbsp_accounts_for() {
+        // One NBSP accounts for exactly one source whitespace byte. A range
+        // covering TWO trailing spaces is absorbing a byte that is not the
+        // node's own, even though the boundary looks like the sanctioned case.
+        let mut findings = Vec::new();
+        check_tightness(
+            "Str",
+            &(0..6),
+            b"e.g.  x",
+            Some("e.g.\u{a0}"),
+            &mut findings,
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "2 source spaces vs 1 NBSP is over-absorption and must be flagged; got: {:#?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn tightness_skipped_when_the_substituted_source_byte_is_a_tab() {
+        // A Pandoc `Space` can come from a tab, and the substitution is the
+        // same, so the exclusion must accept either.
+        let mut findings = Vec::new();
+        check_tightness(
+            "Str",
+            &(0..5),
+            b"e.g.\tx",
+            Some("e.g.\u{a0}"),
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "a tab is the same substitution as a space; got: {:#?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn tightness_strict_when_no_text_is_supplied() {
+        let mut findings = Vec::new();
+        // The attr-key/attr-val path passes None and must stay strict — this is
+        // the assertion bd-1d6io exists to make.
+        check_tightness("attr-key", &(0..5), b" bb=1", None, &mut findings);
+        assert_eq!(findings.len(), 1, "None must keep the check strict");
     }
 }

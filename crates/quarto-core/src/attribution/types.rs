@@ -118,12 +118,34 @@ pub type IdentityMap = HashMap<Arc<str>, Identity>;
 /// boundary; both fields use `#[serde(default, skip_serializing_if)]`
 /// so runs-only and identities-only transport payloads serialize
 /// compactly.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AttributionData {
     #[serde(default, skip_serializing_if = "AttributionMap::is_empty")]
     pub runs: AttributionMap,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub identities: IdentityMap,
+    /// The file the runs' byte ranges index into — the file the
+    /// provider blamed. v1 providers blame the primary document,
+    /// which `ParseDocumentStage` registers as the first (dense) slot
+    /// of a fresh `SourceContext`, i.e. `FileId(0)`; the builder
+    /// defaults accordingly. Consumers must compare a node's resolved
+    /// FileId against THIS field, never against a literal `0`
+    /// (bd-vmlhw7nx): carrying the identity here keeps the
+    /// single-doc invariant in one place and makes the gate survive
+    /// any future change to slot assignment or multi-file (v2)
+    /// attribution.
+    #[serde(skip)]
+    pub file_id: quarto_source_map::FileId,
+}
+
+impl Default for AttributionData {
+    fn default() -> Self {
+        Self {
+            runs: AttributionMap::default(),
+            identities: IdentityMap::default(),
+            file_id: quarto_source_map::FileId(0),
+        }
+    }
 }
 
 /// Transport-only mirror of [`AttributionRun`] used at the WASM
@@ -136,6 +158,10 @@ pub struct AttributionData {
 pub struct TransportAttributionRun {
     pub start: usize,
     pub end: usize,
+    /// Attribution key, chosen by the JS producer: the change's author ID
+    /// when recorded (post-transition changes), else the bare actor ID
+    /// (pre-transition history). Rust only joins on the key; the field
+    /// keeps the `actor` name per the author-ID transition's D6.
     pub actor: String,
     pub time: i64,
 }
@@ -178,12 +204,19 @@ pub type AttributionHit = AttributionRecord;
 /// attribution on a non-consuming format would otherwise fire a
 /// `git blame` subprocess whose output goes nowhere visible.
 ///
-/// In v1 returns `true` for HTML and q2-debug JSON only. The
-/// `q2-debug` pseudo-format parses with `FormatIdentifier::Html` but
-/// keeps its original string in `target_format`, so the HTML branch
-/// covers both; `revealjs` has its own identifier and is excluded.
+/// Returns `true` for HTML, q2-debug JSON, and every Pandoc-hybrid
+/// format (docx, pptx, typst, ...). The `q2-debug` pseudo-format parses
+/// with `FormatIdentifier::Html` but keeps its original string in
+/// `target_format`, so the HTML branch covers both; `revealjs` has its
+/// own identifier and is excluded.
+///
+/// For Pandoc-hybrid formats the data is only consumable by pampa-side
+/// Lua filters (pre-ast, post-ast, pre-quarto) via
+/// `quarto.attribution.*`: the writer is a pandoc subprocess, which
+/// never sees it, and the HTML-specific render/viewer output is
+/// written to `format_options.html`, which those writers ignore.
 pub fn format_supports_attribution(format: &Format) -> bool {
-    matches!(format.identifier, FormatIdentifier::Html)
+    matches!(format.identifier, FormatIdentifier::Html) || format.identifier.is_pandoc_hybrid()
 }
 
 /// Read user-authored `meta.attribution.identities` (a small

@@ -1,8 +1,12 @@
-# Block Handlers Implementation Plan - ACCURATE Assessment
-
-**Date**: 2025-10-31
-**Beads Issue**: k-274 (tree-sitter grammar refactoring - block handlers phase)
-**Status**: Most block handlers are NOT implemented
+---
+title: 'Block Handlers Implementation Plan - ACCURATE Assessment'
+date: 2025-10-31
+description: 'Lists the block-level node types the tree-sitter visitor still does not handle, such as block quotes, lists, tables and fenced divs, which crash the parser on any document containing them, ordered by dependency.'
+status: in-progress  # Most block handlers are NOT implemented
+braid:
+  strand: k-274  # tree-sitter grammar refactoring - block handlers phase
+  priority: P0
+---
 
 ## Critical Reality Check
 
@@ -70,7 +74,7 @@ Most inline handlers ARE working:
 - Notes: inline notes ^[note], note references [^ref]
 - Quotes: single and double quotes
 - Links/Images: spans and images
-- Shortcodes: {{< shortcode >}}
+- Shortcodes: {{{< shortcode >}}}
 - Attributes: full attribute support
 
 ## Implementation Statistics
@@ -124,11 +128,11 @@ All 7 missing block handlers are **CRITICAL** because they all cause crashes. We
 - **Complexity**: Medium (language, attributes, content)
 - **Dependencies**: Attribute handling (already working)
 - **Example**:
-  ```markdown
+  ````markdown
   ```python
   print("hello")
   ```
-  ```
+  ````
 - **Helper**: `process_fenced_code_block` exists
 - **Note**: Only backtick fences (no tildes), no indented code blocks
 
@@ -315,32 +319,32 @@ For each of the 7 handlers:
 
 Given that helpers exist and are presumably working:
 
-- **Phase 1** (Basic Containers): ~2-3 hours
+- **Phase 1** (Basic Containers): \~2-3 hours
   - Block quote: 30 min
   - Horizontal rule: 15 min
   - Code block: 1-1.5 hours
 
-- **Phase 2** (Lists): ~2-3 hours
+- **Phase 2** (Lists): \~2-3 hours
   - Basic lists: 1 hour
   - Nested lists: 1 hour
   - Edge cases: 1 hour
 
-- **Phase 3** (Divs): ~2-3 hours
+- **Phase 3** (Divs): \~2-3 hours
   - Basic div: 1 hour
   - Note definition: 1 hour
   - Edge cases: 1 hour
 
-- **Phase 4** (Tables): ~3-4 hours
+- **Phase 4** (Tables): \~3-4 hours
   - Basic table: 1 hour
   - Alignment/caption: 1 hour
   - Edge cases: 1-2 hours
 
-**Total**: ~9-13 hours of focused work
+**Total**: \~9-13 hours of focused work
 
 ## Success Criteria
 
 1. ✅ All 7 block handlers uncommented in treesitter.rs
-2. ✅ No "[TOP-LEVEL MISSING NODE]" warnings for supported blocks
+2. ✅ No "\[TOP-LEVEL MISSING NODE\]" warnings for supported blocks
 3. ✅ No "Expected Block or Section, got IntermediateUnknown" crashes
 4. ✅ Each handler has 5+ tests (basic + edge cases)
 5. ✅ All 135+ existing inline tests still pass

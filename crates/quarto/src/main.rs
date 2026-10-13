@@ -10,6 +10,17 @@ use quarto_core::attribution::AttributionMode;
 
 mod commands;
 
+// mimalloc as the global allocator for the native CLI. A `q2 render` is
+// allocation-heavy (millions of small AST-node and `Vec` allocations per
+// document); on the Connect docs' api/index.qmd this swap alone was ~10%
+// of wall time, on top of the traversal changes measured in
+// claude-notes/research/2026-09-19-topdown-traverse-alloc-perf.md
+// (bd-w0x91nmh). Native binary only — the WASM crate does not depend on
+// this crate. Note `#[global_allocator]` covers Rust allocations only;
+// tree-sitter's C side still uses libc malloc.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 // "q2" is the actual binary name (and what usage/help should show);
 // "(quarto 2)" in the version string disambiguates from TS Quarto, so
@@ -156,7 +167,8 @@ enum Commands {
         attribution: Option<AttributionMode>,
 
         /// Emit diagnostics as one JSON object per line on stderr
-        /// instead of human-readable text.
+        /// instead of human-readable text. Implies `--quiet`, so stderr
+        /// carries nothing but JSON.
         #[arg(long = "json-errors")]
         json_errors: bool,
 
@@ -217,6 +229,15 @@ enum Commands {
         #[arg(long)]
         no_browser: bool,
 
+        /// Open the preview in a specific browser instead of the
+        /// system default — e.g. `--browser firefox` or `--browser
+        /// "Google Chrome"`. The value is handed to the OS opener
+        /// (`open -a` on macOS), so use a command on PATH or an
+        /// installed application name. Incompatible with
+        /// --no-browser.
+        #[arg(long, value_name = "BROWSER", conflicts_with = "no_browser")]
+        browser: Option<String>,
+
         /// Override the directory the preview uses for ephemeral
         /// per-session state. Default: a fresh tempdir that is
         /// deleted when `q2 preview` exits.
@@ -240,6 +261,93 @@ enum Commands {
         /// document changes to your files.
         #[arg(long)]
         allow_edit: bool,
+
+        /// Share this preview session over an end-to-end encrypted
+        /// peer-to-peer tunnel (via iroh). Prints a join string;
+        /// anyone who has it can VIEW the project and RE-RUN its code
+        /// on this machine (and EDIT the files if --allow-edit is also
+        /// set), so treat the string like a password.
+        #[arg(long)]
+        share: bool,
+
+        /// Which frontend to serve: the read-only preview UI
+        /// (`viewer`, the default) or the full collaborative editor
+        /// (`editor`: Monaco, file sidebar, live preview pane).
+        ///
+        /// Choosing `editor` never changes the write policy: without
+        /// --allow-edit, edits made in the editor drive the live
+        /// session for everyone connected but are never written to
+        /// your files (and a file change on disk converges the
+        /// session back to the disk content). The editor keeps no
+        /// browser storage across sessions (each preview session is a
+        /// fresh origin, so nothing could be reused anyway). One
+        /// caveat: with --share the host's --ui choice is what all
+        /// guests get.
+        #[arg(long, value_enum, default_value_t = PreviewUiArg::Viewer)]
+        ui: PreviewUiArg,
+
+        /// Print the embedded SPA asset manifest hashes and exit.
+        /// Release CI compares these across the per-platform builds —
+        /// a mismatch silently disables live-share local asset serving
+        /// for cross-platform pairs (live-share plan Phase 2,
+        /// bd-ee2fqm95). Not a user-facing command.
+        #[arg(long, hide = true)]
+        print_asset_manifest_hashes: bool,
+
+        /// Join a shared preview session using the `q2preview…` string
+        /// printed by `q2 preview --share` on the host machine.
+        ///
+        /// Runs a local proxy for the host's session — no local project
+        /// is read and nothing is written to disk on this machine, so
+        /// the host-mode flags (a path, --share, --no-project,
+        /// --allow-edit, --ui, --data-dir, --preview-dir) don't combine
+        /// with it. --port/--host pick where the local proxy listens;
+        /// --no-browser and --browser still apply.
+        ///
+        /// When this binary embeds the exact UI asset build the host
+        /// advertises (a manifest hash compared while joining), the UI
+        /// is served from this binary and only the session's dynamic
+        /// traffic crosses the tunnel, so a first join downloads a few
+        /// kilobytes instead of the whole UI. On any mismatch — an
+        /// older or newer q2, or a dev build — everything is tunneled:
+        /// the join still works, it just boots slower.
+        #[arg(
+            long,
+            value_name = "TICKET",
+            conflicts_with_all = ["path", "share", "no_project", "allow_edit", "data_dir", "preview_dir", "ui"]
+        )]
+        join: Option<String>,
+
+        /// Quarto-1-style preview: render the document or project to
+        /// disk exactly as `q2 render` does, serve the output directory
+        /// over a plain static HTTP server, and (unless --no-watch)
+        /// watch the source files, re-render what changed, and reload
+        /// the browser.
+        ///
+        /// Uses none of the live-editing machinery, so --share,
+        /// --allow-edit, --ui, --join, --no-project, --data-dir and
+        /// --preview-dir don't combine with it. Only `html` and
+        /// `revealjs` output can be served this way.
+        #[arg(
+            long = "static",
+            conflicts_with_all = ["join", "share", "no_project", "allow_edit", "data_dir", "preview_dir", "ui"]
+        )]
+        static_mode: bool,
+
+        /// With --static: render once and serve, without watching the
+        /// filesystem or re-rendering.
+        #[arg(long, requires = "static_mode")]
+        no_watch: bool,
+
+        /// With --static: after a re-render, reload the page the browser
+        /// is on instead of navigating to the page that changed.
+        #[arg(long, requires = "static_mode")]
+        no_navigate: bool,
+
+        /// With --static: the output format to render, as `q2 render
+        /// --to`. Defaults to the document's `format:`, else `html`.
+        #[arg(long, value_name = "FORMAT", requires = "static_mode")]
+        to: Option<String>,
     },
 
     /// Serve a Shiny interactive document
@@ -396,6 +504,10 @@ enum Commands {
         #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
         dry_run: bool,
 
+        /// Active project profile(s) (comma-separated or repeated).
+        #[arg(long)]
+        profile: Vec<String>,
+
         /// Emit machine-readable output (implies --no-prompt;
         /// final PublishOutcome on stdout, NDJSON events on stderr)
         #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -410,12 +522,8 @@ enum Commands {
 
     /// Access functions of Quarto subsystems such as its rendering engines
     Call {
-        /// Function to call
-        function: Option<String>,
-
-        /// Arguments for the function
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: CallCommands,
     },
 
     /// Start the Quarto Language Server Protocol server
@@ -454,6 +562,10 @@ enum Commands {
         /// Emit compact single-line JSON instead of pretty-printed.
         #[arg(long)]
         compact: bool,
+
+        /// Active project profile(s) (comma-separated or repeated).
+        #[arg(long)]
+        profile: Vec<String>,
     },
 
     /// Inspect pipeline execution traces under `.quarto/trace/`.
@@ -564,6 +676,33 @@ enum Commands {
         #[arg(long = "peer", value_name = "URL")]
         peers: Vec<String>,
 
+        /// Listen exclusively on a unix domain socket instead of
+        /// TCP+WebSocket; no TCP listener is bound. With no value, uses
+        /// the convention path (<project>/.quarto/hub/hub.sock in project
+        /// mode, <data-dir>/hub.sock standalone). Connections are
+        /// unauthenticated local-trusted: filesystem permissions plus an
+        /// accept-time uid check are the access control. Browsers cannot
+        /// connect in this mode except through an operator-configured
+        /// proxy. Unix only.
+        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        socket_path: Option<Option<PathBuf>>,
+
+        /// Trusted-proxy shape: grant <group> access to the socket — the
+        /// parent dir becomes 0750 and the socket 0660, group-owned by
+        /// <group>. Requires --socket-path.
+        #[arg(long, value_name = "GROUP", requires = "socket_path")]
+        socket_group: Option<String>,
+
+        /// Trusted-proxy shape: accept connections from this uid at the
+        /// socket (repeatable) — extends the accept-time peer-uid
+        /// allowlist beyond the hub's own uid. Requires --socket-path.
+        #[arg(
+            long = "socket-allow-uid",
+            value_name = "UID",
+            requires = "socket_path"
+        )]
+        socket_allow_uid: Vec<u32>,
+
         /// Periodic filesystem sync interval in seconds.
         /// Set to 0 to disable periodic sync.
         #[arg(long, default_value = "30")]
@@ -629,6 +768,104 @@ enum Commands {
         #[arg(long, env = "QUARTO_HUB_ADDITIONAL_AUDIENCES", value_delimiter = ',')]
         additional_audiences: Vec<String>,
     },
+
+    /// Documentation embedded in this binary
+    ///
+    /// A namespace, not a command: `q2 docs` alone prints this help.
+    /// `q2 docs llms` serves the machine-readable (llms.txt) mirror of
+    /// the Quarto 2 documentation site for AI agents and tooling.
+    // Bare `q2 docs` shows the namespace help rather than a terse
+    // missing-subcommand error — it must never dump document content.
+    #[command(arg_required_else_help = true)]
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommands,
+    },
+
+    /// Alias for `q2 docs llms`: embedded docs for AI agents
+    #[command(name = "agents-info")]
+    AgentsInfo(DocsLlmsArgs),
+}
+
+/// Subcommands under `q2 docs` — documentation embedded in the binary
+/// (bd-hwop1zii). `llms` is the machine-readable surface; the namespace
+/// deliberately leaves room for a future human-facing offline-docs
+/// mechanism (e.g. `docs serve`).
+#[derive(clap::Subcommand)]
+enum DocsCommands {
+    /// Machine-readable documentation (llms.txt) for AI agents
+    ///
+    /// With no arguments, prints the llms.txt index of the embedded
+    /// Quarto 2 documentation; each listed href can be fetched with
+    /// `q2 docs llms <href>`.
+    Llms(DocsLlmsArgs),
+}
+
+/// Arguments shared by `q2 docs llms` and its `q2 agents-info` alias.
+/// The four modes are mutually exclusive; bare invocation prints the
+/// llms.txt index.
+#[derive(clap::Args)]
+struct DocsLlmsArgs {
+    /// Documentation page to print, as an href from the index or
+    /// `--list` (e.g. `guides/authoring/figures.md`). The `.qmd` and
+    /// `.html` spellings, and extensionless paths, work too
+    href: Option<String>,
+
+    /// Print every page in one stream (llms-full.txt)
+    #[arg(long, conflicts_with_all = ["href", "list", "embed_info"])]
+    full: bool,
+
+    /// List every embedded page, one `href<TAB>title` per line
+    #[arg(long, conflicts_with_all = ["href", "embed_info"])]
+    list: bool,
+
+    /// Report provenance of the embedded docs snapshot (source commit,
+    /// page count)
+    #[arg(long = "embed-info", conflicts_with = "href")]
+    embed_info: bool,
+}
+
+impl DocsLlmsArgs {
+    fn mode(self) -> commands::docs_llms::Mode {
+        use commands::docs_llms::Mode;
+        // clap enforces mutual exclusion; the order here is arbitrary.
+        if self.full {
+            Mode::Full
+        } else if self.list {
+            Mode::List
+        } else if self.embed_info {
+            Mode::EmbedInfo
+        } else if let Some(href) = self.href {
+            Mode::Page(href)
+        } else {
+            Mode::Index
+        }
+    }
+}
+
+/// Subcommands under `quarto call` — the Q1-parity `call` group.
+/// Q1's group is `{ engine, build-ts-extension, typst-gather }`; q2 ships
+/// `test` + `build-ts-extension` (plan9 adds `engine`).
+#[derive(clap::Subcommand)]
+enum CallCommands {
+    /// Run embedded document tests
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build TypeScript execution engine extensions
+    #[command(name = "build-ts-extension")]
+    BuildTsExtension {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        workspace: bool,
+    },
+    /// Inline `<style>` rules of the HTML on stdin into `style` attributes
+    /// (internal helper for the Pandoc filter chain)
+    #[command(name = "inline-css", hide = true)]
+    InlineCss,
 }
 
 #[derive(Subcommand)]
@@ -723,11 +960,388 @@ enum TraceCommand {
     },
 }
 
+/// `--ui` values for `q2 preview` (live-share plan Phase 4,
+/// bd-jt1etjbn): which embedded frontend the preview server serves.
+/// CLI-side mirror of [`quarto_preview::PreviewUi`] so the library
+/// doesn't grow a clap dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum PreviewUiArg {
+    /// The read-only preview UI (the default).
+    Viewer,
+    /// The full hub-client editor. Does not imply --allow-edit.
+    Editor,
+}
+
+impl From<PreviewUiArg> for quarto_preview::PreviewUi {
+    fn from(arg: PreviewUiArg) -> Self {
+        match arg {
+            PreviewUiArg::Viewer => quarto_preview::PreviewUi::Viewer,
+            PreviewUiArg::Editor => quarto_preview::PreviewUi::Editor,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    //! clap parse harness (live-share plan, Phase 2). These are the first
+    //! parse-level tests for the `q2` CLI; the Phase 3 `--join` conflict
+    //! matrix extends this module.
+
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    /// Parse argv (without the implicit binary name) into `Cli`.
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("q2").chain(args.iter().copied()))
+    }
+
+    /// Unwrap a parsed `Preview` command or panic with the actual variant.
+    fn parse_preview(args: &[&str]) -> Commands {
+        let cli = try_parse(args).expect("args should parse");
+        match cli.command {
+            cmd @ Commands::Preview { .. } => cmd,
+            _ => panic!("expected a Preview command from {args:?}"),
+        }
+    }
+
+    /// Extract the `DocsLlmsArgs` from either the canonical `docs llms`
+    /// spelling or the top-level `agents-info` alias (bd-hwop1zii).
+    fn parse_docs_llms(args: &[&str]) -> super::DocsLlmsArgs {
+        let cli = try_parse(args).expect("args should parse");
+        match cli.command {
+            Commands::Docs {
+                command: super::DocsCommands::Llms(a),
+            } => a,
+            Commands::AgentsInfo(a) => a,
+            _ => panic!("expected docs llms / agents-info from {args:?}"),
+        }
+    }
+
+    #[test]
+    fn docs_llms_and_agents_info_parse_identically() {
+        for tail in [
+            &[][..],
+            &["--list"],
+            &["--full"],
+            &["--embed-info"],
+            &["guides/authoring/figures.md"],
+        ] {
+            let canonical: Vec<&str> = ["docs", "llms"]
+                .iter()
+                .copied()
+                .chain(tail.iter().copied())
+                .collect();
+            let alias: Vec<&str> = std::iter::once("agents-info")
+                .chain(tail.iter().copied())
+                .collect();
+            let c = parse_docs_llms(&canonical);
+            let a = parse_docs_llms(&alias);
+            assert_eq!(
+                (c.href, c.full, c.list, c.embed_info),
+                (a.href, a.full, a.list, a.embed_info),
+                "alias must parse identically to canonical for tail {tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_docs_shows_help_not_content() {
+        let err = match try_parse(&["docs"]) {
+            Ok(_) => panic!("bare `q2 docs` must not parse into a runnable command"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+            "bare `q2 docs` must display the namespace help"
+        );
+    }
+
+    #[test]
+    fn docs_llms_modes_are_mutually_exclusive() {
+        for args in [
+            &["docs", "llms", "--full", "--list"][..],
+            &["docs", "llms", "--full", "--embed-info"],
+            &["docs", "llms", "--list", "--embed-info"],
+            &["docs", "llms", "--full", "x.md"],
+            &["docs", "llms", "--list", "x.md"],
+            &["docs", "llms", "--embed-info", "x.md"],
+            &["agents-info", "--full", "--list"],
+        ] {
+            let err = match try_parse(args) {
+                Ok(_) => panic!("conflicting modes must not parse: {args:?}"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "args: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_share_flag_parses() {
+        let Commands::Preview { share, .. } = parse_preview(&["preview", "--share"]) else {
+            unreachable!()
+        };
+        assert!(share, "--share must set PreviewArgs::share");
+    }
+
+    #[test]
+    fn preview_share_defaults_off() {
+        let Commands::Preview { share, .. } = parse_preview(&["preview"]) else {
+            unreachable!()
+        };
+        assert!(!share, "share must default to false");
+    }
+
+    #[test]
+    fn preview_share_composes_with_allow_edit() {
+        // Composition from the plan's CLI surface: `--share --allow-edit`
+        // (viewer with inline-edit write-back for guests).
+        let Commands::Preview {
+            share, allow_edit, ..
+        } = parse_preview(&["preview", "--share", "--allow-edit"])
+        else {
+            unreachable!()
+        };
+        assert!(share && allow_edit, "--share --allow-edit must both parse");
+    }
+
+    #[test]
+    fn preview_print_asset_manifest_hashes_parses() {
+        // Hidden release-CI diagnostic (bd-ee2fqm95): parses on the
+        // host-mode command and defaults off.
+        let Commands::Preview {
+            print_asset_manifest_hashes,
+            ..
+        } = parse_preview(&["preview", "--print-asset-manifest-hashes"])
+        else {
+            unreachable!()
+        };
+        assert!(print_asset_manifest_hashes);
+        let Commands::Preview {
+            print_asset_manifest_hashes,
+            ..
+        } = parse_preview(&["preview"])
+        else {
+            unreachable!()
+        };
+        assert!(!print_asset_manifest_hashes);
+    }
+
+    #[test]
+    fn preview_share_conflicts_with_join() {
+        // (match instead of expect_err: `Cli` deliberately has no Debug impl)
+        let err = match try_parse(&["preview", "--share", "--join", "x"]) {
+            Ok(_) => panic!("--share and --join are host vs. guest; must conflict"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    // ── Phase 3 (bd-6y0p1bne): `--join` conflict matrix ──────────────
+    // The guest path has no local project, hub, or disk surface, so
+    // every host-mode-only flag must be a hard parse error, not a
+    // silent no-op. (`--ui` joins this matrix in Phase 4, when the
+    // flag itself lands.)
+
+    /// Assert argv is rejected specifically as an argument conflict
+    /// (not, say, an unknown-arg error).
+    fn assert_join_conflict(args: &[&str]) {
+        let err = match try_parse(args) {
+            Ok(_) => panic!("{args:?} mixes guest mode with a host-only flag; must conflict"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn preview_join_parses_and_captures_ticket() {
+        let Commands::Preview { join, .. } = parse_preview(&["preview", "--join", "q2previewabc"])
+        else {
+            unreachable!()
+        };
+        assert_eq!(join.as_deref(), Some("q2previewabc"));
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_positional_path() {
+        assert_join_conflict(&["preview", "some/project", "--join", "x"]);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_share() {
+        assert_join_conflict(&["preview", "--join", "x", "--share"]);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_no_project() {
+        assert_join_conflict(&["preview", "--join", "x", "--no-project"]);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_allow_edit() {
+        assert_join_conflict(&["preview", "--join", "x", "--allow-edit"]);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_data_dir() {
+        assert_join_conflict(&["preview", "--join", "x", "--data-dir", "d"]);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_preview_dir() {
+        assert_join_conflict(&["preview", "--join", "x", "--preview-dir", "d"]);
+    }
+
+    // ── Phase 4 (bd-jt1etjbn): `--ui <viewer|editor>` ────────────────
+    // The flag substitutes which embedded frontend the server serves.
+    // It is orthogonal to `--allow-edit` (UI × write policy is a real
+    // 2×2) and meaningless for a guest (the host's server serves the
+    // UI through the tunnel), hence the `--join` conflict.
+
+    use super::PreviewUiArg;
+
+    #[test]
+    fn preview_ui_defaults_to_viewer() {
+        let Commands::Preview { ui, .. } = parse_preview(&["preview"]) else {
+            unreachable!()
+        };
+        assert_eq!(ui, PreviewUiArg::Viewer, "--ui must default to viewer");
+    }
+
+    #[test]
+    fn preview_ui_parses_viewer_and_editor() {
+        for (value, expected) in [
+            ("viewer", PreviewUiArg::Viewer),
+            ("editor", PreviewUiArg::Editor),
+        ] {
+            let Commands::Preview { ui, .. } = parse_preview(&["preview", "--ui", value]) else {
+                unreachable!()
+            };
+            assert_eq!(ui, expected, "--ui {value}");
+        }
+    }
+
+    #[test]
+    fn preview_ui_rejects_unknown_value_listing_the_valid_ones() {
+        let err = match try_parse(&["preview", "--ui", "monaco"]) {
+            Ok(_) => panic!("--ui monaco is not a frontend we ship; must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("viewer") && msg.contains("editor"),
+            "the error must list the valid values; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn preview_ui_composes_with_share_and_allow_edit() {
+        // The full-collaboration composition from the plan's CLI surface:
+        // `--share --ui editor --allow-edit`.
+        let Commands::Preview {
+            share,
+            ui,
+            allow_edit,
+            ..
+        } = parse_preview(&["preview", "--share", "--ui", "editor", "--allow-edit"])
+        else {
+            unreachable!()
+        };
+        assert!(share && allow_edit);
+        assert_eq!(ui, PreviewUiArg::Editor);
+    }
+
+    #[test]
+    fn preview_join_conflicts_with_ui() {
+        // The Phase 3 conflict-matrix entry deferred to Phase 4 (the
+        // flag didn't exist yet).
+        assert_join_conflict(&["preview", "--join", "x", "--ui", "editor"]);
+    }
+
+    #[test]
+    fn preview_join_composes_with_guest_flags() {
+        // `--port` picks the local proxy port, `--host` its bind
+        // interface, `--no-browser` suppresses the auto-open — all
+        // meaningful for a guest and must keep parsing.
+        let Commands::Preview {
+            join,
+            port,
+            host,
+            no_browser,
+            ..
+        } = parse_preview(&[
+            "preview",
+            "--join",
+            "q2previewabc",
+            "--port",
+            "9280",
+            "--host",
+            "127.0.0.1",
+            "--no-browser",
+        ])
+        else {
+            unreachable!()
+        };
+        assert_eq!(join.as_deref(), Some("q2previewabc"));
+        assert_eq!(port, Some(9280));
+        assert_eq!(host.as_deref(), Some("127.0.0.1"));
+        assert!(no_browser);
+    }
+
+    #[test]
+    fn preview_browser_parses_and_composes_with_share() {
+        let Commands::Preview { browser, share, .. } =
+            parse_preview(&["preview", "--share", "--browser", "firefox"])
+        else {
+            unreachable!()
+        };
+        assert!(share);
+        assert_eq!(browser.as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn preview_browser_composes_with_join() {
+        // Guests pick the browser for the local proxy URL too.
+        let Commands::Preview { join, browser, .. } =
+            parse_preview(&["preview", "--join", "q2previewabc", "--browser", "safari"])
+        else {
+            unreachable!()
+        };
+        assert_eq!(join.as_deref(), Some("q2previewabc"));
+        assert_eq!(browser.as_deref(), Some("safari"));
+    }
+
+    #[test]
+    fn preview_browser_conflicts_with_no_browser() {
+        let err = match try_parse(&["preview", "--browser", "firefox", "--no-browser"]) {
+            Ok(_) => panic!("--browser and --no-browser must conflict"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+}
+
 fn main() -> Result<()> {
     // Install Quarto's `Q-*` error catalog into the catalog-agnostic
     // `quarto-error-reporting` host, so diagnostics can resolve docs URLs and
     // catalog metadata. Must run before any diagnostic is rendered; idempotent.
     quarto_error_catalog::install();
+
+    // Let Pandoc filters call back into this binary (`quarto-cli-path`), e.g.
+    // `q2 call inline-css` for raw HTML tables.
+    if let Ok(exe) = std::env::current_exe() {
+        quarto_core::pandoc_filters::params::set_cli_path(exe);
+    }
 
     let cli = Cli::parse();
 
@@ -741,7 +1355,9 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| quarto_util::verbose_to_filter(cli.verbose).into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        // Logs go to stderr like every other q2 diagnostic — stdout
+        // stays reserved for command output (`get-config` JSON, etc.).
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     match cli.command {
@@ -759,6 +1375,7 @@ fn main() -> Result<()> {
             fail_fast,
             strict,
             no_render_scripts,
+            profile,
             ..
         } => commands::render::execute(commands::render::RenderArgs {
             inputs,
@@ -774,26 +1391,73 @@ fn main() -> Result<()> {
             fail_fast,
             strict,
             no_render_scripts,
+            profile,
+            // `q2 render` always executes; only `q2 preview --static`
+            // narrows this (bd-sl79jjiq).
+            execution_policy: quarto_core::engine::ExecutionPolicy::All,
         }),
         Commands::Preview {
             path,
             port,
             host,
             no_browser,
+            browser,
             data_dir,
             preview_dir,
             no_project,
             allow_edit,
-        } => commands::preview::execute(commands::preview::PreviewArgs {
-            path,
-            port,
-            host,
-            no_browser,
-            data_dir,
-            preview_dir,
-            no_project,
-            allow_edit,
-        }),
+            share,
+            ui,
+            print_asset_manifest_hashes,
+            join,
+            static_mode,
+            no_watch,
+            no_navigate,
+            to,
+        } => {
+            if print_asset_manifest_hashes {
+                // Binary diagnostic (release CI drift check); answers
+                // without starting anything, in either mode.
+                commands::preview::print_asset_manifest_hashes()
+            } else if static_mode {
+                // Q1-style static preview (bd-sl79jjiq): clap has already
+                // rejected every hub-mode flag via conflicts_with_all.
+                commands::preview_static::execute(commands::preview_static::StaticArgs {
+                    path,
+                    port,
+                    host,
+                    no_browser,
+                    browser,
+                    no_watch,
+                    no_navigate,
+                    to,
+                })
+            } else if let Some(ticket) = join {
+                // Guest mode (live-share plan Phase 3): clap has already
+                // rejected every host-mode flag via conflicts_with_all.
+                commands::preview::execute_join(commands::preview::JoinArgs {
+                    ticket,
+                    port,
+                    host,
+                    no_browser,
+                    browser,
+                })
+            } else {
+                commands::preview::execute(commands::preview::PreviewArgs {
+                    path,
+                    port,
+                    host,
+                    no_browser,
+                    browser,
+                    data_dir,
+                    preview_dir,
+                    no_project,
+                    allow_edit,
+                    share,
+                    ui: ui.into(),
+                })
+            }
+        }
         Commands::Serve { .. } => commands::serve::execute(),
         Commands::Create {
             type_,
@@ -840,10 +1504,12 @@ fn main() -> Result<()> {
             no_wait,
             dry_run,
             json,
+            profile,
         } => commands::publish::execute(commands::publish::PublishArgs {
             provider,
             path,
             no_render,
+            profile,
             no_prompt,
             no_browser,
             no_wait,
@@ -851,7 +1517,21 @@ fn main() -> Result<()> {
             json,
         }),
         Commands::Check { .. } => commands::check::execute(),
-        Commands::Call { function, args } => commands::call::execute(function, args),
+        Commands::Call { command } => match command {
+            CallCommands::Test { args } => commands::call::execute(Some("test".to_string()), args),
+            CallCommands::BuildTsExtension {
+                path,
+                config,
+                workspace,
+            } => commands::build_ts_extension::execute(
+                commands::build_ts_extension::BuildTsExtensionArgs {
+                    path,
+                    config,
+                    workspace,
+                },
+            ),
+            CallCommands::InlineCss => commands::inline_css::execute(),
+        },
         Commands::Lsp => commands::lsp::execute(),
         Commands::GetConfig {
             file,
@@ -860,6 +1540,7 @@ fn main() -> Result<()> {
             output,
             strict,
             compact,
+            profile,
         } => commands::get_config::execute(commands::get_config::GetConfigArgs {
             file,
             path,
@@ -867,7 +1548,12 @@ fn main() -> Result<()> {
             output,
             strict,
             compact,
+            profile,
         }),
+        Commands::Docs { command } => match command {
+            DocsCommands::Llms(args) => commands::docs_llms::execute(args.mode()),
+        },
+        Commands::AgentsInfo(args) => commands::docs_llms::execute(args.mode()),
         Commands::Mcp { args } => commands::mcp::run(&args),
 
         Commands::ProvideHub {
@@ -904,6 +1590,9 @@ fn main() -> Result<()> {
             allowed_emails,
             allowed_domains,
             additional_audiences,
+            socket_path,
+            socket_group,
+            socket_allow_uid,
         } => commands::hub::execute(commands::hub::HubArgs {
             project,
             no_project,
@@ -922,6 +1611,9 @@ fn main() -> Result<()> {
             allowed_emails,
             allowed_domains,
             additional_audiences,
+            socket_path,
+            socket_group,
+            socket_allow_uid,
         }),
         Commands::Trace { command } => match command {
             TraceCommand::List { trace_dir } => {

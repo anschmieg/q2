@@ -16,7 +16,6 @@ use mlua::{
     UserDataRef, Value, Variadic,
 };
 use quarto_source_map::{By, SourceInfo};
-use smallvec::SmallVec;
 
 use crate::pandoc::{Block, Inline};
 
@@ -267,41 +266,72 @@ impl LuaInline {
     }
 }
 
-impl LuaInline {
-    /// Get the tag name for this inline element
-    pub fn tag_name(&self) -> &'static str {
-        match &*self.0.borrow() {
-            Inline::Str(_) => "Str",
-            Inline::Emph(_) => "Emph",
-            Inline::Underline(_) => "Underline",
-            Inline::Strong(_) => "Strong",
-            Inline::Strikeout(_) => "Strikeout",
-            Inline::Superscript(_) => "Superscript",
-            Inline::Subscript(_) => "Subscript",
-            Inline::SmallCaps(_) => "SmallCaps",
-            Inline::Quoted(_) => "Quoted",
-            Inline::Cite(_) => "Cite",
-            Inline::Code(_) => "Code",
-            Inline::Space(_) => "Space",
-            Inline::SoftBreak(_) => "SoftBreak",
-            Inline::LineBreak(_) => "LineBreak",
-            Inline::Math(_) => "Math",
-            Inline::RawInline(_) => "RawInline",
-            Inline::Link(_) => "Link",
-            Inline::Image(_) => "Image",
-            Inline::Note(_) => "Note",
-            Inline::Span(_) => "Span",
-            Inline::Shortcode(_) => "Shortcode",
-            Inline::NoteReference(_) => "NoteReference",
-            Inline::Attr(_) => "Attr",
-            Inline::Insert(_) => "Insert",
-            Inline::Delete(_) => "Delete",
-            Inline::Highlight(_) => "Highlight",
-            Inline::EditComment(_) => "EditComment",
-            Inline::Custom(_) => "Custom",
+/// Define an element type's Lua tag names once, generating both the
+/// `tag_name` dispatch and the list of every name it can return.
+///
+/// The two must never disagree: the walker looks handler functions up **by
+/// tag name** (`walk.rs`'s `inline_fn`/`block_fn`), so any consumer that needs
+/// to know "is this a handler name q2 recognizes?" — the globals scan in
+/// `get_filter_table`, the unrecognized-name warning — has to enumerate
+/// exactly the names `tag_name` produces. Maintaining that list by hand is
+/// what caused bd-18a2r2lp, where five dispatchable tags were missing from the
+/// globals whitelist and filters defining them were silently dropped.
+///
+/// Generating both from one source makes that drift unrepresentable: the match
+/// stays exhaustive (the compiler rejects a new variant that is not listed),
+/// and the constant is built from the same lines.
+macro_rules! element_tag_names {
+    (
+        $self_ty:ident, $enum:ident, $consts:ident;
+        $($variant:ident => $name:literal),* $(,)?
+    ) => {
+        impl $self_ty {
+            /// Get the tag name for this element
+            pub fn tag_name(&self) -> &'static str {
+                match &*self.0.borrow() {
+                    $($enum::$variant(_) => $name,)*
+                }
+            }
         }
-    }
 
+        /// Every tag name `tag_name` can return, in declaration order.
+        pub const $consts: &[&str] = &[$($name),*];
+    };
+}
+
+element_tag_names! {
+    LuaInline, Inline, INLINE_TAG_NAMES;
+    Str => "Str",
+    Emph => "Emph",
+    Underline => "Underline",
+    Strong => "Strong",
+    Strikeout => "Strikeout",
+    Superscript => "Superscript",
+    Subscript => "Subscript",
+    SmallCaps => "SmallCaps",
+    Quoted => "Quoted",
+    Cite => "Cite",
+    Code => "Code",
+    Space => "Space",
+    SoftBreak => "SoftBreak",
+    LineBreak => "LineBreak",
+    Math => "Math",
+    RawInline => "RawInline",
+    Link => "Link",
+    Image => "Image",
+    Note => "Note",
+    Span => "Span",
+    Shortcode => "Shortcode",
+    NoteReference => "NoteReference",
+    Attr => "Attr",
+    Insert => "Insert",
+    Delete => "Delete",
+    Highlight => "Highlight",
+    EditComment => "EditComment",
+    Custom => "Custom",
+}
+
+impl LuaInline {
     /// Get the list of field names for this inline element (for pairs iteration)
     pub fn field_names(&self) -> &'static [&'static str] {
         match &*self.0.borrow() {
@@ -664,6 +694,10 @@ impl LuaInline {
             // Math
             (Inline::Math(m), "text") => {
                 m.text = String::from_lua(val, lua)?;
+                // The text no longer comes from the source bytes the
+                // reader mapped; drop the mapping rather than keep a stale
+                // one (bd-ieldbghj).
+                m.text_source = None;
                 Ok(())
             }
             (Inline::Math(m), "mathtype") => {
@@ -1039,12 +1073,17 @@ impl UserData for LuaSourceInfo {
         // `nil` when the SourceInfo chain doesn't resolve to a single
         // contiguous byte range.
         methods.add_method("byte_range", |lua, this, ()| {
-            let Some((_fid, start, end)) = this.0.resolve_byte_range() else {
+            let Some((fid, start, end)) = this.0.resolve_byte_range() else {
                 return Ok(Value::Nil);
             };
             let t = lua.create_table()?;
             t.set("start", start)?;
             t.set("end_", end)?;
+            // The file the offsets index into. Carried on the table so
+            // callers can pass it to `quarto.attribution.lookup_range`
+            // (or gate on it) without re-deriving via `file_id()`
+            // (bd-thagcbfq).
+            t.set("file_id", fid)?;
             // Positional access for callers that prefer it.
             t.set(1, start)?;
             t.set(2, end)?;
@@ -1075,6 +1114,29 @@ impl UserData for LuaSourceInfo {
 /// `claude-notes/plans/2026-04-21-lua-attr-mutation-proxy.md`.
 #[derive(Debug, Clone)]
 pub struct LuaBlock(pub Rc<RefCell<Block>>, pub PropertyCache);
+
+element_tag_names! {
+    LuaBlock, Block, BLOCK_TAG_NAMES;
+    Plain => "Plain",
+    Paragraph => "Para",
+    LineBlock => "LineBlock",
+    CodeBlock => "CodeBlock",
+    RawBlock => "RawBlock",
+    BlockQuote => "BlockQuote",
+    OrderedList => "OrderedList",
+    BulletList => "BulletList",
+    DefinitionList => "DefinitionList",
+    Header => "Header",
+    HorizontalRule => "HorizontalRule",
+    Table => "Table",
+    Figure => "Figure",
+    Div => "Div",
+    BlockMetadata => "BlockMetadata",
+    NoteDefinitionPara => "NoteDefinitionPara",
+    NoteDefinitionFencedBlock => "NoteDefinitionFencedBlock",
+    CaptionBlock => "CaptionBlock",
+    Custom => "Custom",
+}
 
 impl LuaBlock {
     /// Construct a `LuaBlock` around a freshly-owned `Block` in a new cell.
@@ -1144,31 +1206,6 @@ impl LuaBlock {
     /// Deep-clone the inner `Block` into an owned value.
     pub fn clone_block(&self) -> Block {
         self.0.borrow().clone()
-    }
-
-    /// Get the tag name for this block element
-    pub fn tag_name(&self) -> &'static str {
-        match &*self.0.borrow() {
-            Block::Plain(_) => "Plain",
-            Block::Paragraph(_) => "Para",
-            Block::LineBlock(_) => "LineBlock",
-            Block::CodeBlock(_) => "CodeBlock",
-            Block::RawBlock(_) => "RawBlock",
-            Block::BlockQuote(_) => "BlockQuote",
-            Block::OrderedList(_) => "OrderedList",
-            Block::BulletList(_) => "BulletList",
-            Block::DefinitionList(_) => "DefinitionList",
-            Block::Header(_) => "Header",
-            Block::HorizontalRule(_) => "HorizontalRule",
-            Block::Table(_) => "Table",
-            Block::Figure(_) => "Figure",
-            Block::Div(_) => "Div",
-            Block::BlockMetadata(_) => "BlockMetadata",
-            Block::NoteDefinitionPara(_) => "NoteDefinitionPara",
-            Block::NoteDefinitionFencedBlock(_) => "NoteDefinitionFencedBlock",
-            Block::CaptionBlock(_) => "CaptionBlock",
-            Block::Custom(_) => "Custom",
-        }
     }
 
     /// Get the list of field names for this block element (for pairs iteration)
@@ -1914,68 +1951,7 @@ pub(crate) fn attr_structurally_eq(a: &crate::pandoc::Attr, b: &crate::pandoc::A
             .all(|((k1, v1), (k2, v2))| k1 == k2 && v1 == v2)
 }
 
-/// Split a string into Inlines, matching Pandoc's `B.text` from pandoc-types Builder.hs.
-///
-/// Groups consecutive characters by space vs non-space:
-/// - Non-space runs → `Str(text)`
-/// - Space-only runs → `SoftBreak` if the run contains `\n` or `\r`, else `Space`
-/// - Empty string → empty vec
-pub fn split_string_to_inlines(s: &str) -> Vec<Inline> {
-    use crate::pandoc::{SoftBreak, Space, Str};
-
-    if s.is_empty() {
-        return Vec::new();
-    }
-
-    let is_space = |c: char| matches!(c, ' ' | '\r' | '\n' | '\t');
-    let is_newline = |c: char| matches!(c, '\r' | '\n');
-
-    let mut result = Vec::new();
-    let mut chars = s.chars().peekable();
-
-    while chars.peek().is_some() {
-        let first = *chars.peek().unwrap();
-        if is_space(first) {
-            // Consume all consecutive space chars
-            let mut has_newline = false;
-            while let Some(&c) = chars.peek() {
-                if is_space(c) {
-                    if is_newline(c) {
-                        has_newline = true;
-                    }
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if has_newline {
-                result.push(Inline::SoftBreak(SoftBreak {
-                    source_info: SourceInfo::generated(By::unknown()),
-                }));
-            } else {
-                result.push(Inline::Space(Space {
-                    source_info: SourceInfo::generated(By::unknown()),
-                }));
-            }
-        } else {
-            // Consume all consecutive non-space chars
-            let mut word = String::new();
-            while let Some(&c) = chars.peek() {
-                if is_space(c) {
-                    break;
-                }
-                word.push(c);
-                chars.next();
-            }
-            result.push(Inline::Str(Str {
-                text: word,
-                source_info: SourceInfo::generated(By::unknown()),
-            }));
-        }
-    }
-
-    result
-}
+pub use quarto_pandoc_types::inline::split_string_to_inlines;
 
 /// Call a `__toinline`/`__toblock`-style metamethod hook on a table
 /// or userdata value, returning the hook's raw result. Any other
@@ -2270,10 +2246,10 @@ pub fn filter_source_info(lua: &Lua) -> SourceInfo {
                 // The source often starts with "@" for file paths
                 let path: &str = src.strip_prefix("@").unwrap_or(&src);
                 let line_num = line.unwrap_or(0);
-                return Some(SourceInfo::Generated {
-                    by: By::filter(path.to_string(), line_num),
-                    from: SmallVec::new(),
-                });
+                return Some(SourceInfo::generated(By::filter(
+                    path.to_string(),
+                    line_num,
+                )));
             }
             None
         }) && let Some(info) = result
@@ -3720,6 +3696,7 @@ mod tests {
             math_type: MathType::InlineMath,
             text: "x^2".into(),
             source_info: si(),
+            text_source: None,
         });
         assert_eq!(LuaInline::new(inline).tag_name(), "Math");
     }
@@ -3955,6 +3932,7 @@ mod tests {
             math_type: MathType::DisplayMath,
             text: "E=mc^2".into(),
             source_info: si(),
+            text_source: None,
         });
         assert_eq!(
             LuaInline::new(inline).field_names(),

@@ -1,10 +1,15 @@
-# Phase 4 Components Tree Validation Plan (k-228)
+---
+title: 'Phase 4 Components Tree Validation Plan (k-228)'
+date: 2025-10-26
+description: 'Adds systematic validation of the AnnotatedParse components tree, checking structural integrity, child ordering, nesting depth, source-range containment and navigation helpers across all document types.'
+status: in-progress
+braid:
+  strand: k-228
+  priority: P2
+---
 
-**Date**: 2025-10-26
-**Status**: In Progress
 **Owner**: Claude Code
 **Parent Task**: k-192 (Phase 5: Write comprehensive tests for annotated Pandoc AST)
-**Beads Issue**: k-228
 
 ## Objective
 
@@ -267,7 +272,7 @@ Add tree validation calls to existing test files:
 npm test
 ```
 
-Expected: ~20-25 new tests, all passing, total ~138-143 tests.
+Expected: \~20-25 new tests, all passing, total \~138-143 tests.
 
 ## Test Examples
 
@@ -347,7 +352,7 @@ test('extract text content from paragraph', () => {
 - Test file creation: 60 min
 - Enhance existing tests: 30 min
 - Run and verify: 15 min
-- **Total: ~2.5 hours**
+- **Total: \~2.5 hours**
 
 ## Dependencies
 

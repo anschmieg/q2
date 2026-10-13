@@ -25,7 +25,7 @@
  *   7. Favicon `<link rel="icon">` lands in the iframe's
  *      `document.head`.
  *
- * Per CLAUDE.md "End-to-end verification before declaring
+ * Per AGENTS.md "End-to-end verification before declaring
  * success": these specs spawn the real `q2 preview` binary
  * against the canonical fixture set, so they exercise the full
  * pipeline (Rust pass-1/pass-2, WASM bridge, samod sync, SPA
@@ -372,7 +372,9 @@ test('TOC renders on a doc with sections', async ({ page }) => {
             ),
         };
     });
-    expect(toc.tocTitle).toBe('Table of Contents');
+    // Website projects title the TOC "On this page" (Q1 `toc-title-website`);
+    // see `toc_title_term` in quarto-core's toc_generate.rs.
+    expect(toc.tocTitle).toBe('On this page');
     expect(toc.entries).toEqual(
         expect.arrayContaining(['Section A', 'Subsection A1', 'Section B']),
     );

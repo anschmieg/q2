@@ -1,7 +1,12 @@
-# Plan: Q-2-30 Multi-Paragraph Footnote Linting Diagnostic
+---
+title: 'Plan: Q-2-30 Multi-Paragraph Footnote Linting Diagnostic'
+date: 2025-11-20
+description: 'Adds a linting diagnostic that flags an indented paragraph following a footnote definition, a Pandoc-style multi-paragraph footnote that parses without error but is not part of the note.'
+braid:
+  strand: k-367  # (case 2)
+  priority: P1
+---
 
-**Date**: 2025-11-20
-**Issue**: k-367 (case 2)
 **Type**: Linting diagnostic (not a parse error)
 
 ## Problem Statement
@@ -44,7 +49,7 @@ Second paragraph
 Look for consecutive blocks in the AST:
 1. `NoteDefinitionPara` with id X and content
 2. Immediately followed by `Para`
-3. Where the `Para`'s source text starts with whitespace (indentation)
+3. Where the `Para`\'s source text starts with whitespace (indentation)
 
 This pattern suggests the user intended a multi-paragraph footnote using Pandoc's indentation syntax.
 
@@ -408,7 +413,7 @@ if let pandoc::Block::NoteDefinitionPara(note_id, _content, _si) = current {
 - **Testing**: 30 minutes
 - **Documentation**: 30 minutes
 
-**Total**: ~4 hours
+**Total**: \~4 hours
 
 ## Dependencies
 

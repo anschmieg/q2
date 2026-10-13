@@ -315,7 +315,7 @@ fn stage_feed_inner(
     // skipped).
     let mut body = String::new();
     for it in items {
-        if it.title.trim().is_empty() || it.output_href.is_empty() {
+        if it.title_text().trim().is_empty() || it.target.href().is_none() {
             continue;
         }
         let fi = build_feed_item(it, feed_options, site_url, project_dir);
@@ -619,6 +619,7 @@ mod tests {
     use crate::project::index::ProjectIndex;
     use crate::project::listing::config::{Listing, apply_type_defaults};
     use crate::project::listing::config::{ListingFeedOptions, ListingType};
+    use crate::project::listing::item::{ItemOrigin, ItemTarget};
     use crate::project::{DocumentInfo, ProjectConfig, ProjectContext};
     use crate::render::BinaryDependencies;
     use quarto_pandoc_types::ConfigMapEntry;
@@ -645,9 +646,14 @@ mod tests {
 
     fn make_item(title: &str, date: Option<&str>) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
-            description: Some(format!("Description of {}.", title)),
+            description: Some(crate::document_profile::text(format!(
+                "Description of {}.",
+                title
+            ))),
             author: Some("Jane".to_string()),
             authors: vec!["Jane".to_string()],
             date: date.map(String::from),
@@ -658,8 +664,12 @@ mod tests {
             image_lazy_loading: None,
             reading_time_minutes: None,
             word_count: None,
-            source_path: PathBuf::from(format!("posts/{}.qmd", title)),
-            output_href: format!("posts/{}.html", title),
+            order: None,
+            target: ItemTarget::document(
+                format!("posts/{}.qmd", title),
+                format!("posts/{}.html", title),
+            ),
+            origin: ItemOrigin::Document,
             extra: BTreeMap::new(),
         }
     }
@@ -706,6 +716,8 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path(project_dir.join("posts.qmd"))],
             output_dir: project_dir.join("_site"),
+
+            ..Default::default()
         }
     }
 

@@ -7,8 +7,20 @@
  */
 
 import { Repo, DocHandle, updateText, splice, generateAutomergeUrl, parseAutomergeUrl } from '@automerge/automerge-repo';
-import type { DocumentId, Patch, StorageId } from '@automerge/automerge-repo';
-import { clone as automergeClone, from as automergeFrom, save as automergeSerialize } from '@automerge/automerge';
+import type {
+  DocumentId,
+  Patch,
+  StorageId,
+  DocHandleChangePayload,
+} from '@automerge/automerge-repo';
+import {
+  from as automergeFrom,
+  save as automergeSerialize,
+  getChanges as automergeGetChanges,
+  decodeChange as automergeDecodeChange,
+  getActorId as automergeGetActorId,
+  getBackend as automergeGetBackend,
+} from '@automerge/automerge';
 import type { NetworkAdapter } from '@automerge/automerge-repo/slim';
 
 import { StoppableWebSocketClientAdapter } from './StoppableWebSocketClientAdapter.js';
@@ -30,6 +42,7 @@ import {
   getDocumentType,
   isBinaryExtension,
   migrateIndexDocument,
+  normalizeProjectPath,
   setIdentity,
 } from '@quarto/quarto-automerge-schema';
 
@@ -40,6 +53,7 @@ import type {
   ASTOptions,
   ConnectOptions,
   CreateBinaryFileResult,
+  CreateFileIfAbsentResult,
   CreateProjectOptions,
   CreateProjectResult,
   DisconnectOptions,
@@ -49,6 +63,15 @@ import type {
 } from './types.js';
 import { computeSHA256 } from './hash.js';
 import { syncLog } from './log.js';
+import {
+  recordSyncMessage,
+  recordEphemeralMessage,
+  recordRemoteChange,
+  recordLocalChange,
+  recordLocalDelivery,
+  recordConnectionEvent,
+  getDocSyncActivity,
+} from './sync-activity.js';
 
 /**
  * The sync server could not be reached within the peer-wait budget
@@ -121,8 +144,10 @@ export function indexUnavailableMessage(indexDocId: string): string {
 /**
  * Build the WebSocket adapter for a sync connection. With `auth` set,
  * we lazily import the Node adapter (which depends on `ws`) so browser
- * bundles never pull it in. Without `auth`, the upstream browser
- * adapter is used unchanged.
+ * bundles never pull it in. Without `auth`, connections use
+ * `StoppableWebSocketClientAdapter` — the upstream browser adapter
+ * plus terminal disconnect() and the wake/network-change
+ * force-reconnect triggers.
  *
  * `retryIntervalMs` is forwarded to the adapter's reconnect loop when
  * set; when unset, the adapter's own default (5000 ms) applies.
@@ -191,12 +216,26 @@ function sameHeads(a: readonly string[], b: readonly string[]): boolean {
   return a.every((h) => bSet.has(h));
 }
 
+/** Live, independent connection signals (see getConnectionInfo). */
+export interface ConnectionInfo {
+  /** WebSocket.readyState (0–3), or null when there is no socket. */
+  wsReadyState: number | null;
+  wsUrl: string | null;
+  /** Peers whose automerge handshake is currently established. */
+  peers: Array<{ peerId: string; storageId?: string }>;
+}
+
 /**
  * Internal state for a sync client instance.
  */
 interface SyncClientState {
   repo: Repo | null;
   wsAdapter: NetworkAdapter | null;
+  /**
+   * The unwrapped websocket adapter (wsAdapter may be a debug-tap
+   * wrapper); kept so getConnectionInfo can read the live socket.
+   */
+  rawWsAdapter: NetworkAdapter | null;
   indexHandle: DocHandle<IndexDocument> | null;
   fileHandles: Map<string, DocHandle<FileDocument>>;
   /**
@@ -208,7 +247,13 @@ interface SyncClientState {
   unavailableFiles: Map<string, string>;
   binaryFiles: Set<string>;
   cleanupFns: (() => void)[];
-  actorId: string | null;
+  /**
+   * The stable per-user attribution identity applied to every document
+   * this client touches as automerge change-level author metadata (D9).
+   * Never an actor ID: actors are automerge's random per-document-instance
+   * defaults (D1) and no code here may set one.
+   */
+  authorId: string | null;
   /**
    * Peers currently connected on this repo's network subsystem.
    * Gates the findDoc "unavailable" retry: with zero peers,
@@ -247,12 +292,13 @@ interface SyncClientState {
 
 /**
  * One index-referenced file that has NOT loaded, as reported by
- * `getSyncDiagnostics()`. `handleState` is the raw automerge-repo DocHandle
- * state (`'loading'` / `'requesting'` / `'unavailable'` / …), or null when
- * the repo holds no cached handle for the doc at all. `unavailableMarker`
+ * `getSyncDiagnostics()`. `handleState` is the repo's verdict on the doc
+ * (`'loading'` / `'unavailable'` / `'failed'` from its DocumentQuery, or
+ * the handle's own `'ready'` / `'deleted'` once loaded), or null when the
+ * repo holds no query for the doc at all. `unavailableMarker`
  * is this client's own dangling-entry marker (`markFileUnavailable`).
- * The two disagree exactly when a stall mechanism is hiding: e.g. a handle
- * stuck `requesting` with no marker means a find is still in flight (or
+ * The two disagree exactly when a stall mechanism is hiding: e.g. a query
+ * stuck `loading` with no marker means a find is still in flight (or
  * hung), while marker-set + `unavailable` is the settled verdict.
  */
 export interface StrandedFileDiagnostic {
@@ -276,8 +322,9 @@ export interface SyncDiagnostics {
  * API (`quartoDebug.am`, bd-q93tkglb).
  *
  * `docId` is the bare document id (no `automerge:` prefix).
- * `handleState` is the raw automerge-repo DocHandle state, or null when
- * the repo holds no cached handle for the doc. `heads` is the doc's
+ * `handleState` is the repo's verdict on the doc (see
+ * {@link StrandedFileDiagnostic}), or null when the repo holds no query
+ * for the doc. `heads` is the doc's
  * current change-hash heads when the handle is ready, else null.
  * `unavailableMarker` mirrors the client's dangling-entry marker: the
  * index references this path but the document never loaded — for those
@@ -348,12 +395,13 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   const state: SyncClientState = {
     repo: null,
     wsAdapter: null,
+    rawWsAdapter: null,
     indexHandle: null,
     fileHandles: new Map(),
     unavailableFiles: new Map(),
     binaryFiles: new Set(),
     cleanupFns: [],
-    actorId: null,
+    authorId: null,
     connectedPeers: new Set(),
     peerStorageIds: new Map(),
     findDocRetry: DEFAULT_FIND_DOC_RETRY,
@@ -377,10 +425,12 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   if (typeof g.addEventListener === 'function') {
     const onBrowserOffline = () => {
       syncLog('Browser offline event fired');
+      recordConnectionEvent('browser-offline');
       callbacks.onConnectionChange?.(false);
     };
     const onBrowserOnline = () => {
       syncLog('Browser online event fired');
+      recordConnectionEvent('browser-online');
       callbacks.onConnectionChange?.(true);
     };
 
@@ -440,6 +490,30 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
 
   // Track last-seen captures for diffing
   let lastCaptures: Record<string, CaptureRef> = {};
+
+  // Helper: get the explicit-folder set from the index document (V3+)
+  function getFoldersFromIndex(doc: IndexDocument): string[] {
+    return doc.folders ? Object.keys(doc.folders).sort() : [];
+  }
+
+  // Track last-seen folders for diffing
+  let lastFolders: string[] = [];
+
+  // Helper: fire onFoldersChange if the folder set differs from last seen
+  function notifyFoldersIfChanged(doc: IndexDocument): void {
+    const current = getFoldersFromIndex(doc);
+    if (JSON.stringify(current) !== JSON.stringify(lastFolders)) {
+      lastFolders = current;
+      callbacks.onFoldersChange?.(current);
+    }
+  }
+
+  // Index-document self-heal (bd-6f21d4c6 / H4): the 'change' handler
+  // currently attached to state.indexHandle, tracked so a recovery can
+  // detach it from the old (about-to-be-deleted) handle before attaching
+  // a fresh one. See attachIndexSubscription / recoverIndexDocument below.
+  let indexChangeHandler: (() => void) | null = null;
+  let indexRecoveryInFlight = false;
 
   // Helper: fire onIdentitiesChange if identities differ from last seen
   function notifyIdentitiesIfChanged(doc: IndexDocument): void {
@@ -504,41 +578,149 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       if (peerMetadata?.storageId) {
         state.peerStorageIds.set(peerId, peerMetadata.storageId);
       }
+      recordConnectionEvent(
+        'peer-connected',
+        peerMetadata?.storageId ? `${peerId} (storage ${peerMetadata.storageId})` : peerId,
+      );
     };
     const onPeerGone = ({ peerId }: { peerId: string }) => {
       state.connectedPeers.delete(peerId);
+      recordConnectionEvent('peer-disconnected', peerId);
     };
+    // Stamp sync-activity timestamps for the connection-status dialog.
+    const onMessage = (msg: {
+      type: string;
+      documentId?: string;
+      senderId?: string;
+      data?: Uint8Array;
+    }) => {
+      if (msg.type === 'ephemeral') {
+        recordEphemeralMessage(msg.documentId);
+      } else {
+        recordSyncMessage({
+          type: msg.type,
+          documentId: msg.documentId,
+          senderId: msg.senderId,
+          byteLength: msg.data?.byteLength,
+        });
+      }
+    };
+    // Record the diff (patches) of remotely-caused document changes so
+    // the connection-status dialog can show what the last sync did.
+    //
+    // The installed automerge-repo neither emits Repo `document` events
+    // nor reports patchInfo.source (hardcoded 'change' — upstream TODO),
+    // so instead: periodically sweep the repo's handle cache to attach
+    // change listeners, and classify a change as remote when any of its
+    // applied automerge changes carries an actor other than the doc's
+    // own local actor. Handle-level listeners die with the repo.
+    const onHandleChange = ({
+      handle,
+      doc,
+      patches,
+      patchInfo,
+    }: DocHandleChangePayload<unknown>) => {
+      // The initial load/arrival event fires before the handle flips to
+      // ready; skip it so a doc loaded from IndexedDB (full of historic
+      // remote actors) isn't reported as a fresh remote change.
+      if (!handle.isReady()) return;
+      // automerge-repo ≥ 2.6 types the payload's `doc` as possibly undefined
+      // (a sub-handle whose path no longer resolves); root handles always
+      // carry one, so this only guards the type.
+      if (doc === undefined) return;
+      try {
+        const localActor = automergeGetActorId(doc);
+        const changes = automergeGetChanges(patchInfo.before, patchInfo.after);
+        if (changes.some(c => automergeDecodeChange(c).actor !== localActor)) {
+          // Text docs (schema TextDocumentContent) carry a `text` field;
+          // capture before/after so the UI can render a real diff view.
+          const textOf = (d: unknown): string | undefined => {
+            const t = (d as { text?: unknown } | null)?.text;
+            return typeof t === 'string' ? t : undefined;
+          };
+          recordRemoteChange(String(handle.documentId), patches, {
+            beforeText: textOf(patchInfo.before),
+            afterText: textOf(patchInfo.after),
+          });
+        } else if (changes.length > 0) {
+          // All applied changes carry the local actor: a local edit.
+          recordLocalChange(String(handle.documentId));
+        }
+      } catch {
+        // Classification is best-effort display info; never break sync.
+      }
+    };
+    const watchedHandles = new WeakSet<DocHandle<unknown>>();
+    const watchHandles = () => {
+      for (const handle of Object.values(repo.handles)) {
+        if (!watchedHandles.has(handle)) {
+          watchedHandles.add(handle);
+          handle.on('change', onHandleChange);
+          // Stamp "your change got synced": when a storage-backed peer's
+          // confirmed heads catch up to a doc that has an unacknowledged
+          // local change from this session, record the delivery time.
+          // Same signal the exit drain uses (isDelivered, bd-10deu8h4).
+          handle.on('remote-heads', () => {
+            try {
+              if (!handle.isReady()) return;
+              const docId = String(handle.documentId);
+              const a = getDocSyncActivity(docId);
+              if (!a.lastLocalChangeAt) return;
+              if ((a.lastLocalDeliveredAt ?? 0) >= a.lastLocalChangeAt) return;
+              if (isDelivered(handle)) recordLocalDelivery(docId);
+            } catch {
+              // Display-only bookkeeping; never break sync.
+            }
+          });
+        }
+      }
+    };
+    watchHandles();
+    const watchTimer = setInterval(watchHandles, 2000);
     repo.networkSubsystem.on('peer', onPeer);
     repo.networkSubsystem.on('peer-disconnected', onPeerGone);
+    repo.networkSubsystem.on('message', onMessage);
     state.cleanupFns.push(() => {
+      clearInterval(watchTimer);
       repo.networkSubsystem.off('peer', onPeer);
       repo.networkSubsystem.off('peer-disconnected', onPeerGone);
+      repo.networkSubsystem.off('message', onMessage);
     });
   }
 
-  // Helper: apply actor ID to a document handle via clone.
-  // The initial repo.create() writes one change with a random actor before this
-  // switches to the sub-derived actor. That random actor persists in history as
-  // noise — not a privacy concern (it's random, not identity-derived).
-  function applyActorId<T>(handle: DocHandle<T>, actorId: string | null): void {
-    if (!actorId) return;
-    handle.update(doc => automergeClone(doc, { actor: actorId }));
+  // Helper: apply the author ID to a document handle, in place on the
+  // shared backend (D9). Author is runtime-only backend state (never
+  // serialized), so setting it directly is semantically correct and avoids
+  // the clone's side effects (a fresh fork per find, a re-randomized actor
+  // per call, a spurious applyMutation notification). setAuthor mints a
+  // fresh random actor when the value changes (automerge's 1-author→N-actors
+  // model) and is a no-op when re-applied with the same value, so calling
+  // this on every findDoc is safe and idempotent.
+  //
+  // Documented fallback if the @hidden `getBackend` hatch is ever removed:
+  // handle.update(doc => automergeClone(doc, { author: authorId })).
+  function applyAuthorId<T>(handle: DocHandle<T>, authorId: string | null): void {
+    if (!authorId) return;
+    const doc = handle.doc();
+    if (!doc) return;
+    automergeGetBackend(doc).setAuthor(authorId);
   }
 
-  // Helper: create a new document with the correct actor ID from the
+  // Helper: create a new document with the author ID stamped on the
   // very first change. Uses Automerge.from() + repo.import() so the
-  // initial data is attributed to the HMAC actor (not a random one).
-  // applyActorId is still needed after import because repo.import()
-  // does not preserve the actor for future handle.change() calls.
+  // initial data carries the author footer (its seq-1 change).
+  // applyAuthorId is still needed after import because repo.import()
+  // does not preserve the author setting for future handle.change() calls
+  // (it re-creates the doc via Automerge.load with no options).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function createDoc<T>(initialValue?: any, docId?: DocumentId): DocHandle<T> {
-    if (state.actorId) {
-      const doc = automergeFrom(initialValue ?? {}, { actor: state.actorId });
+    if (state.authorId) {
+      const doc = automergeFrom(initialValue ?? {}, { author: state.authorId });
       const handle = state.repo!.import<T>(automergeSerialize(doc), docId ? { docId } : undefined);
-      applyActorId(handle, state.actorId);
+      applyAuthorId(handle, state.authorId);
       return handle;
     }
-    // No actor ID (offline mode) - use import without actor to respect the provided docId
+    // No author ID (offline mode) - use import without author to respect the provided docId
     const doc = automergeFrom(initialValue ?? {});
     const handle = state.repo!.import<T>(automergeSerialize(doc), docId ? { docId } : undefined);
     return handle;
@@ -564,7 +746,7 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
           signal: AbortSignal.timeout(FIND_DOC_ATTEMPT_TIMEOUT_MS),
         });
         await handle.whenReady();
-        applyActorId(handle, state.actorId);
+        applyAuthorId(handle, state.authorId);
         return handle;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -587,6 +769,172 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
         // The connection may have been torn down while we slept.
         if (state.repo !== repo) throw err;
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Index-document self-heal (bd-6f21d4c6; see
+  // claude-notes/plans/2026-09-17-index-doc-duplicate-seq-self-heal.md).
+  // An Automerge actor id reused across two sessions (the pre-transition
+  // stable actor from actorIdFromUserId, userSettings.ts — no longer minted
+  // by this client, but still emitted by legacy clients during the
+  // version-skew window) can make two independently-edited
+  // copies of the SAME document claim the same (actor, seq) pair. When a
+  // sync message carrying the colliding change arrives, the underlying
+  // `automerge` library correctly throws `RangeError: duplicate seq N
+  // found for actor <id>` out of its (synchronous) receiveSyncMessage —
+  // that part is unaffected by automerge-repo's own version. automerge-repo
+  // itself just logs that throw and drops the message, with no recovery:
+  // in v2.5.6 that happened via an unhandled promise rejection from
+  // `Repo#receiveMessage`'s `this.synchronizer.receiveMessage(message)
+  // .catch(...)`; from v2.6.0-alpha.5 `receiveMessage` became synchronous
+  // and the same log-and-drop moved to a `try/catch` around dispatch in
+  // `Repo`'s own inbound "message" handler. Either way, the affected peer
+  // relationship for that document is wedged permanently, surviving
+  // reload, until something discards the local copy and re-fetches. This
+  // wraps the repo's own public CollectionSynchronizer#receiveMessage
+  // (still present, and still called through the same code path, across
+  // both automerge-repo shapes above — only whether it returns a promise
+  // changed) to detect that specific error for THIS connection's index
+  // document, and automates the scoped equivalent of the manual "clear
+  // IndexedDB" workaround: repo.delete() (drops the wedged per-peer sync
+  // state AND the persisted storage entry for that one document — see
+  // Repo's "delete-document" handling) followed by a fresh repo.find().
+  // No automerge-repo source is modified; this only monkey-patches an
+  // instance property on the Repo this SyncClient itself created, so it
+  // can't affect any other Repo instance.
+  // ---------------------------------------------------------------------
+
+  type IndexSynchronizer = Repo['synchronizer'];
+  type IndexReceivedMessage = Parameters<IndexSynchronizer['receiveMessage']>[0];
+
+  // Helper: reconcile file/identity/capture state against the index
+  // document's current content. Shared by the live 'change' subscription
+  // and by recoverIndexDocument's one-time post-recovery catch-up (a
+  // 'change' event only fires on FUTURE mutations, not retroactively).
+  function reconcileIndexDoc(handle: DocHandle<IndexDocument>, notifyCaptures: boolean): void {
+    const changedDoc = handle.doc();
+    if (changedDoc) {
+      const newFiles = getFilesFromIndex(changedDoc);
+      syncWithFilesHandled(newFiles);
+      callbacks.onFilesChange?.(newFiles);
+      notifyIdentitiesIfChanged(changedDoc);
+      if (notifyCaptures) notifyCapturesIfChanged(changedDoc);
+      notifyFoldersIfChanged(changedDoc);
+    }
+  }
+
+  // Helper: subscribe to index changes on the given handle, tracking the
+  // handler so a later recovery can detach it from a since-replaced handle.
+  function attachIndexSubscription(handle: DocHandle<IndexDocument>, notifyCaptures: boolean): void {
+    const handler = () => reconcileIndexDoc(handle, notifyCaptures);
+    handle.on('change', handler);
+    indexChangeHandler = handler;
+    state.cleanupFns.push(() => handle.off('change', handler));
+  }
+
+  /**
+   * Detect the swallowed duplicate-seq collision (H4) for
+   * `targetDocumentId` and trigger recovery. Returns an uninstall
+   * function; callers push it onto state.cleanupFns so disconnect()
+   * restores the original method.
+   */
+  function installDuplicateSeqRecovery(repo: Repo, targetDocumentId: DocumentId): () => void {
+    const synchronizer = repo.synchronizer as IndexSynchronizer | undefined;
+    // Defensive: some test doubles (and conceivably a future
+    // automerge-repo version) don't expose a real .synchronizer. This is
+    // a best-effort enhancement, not a required invariant for connect()
+    // to function — skip installing rather than crash the connection.
+    if (!synchronizer || typeof synchronizer.receiveMessage !== 'function') {
+      return () => {};
+    }
+    const original = synchronizer.receiveMessage.bind(synchronizer);
+    const handleCollision = (message: IndexReceivedMessage, err: unknown): void => {
+      if (
+        message.documentId === targetDocumentId &&
+        err instanceof RangeError &&
+        /duplicate seq \d+ found for actor/.test(err.message)
+      ) {
+        void recoverIndexDocument(message.documentId);
+      }
+    };
+    // Handle both shapes receiveMessage has had across automerge-repo
+    // versions (see the block comment above) without assuming which is
+    // currently installed, so a future version bump doesn't silently
+    // disable this: a synchronous throw (v2.6.0-alpha.5+) is caught
+    // directly and re-thrown so the repo's own handling still runs
+    // unchanged; a rejecting promise (v2.5.6) is tapped with an
+    // additional `.catch` without altering what's returned to the caller.
+    const wrapped = (message: IndexReceivedMessage) => {
+      try {
+        const result: unknown = original(message);
+        if (result instanceof Promise) {
+          result.catch((err: unknown) => handleCollision(message, err));
+        }
+        return result;
+      } catch (err) {
+        handleCollision(message, err);
+        throw err;
+      }
+    };
+    synchronizer.receiveMessage = wrapped as typeof synchronizer.receiveMessage;
+    return () => {
+      if (synchronizer.receiveMessage === wrapped) {
+        synchronizer.receiveMessage = original;
+      }
+    };
+  }
+
+  /**
+   * Recover a permanently-wedged index document (H4): discard the local
+   * copy (dropping its DocSynchronizer's poisoned per-peer sync state and
+   * its persisted storage entry) and re-fetch a fresh copy from the hub,
+   * then re-wire the live subscription and reconcile file/identity/
+   * capture state against whatever changed while this client was stuck.
+   * Scoped to the index document only — a collision on some OTHER
+   * document is not this connection's index doc and is left alone.
+   */
+  async function recoverIndexDocument(collidedDocumentId: DocumentId): Promise<void> {
+    const repo = state.repo;
+    const oldHandle = state.indexHandle;
+    if (!repo || !oldHandle || oldHandle.documentId !== collidedDocumentId) return;
+    if (indexRecoveryInFlight) return;
+    indexRecoveryInFlight = true;
+    try {
+      console.warn(
+        `[quarto-sync-client] index document ${collidedDocumentId} hit a duplicate-seq actor ` +
+          `collision (bd-6f21d4c6); discarding the local copy and re-fetching from the hub`,
+      );
+      if (indexChangeHandler) oldHandle.off('change', indexChangeHandler);
+      repo.delete(collidedDocumentId);
+
+      let freshHandle: DocHandle<IndexDocument>;
+      try {
+        freshHandle = await findDoc<IndexDocument>(collidedDocumentId);
+      } catch (err) {
+        console.warn(
+          `[quarto-sync-client] re-fetch of index document ${collidedDocumentId} after a ` +
+            `duplicate-seq collision failed; will retry on the next collision`,
+          err,
+        );
+        return;
+      }
+
+      // The connection may have been torn down (or replaced by a new
+      // connect()) while we were awaiting the re-fetch above — same race
+      // findDoc's own retry loop guards against. Applying a stale
+      // recovery's result to unrelated new state would be worse than the
+      // original collision.
+      if (state.repo !== repo) return;
+
+      freshHandle.change(d => migrateIndexDocument(d));
+      state.indexHandle = freshHandle;
+      attachIndexSubscription(freshHandle, true);
+      reconcileIndexDoc(freshHandle, true);
+
+      console.warn(`[quarto-sync-client] recovered index document ${collidedDocumentId}`);
+    } finally {
+      indexRecoveryInFlight = false;
     }
   }
 
@@ -848,7 +1196,7 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
    * serialization), and memory storage keeps the IndexedDB open off
    * the critical path of the WebSocket `join`.
    */
-  async function connect(syncServerUrl: string, indexDocId: string, actorId?: string, screenName?: string, color?: string, peerTimeoutMsOrOptions: number | ConnectOptions = 1, auth?: SyncClientAuthOptions): Promise<AnnotatedFileEntry[]> {
+  async function connect(syncServerUrl: string, indexDocId: string, authorId?: string, screenName?: string, color?: string, peerTimeoutMsOrOptions: number | ConnectOptions = 1, auth?: SyncClientAuthOptions): Promise<AnnotatedFileEntry[]> {
     const options: ConnectOptions =
       typeof peerTimeoutMsOrOptions === 'number'
         ? { peerTimeoutMs: peerTimeoutMsOrOptions }
@@ -864,17 +1212,25 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     // Disconnect from any existing connection
     await disconnect();
 
+    recordConnectionEvent('connect', syncServerUrl);
     try {
-      state.wsAdapter = wrapAdapter(
-        await buildWsAdapter(syncServerUrl, effectiveAuth, options.retryIntervalMs),
+      const rawAdapter = await buildWsAdapter(
+        syncServerUrl,
+        effectiveAuth,
+        options.retryIntervalMs,
       );
+      state.rawWsAdapter = rawAdapter;
+      state.wsAdapter = wrapAdapter(rawAdapter);
       state.repo = new Repo({
         network: [state.wsAdapter],
         storage: buildStorageAdapter(options.storage),
       });
-      state.actorId = actorId ?? null;
+      state.authorId = authorId ?? null;
       state.findDocRetry = { ...DEFAULT_FIND_DOC_RETRY, ...options.findDocRetry };
       trackPeers(state.repo);
+      state.cleanupFns.push(
+        installDuplicateSeqRecovery(state.repo, indexDocId as DocumentId),
+      );
 
       // Try to connect to peer, but continue in offline mode if it fails
       let isOnline = false;
@@ -923,8 +1279,8 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       // Always write locally — Automerge will sync when the peer connects.
       indexHandle.change(d => {
         migrateIndexDocument(d);
-        if (actorId && screenName) {
-          setIdentity(d, actorId, screenName, color || '');
+        if (authorId && screenName) {
+          setIdentity(d, authorId, screenName, color || '');
         }
       });
 
@@ -939,22 +1295,20 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       lastCaptures = getCapturesFromIndex(currentDoc);
       callbacks.onCapturesChange?.(lastCaptures);
 
-      // Subscribe to index changes
-      const indexChangeHandler = () => {
-        const changedDoc = indexHandle.doc();
-        if (changedDoc) {
-          const newFiles = getFilesFromIndex(changedDoc);
-          syncWithFilesHandled(newFiles);
-          callbacks.onFilesChange?.(newFiles);
-          notifyIdentitiesIfChanged(changedDoc);
-          notifyCapturesIfChanged(changedDoc);
-        }
-      };
-      indexHandle.on('change', indexChangeHandler);
-      state.cleanupFns.push(() => indexHandle.off('change', indexChangeHandler));
+      // Fire initial folders (empty before V3)
+      lastFolders = getFoldersFromIndex(currentDoc);
+      callbacks.onFoldersChange?.(lastFolders);
 
-      // Subscribe to network events for ongoing connection status
-      let currentlyOnline = isOnline;
+      // Subscribe to index changes
+      attachIndexSubscription(indexHandle, true);
+
+      // Subscribe to network events for ongoing connection status.
+      // Initialize from the live peer set, not the waitForPeer outcome:
+      // a peer whose handshake completed after waitForPeer's timeout but
+      // before this subscription would otherwise be missed, leaving the
+      // flag stuck at "offline" while a peer is connected (trackPeers is
+      // subscribed before waitForPeer, so its set has no such gap).
+      let currentlyOnline = state.connectedPeers.size > 0;
       const onPeerConnect = () => {
         if (!currentlyOnline) {
           currentlyOnline = true;
@@ -1123,13 +1477,15 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     astCache.clear();
 
     if (state.wsAdapter) {
+      recordConnectionEvent('disconnect');
       (state.wsAdapter as { disconnect: () => void }).disconnect();
       state.wsAdapter = null;
     }
+    state.rawWsAdapter = null;
 
     state.repo = null;
     state.indexHandle = null;
-    state.actorId = null;
+    state.authorId = null;
     state.connectedPeers = new Set();
     state.peerStorageIds = new Map();
     state.findDocRetry = DEFAULT_FIND_DOC_RETRY;
@@ -1252,10 +1608,11 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   /**
    * Create a new text file.
    */
-  async function createFile(path: string, content: string = ''): Promise<void> {
+  async function createFile(rawPath: string, content: string = ''): Promise<void> {
     if (!state.repo || !state.indexHandle) {
       throw new Error('Not connected');
     }
+    const path = normalizeProjectPath(rawPath);
 
     const handle = createDoc<TextDocumentContent>();
     handle.change(doc => {
@@ -1273,16 +1630,61 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   }
 
   /**
+   * Create a new text file only if `path` is not already in the index.
+   *
+   * Unlike `createFile`, this never replaces an index entry. The presence
+   * check and the index write happen inside one `indexHandle.change`
+   * callback, so nothing local can slip in between them. The text goes into
+   * the new document as its initial value, so the document's history is a
+   * single change holding the whole content (document import keeps that as
+   * its recoverable base, I20) instead of an empty document plus a second
+   * change.
+   *
+   * Residual risk: the check sees only this client's copy of the index. A
+   * file another client created at the same path that has not synced yet is
+   * invisible here, and the index map then resolves last-writer-wins.
+   */
+  async function createFileIfAbsent(
+    rawPath: string,
+    content: string
+  ): Promise<CreateFileIfAbsentResult> {
+    if (!state.repo || !state.indexHandle) {
+      throw new Error('Not connected');
+    }
+    const path = normalizeProjectPath(rawPath);
+
+    const handle = createDoc<TextDocumentContent>({ text: content });
+    const docId = handle.documentId;
+
+    let present = false;
+    state.indexHandle.change(doc => {
+      if (doc.files[path]) {
+        present = true;
+        return;
+      }
+      doc.files[path] = docId;
+    });
+    if (present) return { created: false };
+
+    // Same follow-up as createFile.
+    await subscribeToFileInternal(path, handle as unknown as DocHandle<FileDocument>);
+    callbacks.onFileAdded(path, { type: 'text', text: content });
+    tryParseAndNotify(path, content);
+    return { created: true, docId };
+  }
+
+  /**
    * Create a new binary file with deduplication.
    */
   async function createBinaryFile(
-    path: string,
+    rawPath: string,
     content: Uint8Array,
     mimeType: string
   ): Promise<CreateBinaryFileResult> {
     if (!state.repo || !state.indexHandle) {
       throw new Error('Not connected');
     }
+    let path = normalizeProjectPath(rawPath);
 
     const hash = await computeSHA256(content);
     const indexDoc = state.indexHandle.doc();
@@ -1332,10 +1734,11 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   /**
    * Delete a file.
    */
-  function deleteFile(path: string): void {
+  function deleteFile(rawPath: string): void {
     if (!state.indexHandle) {
       throw new Error('Not connected');
     }
+    const path = normalizeProjectPath(rawPath);
 
     const indexHandle = state.indexHandle;
     indexHandle.change(doc => {
@@ -1379,11 +1782,65 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   }
 
   /**
-   * Rename a file.
+   * Record an explicitly created folder so it exists (and is listed) even
+   * with no files under it. Idempotent. `path` is root-relative with no
+   * leading or trailing slash.
    */
-  function renameFile(oldPath: string, newPath: string): void {
+  function createFolder(rawPath: string): void {
     if (!state.indexHandle) {
       throw new Error('Not connected');
+    }
+    const path = normalizeProjectPath(rawPath);
+    if (!path) return;
+    state.indexHandle.change(doc => {
+      if (!doc.folders) doc.folders = {};
+      if (doc.folders[path] !== true) doc.folders[path] = true;
+    });
+  }
+
+  /**
+   * Forget an explicitly created folder. Only the folder marker is
+   * removed — files under the path are untouched, so a folder that still
+   * contains files keeps appearing in listings (derived from those
+   * paths). Callers wanting "delete folder" semantics delete the files
+   * first. No-op when the marker is absent.
+   */
+  function deleteFolder(rawPath: string): void {
+    if (!state.indexHandle) {
+      throw new Error('Not connected');
+    }
+    const path = normalizeProjectPath(rawPath);
+    state.indexHandle.change(doc => {
+      if (doc.folders && doc.folders[path] !== undefined) {
+        delete doc.folders[path];
+      }
+    });
+  }
+
+  /**
+   * List explicitly created folders (V3+). Empty before connect.
+   */
+  function getFolderPaths(): string[] {
+    const doc = state.indexHandle?.doc();
+    return doc ? getFoldersFromIndex(doc) : [];
+  }
+
+  /**
+   * Rename a file.
+   */
+  function renameFile(rawOldPath: string, rawNewPath: string): void {
+    if (!state.indexHandle) {
+      throw new Error('Not connected');
+    }
+    // Existing keys may predate normalization, so look the old path up
+    // as given and fall back to its normalized form.
+    const indexBefore = state.indexHandle.doc();
+    const oldPath = indexBefore?.files?.[rawOldPath] !== undefined
+      ? rawOldPath
+      : normalizeProjectPath(rawOldPath);
+    const newPath = normalizeProjectPath(rawNewPath);
+    if (!newPath) {
+      throw new Error('New path is empty');
     }
 
     const indexDoc = state.indexHandle.doc();
@@ -1463,6 +1920,25 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   }
 
   /**
+   * Live, independent connection signals for the connection-status
+   * dialog: raw websocket readyState (read straight off the socket)
+   * and the current automerge peer handshake state.
+   */
+  function getConnectionInfo(): ConnectionInfo {
+    // Both ws adapters expose their underlying socket as `socket`.
+    const socket = (state.rawWsAdapter as { socket?: { readyState?: number; url?: string } } | null)
+      ?.socket;
+    return {
+      wsReadyState: socket?.readyState ?? null,
+      wsUrl: socket?.url ?? null,
+      peers: [...state.connectedPeers].map(peerId => ({
+        peerId,
+        storageId: state.peerStorageIds.get(peerId),
+      })),
+    };
+  }
+
+  /**
    * Get all file paths.
    */
   function getFilePaths(): string[] {
@@ -1509,11 +1985,10 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
         const bareId = raw.startsWith('automerge:')
           ? raw.slice('automerge:'.length)
           : raw;
-        const cached = repo?.handles?.[bareId as DocumentId];
         return {
           path,
           docId: raw,
-          handleState: cached?.state ?? null,
+          handleState: cachedDocState(repo, bareId),
           unavailableMarker: state.unavailableFiles.has(path),
         };
       });
@@ -1533,6 +2008,23 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
    */
   function getRepo(): Repo | null {
     return state.repo;
+  }
+
+  /**
+   * The repo's verdict on a document it already knows about, or null
+   * when it holds no query for that doc. Since automerge-repo 2.6,
+   * availability lives on the DocumentQuery, not the DocHandle: a
+   * handle's own `state` is only ever 'ready' or 'deleted', and
+   * `repo.find()` rejects for a doc no peer has instead of handing out
+   * an 'unavailable' handle. Only an existing query is consulted —
+   * `findWithProgress` on an unknown id would create one and start
+   * requesting the doc, which diagnostics must never do.
+   */
+  function cachedDocState(repo: Repo | null, bareId: string): string | null {
+    const cached = repo?.handles?.[bareId as DocumentId];
+    if (!repo || !cached) return null;
+    const query = repo.findWithProgress<unknown>(bareId as DocumentId).peek();
+    return query.state === 'ready' ? cached.state : query.state;
   }
 
   /** Heads of a handle's doc when ready, else null (plain string[]). */
@@ -1576,12 +2068,11 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       const bareId = rawDocId.startsWith('automerge:')
         ? rawDocId.slice('automerge:'.length)
         : rawDocId;
-      const cached = state.repo?.handles?.[bareId as DocumentId];
       byPath.push({
         docId: bareId,
         role: 'file',
         path,
-        handleState: cached?.state ?? null,
+        handleState: cachedDocState(state.repo, bareId),
         heads: null,
         unavailableMarker: true,
       });
@@ -1596,21 +2087,21 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
    */
   async function createNewProject(
     options: CreateProjectOptions,
-    actorId?: string,
+    authorId?: string,
     screenName?: string,
     color?: string,
-    resolveActorId?: (indexDocId: string) => Promise<string | null | undefined>,
+    resolveAuthorId?: (indexDocId: string) => Promise<string | null | undefined>,
   ): Promise<CreateProjectResult> {
     await disconnect();
 
     try {
-      state.wsAdapter = wrapAdapter(
-        await buildWsAdapter(
-          options.syncServer,
-          options.auth,
-          options.retryIntervalMs,
-        ),
+      const rawAdapter = await buildWsAdapter(
+        options.syncServer,
+        options.auth,
+        options.retryIntervalMs,
       );
+      state.rawWsAdapter = rawAdapter;
+      state.wsAdapter = wrapAdapter(rawAdapter);
       state.repo = new Repo({
         network: [state.wsAdapter],
         storage: buildStorageAdapter(options.storage),
@@ -1622,12 +2113,10 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       // The timeout defaults to 1 ms so the browser falls back to IDB
       // quickly; callers that need guaranteed online creation (e.g. test
       // helpers) should pass options.peerTimeoutMs to wait for the peer.
-      let isOnline = false;
       try {
         syncLog('Waiting for peer connection...');
         await waitForPeer(state.repo, options.peerTimeoutMs ?? 1);
         syncLog('Peer connected - online mode');
-        isOnline = true;
       } catch (peerError) {
         if (options.requireOnline) {
           await disconnect();
@@ -1638,34 +2127,35 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
           );
         }
         console.warn('Peer connection failed, creating project in offline mode:', peerError);
-        isOnline = false;
       }
 
-      // Phase 1: Generate a document ID and resolve the actor ID before
+      // Phase 1: Generate a document ID and resolve the author ID before
       // creating any documents. This avoids the chicken-and-egg problem
-      // where repo.create() writes an initial change with a random actor.
+      // where repo.create() writes an initial change before the author is
+      // known.
       const indexUrl = generateAutomergeUrl();
       const { documentId: indexDocId } = parseAutomergeUrl(indexUrl);
+      state.cleanupFns.push(installDuplicateSeqRecovery(state.repo, indexDocId));
 
-      const resolvedActorId = resolveActorId
-        ? (await resolveActorId(indexDocId)) ?? undefined
-        : actorId;
-      state.actorId = resolvedActorId ?? null;
+      const resolvedAuthorId = resolveAuthorId
+        ? (await resolveAuthorId(indexDocId)) ?? undefined
+        : authorId;
+      state.authorId = resolvedAuthorId ?? null;
 
       // Phase 2: Create the index document via createDoc with the
-      // pre-generated ID so the first change uses the correct actor.
+      // pre-generated ID so the first change carries the author.
       syncLog(`[createNewProject] Creating index document with ID ${indexDocId}`);
       const indexHandle = createDoc<IndexDocument>(
-        { files: {}, version: CURRENT_SCHEMA_VERSION, identities: {} },
+        { files: {}, version: CURRENT_SCHEMA_VERSION, identities: {}, folders: {} },
         indexDocId,
       );
       state.indexHandle = indexHandle;
       syncLog(`[createNewProject] Index document created, ID:`, indexHandle.documentId);
 
       // Write identity (separate change so the schema init is clean).
-      if (resolvedActorId && screenName) {
+      if (resolvedAuthorId && screenName) {
         indexHandle.change(doc => {
-          setIdentity(doc, resolvedActorId, screenName, color || '');
+          setIdentity(doc, resolvedAuthorId, screenName, color || '');
         });
       }
 
@@ -1676,6 +2166,10 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       // Fire initial captures (always empty for a fresh project)
       lastCaptures = getCapturesFromIndex(indexHandle.doc()!);
       callbacks.onCapturesChange?.(lastCaptures);
+
+      // Fire initial folders (always empty for a fresh project)
+      lastFolders = getFoldersFromIndex(indexHandle.doc()!);
+      callbacks.onFoldersChange?.(lastFolders);
 
       // Phase 3: Create file documents (now using the correct actor).
       const createdFiles: FileEntry[] = [];
@@ -1720,20 +2214,12 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
       }
 
       // Subscribe to index changes
-      const indexChangeHandler = () => {
-        const changedDoc = indexHandle.doc();
-        if (changedDoc) {
-          const newFiles = getFilesFromIndex(changedDoc);
-          syncWithFilesHandled(newFiles);
-          callbacks.onFilesChange?.(newFiles);
-          notifyIdentitiesIfChanged(changedDoc);
-        }
-      };
-      indexHandle.on('change', indexChangeHandler);
-      state.cleanupFns.push(() => indexHandle.off('change', indexChangeHandler));
+      attachIndexSubscription(indexHandle, false);
 
-      // Subscribe to network events for ongoing connection status
-      let currentlyOnline = isOnline;
+      // Subscribe to network events for ongoing connection status.
+      // Initialized from the live peer set for the same missed-peer-event
+      // reason as in connect() above.
+      let currentlyOnline = state.connectedPeers.size > 0;
       const onPeerConnect = () => {
         if (!currentlyOnline) {
           currentlyOnline = true;
@@ -1802,10 +2288,12 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   }
 
   /**
-   * Get the current actor ID, or null if not set.
+   * Get the current author ID — the attribution key identifying this
+   * user's changes (per the author-ID transition, identities and
+   * attribution runs key off this value) — or null if not set.
    */
-  function getActorId(): string | null {
-    return state.actorId;
+  function getAuthorId(): string | null {
+    return state.authorId;
   }
 
   // Return the public API
@@ -1821,20 +2309,25 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     updateFileAst,
     getFileAst,
     createFile,
+    createFileIfAbsent,
     createBinaryFile,
     deleteFile,
     renameFile,
+    createFolder,
+    deleteFolder,
+    getFolderPaths,
     clearCapture,
     isConnected,
     getFileHandle,
     getIndexHandle,
+    getConnectionInfo,
     getFilePaths,
     getUnavailableFiles,
     getSyncDiagnostics,
     getRepo,
     getDocInventory,
     createNewProject,
-    getActorId,
+    getAuthorId,
   };
 }
 

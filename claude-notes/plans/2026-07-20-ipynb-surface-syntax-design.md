@@ -1,8 +1,39 @@
-# .ipynb Surface Syntax for Quarto 2 — Feasibility and Design
+---
+title: '.ipynb Surface Syntax for Quarto 2 — Feasibility and Design'
+date: 2026-07-20
+description: 'Design reference for rendering `.ipynb` notebooks directly, converting each cell''s logical text into an in-memory source file so diagnostics point at cell coordinates, not raw JSON bytes.'
+status: superseded  # **DESIGN REFERENCE — execution moved to Plan 7c** (2026-08-17)
+braid:
+  strand: bd-19nc56ao  # related: k-zr88, bd-xxul, bd-kik3s1vt
+  priority: P1
+  labels: [surface-syntax]
+---
 
-**Date**: 2026-07-20
-**Strand**: bd-19nc56ao (related: k-zr88, bd-xxul, bd-kik3s1vt)
-**Status**: Design discussion / plan skeleton — awaiting review
+> **Where this work lives now.** The design below is sound and is absorbed
+> wholesale into
+> [`2026-07-08-plan7c-ipynb-content-processor.md`](2026-07-08-plan7c-ipynb-content-processor.md)
+> — the source-location design (per-cell ephemeral `SourceFile`s), cell
+> emission rules, presentation P1/P2, the stored-output decision (option B),
+> and the three implementation seams. **Execute 7c, not the phases here.**
+>
+> **One thing changed: the attachment point.** This doc puts conversion "in
+> front of the parser, keyed off the already-existing `SourceType` detection —
+> *not* a new pipeline stage, and *not* (yet) the full `ConverterRegistry`."
+> Both halves are now superseded:
+>
+> - `SourceType` **lost its `Ipynb` variant** in the ts-engine-extensions ←
+>   main merge (decision D3 in
+>   `2026-08-13-ts-engine-extensions-merge-main.md`). `.ipynb` lands as an
+>   **engine claiming `.ipynb`**, converted by `SourceConversionStage`.
+> - The registry this doc declined as "speculative for one converter" is being
+>   built anyway by Plan 7b, for percent and spin. ipynb is therefore the
+>   *third* converter, not the first — which is the condition this doc itself
+>   names for slotting a registry in ("when a second converter (percent
+>   scripts) arrives").
+>
+> Everything else here stands, including the assumption audit that retired the
+> sidecar mechanism and the `SourceInfo::NotebookCell` variant — 7c adopts both
+> conclusions, and they simplify Plan 7b in turn.
 
 ## Overview
 
@@ -55,7 +86,7 @@ the source-location question (the hard part), and lays out a phased plan.
 |---|---|---|
 | "qmd files must exist on disk" (intermediate for engines) | False. `run_pipeline(content: &[u8], source_name)` is fully in-memory (`quarto-core/src/pipeline.rs`); the Q2 jupyter engine executes fenced blocks from the qmd *string* (`engine/jupyter/text_execute.rs`), no notebook or qmd intermediary on disk | **The entire sidecar-file mechanism is unnecessary.** Conversion can happen in-process, in front of the parser |
 | "SourceContext serialization is limited (PandocAST JSON only)" | False since the k-44 pool work: `SourceContext`/`SourceInfo` are plain serde types | No cross-process handoff problem to design around |
-| Needs new `SourceInfo::NotebookCell` variant carrying cell metadata + content file id per span | Cell identity is per-*file*, not per-*span*: with one ephemeral `SourceFile` per cell, existing `Original`/`Substring`/`Concat` compose fine | **No `SourceInfo` enum change needed** (the enum is closed, with ~8 match sites upstream — avoiding this is a big deal) |
+| Needs new `SourceInfo::NotebookCell` variant carrying cell metadata + content file id per span | Cell identity is per-*file*, not per-*span*: with one ephemeral `SourceFile` per cell, existing `Original`/`Substring`/`Concat` compose fine | **No `SourceInfo` enum change needed** (the enum is closed, with \~8 match sites upstream — avoiding this is a big deal) |
 | `FilterProvenance` variant exists | Extracted crate has `Generated { by: By, from: [Anchor] }` instead | Use `Generated` for synthesized scaffolding (fences etc.) |
 
 What *hasn't* changed: no converter infrastructure exists; `SourceType::Ipynb`
@@ -99,7 +130,7 @@ first, observe that we don't actually need it:
 Nobody reads a notebook as raw JSON — not the user (who sees cells in Jupyter
 or a cell-aware editor), not our renderer. The JSON byte layout is an
 implementation detail (Jupyter itself rewrites it freely — fragment
-splitting is unstable across saves). So instead of treating `foo.ipynb`'s
+splitting is unstable across saves). So instead of treating `foo.ipynb`\'s
 bytes as the root and fighting the escape problem, **register each cell's
 logical content as its own ephemeral in-memory `SourceFile`, and make that the
 root coordinate system.** The unescaping happens once, at ingestion, *before*
@@ -177,7 +208,7 @@ If raw-file offsets are ever needed, two escalation paths, in increasing
 order of ambition:
 
 1. **Converter-level decode maps**: while reading the notebook with a
-   span-aware JSON reader (we own `pampa`'s raw-json reader as a starting
+   span-aware JSON reader (we own `pampa`\'s raw-json reader as a starting
    point), record per cell a run table `[(logical_range, file_range), …]`
    breaking at every escape sequence and fragment boundary. Store it next to
    the virtual file (converter output struct — no `SourceInfo` change), and
@@ -322,7 +353,7 @@ pipeline without new surface area (not in scope for the first cut).
 ### Phase 2 — pipeline wiring
 - [ ] `ParseDocumentStage` branch on `SourceType::Ipynb`
 - [ ] SourceContext plumbing on both success and error paths (incl.
-      `run_pipeline`'s rebuilt context)
+      `run_pipeline`\'s rebuilt context)
 - [ ] Cell-options composition test (`#|` YAML error inside a code cell of a
       notebook lands in the right cell)
 - [ ] End-to-end: `cargo run --bin q2 -- render fixture.ipynb` + inspect

@@ -1,7 +1,12 @@
-# ANSI Writer Block Types Implementation Plan
+---
+title: 'ANSI Writer Block Types Implementation Plan'
+date: 2025-10-27
+description: 'Adds Paragraph, Plain, Div, BulletList and OrderedList support to the ANSI writer, using prefix-writing contexts so nested lists compose and blank-line spacing depends on the block types around each block.'
+braid:
+  strand: k-267  # Phase 2
+  priority: P1
+---
 
-**Date**: 2025-10-27
-**Issue**: k-267 Phase 2
 **Goal**: Implement Paragraph, Plain (consecutive), Div, BulletList, and OrderedList blocks
 
 ## 1. Understanding qmd.rs Context Pattern
@@ -265,26 +270,26 @@ fn calculate_indent_width(start: usize, count: usize) -> usize {
 
 ## 4. Implementation Plan
 
-**Phase 1: Infrastructure** (~30 min)
+**Phase 1: Infrastructure** (\~30 min)
 1. Add `LastBlockSpacing` enum
 2. Modify `write_block` to `write_block_with_depth`, return `LastBlockSpacing`
 3. Add `list_depth` parameter to block writing functions
 4. Update `write_with_config` to track spacing
 
-**Phase 2: Context Structs** (~40 min)
+**Phase 2: Context Structs** (\~40 min)
 5. Implement `BulletListContext` with depth-based bullet selection
 6. Implement `OrderedListContext` with calculated indentation
 7. Implement `DivContext` with line-by-line styling
 8. Add helper function `calculate_indent_width`
 
-**Phase 3: Block Implementations** (~90 min)
+**Phase 3: Block Implementations** (\~90 min)
 9. **Paragraph**: Surround with blank lines, return `Paragraph` spacing
 10. **Plain**: Return `Plain` spacing (no changes to impl needed)
 11. **Div**: Create DivContext if colors present, write blocks, return `Paragraph` spacing
 12. **BulletList**: Create contexts per item, handle tight/loose, pass `list_depth + 1` to nested blocks
 13. **OrderedList**: Calculate indent, create contexts, handle numbering
 
-**Phase 4: Testing** (~60 min)
+**Phase 4: Testing** (\~60 min)
 14. Test Para spacing (blank lines)
 15. Test consecutive Plains vs mixed Plains
 16. Test Div colors
@@ -391,4 +396,4 @@ pub fn write_with_config<T: Write>(
 - **Phase 1-2**: 70 minutes (infrastructure + contexts)
 - **Phase 3**: 90 minutes (block implementations)
 - **Phase 4**: 60 minutes (testing)
-- **Total**: ~3.5-4 hours including testing and debugging
+- **Total**: \~3.5-4 hours including testing and debugging

@@ -1,4 +1,8 @@
-# Test Suite Fixing Plan - November 1, 2025
+---
+title: 'Test Suite Fixing Plan - November 1, 2025'
+date: 2025-11-01
+description: 'Groups the eleven failing quarto-markdown-pandoc integration tests by root cause, from document-level parse crashes to citations, line breaks and nested inline formatting, and sets a fix order.'
+---
 
 ## Overview
 
@@ -93,14 +97,14 @@ After completing the k-274 tree-sitter refactoring, we need to fix the failing t
 
 **Problem:**
 - Input: `~he~~l~~lo~` (subscript with strikeout inside)
-- Expected: Subscript containing [Str "he", Strikeout [Str "l"], Str "lo"]
-- Actual: Subscript containing [Str "he", RawInline "leftover", Str "lo"]
+- Expected: Subscript containing `[Str "he", Strikeout [Str "l"], Str "lo"]`
+- Actual: Subscript containing `[Str "he", RawInline "leftover", Str "lo"]`
 
-**Root cause:** Strikeout (~~ inside ~) not being parsed correctly when nested in subscript
+**Root cause:** Strikeout (\~\~ inside \~) not being parsed correctly when nested in subscript
 
 **Fix approach:**
 1. Review inline formatting nesting in grammar
-2. May need grammar changes to handle nested ~~ and ~
+2. May need grammar changes to handle nested \~\~ and \~
 3. Add comprehensive nesting tests
 
 **Priority:** MEDIUM - edge case but affects complex documents

@@ -1,9 +1,14 @@
-# Website sidebar layout: body class + grid placement
+---
+title: 'Website sidebar layout: body class + grid placement'
+date: 2026-04-29
+description: 'Moves the website sidebar from the bottom of the page into a left column by setting body classes from the sidebar style and fixing the sidebar''s grid placement, matching Quarto 1''s layout.'
+status: draft  # Draft — awaiting user review before implementation.
+braid:
+  strand: bd-mgoh  # discovered-from bd-2jwk
+  priority: P1
+---
 
-**Date:** 2026-04-29
-**Beads:** `bd-mgoh` (this task); discovered-from `bd-2jwk` (website examples).
 **Parent epic:** `claude-notes/plans/2026-04-23-website-project-epic.md`
-**Status:** Draft — awaiting user review before implementation.
 
 ## Symptom
 
@@ -145,7 +150,7 @@ before declaring success"):
 - [ ] Reload `127.0.0.1:8080` (the user's running static server) and
       confirm via Chrome DevTools that:
       - body class includes `nav-sidebar floating`
-      - `#quarto-sidebar`'s computed `grid-column` resolves to
+      - `#quarto-sidebar`\'s computed `grid-column` resolves to
         `page-start / body-start` (or equivalent left-column
         track), not `body-content-start / body-content-end`
       - the sidebar visually sits to the left of `<main>`, not
@@ -189,7 +194,7 @@ before declaring success"):
 - [x] `template.rs::test_full_template_no_sidebar_wrapper` (new) —
       rendering with `rendered.navigation.sidebar` set produces no
       `<div id="quarto-sidebar-container">` wrapper; the sidebar
-      HTML appears between `#quarto-content`'s opening tag and
+      HTML appears between `#quarto-content`\'s opening tag and
       `<main>`.
 - [x] `template.rs::test_full_template_quarto_container_class`
       (new) — `#quarto-content` carries `quarto-container` for

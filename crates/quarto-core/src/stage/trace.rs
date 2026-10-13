@@ -416,7 +416,12 @@ fn serialize_pipeline_data(data: &PipelineData) -> serde_json::Value {
     match data {
         PipelineData::LoadedSource(s) => serde_json::json!({
             "path": s.path.display().to_string(),
-            "source_type": format!("{:?}", s.source_type),
+            // `Some(Qmd)` → `"Qmd"`, `None` → JSON `null`. Rendering the
+            // Option's Debug form directly would put the string
+            // `"Some(Qmd)"` on the wire; consumers want the variant.
+            // `null` is the honest encoding of "unknown extension, not yet
+            // converted" (see `LoadedSource::source_type`).
+            "source_type": s.source_type.map(|t| format!("{t:?}")),
             "content_length": s.content.len(),
         }),
         PipelineData::DocumentSource(s) => serde_json::json!({
@@ -564,6 +569,7 @@ mod tests {
             source_context: quarto_source_map::SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         };
 
         let data = PipelineData::DocumentAst(doc);
@@ -586,6 +592,7 @@ mod tests {
             source_context: quarto_source_map::SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         };
 
         let data = PipelineData::DocumentAst(doc);

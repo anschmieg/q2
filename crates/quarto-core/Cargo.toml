@@ -17,13 +17,31 @@ async-trait.workspace = true
 tokio-util.workspace = true
 pollster.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 yaml-rust2.workspace = true
 smallvec.workspace = true
 hashlink = "0.11"
 pathdiff.workspace = true
 sha2 = "0.11"
 hex = "0.4"
+# Image links in imported qmd are percent-encoded (document import I12).
+percent-encoding = "2"
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
 glob = "0.3"
+# Nested-cell-mask opener/closer matching (engine/nested_cell_mask.rs) runs on
+# both native and wasm32 (the WASM preview pipeline must mask displayed cells
+# too). Unconditional here costs nothing: `pampa` already declares `regex`
+# unconditionally and `quarto-core` depends on `pampa` unconditionally, so
+# regex is already compiled into the WASM payload.
+regex = "1.12"
+# Plan 7b spin processor: `matchable` (is a `#'`/chunk marker inside a
+# multi-line string, or a real top-level token?) reuses tree-sitter-r rather
+# than hand-rolling an R tokenizer. Cross-target on purpose (native + wasm32)
+# — see claude-notes/plans/2026-07-08-plan7b-native-content-processors.md
+# Decision 4. `quarto-highlight` already pays this cost in the wasm32 build
+# (`wasm-quarto-hub-client` depends on it), so this is not new WASM weight.
+tree-sitter.workspace = true
+tree-sitter-r = "1.2"
 # `time` for date formatting (used by L1 ListingItemInfoStage; see
 # claude-notes/plans/2026-05-05-listings-L1-autofill-stage.md §D12).
 # `formatting` enables `OffsetDateTime::format`; `parsing` enables
@@ -33,6 +51,10 @@ glob = "0.3"
 # compile-time `format_description!` macro. WASM-compatible.
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 
+# Backs `inline_css` (Q1's juice step), used by the `inline-css` subcommand and
+# the `css-inline` pipeline stage. Default features (remote/file stylesheet
+# loading, rayon) stay off, which keeps it buildable for wasm32.
+css-inline = { version = "0.21", default-features = false }
 quarto-util.workspace = true
 quarto-system-runtime.workspace = true
 quarto-pandoc-types.workspace = true
@@ -54,6 +76,13 @@ pampa = { workspace = true, features = ["lua-filter", "json-filter"] }
 # `quarto-highlight` crate itself to avoid compiling wasmtime for the
 # wasm32-unknown-unknown target.
 quarto-highlight.workspace = true
+# `MathMlStage` (html-math-method: mathml) converts math at render time.
+quarto-math = { path = "../quarto-math" }
+# Book-projects P6: the project-wide bibliography merge builds its own
+# `quarto_citeproc::Processor` directly (over the union of every chapter's
+# cited references) and needs `quarto_csl::Style` to construct it.
+quarto-citeproc = { path = "../quarto-citeproc" }
+quarto-csl = { path = "../quarto-csl" }
 
 # Used by the listings module's `b64_encode_unicode` helper (mirroring
 # Q1's `b64EncodeUnicode` for the categories click handler). Available
@@ -80,6 +109,10 @@ clap = { workspace = true, optional = true, features = ["derive"] }
 # flate2 (miniz_oxide backend) builds cleanly for wasm.
 flate2.workspace = true
 
+# CSS tokenizer for reading Google Fonts `@font-face` rules
+# (`typst_google_fonts`). Already in the lockfile via scraper/selectors.
+cssparser = "0.36"
+
 [features]
 clap = ["dep:clap"]
 
@@ -87,7 +120,17 @@ clap = ["dep:clap"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = "3"
 which = "8"
-regex = "1.12"
+# hephaestus plot documents (`.hep`) → SVG at render time
+# (bd-3qych45b). Renderer-free configuration on purpose: `document-read`
+# decodes the document, `svg` is the GPU-less vector backend, `png` lets
+# a document that embeds raster images render them. No `vello` /
+# `wgpu` — rasterizing needs a GPU adapter, which a headless render
+# machine may not have. Native-only: the browser preview renders the
+# same documents with the npm `hephaestus-svg-wasm` client instead of
+# linking this into the main WASM bundle. See
+# `claude-notes/plans/2026-09-17-hephaestus-hep-integration.md`.
+hephaestus = { version = "0.4.1", default-features = false, features = ["document-read", "svg", "png"] }
+
 # `scraper` (CSS-selector HTML reader) for the L7 post-render upgrade
 # (`bd-qf7r`). Native-only by construction: post_render runs only
 # under `quarto render`, never in the WASM hub-client preview. The
@@ -119,12 +162,56 @@ jupyter-protocol = "2.0"
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "process", "fs", "net", "io-util"] }
 uuid.workspace = true
 
+# `typst-gather` stages @preview packages a document references beyond
+# Quarto's 5 vendored ones (pandoc-hybrid-typst Phase 2). Native-only:
+# `TypstCompileStage` (which calls it) is itself WASM-gated.
+typst-gather.workspace = true
+
+# hephaestus's text stack (parley → fontique) enumerates system fonts
+# through fontconfig on Linux, and by default *links* libfontconfig at
+# build time (pkg-config), which would make `libfontconfig1-dev` a
+# build requirement for anyone compiling q2 on Linux. Enabling
+# fontique's `fontconfig-dlopen` feature (additive across the graph)
+# loads the library at run time instead and degrades to an empty
+# system collection when it is absent — fine for us, since the plot
+# text is shaped with the bundled faces in `resources/hephaestus/`.
+# Keep the version in step with the `fontique` parley pulls in.
+[target.'cfg(target_os = "linux")'.dependencies]
+fontique = { version = "0.9", default-features = false, features = ["fontconfig-dlopen"] }
+
 [dev-dependencies]
 insta.workspace = true
 quarto-error-catalog = { workspace = true }
+# P7 Task 11: the shared docx/pptx semantic extractor + pandoc-goldens
+# fixture manifest, also used by `cargo xtask capture-pandoc-goldens`.
+quarto-output-extract = { path = "../quarto-output-extract" }
+# Enables `quarto_config::span_assert` for tests that assert *where* a
+# diagnostic points, not just which code it carries (bd-9yh3pzfu).
+quarto-config = { workspace = true, features = ["span-assert"] }
 tempfile = "3"
+# R1: validate the PandocRequest golden against its published JSON Schema.
+jsonschema = { version = "0.55", default-features = false }
 walkdir.workspace = true
 tokio = { version = "1", features = ["rt", "macros"] }
+tracing-subscriber.workspace = true
+socket2 = "0.6"
+# T11.1: reading back the docx a real `pandoc` subprocess produces, to
+# assert `word/document.xml` is extractable — not writing archives, so
+# only the deflate read codec is needed (same minimal feature set as
+# quarto-source-fetch, which already vendors this at the same version).
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# document-import P6 T6: every part of a docx/pptx the editorial-marks export writes must be
+# well-formed XML (the extension's run-tests.py checked this with minidom).
+roxmltree = "0.21"
+# book-projects P2 item 49: pure-Rust PDF text extraction for hermetic
+# inspection of a real compiled Typst PDF's rendered figure numbers.
+# CI (main's test-suite.yml) provisions `typst` but not `pdftotext`
+# (poppler-utils); `typst query` resolves numbering *patterns*, not the
+# actual counter value at a given figure, and Typst's SVG output renders
+# text as vector paths (not `<text>` nodes), so neither is greppable.
+# `pdf-extract` needs no external binary.
+# P2: the gordonwoodhull fork is accepted for MCID support; keep pinned to a commit SHA.
+pdf-extract = { git = "https://github.com/gordonwoodhull/pdf-extract", rev = "b1371931381491fe2557c013d99cc3671f6e28c3" }
 
 [lints]
 workspace = true

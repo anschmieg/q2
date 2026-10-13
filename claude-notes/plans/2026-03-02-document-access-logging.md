@@ -1,4 +1,8 @@
-# Plan: Add `document_served` effect to samod-core
+---
+title: 'Plan: Add `document_served` effect to samod-core'
+date: 2026-03-02
+description: 'Adds a one-time `document_served` event in samod-core, emitted when a document''s sync data is first sent to a remote peer, so the hub can audit which user received which document.'
+---
 
 ## Context
 
@@ -168,8 +172,8 @@ DocToHubMsgPayload::DocumentServed { connection_id, document_id } => {
 
 ### 2a: Re-export `DocumentServed`
 
-- [x] Re-export `DocumentServed` from `samod-core`'s public API (so `samod` and downstream crates can import it)
-- [x] Re-export from `samod`'s public API (so `quarto-hub` can import it)
+- [x] Re-export `DocumentServed` from `samod-core`\'s public API (so `samod` and downstream crates can import it)
+- [x] Re-export from `samod`\'s public API (so `quarto-hub` can import it)
 
 ### 2b: Surface in samod runtime
 

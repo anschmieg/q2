@@ -8,7 +8,10 @@ use std::path::Path;
 use quarto_brand::{Brand, BrandLogoResource};
 
 fn brand(yaml: &str) -> Brand {
-    Brand::from_yaml_str(yaml).expect("parse")
+    quarto_brand::UnifiedBrand::from_yaml_str(yaml)
+        .expect("parse")
+        .split()
+        .light
 }
 
 #[test]
@@ -57,6 +60,36 @@ fn logo_lookup_by_size() {
         b.logo("large").and_then(|l| l.single_path()),
         Some("large.png")
     );
+}
+
+/// P8 orange-book: `small: <name>` where `<name>` matches a key under
+/// `logo.images` resolves to that image's path, not the literal string
+/// — Q1's `getLogoResource` precedence (`brand.ts`).
+#[test]
+fn favicon_resolves_small_logo_name_against_images() {
+    let b = brand(
+        "logo:\n\
+         \x20 small: test-logo\n\
+         \x20 images:\n\
+         \x20   test-logo:\n\
+         \x20     path: logo.svg\n",
+    );
+    assert_eq!(b.favicon(), Some("logo.svg"));
+}
+
+/// An explicit `{path, alt}` value is never treated as a name
+/// reference, even if its path string collides with an `images` key.
+#[test]
+fn favicon_does_not_resolve_explicit_resource_as_name_reference() {
+    let b = brand(
+        "logo:\n\
+         \x20 small:\n\
+         \x20   path: test-logo\n\
+         \x20 images:\n\
+         \x20   test-logo:\n\
+         \x20     path: logo.svg\n",
+    );
+    assert_eq!(b.favicon(), Some("test-logo"));
 }
 
 #[test]

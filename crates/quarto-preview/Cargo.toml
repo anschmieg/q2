@@ -9,8 +9,7 @@ description = "Local HTTP server hosting the q2-preview SPA. Wraps quarto-hub fo
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
-include_dir.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "sync"] }
 axum = "0.8"
 flate2.workspace = true
 pollster.workspace = true
@@ -22,23 +21,60 @@ thiserror.workspace = true
 # Match quarto-hub's versions so `capture_driver::read_capture_from_doc`
 # can talk to samod directly (it reads back the binary doc Phase C.1
 # writes; Phase C.4 reuses the same wire format in the WASM/SPA layer).
-automerge = { version = "0.10.0", features = ["utf16-indexing"] }
-samod = { version = "0.12.3", git = "https://github.com/quarto-dev/samod.git", branch = "access-policy", features = ["tokio"] }
+automerge = { version = "0.12.0", features = ["utf16-indexing"] }
+samod = { version = "0.14.0", git = "https://github.com/quarto-dev/samod.git", branch = "access-policy", features = ["tokio"] }
 
 quarto-core.workspace = true
 quarto-error-reporting = { workspace = true, features = ["json"] }
 quarto-hub.workspace = true
+# Live-share tunnel host (`--share`, plan Phase 2). Native-only; keeps
+# all iroh usage behind quarto-p2p's API.
+quarto-p2p.workspace = true
 quarto-pandoc-types.workspace = true
 quarto-source-map.workspace = true
 quarto-system-runtime.workspace = true
 quarto-trace.workspace = true
+spa-manifest.workspace = true
+# The embed format: identity-only tar.zst archives, decoded lazily at
+# runtime (bd-rem4bpee). flate2 (above) regenerates gzip responses.
+tar.workspace = true
+zstd.workspace = true
+
+# `q2 preview --static` (bd-sl79jjiq): SSE reload channel over a
+# broadcast receiver, content types for a rendered site, and URL path
+# decoding for the static router.
+tokio-stream = { version = "0.1", features = ["sync"] }
+mime_guess = "2"
+percent-encoding = "2"
+
+# `POST /api/preview/render` renders into a scratch directory (H4b).
+tempfile = "3"
+
+[build-dependencies]
+# Writes the editor embed's spa-manifest.json over the post-dedupe,
+# post-resolution file view (live-share plan Phase 2, design decision
+# 4 — only this script knows that file set).
+spa-manifest.workspace = true
+# Archives the embed dirs to tar.zst at compile time (bd-rem4bpee).
+tar.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+# Reads the docx back in the `render_download` tests.
+zip.workspace = true
 tower = "0.5"
 http-body-util = "0.1"
 http = "1"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+# The Phase 3 money test dials samod's `/ws` through the tunnel
+# (`dial_websocket` takes a `url::Url`).
+url = "2"
+# The join-frontend tests drive a WebSocket upgrade through the guest
+# port (tokio-tungstenite client) and stand up a ws echo target behind
+# the tunnel (axum `ws` feature).
+axum = { version = "0.8", features = ["ws"] }
+futures = "0.3"
+tokio-tungstenite = "0.29"
 
 [lints]
 workspace = true

@@ -51,12 +51,13 @@ export interface InstallLinkHandlersOptions {
     currentFilePath: string;
     /**
      * Phase F.1 (bd-kw93.14): project file paths used to reverse-map
-     * artifact-rooted `.html` clicks back to their source `.qmd`.
-     * Optional and currently unused except for type-shape consistency
-     * with `iframePostProcessor.ts` — the q2-preview link handler
-     * intercepts every artifact-rooted href regardless of whether the
-     * mapped `.qmd` is in this list, so the field is a documentation
-     * hook for the future (e.g. a "did you mean ..." overlay).
+     * artifact-rooted `.html` clicks back to their source file. Since
+     * bd-6d2wj4zp Phase 5 the list picks the source *extension*: a
+     * clicked `foo.html` maps to `foo.qmd` or `foo.md`, whichever the
+     * project actually contains (`.qmd` wins a tie). The handler still
+     * intercepts every artifact-rooted href — when neither source
+     * exists it falls back to the `.qmd` candidate so a missing-page
+     * click surfaces the render-error overlay.
      */
     projectFilePaths?: readonly string[];
     /**
@@ -79,43 +80,7 @@ export function installLinkHandlers(
     if (!body) return;
 
     body.addEventListener('click', (ev) => {
-        const anchor = findAnchorAncestor(ev.target as Element | null);
-        if (!anchor) return;
-        const href = anchor.getAttribute('href');
-        if (!href) return;
-
-        if (href.startsWith('http://') || href.startsWith('https://')) {
-            ev.preventDefault();
-            window.open(href, '_blank', 'noopener,noreferrer');
-            return;
-        }
-
-        if (href.startsWith('#')) {
-            const parsed = parseLink(href);
-            if (parsed.anchor && opts.onQmdLinkClick) {
-                ev.preventDefault();
-                opts.onQmdLinkClick({ anchor: parsed.anchor });
-            }
-            return;
-        }
-
-        // Phase F.1: artifact-rooted .html hrefs land here after
-        // LinkRewriteTransform runs. Always intercept; route the
-        // .qmd candidate through onQmdLinkClick (PreviewApp's render
-        // attempt is what surfaces a missing-page error).
-        const artifact = parseArtifactHref(href);
-        if (artifact && opts.onQmdLinkClick) {
-            ev.preventDefault();
-            opts.onQmdLinkClick({ path: artifact.qmdCandidate, anchor: artifact.anchor });
-            return;
-        }
-
-        const parsed = parseLink(href);
-        if (parsed.path && parsed.path.endsWith('.qmd') && opts.onQmdLinkClick) {
-            ev.preventDefault();
-            const resolved = resolveRelativePath(opts.currentFilePath, parsed.path);
-            opts.onQmdLinkClick({ path: resolved, anchor: parsed.anchor });
-        }
+        routeLinkClick(ev, opts);
     });
 
     doc.addEventListener('keydown', (ev) => {
@@ -124,6 +89,71 @@ export function installLinkHandlers(
             window.parent.postMessage({ type: 'hub-client-save' }, '*');
         }
     });
+}
+
+/**
+ * Route one click event through the link-handling policy (extracted
+ * from the delegated body listener above — bd-y66gbfs4). Exists as a
+ * standalone function so surfaces whose click handling deliberately
+ * stops propagation before `doc.body` (the comment bubble's chrome,
+ * which must keep its clicks away from the click-to-edit delegate)
+ * can still route `<a>` clicks through identical logic.
+ *
+ * Returns true when the click was handled (and default-prevented):
+ * external → new tab; `#frag` / `.qmd` / artifact-rooted `.html` →
+ * `opts.onQmdLinkClick`. Returns false for clicks with no `<a>`
+ * ancestor or with an unroutable href — callers decide what a
+ * fall-through means on their surface (the body listener: native
+ * behavior; the bubble: treat as a plain bubble click).
+ */
+export function routeLinkClick(
+    ev: MouseEvent,
+    opts: InstallLinkHandlersOptions,
+): boolean {
+    const anchor = findAnchorAncestor(ev.target as Element | null);
+    if (!anchor) return false;
+    const href = anchor.getAttribute('href');
+    if (!href) return false;
+
+    if (href.startsWith('http://') || href.startsWith('https://')) {
+        ev.preventDefault();
+        window.open(href, '_blank', 'noopener,noreferrer');
+        return true;
+    }
+
+    if (href.startsWith('#')) {
+        const parsed = parseLink(href);
+        if (parsed.anchor && opts.onQmdLinkClick) {
+            ev.preventDefault();
+            opts.onQmdLinkClick({ anchor: parsed.anchor });
+            return true;
+        }
+        return false;
+    }
+
+    // Phase F.1: artifact-rooted .html hrefs land here after
+    // LinkRewriteTransform runs. Always intercept; route the
+    // .qmd candidate through onQmdLinkClick (PreviewApp's render
+    // attempt is what surfaces a missing-page error).
+    const artifact = parseArtifactHref(href, opts.projectFilePaths);
+    if (artifact && opts.onQmdLinkClick) {
+        ev.preventDefault();
+        opts.onQmdLinkClick({ path: artifact.sourceCandidate, anchor: artifact.anchor });
+        return true;
+    }
+
+    const parsed = parseLink(href);
+    if (
+        parsed.path &&
+        (parsed.path.endsWith('.qmd') || parsed.path.endsWith('.md')) &&
+        opts.onQmdLinkClick
+    ) {
+        ev.preventDefault();
+        const resolved = resolveRelativePath(opts.currentFilePath, parsed.path);
+        opts.onQmdLinkClick({ path: resolved, anchor: parsed.anchor });
+        return true;
+    }
+    return false;
 }
 
 interface ParsedLink {
@@ -142,16 +172,25 @@ function parseLink(href: string): ParsedLink {
 }
 
 /**
- * Parse an artifact-rooted href into its `.qmd` source-path candidate +
+ * Source extensions the website renderer rewrites to `.html`, in
+ * tie-break order (`.qmd` wins when both stems exist — that pair is a
+ * render-time output collision anyway). Mirrors
+ * `iframePostProcessor.ts::RENDERABLE_EXTS`; bd-msp0 tracks hoisting
+ * the duplicated constants once service-worker resource resolution
+ * lands. (`.md` joined with bd-6d2wj4zp Phase 5.)
+ */
+const RENDERABLE_EXTS: readonly string[] = ['.qmd', '.md'];
+
+/**
+ * Parse an artifact-rooted href into its source-path candidate +
  * optional anchor. Returns null for hrefs that don't start with the
  * artifact root, or whose stem is neither empty nor ending in `.html`.
  *
- * Examples:
- *   /.quarto/project-artifacts/about.html       → { qmdCandidate: 'about.qmd', anchor: null }
- *   /.quarto/project-artifacts/about.html#sec   → { qmdCandidate: 'about.qmd', anchor: 'sec' }
- *   /.quarto/project-artifacts/posts/x.html     → { qmdCandidate: 'posts/x.qmd', anchor: null }
- *   /.quarto/project-artifacts/                 → { qmdCandidate: 'index.qmd', anchor: null }
- *   /.quarto/project-artifacts/#intro           → { qmdCandidate: 'index.qmd', anchor: 'intro' }
+ * Examples (with `projectFilePaths = ['index.qmd', 'admin/index.md']`):
+ *   /.quarto/project-artifacts/admin/index.html → { sourceCandidate: 'admin/index.md', anchor: null }
+ *   /.quarto/project-artifacts/about.html#sec   → { sourceCandidate: 'about.qmd', anchor: 'sec' }  (missing → .qmd fallback)
+ *   /.quarto/project-artifacts/                 → { sourceCandidate: 'index.qmd', anchor: null }
+ *   /.quarto/project-artifacts/#intro           → { sourceCandidate: 'index.qmd', anchor: 'intro' }
  *   /.quarto/project-artifacts/styles.css       → null  (not .html)
  *   ./about.qmd                                 → null  (not artifact-rooted)
  *
@@ -163,24 +202,41 @@ function parseLink(href: string): ParsedLink {
  * the SPA and the iframe navigates to a URL the preview server does
  * not serve.
  *
- * Unlike `iframePostProcessor.ts::reverseMapArtifactHref`, this helper
- * does not consult `projectFilePaths` — see the docstring on
- * `installLinkHandlers` for the rationale (missing-page UX).
+ * `projectFilePaths` picks the source *extension* (bd-6d2wj4zp Phase 5):
+ * the first `RENDERABLE_EXTS` candidate present in the list wins. The
+ * always-intercept policy is preserved — no match (or no list) falls
+ * back to the `.qmd` candidate so a missing-page click surfaces the
+ * render-error overlay instead of navigating the iframe to a 404.
  */
-function parseArtifactHref(href: string): { qmdCandidate: string; anchor: string | null } | null {
+function parseArtifactHref(
+    href: string,
+    projectFilePaths?: readonly string[],
+): { sourceCandidate: string; anchor: string | null } | null {
     if (!href.startsWith(ARTIFACT_ROOT)) return null;
     const stripped = href.slice(ARTIFACT_ROOT.length);
     const hashIdx = stripped.indexOf('#');
     const stem = hashIdx === -1 ? stripped : stripped.slice(0, hashIdx);
     const anchor = hashIdx === -1 ? null : stripped.slice(hashIdx + 1) || null;
     if (stem === '') {
-        return { qmdCandidate: 'index.qmd', anchor };
+        return { sourceCandidate: pickSourceCandidate('index', projectFilePaths), anchor };
     }
     if (!stem.endsWith('.html')) return null;
+    const base = stem.slice(0, -'.html'.length);
     return {
-        qmdCandidate: stem.slice(0, -'.html'.length) + '.qmd',
+        sourceCandidate: pickSourceCandidate(base, projectFilePaths),
         anchor,
     };
+}
+
+/** First `RENDERABLE_EXTS` candidate present in the project, else `<base>.qmd`. */
+function pickSourceCandidate(base: string, projectFilePaths?: readonly string[]): string {
+    if (projectFilePaths) {
+        for (const ext of RENDERABLE_EXTS) {
+            const candidate = base + ext;
+            if (projectFilePaths.includes(candidate)) return candidate;
+        }
+    }
+    return base + '.qmd';
 }
 
 function findAnchorAncestor(start: Element | null): HTMLAnchorElement | null {

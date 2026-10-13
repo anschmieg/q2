@@ -12,9 +12,11 @@ use crate::pandoc::treesitter_utils::code_fence_content::process_code_fence_cont
 use crate::pandoc::treesitter_utils::code_span_helpers::process_pandoc_code_span;
 use crate::pandoc::treesitter_utils::commonmark_attribute::process_commonmark_attribute;
 use crate::pandoc::treesitter_utils::document::process_document;
+use crate::pandoc::treesitter_utils::editorial_div::process_editorial_div;
 use crate::pandoc::treesitter_utils::editorial_marks::{
     process_delete, process_editcomment, process_highlight, process_insert,
 };
+use crate::pandoc::treesitter_utils::entity_reference::process_entity_reference;
 use crate::pandoc::treesitter_utils::fenced_code_block::process_fenced_code_block;
 use crate::pandoc::treesitter_utils::fenced_div_block::process_fenced_div_block;
 use crate::pandoc::treesitter_utils::info_string::process_info_string;
@@ -32,8 +34,8 @@ use crate::pandoc::treesitter_utils::postprocess::{merge_strs, postprocess};
 use crate::pandoc::treesitter_utils::quote_helpers::process_quoted;
 use crate::pandoc::treesitter_utils::section::process_section;
 use crate::pandoc::treesitter_utils::shortcode::{
-    process_shortcode, process_shortcode_number, process_shortcode_string,
-    process_shortcode_string_arg,
+    process_shortcode, process_shortcode_naked_string, process_shortcode_number,
+    process_shortcode_string, process_shortcode_string_arg,
 };
 use crate::pandoc::treesitter_utils::span_link_helpers::{
     process_content_node, process_pandoc_image, process_pandoc_span, process_target,
@@ -42,6 +44,7 @@ use crate::pandoc::treesitter_utils::text_helpers::*;
 use crate::pandoc::treesitter_utils::thematic_break::process_thematic_break;
 use crate::pandoc::treesitter_utils::uri_autolink::process_uri_autolink;
 use quarto_error_reporting::DiagnosticMessageBuilder;
+use quarto_source_map::ProvenanceBuilder;
 
 use crate::pandoc::ast_context::ASTContext;
 use crate::pandoc::attr::AttrSourceInfo;
@@ -51,7 +54,9 @@ use crate::pandoc::inline::{
     RawInline, SoftBreak, Space, Str, Strikeout, Strong, Subscript, Superscript,
 };
 use crate::pandoc::list::{ListAttributes, ListNumberDelim, ListNumberStyle};
-use crate::pandoc::location::{node_location, node_source_info_with_context};
+use crate::pandoc::location::{
+    node_location, node_source_info_with_context, provenance_builder_with_context,
+};
 use crate::pandoc::pandoc::Pandoc;
 use core::panic;
 use once_cell::sync::Lazy;
@@ -80,7 +85,7 @@ static WHITESPACE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\s+").unwrap()
 });
 
-use crate::traversals::bottomup_traverse_concrete_tree;
+use crate::traversals::{DepthLimitExceeded, bottomup_traverse_concrete_tree_with_depth_limit};
 
 use treesitter_utils::pandocnativeintermediate::PandocNativeIntermediate;
 
@@ -337,12 +342,15 @@ fn process_list_item(
             // the item contains a heading (e.g. `* # Section 1`). Flatten the
             // section's blocks into the item, mirroring `process_section`.
             PandocNativeIntermediate::IntermediateSection(section) => blocks.extend(section),
-            PandocNativeIntermediate::IntermediateMetadataString(text, _range) => {
+            PandocNativeIntermediate::IntermediateMetadataString(text, range) => {
                 // for now we assume it's metadata and emit it as a rawblock
                 blocks.push(Block::RawBlock(RawBlock {
                     format: "quarto_minus_metadata".to_string(),
                     text,
-                    source_info: node_source_info_with_context(list_item_node, context),
+                    source_info: quarto_source_map::SourceInfo::from_range(
+                        context.current_file_id(),
+                        range,
+                    ),
                 }));
             }
             // Tokens with no AST-level meaning: tree-sitter ERROR nodes from
@@ -467,29 +475,59 @@ fn block_continuation_column(node: &tree_sitter::Node) -> usize {
 /// The first piece (between the opening `$$` and the first `\n`) is
 /// content right after the delimiter, never a continuation line, and is
 /// always left untouched.
-fn strip_continuation_prefix(content: &str, start_col: usize) -> String {
+///
+/// Provenance: every kept byte is recorded on `builder` as `verbatim` and
+/// every stripped gutter as a zero-length `replacement` (a deletion), so
+/// `builder.finish()` yields a `SourceInfo` for the returned string whose
+/// offsets map byte-for-byte into the source (`Math.text_source`,
+/// bd-ieldbghj). `content_start` is the byte offset of `content[0]` in the
+/// builder's coordinate space (the node offset of the byte after `$$`).
+fn strip_continuation_prefix(
+    content: &str,
+    content_start: usize,
+    start_col: usize,
+    builder: &mut ProvenanceBuilder,
+) -> String {
     if start_col == 0 {
+        builder.verbatim(content_start..content_start + content.len());
         return content.to_string();
     }
     let mut result = String::with_capacity(content.len());
     let mut first = true;
+    // Byte offset of `line`'s first byte, in the same coordinates as
+    // `content_start`.
+    let mut pos = content_start;
     for line in content.split('\n') {
         if first {
             result.push_str(line);
+            builder.verbatim(pos..pos + line.len());
             first = false;
+            pos += line.len() + 1;
             continue;
         }
+        // The `\n` separator that `split` consumed sits at `pos - 1` and is
+        // kept as-is.
         result.push('\n');
+        builder.verbatim(pos - 1..pos);
         let line_bytes = line.as_bytes();
         let strip_n = std::cmp::min(start_col, line_bytes.len());
         let prefix_is_continuation = line_bytes[..strip_n]
             .iter()
             .all(|b| matches!(*b, b'>' | b' ' | b'\t'));
         if prefix_is_continuation {
+            // The gutter is a deletion: source bytes with no content bytes.
+            if strip_n > 0 {
+                builder.replacement(pos..pos + strip_n, 0);
+            }
             result.push_str(&line[strip_n..]);
+            if strip_n < line.len() {
+                builder.verbatim(pos + strip_n..pos + line.len());
+            }
         } else {
             result.push_str(line);
+            builder.verbatim(pos..pos + line.len());
         }
+        pos += line.len() + 1;
     }
     result
 }
@@ -503,7 +541,17 @@ fn strip_continuation_prefix(content: &str, start_col: usize) -> String {
 /// blockquotes, the indent for list items). Pandoc preserves the literal `\n`
 /// in `Math InlineMath` text and strips the gutter, so we replace each
 /// soft_break range with `\n` and append the text segments verbatim.
-fn extract_inline_math_text(node: &tree_sitter::Node, input_bytes: &[u8]) -> String {
+///
+/// Returns the text together with its provenance (`Math.text_source`,
+/// bd-ieldbghj): text segments are `verbatim` pieces; a soft break whose
+/// source bytes are exactly `\n` is verbatim too, any other soft break (one
+/// that swallowed a gutter, or a CRLF) is a `replacement` of its whole range
+/// by the one `\n` it folds to, so that byte maps to the source line ending.
+fn extract_inline_math_text(
+    node: &tree_sitter::Node,
+    input_bytes: &[u8],
+    context: &ASTContext,
+) -> (String, quarto_source_map::SourceInfo) {
     let start = node.start_byte();
     let end = node.end_byte();
     // Strip the opening / closing `$` (each is exactly 1 byte).
@@ -511,12 +559,15 @@ fn extract_inline_math_text(node: &tree_sitter::Node, input_bytes: &[u8]) -> Str
     let body_end = end - 1;
     debug_assert!(body_start <= body_end);
 
+    let mut builder = provenance_builder_with_context(context, body_start);
     let mut text = String::new();
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
         // No structural children — single-line math.
         let bytes = &input_bytes[body_start..body_end];
-        return std::str::from_utf8(bytes).unwrap().to_string();
+        text.push_str(std::str::from_utf8(bytes).unwrap());
+        builder.verbatim(body_start..body_end);
+        return (text, builder.finish());
     }
     let mut byte_cursor = body_start;
     loop {
@@ -526,8 +577,15 @@ fn extract_inline_math_text(node: &tree_sitter::Node, input_bytes: &[u8]) -> Str
             if child.start_byte() > byte_cursor {
                 let bytes = &input_bytes[byte_cursor..child.start_byte()];
                 text.push_str(std::str::from_utf8(bytes).unwrap());
+                builder.verbatim(byte_cursor..child.start_byte());
             }
             text.push('\n');
+            let break_range = child.start_byte()..child.end_byte();
+            if &input_bytes[break_range.clone()] == b"\n" {
+                builder.verbatim(break_range);
+            } else {
+                builder.replacement(break_range, 1);
+            }
             byte_cursor = child.end_byte();
         }
         // Other kinds — including anonymous `$` delimiter tokens — are
@@ -541,8 +599,9 @@ fn extract_inline_math_text(node: &tree_sitter::Node, input_bytes: &[u8]) -> Str
     if byte_cursor < body_end {
         let bytes = &input_bytes[byte_cursor..body_end];
         text.push_str(std::str::from_utf8(bytes).unwrap());
+        builder.verbatim(byte_cursor..body_end);
     }
-    text
+    (text, builder.finish())
 }
 
 /// Detect whether a list item's tree-sitter node contains a blank line between
@@ -698,12 +757,24 @@ fn native_visitor<T: Write>(
         "fenced_div_note_id" => create_base_text_from_node_text(node, input_bytes),
         "document" => process_document(node, children, context),
         "metadata" => {
-            // Extract YAML frontmatter text
-            let text = node.utf8_text(input_bytes).unwrap().to_string();
-            PandocNativeIntermediate::IntermediateMetadataString(text, node_location(node))
+            // The grammar exposes the YAML between the `---` delimiters as
+            // the `body` field (a `yaml` node), so the text and range come
+            // straight from the parse — never re-derived from the node text,
+            // which is how a `---` inside a value once truncated the
+            // metadata (bd-mjo6ao32, GH #671). A `metadata` node without a
+            // body only arises from error recovery; the parse error is
+            // already reported, so treat it as an empty block.
+            let (text, range) = match node.child_by_field_name("body") {
+                Some(body) => (
+                    body.utf8_text(input_bytes).unwrap().to_string(),
+                    node_location(&body),
+                ),
+                None => (String::new(), node_location(node)),
+            };
+            PandocNativeIntermediate::IntermediateMetadataString(text, range)
         }
         "section" => process_section(node, children, context),
-        "pandoc_paragraph" => process_paragraph(node, children, context),
+        "pandoc_paragraph" => process_paragraph(node, children, input_bytes, context),
         "atx_heading" => process_atx_heading(node, children, context),
         "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker" | "atx_h5_marker"
         | "atx_h6_marker" => {
@@ -730,12 +801,13 @@ fn native_visitor<T: Write>(
             // blockquotes, the indent for list items). Pandoc preserves the
             // literal `\n` in the math text and strips the gutter, so we
             // collapse each pandoc_soft_break range to a single `\n`.
-            let text = extract_inline_math_text(node, input_bytes);
+            let (text, text_source) = extract_inline_math_text(node, input_bytes, context);
 
             PandocNativeIntermediate::IntermediateInline(Inline::Math(Math {
                 math_type: MathType::InlineMath,
                 text,
                 source_info: node_source_info_with_context(node, context),
+                text_source: Some(text_source),
             }))
         }
         "pandoc_display_math" => {
@@ -755,19 +827,24 @@ fn native_visitor<T: Write>(
             // on the opening line (e.g. `_`, `[`, `**`) don't shift the
             // column away from the true continuation prefix width (bd-qpa2).
             let start_col = block_continuation_column(node);
-            let text = strip_continuation_prefix(content, start_col);
+            // `content` starts right after the opening `$$`.
+            let content_start = node.start_byte() + 2;
+            let mut builder = provenance_builder_with_context(context, content_start);
+            let text = strip_continuation_prefix(content, content_start, start_col, &mut builder);
 
             PandocNativeIntermediate::IntermediateInline(Inline::Math(Math {
                 math_type: MathType::DisplayMath,
                 text,
                 source_info: node_source_info_with_context(node, context),
+                text_source: Some(builder.finish()),
             }))
         }
         "pandoc_str" => {
             // Tree-sitter may include leading ASCII whitespace in the
-            // pandoc_str node when it wraps the external `_pandoc_lt_str`
-            // token (bd-j9cf): the block-level scanner consumes preceding
-            // indentation before dispatching into `parse_open_angle_brace`,
+            // pandoc_str node when it wraps the external `_pandoc_literal_str`
+            // token (bd-j9cf for `<`, bd-star-as-str-qigl02pz for `*` `_`
+            // `~` `^`): the block-level scanner consumes preceding
+            // whitespace before dispatching into the character handlers,
             // so the chomped whitespace ends up inside the reported token
             // range. Split it back out into a leading Space inline so
             // siblings round-trip cleanly. Regular pandoc_str text never
@@ -845,7 +922,8 @@ fn native_visitor<T: Write>(
         "numeric_character_reference" => {
             process_numeric_character_reference(node, input_bytes, context)
         }
-        "autolink" => process_uri_autolink(node, input_bytes, context),
+        "entity_reference" => process_entity_reference(node, input_bytes, context),
+        "autolink" => process_uri_autolink(node, input_bytes, context, error_collector),
         "pandoc_space" => PandocNativeIntermediate::IntermediateInline(Inline::Space(Space {
             source_info: node_source_info_with_context(node, context),
         })),
@@ -979,16 +1057,24 @@ fn native_visitor<T: Write>(
         // Shortcode nodes
         "shortcode_delimiter" => PandocNativeIntermediate::IntermediateUnknown(node_location(node)),
         "shortcode_name" => process_shortcode_string_arg(node, input_bytes, context),
-        "shortcode_naked_string" => process_shortcode_string_arg(node, input_bytes, context),
+        "shortcode_naked_string" => process_shortcode_naked_string(node, input_bytes, context),
         "shortcode_string" => {
             // Extract the quoted text by getting the full node text and stripping quotes
             // The grammar uses anonymous rules (_commonmark_*_quote_string) so there are
             // no named children - we must extract and strip quotes ourselves
+            // extract_quoted_text returns only the decoded string. The
+            // quote-inclusive node span is recomputed independently by
+            // process_shortcode_string (paired with the decoded string in
+            // the IntermediateShortcodeArg it returns); no consumer offsets
+            // into that range — ShortcodeArg::String carries no SourceInfo
+            // at all, so shortcode_resolve.rs's readers of it
+            // (crates/quarto-core/src/transforms/shortcode_resolve.rs:135,
+            // :171, :837, :848, :2236, :2269) only ever see the string.
             let extract_quoted_text = || {
                 let full_text = node.utf8_text(input_bytes).unwrap();
                 // Strip surrounding quotes and unescape internal escaped quotes
                 // The grammar recognizes \" in double-quoted and \' in single-quoted strings
-                let text = if full_text.starts_with('"') && full_text.ends_with('"') {
+                if full_text.starts_with('"') && full_text.ends_with('"') {
                     let inner = &full_text[1..full_text.len() - 1];
                     inner.replace("\\\"", "\"")
                 } else if full_text.starts_with('\'') && full_text.ends_with('\'') {
@@ -996,12 +1082,7 @@ fn native_visitor<T: Write>(
                     inner.replace("\\'", "'")
                 } else {
                     full_text.to_string()
-                };
-                let range = crate::pandoc::location::source_info_to_qsm_range_or_fallback(
-                    &node_source_info_with_context(node, context),
-                    context,
-                );
-                PandocNativeIntermediate::IntermediateBaseText(text, range)
+                }
             };
             process_shortcode_string(&extract_quoted_text, node, context)
         }
@@ -1199,22 +1280,40 @@ fn native_visitor<T: Write>(
             PandocNativeIntermediate::IntermediateBaseText(class.to_string(), node_location(node))
         }
         "key_value_key" => {
-            // Extract key name and trim whitespace
+            // Extract key name and trim whitespace. The range must be trimmed in
+            // lockstep: `key_value_key` is the external `KEY_SPECIFIER` token, and
+            // the 2nd+ same-line pair in `{a=1 bb=2}` absorbs the separator, so the
+            // raw node spans `" bb"` while the text is `"bb"` (bd-1d6io, §P1).
             let text = node.utf8_text(input_bytes).unwrap().trim().to_string();
-            PandocNativeIntermediate::IntermediateBaseText(text, node_location(node))
+            PandocNativeIntermediate::IntermediateBaseText(
+                text,
+                crate::pandoc::location::tight_node_location(node, input_bytes),
+            )
         }
         "key_value_value" => {
-            // Extract value, strip quotes if present
+            // Extract value, strip quotes if present. `extract_quoted_text`
+            // also hands back the *content* provenance of the decoded
+            // value, which is what downstream consumers offset into (the
+            // raw node span includes the quotes and over-counts every
+            // collapsed escape).
             let text = node.utf8_text(input_bytes).unwrap();
-            let value = extract_quoted_text(text);
-            PandocNativeIntermediate::IntermediateBaseText(value, node_location(node))
+            let (value, content_source) =
+                extract_quoted_text(text, context.current_file_id(), node.start_byte());
+            PandocNativeIntermediate::IntermediateDecodedText(value, content_source)
         }
         "key_value_specifier" => {
             // Collect key and value from children
             let mut key = String::new();
             let mut value = String::new();
             let mut key_range = node_location(node);
-            let mut value_range = node_location(node);
+            // Fallback for a specifier with no `key_value_value` child:
+            // the whole specifier node, in the same coordinate space
+            // `process_commonmark_attribute` used before this carried a
+            // `SourceInfo` (`from_range(current_file_id, ..)`).
+            let mut value_source = quarto_source_map::SourceInfo::from_range(
+                context.current_file_id(),
+                node_location(node),
+            );
 
             for (node_name, child) in children {
                 match node_name.as_str() {
@@ -1225,9 +1324,11 @@ fn native_visitor<T: Write>(
                         }
                     }
                     "key_value_value" => {
-                        if let PandocNativeIntermediate::IntermediateBaseText(text, range) = child {
+                        if let PandocNativeIntermediate::IntermediateDecodedText(text, source) =
+                            child
+                        {
                             value = text;
-                            value_range = range;
+                            value_source = source;
                         }
                     }
                     "=" => {} // Ignore delimiter
@@ -1239,7 +1340,7 @@ fn native_visitor<T: Write>(
                 key,
                 value,
                 key_range,
-                value_range,
+                value_source,
             )])
         }
         "commonmark_specifier" => {
@@ -1297,10 +1398,13 @@ fn native_visitor<T: Write>(
             PandocNativeIntermediate::IntermediateBaseText(text, node_location(node))
         }
         "title" => {
-            // Extract title text, strip quotes
+            // Extract title text, strip quotes. As with `key_value_value`,
+            // the span we keep is the decoded title's content provenance,
+            // not the quote-inclusive raw node range.
             let text = node.utf8_text(input_bytes).unwrap();
-            let title = extract_quoted_text(text);
-            PandocNativeIntermediate::IntermediateBaseText(title, node_location(node))
+            let (title, content_source) =
+                extract_quoted_text(text, context.current_file_id(), node.start_byte());
+            PandocNativeIntermediate::IntermediateDecodedText(title, content_source)
         }
         "target" => process_target(children),
         "pandoc_span" => process_pandoc_span(node, children, context),
@@ -1395,6 +1499,7 @@ fn native_visitor<T: Write>(
             result
         }
         "pandoc_div" => process_fenced_div_block(node, children, context),
+        "editorial_div" => process_editorial_div(node, children, context),
         "pipe_table_delimiter_cell" => process_pipe_table_delimiter_cell(children, context),
         "pipe_table_header" | "pipe_table_row" => {
             process_pipe_table_header_or_row(node, children, context)
@@ -1627,14 +1732,35 @@ fn native_visitor<T: Write>(
                 let trimmed_source_info =
                     node_source_info_with_options(node, context, &SourceInfoOptions::trim_all());
 
-                // Create a warning (not error) about the auto-conversion
-                let msg =
+                // Create a warning (not error) about the auto-conversion.
+                //
+                // Naked HTML is not a supported authoring form in qmd, so the
+                // warning fires either way — but the accurate description and
+                // the useful suggestion differ between a tag that opens a line
+                // with a block-level name (which becomes a RawBlock; see
+                // treesitter_utils/html_block.rs) and one sitting in running
+                // text (which becomes a RawInline).
+                let is_block =
+                    crate::pandoc::treesitter_utils::html_block::starts_block_html(&text)
+                        && crate::pandoc::treesitter_utils::html_block::at_line_start(
+                            input_bytes,
+                            node.start_byte(),
+                        );
+                let builder =
                     DiagnosticMessageBuilder::warning("HTML element converted to raw HTML")
                         .with_code("Q-2-9")
-                        .with_location(trimmed_source_info.clone())
-                        .add_info("HTML elements are automatically converted to RawInline nodes with format 'html'")
+                        .with_location(trimmed_source_info.clone());
+                let msg = if is_block {
+                    builder
+                        .add_info("This tag opens a line and names a block-level element, so it is passed through as a raw HTML block")
+                        .add_hint("To be explicit, put it in a ```{=html} block — or write a Quarto div instead: ::: {.your-class}")
+                        .build()
+                } else {
+                    builder
+                        .add_info("HTML in markdown text is passed through unchanged, as a raw HTML inline")
                         .add_hint("To be explicit, use: `<element>`{=html}")
-                        .build();
+                        .build()
+                };
                 error_collector.add(msg);
 
                 // Tree-sitter may include leading/trailing whitespace in the
@@ -1709,6 +1835,20 @@ fn native_visitor<T: Write>(
     result
 }
 
+/// Deepest concrete-syntax-tree node the reader accepts, counting the root
+/// as 1.
+///
+/// Documents nested more deeply than this are rejected with a diagnostic.
+/// The conversion walk itself is iterative, but much of what runs on the
+/// resulting AST (filters, writers, `Drop`) recurses, and a fuzzer-style
+/// input nested thousands of levels deep would overflow the stack there.
+///
+/// The value is 99 rather than 100 for continuity: the check used to be a
+/// separate pass whose depth count started at 1 and then also counted the
+/// root, and it rejected counts above 100. Keeping 99 here keeps exactly the
+/// same set of documents accepted.
+pub const MAX_CONCRETE_TREE_DEPTH: usize = 99;
+
 pub fn treesitter_to_pandoc<T: Write>(
     buf: &mut T,
     tree: &tree_sitter_qmd::MarkdownTree,
@@ -1716,14 +1856,27 @@ pub fn treesitter_to_pandoc<T: Write>(
     context: &ASTContext,
     error_collector: &mut crate::utils::diagnostic_collector::DiagnosticCollector,
 ) -> Result<Pandoc, Vec<quarto_error_reporting::DiagnosticMessage>> {
-    let result = bottomup_traverse_concrete_tree(
+    // The depth guard rides along with the conversion walk instead of being
+    // a separate pass over the tree (bd-t7i6oanu). The walk stops before the
+    // visitor sees any node past the limit.
+    let result = match bottomup_traverse_concrete_tree_with_depth_limit(
         &mut tree.walk(),
         &mut |node, children, input_bytes, context| {
             native_visitor(buf, node, children, input_bytes, context, error_collector)
         },
         input_bytes,
         context,
-    );
+        MAX_CONCRETE_TREE_DEPTH,
+    ) {
+        Ok(result) => result,
+        Err(DepthLimitExceeded { max_depth }) => {
+            let diagnostic = quarto_error_reporting::generic_error!(format!(
+                "The input document is too deeply nested (more than {} levels).",
+                max_depth
+            ));
+            return Err(vec![diagnostic]);
+        }
+    };
     let (_, PandocNativeIntermediate::IntermediatePandoc(pandoc)) = result else {
         // Top-level parse produced something other than a document
         // This happens when the entire input is malformed
@@ -1732,7 +1885,7 @@ pub fn treesitter_to_pandoc<T: Write>(
         );
         return Err(vec![diagnostic]);
     };
-    let result = match postprocess(pandoc, error_collector) {
+    let result = match postprocess(pandoc, input_bytes, error_collector) {
         Ok(doc) => doc,
         Err(()) => {
             // Postprocess found errors, return the diagnostics from the collector

@@ -12,16 +12,25 @@ mod file_exists;
 mod file_regex;
 mod html_elements;
 mod no_errors;
+mod pdf_metadata;
+mod pdf_regex;
+mod pdf_text_position;
 mod prints_message;
+mod regex_patterns;
 mod should_error;
+mod typst_file_regex;
 
 pub use css_regex::EnsureCssRegexMatches;
 pub use file_exists::{FileExists, FolderExists, PathDoesNotExist};
 pub use file_regex::EnsureFileRegexMatches;
 pub use html_elements::EnsureHtmlElements;
 pub use no_errors::{NoErrors, NoErrorsOrWarnings};
+pub use pdf_metadata::{EnsurePdfMetadata, PdfMetadataExpectation};
+pub use pdf_regex::EnsurePdfRegexMatches;
+pub use pdf_text_position::EnsurePdfTextPositions;
 pub use prints_message::PrintsMessage;
 pub use should_error::ShouldError;
+pub use typst_file_regex::EnsureTypstFileRegexMatches;
 
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -51,6 +60,15 @@ impl LogLevel {
 pub struct LogMessage {
     pub level: LogLevel,
     pub message: String,
+}
+
+impl LogMessage {
+    /// The message with every line after the first indented by `indent`, so a
+    /// multi-line rendered diagnostic stays visually attached to its
+    /// `[LEVEL]` prefix when listed with other messages.
+    pub fn indented(&self, indent: &str) -> String {
+        self.message.replace('\n', &format!("\n{indent}"))
+    }
 }
 
 /// Context provided to assertions for verification.

@@ -17,8 +17,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use pampa::toc::{TocConfig, TocEntry, generate_toc};
-use quarto_pandoc_types::ConfigValue;
+use quarto_pandoc_types::block::Block;
+use quarto_pandoc_types::inline::{Inline, Inlines, Space};
 use quarto_pandoc_types::pandoc::Pandoc;
+use quarto_pandoc_types::{ConfigValue, ConfigValueKind, inlines_to_plain_text};
+use quarto_source_map::{By, SourceInfo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,7 +68,136 @@ use thiserror::Error;
 ///   type and now derives its literals from the same normalization
 ///   (`metadata::authors::parse_authors_model`), so the two fields
 ///   always agree.
-pub const DOCUMENT_PROFILE_VERSION: u32 = 7;
+/// - `8`: `bd-v7ixzsp5` (GH #456). Changes `listing_content_globs`
+///   from `Vec<String>` (raw patterns, expanded dual-view at
+///   graph-build time) to `Vec<GlobPattern>` — patterns are
+///   now **resolved to project-relative form at profile-extraction
+///   time** against the directory of the file each glob was written
+///   in (front matter → host dir, `_metadata.yml` → its dir,
+///   `_quarto.yml` → project root), and carry a `negated` flag for
+///   `!`-prefixed exclusion patterns. Consumers match single-view
+///   via [`crate::glob::PatternSet`].
+/// - `9`: `bd-mt7a6uc4`. Adds `resource_globs: Vec<GlobPattern>` — the
+///   document's `resources:` patterns resolved to project-relative
+///   form at profile-extraction time, against the directory of the
+///   file each was written in. The raw `resources` field stays as-is
+///   because `ResourceReportStage` compares raw pattern strings to
+///   detect filter-added entries; the two answer different questions.
+/// - `10`: `bd-aliases-redirects-missing-sch7cd1g`. Adds
+///   `aliases: Vec<String>` and the index-aligned
+///   `alias_sources: Vec<SourceInfo>` — the document's `aliases:`
+///   front-matter entries, kept **raw**. Unlike `resource_globs`,
+///   these are deliberately *not* resolved at extraction time:
+///   resolving an alias needs only the page's own `output_href`
+///   (already on the profile) and no filesystem, while *validating*
+///   one needs every other page in the project. Resolution and
+///   collision detection therefore both live in the post-render pass,
+///   which is also the only place a diagnostic survives profile
+///   caching (see `rejected_resources` for the same lesson learned
+///   the hard way).
+/// - `11`: `bd-toc-smart-quotes-6nro57ed`. Changes `outline`'s entry
+///   titles from `String` to `Inlines` (`TocEntry::title`). The
+///   outline now carries the heading's inline markup — emphasis,
+///   code, math, and the quoted-span delimiters a flattened title
+///   silently dropped — so it is a faithful semantic outline rather
+///   than a lossy projection. **Serialized shape changes**: a title
+///   that was `"Top"` is now an array of inline nodes, so v10
+///   profiles fail to deserialize at the field level and cached
+///   profiles must be regenerated. Consumers wanting plain text
+///   project it themselves with
+///   `pampa::writers::plaintext::inlines_to_string`.
+/// - `12`: Plan 6 Phase 5
+///   (`claude-notes/plans/2026-06-29-plan6-pass1-engine-resolution.md`).
+///   Adds `engine_resolution: Option<ProfileEngineResolution>` — the
+///   Pass-1-resolved engine sequence/ownership (names only; configs stay
+///   in merged metadata), stamped by `DocumentProfileStage` from
+///   `resolve_engines_pass1`. `None` means the document could not be
+///   resolved load-free at index time — advisory, not an error; Pass-2
+///   always re-resolves via the full loading resolver regardless.
+/// - `13`: `bd-0rsk07il` (GH #445). Adds `comments:
+///   Vec<ProfileComment>` — every editorial comment (`[>> … ]` /
+///   `[…]{.quarto-edit-comment}`) in the document body, in source
+///   order, each carrying its plain-text projection, source span,
+///   in-band `author=`/`date=` attributes (typed), and remaining
+///   attr kvs. Strictly additive in serialized shape
+///   (`#[serde(default)]`), but bumped anyway: a cached v12 profile
+///   would deserialize cleanly and silently report "no comments" for
+///   a document that has them — the semantic misread the version
+///   check exists to prevent.
+/// - `14`: `bd-8a9eum6p`. Changes `title`, `subtitle` and `description`
+///   — on the profile and on `listing_item` — from `Option<String>` to
+///   `Option<Inlines>`, and adds `flattened_prose: Vec<String>` to both.
+///   Listings used to interpolate the plain-text projection into
+///   generated markdown and re-parse it, which lost all markup and broke
+///   on markdown-significant text (`_scope`, `<anonymous>`); they now
+///   write the inlines back as markdown. A multi-block value (e.g. a
+///   two-paragraph `description: |`) used to project to `None` and
+///   vanish; it now flattens to one inline run, recorded in
+///   `flattened_prose` so the listing can warn (Q-12-26). **Serialized
+///   shape changes**; v13 profiles fail to deserialize at the field
+///   level. Plain-text consumers project with
+///   [`quarto_pandoc_types::inlines_to_plain_text`] (the projection
+///   `ConfigValue::as_plain_text` applied before), so their output is
+///   unchanged.
+/// - `15`: `bd-listing-description-precedence-x4bh6w3m`. Adds `abstract`
+///   (top-level `abstract:`, the Q1 description fallback) and
+///   `derived_listing` (the description / image L1 derives from the
+///   body). L1 no longer writes its derived description and image into
+///   `listing_item.description` / `listing_item.image`, so those now hold
+///   only author-supplied values. Listings tell authored from derived by
+///   field, not by key. A cached v14 profile would deserialize with
+///   derived values sitting in the authored slots, which is exactly the
+///   misread this bump prevents.
+pub const DOCUMENT_PROFILE_VERSION: u32 = 15;
+
+/// Listing values L1 (`ListingItemInfoStage`) derives from a document's
+/// body, kept apart from anything the author wrote.
+///
+/// Computed for every document, whether or not the author supplied the
+/// corresponding value: a listing uses them only as the last fallback
+/// (see `project::listing::hydrate_item`), but other consumers — search,
+/// for one — want the body-derived text regardless.
+///
+/// Travels from the stage to the profile on
+/// [`crate::stage::DocumentAst::derived_listing`], a typed side-channel
+/// like `recorded_includes`, rather than through metadata: a reserved
+/// meta key could be written in front matter, would surface among a
+/// listing's custom `extra` fields, and would look authored to Lua
+/// filters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DerivedListingValues {
+    /// Plain text of the first non-empty paragraph of the post-include
+    /// AST, untruncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Source of the first body image, document-relative as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+impl DerivedListingValues {
+    pub fn is_empty(&self) -> bool {
+        self.description.is_none() && self.image.is_none()
+    }
+}
+
+/// Reduced, serializable form of [`crate::engine::EngineResolution`] for the
+/// profile (names only — configs stay in merged metadata; Plan 6 decision 6).
+///
+/// Stamped by `DocumentProfileStage` from `resolve_engines_pass1`'s result
+/// when a document resolves load-free at index time. Consumers (LSP
+/// language→engine ownership, freeze key, engine pooling) read this instead
+/// of re-running resolution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEngineResolution {
+    /// Ordered, distinct engine owners (mirrors
+    /// `EngineResolution::sequence`, names only).
+    pub sequence: Vec<String>,
+    /// Per-language ownership: language → owning engine name, insertion
+    /// order (mirrors `EngineResolution::ownership`, a `LinkedHashMap` in
+    /// the unreduced form).
+    pub ownership: Vec<(String, String)>,
+}
 
 /// Depth used when extracting the heading outline at the profile
 /// checkpoint.
@@ -155,12 +287,14 @@ impl IncludeEntry {
 ///
 /// # Generate / render decomposition
 ///
-/// L0 (this version): the field exists; `DocumentProfile::extract`
-/// reads it from frontmatter. Author-supplied values land here.
-/// L1 (planned, `bd-izqh`) introduces `ListingItemInfoStage` to
-/// auto-fill holes (description, image, word count, reading time,
-/// date-modified) from the AST. Author values always win; the stage
-/// only fills holes.
+/// `DocumentProfile::extract` reads it from frontmatter, so
+/// author-supplied values land here. L1's `ListingItemInfoStage`
+/// auto-fills word count, reading time and date-modified into
+/// `meta.listing-item` when the author left them unset. It does **not**
+/// fill `description` or `image`: those are derived into
+/// [`DocumentProfile::derived_listing`] instead, so that `description`
+/// and `image` here are always the author's and a listing can rank them
+/// above the top-level keys and the derived values.
 ///
 /// All fields are optional / collection-defaulted; an empty
 /// `ListingItemInfo` is the legitimate default for documents that
@@ -180,23 +314,31 @@ impl IncludeEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ListingItemInfo {
     /// Override for the title displayed in listings. Defaults to
-    /// `profile.title` when unset.
+    /// `profile.title` when unset. Markdown prose, kept as inlines
+    /// (see [`prose_inlines`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<Inlines>,
 
     /// Override for the subtitle displayed in listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtitle: Option<String>,
+    pub subtitle: Option<Inlines>,
 
-    /// Listing description (text shown under the title). L0 honors
-    /// an author-supplied value; L1's `ListingItemInfoStage` will
-    /// fill from the first plain-text paragraph of the post-include
-    /// AST when unset.
+    /// Listing description (text shown under the title). Author-supplied
+    /// only; the derived first paragraph lives in
+    /// [`DocumentProfile::derived_listing`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<Inlines>,
 
-    /// Listing image src. L0 honors an author-supplied value; L1
-    /// will fill from the first body `Image` node when unset.
+    /// Keys among `title` / `subtitle` / `description` whose value
+    /// was written as more than one block and flattened into one
+    /// inline run (see [`prose_inlines`]). The listing that uses the
+    /// value reports it (Q-12-26); the profile only records it, so
+    /// the report survives profile caching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flattened_prose: Vec<String>,
+
+    /// Listing image src. Author-supplied only; the first body image
+    /// lives in [`DocumentProfile::derived_listing`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
@@ -250,10 +392,39 @@ pub struct ListingItemInfo {
     /// does **not** change when keys are added/removed, so no
     /// `profile_version` bump is required for `extra` mutations.
     /// `BTreeMap` over `HashMap` for deterministic serialization
-    /// (see CLAUDE.md §"HashMap and Determinism").
+    /// (see AGENTS.md §"HashMap and Determinism").
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, ConfigValue>,
 }
+
+/// What [`ListingItemInfo::from_map`] does with keys it does not
+/// recognize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownKeyPolicy {
+    /// Drop them. Front-matter `listing-item:` — custom fields must
+    /// be declared under `extra:` (bd-0t4e07jk owns widening this).
+    Drop,
+    /// Route them into `extra`. Inline `contents:` records — the
+    /// record *is* the item, so every key is intentional. Keys in
+    /// `except` belong to the caller and are neither typed here nor
+    /// forwarded.
+    IntoExtra { except: &'static [&'static str] },
+}
+
+/// Keys [`ListingItemInfo::from_map`] reads into typed fields.
+pub const LISTING_ITEM_KEYS: &[&str] = &[
+    "title",
+    "subtitle",
+    "description",
+    "image",
+    "image-alt",
+    "date",
+    "date-modified",
+    "categories",
+    "reading-time-minutes",
+    "word-count",
+    "extra",
+];
 
 impl ListingItemInfo {
     /// True when no author-supplied or auto-filled data is present.
@@ -273,6 +444,46 @@ impl ListingItemInfo {
             && self.reading_time_minutes.is_none()
             && self.word_count.is_none()
             && self.extra.is_empty()
+    }
+
+    /// Build from any map-shaped `ConfigValue` — the `listing-item:`
+    /// front-matter block or one inline `contents:` record. Type
+    /// mismatches at known keys leave the field at its default.
+    pub fn from_map(li: &ConfigValue, unknown: UnknownKeyPolicy) -> Self {
+        let mut extra = extract_listing_item_extra(li);
+        if let UnknownKeyPolicy::IntoExtra { except } = unknown
+            && let Some(entries) = li.as_map_entries()
+        {
+            for entry in entries {
+                let key = entry.key.as_str();
+                if LISTING_ITEM_KEYS.contains(&key) || except.contains(&key) {
+                    continue;
+                }
+                // An explicit `extra:` entry of the same name wins.
+                extra
+                    .entry(entry.key.clone())
+                    .or_insert_with(|| entry.value.clone());
+            }
+        }
+        let mut flattened_prose = Vec::new();
+        let title = prose_field(li, "title", &mut flattened_prose);
+        let subtitle = prose_field(li, "subtitle", &mut flattened_prose);
+        let description = prose_field(li, "description", &mut flattened_prose);
+        ListingItemInfo {
+            title,
+            subtitle,
+            description,
+            flattened_prose,
+            image: plain_text_field(li, "image"),
+            image_alt: plain_text_field(li, "image-alt"),
+            date: plain_text_field(li, "date"),
+            date_modified: plain_text_field(li, "date-modified"),
+            categories: extract_string_list(li, "categories"),
+            categories_raw: li.get("categories").cloned(),
+            reading_time_minutes: extract_u32_field(li, "reading-time-minutes"),
+            word_count: extract_u32_field(li, "word-count"),
+            extra,
+        }
     }
 }
 
@@ -310,6 +521,127 @@ pub struct ProfileAuthor {
     /// Denormalized affiliations, in reference order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affiliations: Vec<ProfileAffiliation>,
+}
+
+/// One editorial comment found in the document body (v13,
+/// bd-0rsk07il / GH #445).
+///
+/// A comment is authored as `[>> comment text ]` (optionally with an
+/// attribute block) or equivalently `[…]{.quarto-edit-comment}`; the
+/// qmd reader normalizes both to an `Inline::Span` whose classes
+/// contain `quarto-edit-comment`. A block comment (`::: >>`, possibly
+/// several paragraphs) is likewise a `Block::Div` with that class.
+/// Comments in included files count
+/// toward the including document (the checkpoint sees the
+/// post-include AST), consistent with `outline`.
+///
+/// "Outstanding" is presence: resolving a comment deletes it from
+/// the source, so every entry here is an open comment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfileComment {
+    /// Plain-text projection of the comment's content
+    /// (`pampa::writers::plaintext::inlines_to_string`, or
+    /// `blocks_to_string` for a block comment).
+    pub text: String,
+
+    /// Source span of the mark, for jump-to-comment, gutter markers,
+    /// and joining with out-of-band authorship (e.g. the hub's
+    /// attribution overlay).
+    pub source: quarto_source_map::SourceInfo,
+
+    /// In-band author, from the mark's `author=` attribute
+    /// (`[>> text ]{author="…"}`). `None` when unstamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+
+    /// In-band timestamp, from the mark's `date=` attribute. Kept as
+    /// the raw string; the stamping convention is ISO 8601 UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+
+    /// Remaining attr kvs (anything other than `author`/`date`), in
+    /// authored order, so future conventions need no shape change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<(String, String)>,
+}
+
+/// Transport form of a [`ProfileComment`] for JSON consumers that
+/// cannot resolve a [`SourceInfo`] themselves (the WASM
+/// `RenderResponse`, future CLI `--json` reports).
+///
+/// Line and column numbers are **1-based** to match Monaco — the same
+/// convention as `quarto_error_reporting::JsonDiagnostic`. `file` is
+/// the source file the mark maps back to, which for a comment inside
+/// an `{{< include >}}` is the *included* file, not the host — a
+/// consumer offering jump-to-comment in the host buffer must check it.
+///
+/// [`SourceInfo`]: quarto_source_map::SourceInfo
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JsonComment {
+    /// Plain-text comment content.
+    pub text: String,
+    /// In-band author (`author=` attribute), when stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// In-band timestamp (`date=` attribute), when stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Remaining attr kvs, authored order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<(String, String)>,
+    /// Path of the source file the mark's span maps to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
+}
+
+impl ProfileComment {
+    /// Resolve this comment's span against `ctx` and produce the
+    /// transport form. Position fields are `None` when the span
+    /// cannot be mapped (synthetic sources); the textual fields are
+    /// always populated.
+    ///
+    /// The end-position fallback mirrors
+    /// `quarto_error_reporting::diagnostic_to_json`: try the span
+    /// length, then length − 1, then reuse the start.
+    pub fn to_json(&self, ctx: &quarto_source_map::SourceContext) -> JsonComment {
+        let start = self.source.map_offset(0, ctx);
+        let end = self
+            .source
+            .map_offset(self.source.length(), ctx)
+            .or_else(|| {
+                if self.source.length() > 0 {
+                    self.source.map_offset(self.source.length() - 1, ctx)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| start.clone());
+
+        let file = start
+            .as_ref()
+            .and_then(|s| ctx.get_file(s.file_id))
+            .map(|f| f.path.clone());
+
+        JsonComment {
+            text: self.text.clone(),
+            author: self.author.clone(),
+            date: self.date.clone(),
+            attributes: self.attributes.clone(),
+            file,
+            start_line: start.as_ref().map(|s| (s.location.row + 1) as u32),
+            start_column: start.as_ref().map(|s| (s.location.column + 1) as u32),
+            end_line: end.as_ref().map(|e| (e.location.row + 1) as u32),
+            end_column: end.as_ref().map(|e| (e.location.column + 1) as u32),
+        }
+    }
 }
 
 /// One affiliation attached to a [`ProfileAuthor`].
@@ -353,12 +685,28 @@ pub struct DocumentProfile {
     /// `ctx.format.target_format` at the checkpoint.
     pub format_id: String,
 
-    /// Document title, plain text. `None` when the frontmatter has no
-    /// title and no first-heading fallback was applied.
-    pub title: Option<String>,
+    /// Document title, as the inlines the front matter parsed to.
+    /// `None` when the frontmatter has no title and no first-heading
+    /// fallback was applied. Consumers wanting plain text project it
+    /// with [`quarto_pandoc_types::inlines_to_plain_text`].
+    pub title: Option<Inlines>,
 
-    pub subtitle: Option<String>,
-    pub description: Option<String>,
+    pub subtitle: Option<Inlines>,
+    pub description: Option<Inlines>,
+
+    /// Top-level `abstract:`, flattened to one inline run if written as
+    /// several paragraphs. Listings fall back to it when there is no
+    /// description (Q1 parity: `description || abstract || derived`).
+    ///
+    /// Default `None`; serializer omits it. Added v15.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#abstract: Option<Inlines>,
+
+    /// Keys among `title` / `subtitle` / `description` whose value was
+    /// flattened from more than one block (see
+    /// [`ListingItemInfo::flattened_prose`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flattened_prose: Vec<String>,
 
     /// Authors, flat list of plain-text names (the `literal` of each
     /// [`ProfileAuthor`] in `authors_structured`; kept for consumers
@@ -378,6 +726,39 @@ pub struct DocumentProfile {
     pub keywords: Vec<String>,
     pub image: Option<String>,
     pub draft: bool,
+
+    /// `aliases:` front-matter entries — old URLs that should redirect
+    /// to this page — exactly as the author wrote them.
+    ///
+    /// Kept raw. An alias is resolved against this profile's own
+    /// [`output_href`](Self::output_href), which needs no filesystem
+    /// and no other document; but deciding whether it is *legal*
+    /// needs every other page in the project. Both therefore happen
+    /// in `project::website_post_render`, which is additionally the
+    /// only place a diagnostic survives profile caching — a collision
+    /// reported at extraction time would appear on the render that
+    /// populated the cache and never again.
+    ///
+    /// Consumed only by website projects; other project types warn
+    /// that the key is inert rather than dropping it silently.
+    ///
+    /// Default empty; added v9 → v10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
+    /// Provenance for [`Self::aliases`], same order and length — the
+    /// YAML scalar each alias came from.
+    ///
+    /// Collision diagnostics index into this with the position of the
+    /// offending alias, so the two vectors are index-aligned by
+    /// contract. Carried for the same reason as
+    /// [`Self::resource_glob_sources`]: an alias inherited from a
+    /// `_metadata.yml` and shared by many pages is the difference
+    /// between a useful error and a puzzle.
+    ///
+    /// Default empty; added v9 → v10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_sources: Vec<quarto_source_map::SourceInfo>,
 
     /// Author-supplied sort key from `order:` frontmatter. Consumed by
     /// Phase-2 auto-sidebar expansion to order sibling entries. `None`
@@ -468,6 +849,49 @@ pub struct DocumentProfile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<crate::project_resources::RawResourcePattern>,
 
+    /// The same `resources:` declarations, resolved to
+    /// project-relative patterns against the directory of the file
+    /// each was **written in** (bd-mt7a6uc4).
+    ///
+    /// This is what the post-render collector expands. It exists
+    /// separately from [`Self::resources`] because the two answer
+    /// different questions: this one is "which files does this
+    /// document publish", while the raw list is the frontmatter
+    /// snapshot `ResourceReportStage` diffs against post-filter
+    /// metadata to catch filter-added entries.
+    ///
+    /// Populated by `DocumentProfileStage`, which is where the
+    /// document's `SourceContext` (and therefore each pattern's
+    /// declaring file) is in scope. Default empty; added v8 → v9.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_globs: Vec<crate::glob::GlobPattern>,
+
+    /// Provenance for [`Self::resource_globs`], same order and
+    /// length — the YAML scalar each resolved pattern came from.
+    ///
+    /// Carried so the post-render collector's diagnostics (`Q-5-16`)
+    /// can point at what the author wrote. Without it the pattern
+    /// would be named but not located, which for a `_metadata.yml`
+    /// declaration inherited by many pages is the difference between
+    /// a useful warning and a puzzle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_glob_sources: Vec<quarto_source_map::SourceInfo>,
+
+    /// Declared `resources:` patterns resolution could not use — one
+    /// that climbs above the project root, or that the glob engine
+    /// rejects (bd-mt7a6uc4).
+    ///
+    /// These travel with the profile rather than being reported at
+    /// profile-extraction time because **profiles are cached**: a
+    /// diagnostic emitted in the stage would appear on the render
+    /// that populated the cache and never again. The post-render
+    /// collector turns each of these into its `Q-5-1` / `Q-5-2`
+    /// error on every render.
+    ///
+    /// Default empty; added v8 → v9.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_resources: Vec<crate::project_resources::RejectedResourcePattern>,
+
     /// Tagged form of the top-level `categories:` value as written
     /// by the author. Mirrors [`Self::categories`] but preserves
     /// `ConfigValue` merge tags (`!prefer` / `!concat`) for
@@ -500,22 +924,41 @@ pub struct DocumentProfile {
     #[serde(default, skip_serializing_if = "ListingItemInfo::is_empty")]
     pub listing_item: ListingItemInfo,
 
+    /// Description and image L1 derived from the body. Listings use them
+    /// only when nothing is authored; see [`DerivedListingValues`].
+    /// Populated by `DocumentProfileStage` from the
+    /// [`crate::stage::DocumentAst::derived_listing`] side-channel;
+    /// [`DocumentProfile::extract`] leaves it empty.
+    ///
+    /// Default empty; serializer omits empty. Added v15.
+    #[serde(default, skip_serializing_if = "DerivedListingValues::is_empty")]
+    pub derived_listing: DerivedListingValues,
+
     /// Glob patterns from the host's `listing.*.contents:` config,
     /// flattened across all listings declared on the page. Each
-    /// entry is a raw glob string (e.g. `"*.qmd"`,
-    /// `"posts/**/*.qmd"`) — *not* a resolved path.
+    /// entry is a **project-relative, base-resolved** pattern (e.g.
+    /// `"sub/*.qmd"`) plus a negation flag — resolved by
+    /// [`crate::project::listing::glob_resolve::resolve_content_globs`]
+    /// against the directory of the file the glob was written in
+    /// (front matter → host dir, `_metadata.yml` → its dir,
+    /// `_quarto.yml` → project root; GH #456, bd-v7ixzsp5).
+    /// Populated by `DocumentProfileStage` (the resolution needs the
+    /// document's `SourceContext`, which `extract` doesn't take);
+    /// [`DocumentProfile::extract`] leaves it empty. Patterns whose
+    /// normalization escapes the project root are dropped here (the
+    /// render transform owns the `Q-12-17` diagnostic).
     ///
-    /// Resolution is **not** cached on the profile because it
-    /// depends on the full project source set, which a per-doc
-    /// profile cannot represent safely (a new sibling `.qmd` added
-    /// to the project would not invalidate the host's profile
-    /// cache, leaving the resolution stale). Instead, the
-    /// dependency-graph builder
+    /// *Expansion* against the project's file set is still **not**
+    /// cached on the profile because it depends on the full project
+    /// source set, which a per-doc profile cannot represent safely
+    /// (a new sibling `.qmd` added to the project would not
+    /// invalidate the host's profile cache, leaving the expansion
+    /// stale). The dependency-graph builder
     /// ([`crate::project::dependency_graph::ProjectDependencyGraph::build`])
-    /// expands these globs at graph-build time against
-    /// [`crate::project::index::ProjectIndex::profiles`]
-    /// (host-relative first, project-relative fallback — same rule
-    /// the L3 generate transform uses at render time) and produces
+    /// matches these patterns at graph-build time against
+    /// [`crate::project::index::ProjectIndex::profiles`] (single
+    /// view, via [`crate::glob::PatternSet`] — the same rule the
+    /// L3 generate transform uses at render time) and produces
     /// forward edges from each host to each match. Listing hosts
     /// with non-empty entries are also added to
     /// [`crate::project::dependency_graph::ProjectDependencyGraph::force_render`]
@@ -523,9 +966,29 @@ pub struct DocumentProfile {
     /// in the user-named target set.
     ///
     /// Default empty; serializer omits empty lists.
-    /// Added v4 → v5 (`bd-xbnf`).
+    /// Added v4 → v5 (`bd-xbnf`); shape changed v7 → v8
+    /// (`bd-v7ixzsp5`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub listing_content_globs: Vec<String>,
+    pub listing_content_globs: Vec<crate::glob::GlobPattern>,
+
+    /// Pass-1-resolved engine sequence/ownership (names only), stamped by
+    /// `DocumentProfileStage` from `resolve_engines_pass1`. `None` means the
+    /// document fell through to Pass-2's loading resolver — advisory, not
+    /// an error. See [`ProfileEngineResolution`] and Plan 6 decision 6.
+    ///
+    /// Added v12 (Plan 6 Phase 5).
+    #[serde(default)]
+    pub engine_resolution: Option<ProfileEngineResolution>,
+
+    /// Every editorial comment in the document body, in source order.
+    /// See [`ProfileComment`]. Consumers wanting a count use
+    /// `comments.len()` — there is deliberately no separate count
+    /// field to keep in sync.
+    ///
+    /// Default empty; serializer omits empty lists. Added v13
+    /// (bd-0rsk07il, GH #445).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<ProfileComment>,
 }
 
 /// Helper for `#[serde(skip_serializing_if = ...)]` on plain bool
@@ -563,6 +1026,8 @@ impl Default for DocumentProfile {
             title: None,
             subtitle: None,
             description: None,
+            r#abstract: None,
+            flattened_prose: Vec::new(),
             authors: Vec::new(),
             authors_structured: Vec::new(),
             date: None,
@@ -570,6 +1035,8 @@ impl Default for DocumentProfile {
             keywords: Vec::new(),
             image: None,
             draft: false,
+            aliases: Vec::new(),
+            alias_sources: Vec::new(),
             order: None,
             outline: Vec::new(),
             includes: Vec::new(),
@@ -577,9 +1044,17 @@ impl Default for DocumentProfile {
             always_render: false,
             body_link_targets: Vec::new(),
             resources: Vec::new(),
+            // Resolution needs the document's SourceContext, so
+            // `DocumentProfileStage` fills these in; `extract` stays pure.
+            resource_globs: Vec::new(),
+            resource_glob_sources: Vec::new(),
+            rejected_resources: Vec::new(),
             categories_raw: None,
             listing_item: ListingItemInfo::default(),
+            derived_listing: DerivedListingValues::default(),
             listing_content_globs: Vec::new(),
+            engine_resolution: None,
+            comments: Vec::new(),
         }
     }
 }
@@ -587,6 +1062,23 @@ impl Default for DocumentProfile {
 impl DocumentProfile {
     /// The version tag emitted by this build.
     pub const VERSION: u32 = DOCUMENT_PROFILE_VERSION;
+
+    /// [`Self::title`] projected to plain text — the projection
+    /// `ConfigValue::as_plain_text` gives, for consumers that show the
+    /// title outside markdown (sidebar, breadcrumbs, `llms.txt`, ...).
+    pub fn title_text(&self) -> Option<String> {
+        self.title.as_deref().map(inlines_to_plain_text)
+    }
+
+    /// [`Self::subtitle`] projected to plain text.
+    pub fn subtitle_text(&self) -> Option<String> {
+        self.subtitle.as_deref().map(inlines_to_plain_text)
+    }
+
+    /// [`Self::description`] projected to plain text.
+    pub fn description_text(&self) -> Option<String> {
+        self.description.as_deref().map(inlines_to_plain_text)
+    }
 
     /// Extract a profile from a `Pandoc` AST at the pipeline
     /// checkpoint.
@@ -607,15 +1099,26 @@ impl DocumentProfile {
         let meta = &ast.meta;
         let outline = extract_outline(&ast.blocks);
         let authors_structured = extract_structured_authors(meta);
+        let aliases = extract_string_list_with_sources(meta, "aliases");
+        let mut flattened_prose = Vec::new();
+        let title = prose_field(meta, "title", &mut flattened_prose);
+        let subtitle = prose_field(meta, "subtitle", &mut flattened_prose);
+        let description = prose_field(meta, "description", &mut flattened_prose);
+        // An abstract is routinely several paragraphs and is not written
+        // for the listing, so flattening it is expected rather than
+        // something to warn about (Q-12-26): its flag is discarded.
+        let r#abstract = prose_field(meta, "abstract", &mut Vec::new());
 
         Self {
             profile_version: DOCUMENT_PROFILE_VERSION,
             source_path: source_path.to_path_buf(),
             output_href: output_href.to_string(),
             format_id: format_id.to_string(),
-            title: plain_text_field(meta, "title"),
-            subtitle: plain_text_field(meta, "subtitle"),
-            description: plain_text_field(meta, "description"),
+            title,
+            subtitle,
+            description,
+            r#abstract,
+            flattened_prose,
             authors: authors_structured.iter().map(|a| a.name.clone()).collect(),
             authors_structured,
             date: plain_text_field(meta, "date"),
@@ -623,9 +1126,11 @@ impl DocumentProfile {
             keywords: extract_string_list(meta, "keywords"),
             image: plain_text_field(meta, "image"),
             draft: meta.get("draft").and_then(|v| v.as_bool()).unwrap_or(false),
+            aliases: aliases.iter().map(|(s, _)| s.clone()).collect(),
+            alias_sources: aliases.into_iter().map(|(_, info)| info).collect(),
             order: meta
                 .get("order")
-                .and_then(|v| v.as_int())
+                .and_then(|v| v.as_int_lenient())
                 .and_then(|i| i32::try_from(i).ok()),
             outline,
             // Phase-8 fields that come from the AST's `meta.project.*`
@@ -637,16 +1142,30 @@ impl DocumentProfile {
             always_render: meta_bool_path(meta, &["project", "always-render"]).unwrap_or(false),
             body_link_targets: Vec::new(),
             resources: crate::project_resources::extract_resource_patterns(meta, &["resources"]),
+            // Resolution needs the document's SourceContext, so
+            // `DocumentProfileStage` fills these in; `extract` stays pure.
+            resource_globs: Vec::new(),
+            resource_glob_sources: Vec::new(),
+            rejected_resources: Vec::new(),
             // L0 (`bd-n8a4`): both fields wired into extract below.
             // Skeleton stage left explicit so TDD failure points at
             // the wiring, not the field declarations.
             categories_raw: extract_categories_raw(meta),
             listing_item: extract_listing_item(meta),
-            // L6 (`bd-xbnf`): pull glob strings out of meta.listing
-            // so the dep-graph builder can expand them later. The
-            // resolution itself happens at graph-build time, not
-            // here — see the field doc for the reason.
-            listing_content_globs: crate::project::listing::config::extract_content_globs(meta),
+            // Filled by `DocumentProfileStage` from the L1 side-channel.
+            derived_listing: DerivedListingValues::default(),
+            // L6 (`bd-xbnf`) / v8 (`bd-v7ixzsp5`): populated by
+            // `DocumentProfileStage`, which resolves each glob's
+            // base directory from its `SourceInfo` provenance — a
+            // lookup that needs the document's `SourceContext`,
+            // which this pure extractor doesn't take. See the field
+            // doc.
+            listing_content_globs: Vec::new(),
+            // Stamped by `DocumentProfileStage` from `resolve_engines_pass1`
+            // (needs the registry + AST, not available to this pure
+            // metadata-only extractor) — mirrors the `includes` field.
+            engine_resolution: None,
+            comments: extract_comments(&ast.blocks),
         }
     }
 
@@ -666,6 +1185,127 @@ impl DocumentProfile {
         }
         Ok(profile)
     }
+}
+
+/// Metadata prose — `title`, `subtitle`, `description` — as inlines.
+///
+/// Listings write these back into generated markdown, so they must keep
+/// their markup rather than a plain-text projection (bd-8a9eum6p):
+///
+/// - `PandocInlines` (a parsed front-matter string) is used as-is;
+/// - a plain string (e.g. from a `!str` value or a project config file)
+///   becomes literal `Str`/`Space` runs, so its text is never re-read as
+///   markdown;
+/// - `PandocBlocks` with a single paragraph gives that paragraph's
+///   inlines; anything else (two paragraphs, a list, ...) flattens into
+///   one run with a `Space` between blocks, and `flattened` is set so the
+///   consumer can warn (D5 in the plan) — listings show a description as
+///   one paragraph;
+/// - any other value (a number, a map, ...) is `None`, as before.
+pub(crate) fn prose_inlines(value: &ConfigValue) -> Option<ProseInlines> {
+    match &value.value {
+        ConfigValueKind::PandocInlines(inlines) => Some(ProseInlines {
+            inlines: inlines.clone(),
+            flattened: false,
+        }),
+        ConfigValueKind::PandocBlocks(blocks) => match blocks.as_slice() {
+            [] => None,
+            [Block::Paragraph(p)] => Some(ProseInlines {
+                inlines: p.content.clone(),
+                flattened: false,
+            }),
+            [Block::Plain(p)] => Some(ProseInlines {
+                inlines: p.content.clone(),
+                flattened: false,
+            }),
+            _ => {
+                let mut runs = Vec::new();
+                prose_runs(blocks, &mut runs);
+                let mut inlines = Inlines::new();
+                for (i, run) in runs.into_iter().enumerate() {
+                    if i > 0 {
+                        inlines.push(Inline::Space(Space {
+                            source_info: SourceInfo::generated(By::unknown()),
+                        }));
+                    }
+                    inlines.extend(run);
+                }
+                Some(ProseInlines {
+                    inlines,
+                    flattened: true,
+                })
+            }
+        },
+        _ => value.as_plain_text().map(|s| ProseInlines {
+            inlines: quarto_pandoc_types::inline::split_string_to_inlines(&s),
+            flattened: false,
+        }),
+    }
+}
+
+/// Test shorthand: literal text as prose inlines.
+#[cfg(test)]
+pub(crate) fn text(s: impl AsRef<str>) -> Inlines {
+    quarto_pandoc_types::inline::split_string_to_inlines(s.as_ref())
+}
+
+/// Test shorthand: an optional prose value as plain text.
+#[cfg(test)]
+pub(crate) fn plain(inlines: &Option<Inlines>) -> Option<String> {
+    inlines.as_deref().map(inlines_to_plain_text)
+}
+
+/// The paragraph-like runs of `blocks`, in order: one per paragraph,
+/// heading or line block, descending into lists, quotes and divs so
+/// that each list item reads as its own run. Anything else contributes
+/// its `pandoc.utils.blocks_to_inlines` text as one run. Joined with
+/// spaces by [`prose_inlines`]; `blocks_to_inlines` itself would glue
+/// list items together with no separator.
+fn prose_runs(blocks: &[Block], runs: &mut Vec<Inlines>) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(p) => runs.push(p.content.clone()),
+            Block::Plain(p) => runs.push(p.content.clone()),
+            Block::Header(h) => runs.push(h.content.clone()),
+            Block::BulletList(l) => l.content.iter().for_each(|item| prose_runs(item, runs)),
+            Block::OrderedList(l) => l.content.iter().for_each(|item| prose_runs(item, runs)),
+            Block::BlockQuote(q) => prose_runs(&q.content, runs),
+            Block::Div(d) => prose_runs(&d.content, runs),
+            Block::DefinitionList(dl) => {
+                for (term, defs) in &dl.content {
+                    runs.push(term.clone());
+                    defs.iter().for_each(|def| prose_runs(def, runs));
+                }
+            }
+            other => {
+                let run = crate::editorial_marks::blocks_to_inlines_with_sep(
+                    std::slice::from_ref(other),
+                    &[],
+                );
+                if !run.is_empty() {
+                    runs.push(run);
+                }
+            }
+        }
+    }
+}
+
+/// Result of [`prose_inlines`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProseInlines {
+    pub inlines: Inlines,
+    /// The value was more than one block and got joined into one run.
+    pub flattened: bool,
+}
+
+/// [`prose_inlines`] for `meta[key]`, recording `key` in `flattened`
+/// when the value had to be flattened.
+fn prose_field(meta: &ConfigValue, key: &str, flattened: &mut Vec<String>) -> Option<Inlines> {
+    let prose = prose_inlines(meta.get(key)?)?;
+    if prose.flattened {
+        flattened.push(key.to_string());
+    }
+    Some(prose.inlines)
 }
 
 /// Pull a plain-text field out of the document metadata, flattening
@@ -695,24 +1335,9 @@ fn extract_categories_raw(meta: &ConfigValue) -> Option<ConfigValue> {
 /// keys leave the field at its default. Strict diagnostics are L2's
 /// job (see L0 sub-plan §"C5").
 fn extract_listing_item(meta: &ConfigValue) -> ListingItemInfo {
-    let Some(li) = meta.get("listing-item") else {
-        return ListingItemInfo::default();
-    };
-
-    ListingItemInfo {
-        title: plain_text_field(li, "title"),
-        subtitle: plain_text_field(li, "subtitle"),
-        description: plain_text_field(li, "description"),
-        image: plain_text_field(li, "image"),
-        image_alt: plain_text_field(li, "image-alt"),
-        date: plain_text_field(li, "date"),
-        date_modified: plain_text_field(li, "date-modified"),
-        categories: extract_string_list(li, "categories"),
-        categories_raw: li.get("categories").cloned(),
-        reading_time_minutes: extract_u32_field(li, "reading-time-minutes"),
-        word_count: extract_u32_field(li, "word-count"),
-        extra: extract_listing_item_extra(li),
-    }
+    meta.get("listing-item")
+        .map(|li| ListingItemInfo::from_map(li, UnknownKeyPolicy::Drop))
+        .unwrap_or_default()
 }
 
 /// Read a non-negative integer field as `u32`. Returns `None` if the
@@ -721,7 +1346,7 @@ fn extract_listing_item(meta: &ConfigValue) -> ListingItemInfo {
 /// pattern used elsewhere in this module.
 fn extract_u32_field(meta: &ConfigValue, key: &str) -> Option<u32> {
     meta.get(key)
-        .and_then(|v| v.as_int())
+        .and_then(|v| v.as_int_lenient())
         .and_then(|i| u32::try_from(i).ok())
 }
 
@@ -733,7 +1358,7 @@ fn extract_u32_field(meta: &ConfigValue, key: &str) -> Option<u32> {
 /// type coercion. Custom listing templates handle typed access at
 /// render time via `quarto-doctemplate`'s `TemplateValue` conversion.
 /// `BTreeMap` over `HashMap` for deterministic serialization (see
-/// CLAUDE.md §"HashMap and Determinism").
+/// AGENTS.md §"HashMap and Determinism").
 fn extract_listing_item_extra(li: &ConfigValue) -> BTreeMap<String, ConfigValue> {
     let Some(extra) = li.get("extra") else {
         return BTreeMap::new();
@@ -802,6 +1427,38 @@ fn extract_string_list(meta: &ConfigValue, key: &str) -> Vec<String> {
     }
 }
 
+/// [`extract_string_list`] that also keeps each entry's source span.
+///
+/// Same shape rules as its span-less sibling — a YAML sequence yields
+/// one entry per item, a bare scalar yields a single entry — but each
+/// string is paired with the [`SourceInfo`] of the `ConfigValue` it
+/// came from, so a later diagnostic can point at what the author
+/// actually wrote.
+///
+/// The parallel implementation in
+/// [`crate::project_resources::extract_resource_patterns`] does the
+/// same job for `resources:`; it stays separate because it builds a
+/// domain type (`RawResourcePattern`) rather than a bare pair.
+///
+/// [`SourceInfo`]: quarto_source_map::SourceInfo
+fn extract_string_list_with_sources(
+    meta: &ConfigValue,
+    key: &str,
+) -> Vec<(String, quarto_source_map::SourceInfo)> {
+    let Some(value) = meta.get(key) else {
+        return Vec::new();
+    };
+    if let Some(arr) = value.as_array() {
+        arr.iter()
+            .filter_map(|v| v.as_plain_text().map(|s| (s, v.source_info.clone())))
+            .collect()
+    } else if let Some(s) = value.as_plain_text() {
+        vec![(s, value.source_info.clone())]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Structured-author extraction (v7, bd-ez0hiowa): runs the shared
 /// author normalization (`metadata::authors::parse_authors_model` —
 /// the same pass the title block renders from) and snapshots its
@@ -840,9 +1497,36 @@ fn extract_structured_authors(meta: &ConfigValue) -> Vec<ProfileAuthor> {
 /// naturally produces `TocEntry::number == None`, but we scrub the
 /// tree defensively so the invariant holds even if `generate_toc`
 /// grows new numbering behavior.
+///
+/// ## Why this sectionizes first
+///
+/// `generate_toc` walks the *section tree* and stops at any `Div` that
+/// is not a section. The profile is extracted at `DocumentProfileStage`,
+/// long before `SectionizeTransform` runs, so the blocks here are flat
+/// `Header`s wrapped in raw author `Div`s. Walking them directly would
+/// drop every heading written inside a `:::` block — including ordinary
+/// ones like `::: {.content-visible}`, which the rendered TOC does list.
+/// Sectionizing a copy first restores the absorb rule, so a transparent
+/// wrapper disappears and its heading is an ordinary section.
+///
+/// ## Known limitation
+///
+/// This is close to, but not identical with, the rendered TOC. Transforms
+/// that *consume* a heading run after the profile checkpoint, so a callout
+/// **title** written as a heading is still absorbed into a section here
+/// and appears in the outline, while the rendered TOC omits it
+/// (`CalloutTransform` ate the `Header` before `SectionizeTransform` saw
+/// it). Tab titles and tabset/callout **body** headings are excluded
+/// correctly, because their wrappers hold more than a single section and
+/// so are never absorbed. Closing the gap entirely would mean running the
+/// heading-consuming transforms before the profile, which the profile
+/// contract deliberately does not do — see
+/// `claude-notes/designs/document-profile-contract.md`. Tracked as
+/// bd-ca17fck0.
 fn extract_outline(blocks: &[quarto_pandoc_types::block::Block]) -> Vec<TocEntry> {
+    let sectionized = pampa::transforms::sectionize_blocks(blocks.to_vec());
     let toc = generate_toc(
-        blocks,
+        &sectionized,
         &TocConfig {
             depth: OUTLINE_MAX_DEPTH,
             title: None,
@@ -857,6 +1541,208 @@ fn strip_numbers(entries: &mut Vec<TocEntry>) {
     for entry in entries.iter_mut() {
         entry.number = None;
         strip_numbers(&mut entry.children);
+    }
+}
+
+/// Collect every editorial comment in the document body, in source
+/// (walk) order — see [`ProfileComment`].
+///
+/// At the checkpoint a comment is an `Inline::Span` whose classes
+/// contain `quarto-edit-comment`: the qmd reader's postprocess
+/// rewrites `Inline::EditComment` parse nodes into that span form
+/// (both `[>> … ]` and `[…]{.quarto-edit-comment}` normalize to it).
+/// A block comment (`::: >>`) is a `Block::Div` with the same class.
+/// A defensive `EditComment` arm keeps the walk correct for any AST
+/// that reaches extraction pre-postprocess.
+///
+/// The traversal mirrors `LinkResolutionStage`'s: every block and
+/// inline container is entered (list items, table cells, captions,
+/// footnotes, custom-node slots, …). A comment itself is a leaf — its
+/// content is the comment text, not further-scanned document body.
+fn extract_comments(blocks: &[quarto_pandoc_types::block::Block]) -> Vec<ProfileComment> {
+    let mut collector = CommentCollector { seen: Vec::new() };
+    for block in blocks {
+        collector.visit_block(block);
+    }
+    collector.seen
+}
+
+/// Marker class the qmd reader stamps on comment spans and divs.
+const EDIT_COMMENT_CLASS: &str = "quarto-edit-comment";
+
+struct CommentCollector {
+    seen: Vec<ProfileComment>,
+}
+
+impl CommentCollector {
+    fn record(
+        &mut self,
+        attr: &quarto_pandoc_types::attr::Attr,
+        text: String,
+        source: &quarto_source_map::SourceInfo,
+    ) {
+        let (_, _, kvs) = attr;
+        let mut author = None;
+        let mut date = None;
+        let mut attributes = Vec::new();
+        for (k, v) in kvs.iter() {
+            match k.as_str() {
+                "author" => author = Some(v.clone()),
+                "date" => date = Some(v.clone()),
+                _ => attributes.push((k.clone(), v.clone())),
+            }
+        }
+        self.seen.push(ProfileComment {
+            text,
+            source: source.clone(),
+            author,
+            date,
+            attributes,
+        });
+    }
+
+    fn visit_block(&mut self, block: &quarto_pandoc_types::block::Block) {
+        use quarto_pandoc_types::block::Block;
+        match block {
+            Block::Plain(p) => self.visit_inlines(&p.content),
+            Block::Paragraph(p) => self.visit_inlines(&p.content),
+            Block::LineBlock(lb) => {
+                for line in lb.content.iter() {
+                    self.visit_inlines(line);
+                }
+            }
+            Block::BlockQuote(bq) => self.visit_blocks(&bq.content),
+            Block::OrderedList(ol) => {
+                for item in ol.content.iter() {
+                    self.visit_blocks(item);
+                }
+            }
+            Block::BulletList(bl) => {
+                for item in bl.content.iter() {
+                    self.visit_blocks(item);
+                }
+            }
+            Block::DefinitionList(dl) => {
+                for (term, defs) in dl.content.iter() {
+                    self.visit_inlines(term);
+                    for def in defs.iter() {
+                        self.visit_blocks(def);
+                    }
+                }
+            }
+            Block::Header(h) => self.visit_inlines(&h.content),
+            // A block comment (`::: >>`), like the inline mark, is a leaf.
+            Block::Div(d) if d.attr.1.iter().any(|c| c == EDIT_COMMENT_CLASS) => {
+                let text = pampa::writers::plaintext::blocks_to_string(&d.content).0;
+                self.record(&d.attr, text, &d.source_info);
+            }
+            Block::Div(d) => self.visit_blocks(&d.content),
+            Block::Figure(f) => self.visit_blocks(&f.content),
+            Block::Table(t) => {
+                if let Some(short) = t.caption.short.as_ref() {
+                    self.visit_inlines(short);
+                }
+                if let Some(long) = t.caption.long.as_ref() {
+                    self.visit_blocks(long);
+                }
+                for row in t.head.rows.iter().chain(t.foot.rows.iter()) {
+                    for cell in row.cells.iter() {
+                        self.visit_blocks(&cell.content);
+                    }
+                }
+                for body in t.bodies.iter() {
+                    for row in body.body.iter() {
+                        for cell in row.cells.iter() {
+                            self.visit_blocks(&cell.content);
+                        }
+                    }
+                }
+            }
+            Block::CaptionBlock(cb) => self.visit_inlines(&cb.content),
+            Block::Custom(c) => {
+                for (_name, slot) in c.slots.iter() {
+                    self.visit_slot(slot);
+                }
+            }
+            Block::CodeBlock(_)
+            | Block::RawBlock(_)
+            | Block::HorizontalRule(_)
+            | Block::BlockMetadata(_)
+            | Block::NoteDefinitionPara(_)
+            | Block::NoteDefinitionFencedBlock(_) => {}
+        }
+    }
+
+    fn visit_blocks(&mut self, blocks: &[quarto_pandoc_types::block::Block]) {
+        for b in blocks {
+            self.visit_block(b);
+        }
+    }
+
+    fn visit_inlines(&mut self, inlines: &quarto_pandoc_types::Inlines) {
+        for inline in inlines.iter() {
+            self.visit_inline(inline);
+        }
+    }
+
+    fn visit_inline(&mut self, inline: &quarto_pandoc_types::inline::Inline) {
+        use quarto_pandoc_types::inline::Inline;
+        match inline {
+            Inline::Span(s) => {
+                if s.attr.1.iter().any(|c| c == EDIT_COMMENT_CLASS) {
+                    let text = pampa::writers::plaintext::inlines_to_string(&s.content).0;
+                    self.record(&s.attr, text, &s.source_info);
+                } else {
+                    self.visit_inlines(&s.content);
+                }
+            }
+            // Pre-postprocess parse form; postprocess rewrites this
+            // into the span form above before the checkpoint.
+            Inline::EditComment(e) => {
+                let text = pampa::writers::plaintext::inlines_to_string(&e.content).0;
+                self.record(&e.attr, text, &e.source_info)
+            }
+            Inline::Link(l) => self.visit_inlines(&l.content),
+            Inline::Image(i) => self.visit_inlines(&i.content),
+            Inline::Emph(e) => self.visit_inlines(&e.content),
+            Inline::Underline(u) => self.visit_inlines(&u.content),
+            Inline::Strong(s) => self.visit_inlines(&s.content),
+            Inline::Strikeout(s) => self.visit_inlines(&s.content),
+            Inline::Superscript(s) => self.visit_inlines(&s.content),
+            Inline::Subscript(s) => self.visit_inlines(&s.content),
+            Inline::SmallCaps(s) => self.visit_inlines(&s.content),
+            Inline::Quoted(q) => self.visit_inlines(&q.content),
+            Inline::Insert(i) => self.visit_inlines(&i.content),
+            Inline::Delete(d) => self.visit_inlines(&d.content),
+            Inline::Highlight(h) => self.visit_inlines(&h.content),
+            Inline::Note(n) => self.visit_blocks(&n.content),
+            Inline::Custom(c) => {
+                for (_name, slot) in c.slots.iter() {
+                    self.visit_slot(slot);
+                }
+            }
+            Inline::Str(_)
+            | Inline::Cite(_)
+            | Inline::Code(_)
+            | Inline::Space(_)
+            | Inline::SoftBreak(_)
+            | Inline::LineBreak(_)
+            | Inline::Math(_)
+            | Inline::RawInline(_)
+            | Inline::Shortcode(_)
+            | Inline::NoteReference(_)
+            | Inline::Attr(_) => {}
+        }
+    }
+
+    fn visit_slot(&mut self, slot: &quarto_pandoc_types::custom::Slot) {
+        use quarto_pandoc_types::custom::Slot;
+        match slot {
+            Slot::Block(b) => self.visit_block(b),
+            Slot::Blocks(bs) => self.visit_blocks(bs),
+            Slot::Inline(i) => self.visit_inline(i),
+            Slot::Inlines(is) => self.visit_inlines(is),
+        }
     }
 }
 
@@ -884,6 +1770,14 @@ mod tests {
         ast
     }
 
+    /// Project a TOC entry title to plain text for assertions. The
+    /// profile's outline carries inlines (bd-toc-smart-quotes-6nro57ed);
+    /// consumers that want text project it themselves, and the
+    /// plain-text writer is the shared way to do that.
+    fn title_text(title: &quarto_pandoc_types::Inlines) -> String {
+        pampa::writers::plaintext::inlines_to_string(title).0
+    }
+
     fn entry_ids(entries: &[TocEntry]) -> Vec<&str> {
         entries.iter().map(|e| e.id.as_str()).collect()
     }
@@ -903,7 +1797,10 @@ mod tests {
         assert_eq!(profile.source_path, PathBuf::from("doc.qmd"));
         assert_eq!(profile.output_href, "doc.html");
         assert_eq!(profile.format_id, "html");
-        assert_eq!(profile.title.as_deref(), Some("Hello"));
+        assert_eq!(
+            crate::document_profile::plain(&profile.title).as_deref(),
+            Some("Hello")
+        );
         assert!(!profile.draft);
         assert!(profile.outline.is_empty(), "no headings → empty outline");
     }
@@ -936,14 +1833,57 @@ Deep text.
         assert_eq!(profile.outline.len(), 2, "two top-level headings");
         let first = &profile.outline[0];
         assert_eq!(first.level, 1);
-        assert_eq!(first.title, "Top");
+        assert_eq!(title_text(&first.title), "Top");
         assert_eq!(entry_ids(&first.children), vec!["sub"]);
         assert_eq!(first.children[0].level, 2);
         assert_eq!(entry_ids(&first.children[0].children), vec!["deep"]);
-        assert_eq!(profile.outline[1].title, "Top two");
+        assert_eq!(title_text(&profile.outline[1].title), "Top two");
         assert!(
             all_unnumbered(&profile.outline),
             "profile outline must be un-numbered"
+        );
+    }
+
+    /// The outline is built from the section tree, so it needs the same
+    /// sectionizing the render does — otherwise every heading written
+    /// inside a `:::` block disappears from it. Pins both the fix and
+    /// the known gap (see `extract_outline`'s docs).
+    #[test]
+    fn outline_sees_headings_inside_divs() {
+        let qmd = r#"---
+title: Outline containers
+---
+
+# Top
+
+::: {.content-visible when-format="html"}
+## Inside a transparent wrapper
+:::
+
+::: {.panel-tabset}
+## Tab one
+
+## Tab two
+:::
+"#;
+        let ast = parse_qmd(qmd);
+        let profile = DocumentProfile::extract(
+            &ast,
+            Path::new("outline-containers.qmd"),
+            "outline-containers.html",
+            "html",
+        );
+
+        let ids = entry_ids(&profile.outline[0].children);
+        assert!(
+            ids.contains(&"inside-a-transparent-wrapper"),
+            "an empty-id wrapper around one section is absorbed, so its \
+             heading is an ordinary section: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"tab-one") && !ids.contains(&"tab-two"),
+            "a tabset holds two sections, so it is never absorbed and the \
+             walk stops at it: {ids:?}"
         );
     }
 
@@ -969,9 +1909,18 @@ Body.
         let ast = parse_qmd(qmd);
         let profile = DocumentProfile::extract(&ast, Path::new("big.qmd"), "big.html", "html");
 
-        assert_eq!(profile.title.as_deref(), Some("Big doc"));
-        assert_eq!(profile.subtitle.as_deref(), Some("With everything"));
-        assert_eq!(profile.description.as_deref(), Some("A thorough example."));
+        assert_eq!(
+            crate::document_profile::plain(&profile.title).as_deref(),
+            Some("Big doc")
+        );
+        assert_eq!(
+            crate::document_profile::plain(&profile.subtitle).as_deref(),
+            Some("With everything")
+        );
+        assert_eq!(
+            crate::document_profile::plain(&profile.description).as_deref(),
+            Some("A thorough example.")
+        );
         assert_eq!(
             profile.authors,
             vec!["Alice Example".to_string(), "Bob Example".to_string()]
@@ -1058,6 +2007,26 @@ Body.
         assert_eq!(profile.order, None);
     }
 
+    // bd-yjsz6hdu Phase 3: quoted numbers in front matter become
+    // PandocInlines, which the strict `as_int()` misses — the option
+    // silently dropped.
+    #[test]
+    fn profile_extract_order_accepts_quoted_integer() {
+        let ast = parse_qmd("---\ntitle: Ordered\norder: \"3\"\n---\n\nBody.\n");
+        let profile = DocumentProfile::extract(&ast, Path::new("o.qmd"), "o.html", "html");
+        assert_eq!(profile.order, Some(3));
+    }
+
+    #[test]
+    fn profile_extract_listing_item_accepts_quoted_counts() {
+        let ast = parse_qmd(
+            "---\ntitle: T\nlisting-item:\n  reading-time-minutes: \"7\"\n  word-count: \"1200\"\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("t.qmd"), "t.html", "html");
+        assert_eq!(profile.listing_item.reading_time_minutes, Some(7));
+        assert_eq!(profile.listing_item.word_count, Some(1200));
+    }
+
     #[test]
     fn profile_extract_rejects_non_integer_order() {
         // A string `order:` is not a valid sort key; the profile drops it
@@ -1069,12 +2038,62 @@ Body.
     }
 
     #[test]
+    fn profile_extract_aliases_in_declaration_order() {
+        // Order is load-bearing: the post-render pass reports the
+        // *first* declaration of a colliding alias as the primary and
+        // the rest as secondaries, so a reshuffle would move the span
+        // the diagnostic points at.
+        let ast = parse_qmd(
+            "---\ntitle: Moved\naliases:\n  - /old.html\n  - ../previous/index.html\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("m.qmd"), "m.html", "html");
+        assert_eq!(profile.aliases, vec!["/old.html", "../previous/index.html"]);
+    }
+
+    #[test]
+    fn profile_extract_aliases_absent_is_empty() {
+        let ast = parse_qmd("---\ntitle: No aliases\n---\n\nBody.\n");
+        let profile = DocumentProfile::extract(&ast, Path::new("x.qmd"), "x.html", "html");
+        assert!(profile.aliases.is_empty());
+        assert!(profile.alias_sources.is_empty());
+    }
+
+    #[test]
+    fn profile_extract_aliases_accepts_single_scalar() {
+        // Q1 requires a YAML list and silently ignores a bare scalar.
+        // Accepting both matches how `resources:` already behaves here,
+        // and a dropped redirect is exactly the silent failure this
+        // feature exists to prevent.
+        let ast = parse_qmd("---\ntitle: One\naliases: /old.html\n---\n\nBody.\n");
+        let profile = DocumentProfile::extract(&ast, Path::new("o.qmd"), "o.html", "html");
+        assert_eq!(profile.aliases, vec!["/old.html"]);
+        assert_eq!(profile.alias_sources.len(), 1);
+    }
+
+    #[test]
+    fn profile_extract_alias_sources_parallel_to_aliases() {
+        // The two vectors are index-aligned by contract — collision
+        // diagnostics index into `alias_sources` with the position of
+        // the offending alias.
+        let ast = parse_qmd(
+            "---\ntitle: Moved\naliases:\n  - /a.html\n  - /b.html\n  - /c.html\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("m.qmd"), "m.html", "html");
+        assert_eq!(profile.aliases.len(), 3);
+        assert_eq!(
+            profile.alias_sources.len(),
+            profile.aliases.len(),
+            "alias_sources must stay index-aligned with aliases"
+        );
+    }
+
+    #[test]
     fn profile_extract_handles_missing_title() {
         let ast = parse_qmd("Just a paragraph.\n");
         let profile =
             DocumentProfile::extract(&ast, Path::new("untitled.qmd"), "untitled.html", "html");
 
-        assert_eq!(profile.title, None);
+        assert_eq!(profile.title_text(), None);
         assert!(profile.outline.is_empty());
         assert!(profile.authors.is_empty());
         assert!(profile.categories.is_empty());
@@ -1321,15 +2340,15 @@ Body.
     #[allow(clippy::field_reassign_with_default)]
     fn listing_item_info_partial_not_empty_per_field() {
         let mut li = ListingItemInfo::default();
-        li.title = Some("X".into());
+        li.title = Some(crate::document_profile::text("X"));
         assert!(!li.is_empty(), "title set");
 
         let mut li = ListingItemInfo::default();
-        li.subtitle = Some("X".into());
+        li.subtitle = Some(crate::document_profile::text("X"));
         assert!(!li.is_empty(), "subtitle set");
 
         let mut li = ListingItemInfo::default();
-        li.description = Some("X".into());
+        li.description = Some(crate::document_profile::text("X"));
         assert!(!li.is_empty(), "description set");
 
         let mut li = ListingItemInfo::default();
@@ -1381,13 +2400,17 @@ Body.
     #[test]
     fn listing_item_info_serde_omits_empty_fields() {
         let li = ListingItemInfo {
-            title: Some("Hello".into()),
+            title: Some(crate::document_profile::text("Hello")),
             ..Default::default()
         };
         let json = serde_json::to_string(&li).expect("serialize");
         // Only `title` should appear; every other field is empty/None
         // and tagged `skip_serializing_if`.
-        assert!(json.contains("\"title\":\"Hello\""), "title present");
+        // Prose serializes as inline nodes (v14).
+        assert!(
+            json.contains("\"title\":[{\"Str\""),
+            "title present: {json}"
+        );
         assert!(!json.contains("subtitle"));
         assert!(!json.contains("description"));
         assert!(!json.contains("image"));
@@ -1398,6 +2421,7 @@ Body.
         assert!(!json.contains("reading_time_minutes"));
         assert!(!json.contains("word_count"));
         assert!(!json.contains("extra"));
+        assert!(!json.contains("flattened_prose"));
     }
 
     #[test]
@@ -1475,9 +2499,18 @@ Body.
         let ast = parse_qmd(qmd);
         let p = DocumentProfile::extract(&ast, Path::new("li.qmd"), "li.html", "html");
         let li = &p.listing_item;
-        assert_eq!(li.title.as_deref(), Some("Listing title"));
-        assert_eq!(li.subtitle.as_deref(), Some("Listing subtitle"));
-        assert_eq!(li.description.as_deref(), Some("Listing desc"));
+        assert_eq!(
+            crate::document_profile::plain(&li.title).as_deref(),
+            Some("Listing title")
+        );
+        assert_eq!(
+            crate::document_profile::plain(&li.subtitle).as_deref(),
+            Some("Listing subtitle")
+        );
+        assert_eq!(
+            crate::document_profile::plain(&li.description).as_deref(),
+            Some("Listing desc")
+        );
         assert_eq!(li.image.as_deref(), Some("cover.png"));
         assert_eq!(li.image_alt.as_deref(), Some("A cover"));
         assert_eq!(li.date.as_deref(), Some("2026-04-01"));
@@ -1531,7 +2564,10 @@ Body.
 ";
         let ast = parse_qmd(qmd);
         let p = DocumentProfile::extract(&ast, Path::new("c.qmd"), "c.html", "html");
-        assert_eq!(p.listing_item.title.as_deref(), Some("Curated"));
+        assert_eq!(
+            crate::document_profile::plain(&p.listing_item.title).as_deref(),
+            Some("Curated")
+        );
         let extra_title = p
             .listing_item
             .extra
@@ -1577,9 +2613,131 @@ Body.
         assert_eq!(p.listing_item.reading_time_minutes, None);
     }
 
+    // bd-8a9eum6p: prose keeps its markup.
     #[test]
-    fn document_profile_version_is_7() {
-        assert_eq!(DOCUMENT_PROFILE_VERSION, 7);
+    fn profile_keeps_prose_markup_as_inlines() {
+        use quarto_pandoc_types::inline::Inline;
+        let ast = parse_qmd(
+            "---\ntitle: 'Fix `_scope` and *emph*'\nsubtitle: 'Sub \\_x'\ndescription: '**Strong** desc'\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("a.qmd"), "a.html", "html");
+        let title = profile.title.as_deref().expect("title");
+        assert!(
+            title
+                .iter()
+                .any(|i| matches!(i, Inline::Code(c) if c.text == "_scope")),
+            "code span kept: {title:?}"
+        );
+        assert!(
+            title.iter().any(|i| matches!(i, Inline::Emph(_))),
+            "emphasis kept: {title:?}"
+        );
+        assert_eq!(profile.title_text().as_deref(), Some("Fix _scope and emph"));
+        assert_eq!(profile.subtitle_text().as_deref(), Some("Sub _x"));
+        let description = profile.description.as_deref().expect("description");
+        assert!(
+            matches!(description[0], Inline::Strong(_)),
+            "{description:?}"
+        );
+        assert!(profile.flattened_prose.is_empty());
+    }
+
+    // D5: a multi-block value used to project to `None` and vanish.
+    #[test]
+    fn profile_flattens_multi_block_description_and_records_it() {
+        let ast = parse_qmd(
+            "---\ntitle: T\ndescription: |\n  First *para*.\n\n  Second para.\nlisting-item:\n  description: |\n    - one\n    - two\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("a.qmd"), "a.html", "html");
+        assert_eq!(
+            profile.description_text().as_deref(),
+            Some("First para. Second para.")
+        );
+        assert_eq!(profile.flattened_prose, vec!["description".to_string()]);
+        let li = &profile.listing_item;
+        assert_eq!(plain(&li.description).as_deref(), Some("one two"));
+        assert_eq!(li.flattened_prose, vec!["description".to_string()]);
+    }
+
+    #[test]
+    fn single_paragraph_block_scalar_is_not_flattened() {
+        let ast =
+            parse_qmd("---\ntitle: T\ndescription: |\n  Just *one* paragraph.\n---\n\nBody.\n");
+        let profile = DocumentProfile::extract(&ast, Path::new("a.qmd"), "a.html", "html");
+        assert_eq!(
+            profile.description_text().as_deref(),
+            Some("Just one paragraph.")
+        );
+        assert!(profile.flattened_prose.is_empty());
+    }
+
+    // A plain string (not parsed as markdown) is literal text: its
+    // markdown-looking characters must stay text, not become markup.
+    #[test]
+    fn prose_inlines_reads_a_plain_string_as_literal_text() {
+        use quarto_pandoc_types::inline::Inline;
+        use quarto_source_map::SourceInfo;
+        let value = ConfigValue::new_string("a *b* _c_", SourceInfo::for_test());
+        let prose = prose_inlines(&value).expect("prose");
+        assert!(!prose.flattened);
+        assert!(
+            prose
+                .inlines
+                .iter()
+                .all(|i| matches!(i, Inline::Str(_) | Inline::Space(_))),
+            "{:?}",
+            prose.inlines
+        );
+        assert_eq!(inlines_to_plain_text(&prose.inlines), "a *b* _c_");
+    }
+
+    #[test]
+    fn document_profile_version_is_15() {
+        assert_eq!(DOCUMENT_PROFILE_VERSION, 15);
+    }
+
+    // bd-listing-description-precedence-x4bh6w3m: `abstract:` is the
+    // listing's description fallback. Several paragraphs flatten to one
+    // run without being recorded for Q-12-26 — an abstract is not
+    // written for the listing, so the warning would only be noise.
+    #[test]
+    fn profile_extracts_abstract_flattened_without_warning_record() {
+        let ast = parse_qmd(
+            "---\ntitle: T\nabstract: |\n  First *para*.\n\n  Second para.\n---\n\nBody.\n",
+        );
+        let profile = DocumentProfile::extract(&ast, Path::new("a.qmd"), "a.html", "html");
+        assert_eq!(
+            plain(&profile.r#abstract).as_deref(),
+            Some("First para. Second para.")
+        );
+        assert!(profile.flattened_prose.is_empty());
+    }
+
+    #[test]
+    fn profile_without_abstract_has_none() {
+        let ast = parse_qmd("---\ntitle: T\n---\n\nBody.\n");
+        let profile = DocumentProfile::extract(&ast, Path::new("a.qmd"), "a.html", "html");
+        assert_eq!(profile.r#abstract, None);
+        // `extract` is pure: the derived values come from the stage.
+        assert!(profile.derived_listing.is_empty());
+    }
+
+    #[test]
+    fn derived_listing_round_trips_and_is_omitted_when_empty() {
+        let mut profile = DocumentProfile::default();
+        let empty = serde_json::to_string(&profile).expect("serialize");
+        assert!(!empty.contains("derived_listing"), "{empty}");
+        assert!(!empty.contains("abstract"), "{empty}");
+
+        profile.derived_listing = DerivedListingValues {
+            description: Some("First paragraph.".to_string()),
+            image: Some("figs/a.png".to_string()),
+        };
+        profile.r#abstract = Some(crate::document_profile::text("An abstract"));
+        let json = serde_json::to_string(&profile).expect("serialize");
+        assert!(json.contains("\"abstract\""), "{json}");
+        let back = DocumentProfile::from_json(&json).expect("deserialize");
+        assert_eq!(back, profile);
     }
 
     /// A v3 profile (the pre-listings shape) must be rejected by
@@ -1696,11 +2854,15 @@ Body.
         assert!(p.listing_content_globs.is_empty());
     }
 
-    /// Test #10 — frontmatter with a listing populates the field.
-    /// Mirrors what `extract_content_globs` returns when called on
-    /// the document's `meta`.
+    /// Test #10 — `extract` leaves the field empty even when the
+    /// frontmatter declares a listing: since v8 (bd-v7ixzsp5) the
+    /// globs are resolved (base-directory + negation) by
+    /// `DocumentProfileStage`, which has the `SourceContext` the
+    /// pure extractor lacks. The stage-level population is covered
+    /// by `document_profile` stage tests and the
+    /// `listing_glob_resolution` integration suite.
     #[test]
-    fn profile_extract_populates_listing_content_globs_from_meta() {
+    fn profile_extract_leaves_listing_content_globs_to_the_stage() {
         let qmd = "\
 ---
 title: Host
@@ -1712,10 +2874,9 @@ Body.
 ";
         let ast = parse_qmd(qmd);
         let p = DocumentProfile::extract(&ast, Path::new("idx.qmd"), "idx.html", "html");
-        assert_eq!(
-            p.listing_content_globs,
-            vec!["posts/*.qmd".to_string()],
-            "extract should pull glob strings from meta.listing.contents"
+        assert!(
+            p.listing_content_globs.is_empty(),
+            "resolution happens in DocumentProfileStage, not extract"
         );
     }
 
@@ -1754,16 +2915,17 @@ Body.
     #[test]
     #[allow(clippy::field_reassign_with_default)] // default-then-set keeps the test readable
     fn profile_v5_listing_content_globs_round_trip() {
+        use crate::glob::GlobPattern;
         let mut p = DocumentProfile::default();
         p.source_path = PathBuf::from("idx.qmd");
-        p.listing_content_globs = vec!["a/*.qmd".to_string(), "b/*.qmd".to_string()];
+        p.listing_content_globs = vec![
+            GlobPattern::positive("a/*.qmd"),
+            GlobPattern::negated("a/wip.qmd"),
+        ];
 
         let json = p.to_json().expect("serialize");
         let restored = DocumentProfile::from_json(&json).expect("deserialize");
-        assert_eq!(
-            restored.listing_content_globs,
-            vec!["a/*.qmd".to_string(), "b/*.qmd".to_string()]
-        );
+        assert_eq!(restored.listing_content_globs, p.listing_content_globs);
     }
 
     /// Test #13 — `to_json` of a default profile omits the empty
@@ -1776,6 +2938,384 @@ Body.
         assert!(
             !json.contains("listing_content_globs"),
             "empty listing_content_globs should be omitted from JSON; got: {json}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Plan 6 Phase 5: `engine_resolution` field + v6 → v7 bump.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// A default profile (nothing stamped yet) carries `None` and survives
+    /// a round-trip.
+    #[test]
+    fn profile_engine_resolution_default_is_none() {
+        let p = DocumentProfile::default();
+        assert_eq!(p.engine_resolution, None);
+        let json = p.to_json().expect("serialize");
+        let restored = DocumentProfile::from_json(&json).expect("deserialize");
+        assert_eq!(restored.engine_resolution, None);
+    }
+
+    /// A stamped `Some(ProfileEngineResolution)` survives serialize →
+    /// deserialize intact (sequence + ownership order preserved).
+    #[test]
+    fn profile_engine_resolution_round_trip_some() {
+        let p = DocumentProfile {
+            engine_resolution: Some(ProfileEngineResolution {
+                sequence: vec!["knitr".to_string()],
+                ownership: vec![
+                    ("r".to_string(), "knitr".to_string()),
+                    ("python".to_string(), "knitr".to_string()),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let json = p.to_json().expect("serialize");
+        let restored = DocumentProfile::from_json(&json).expect("deserialize");
+        assert_eq!(p, restored);
+        assert_eq!(
+            restored.engine_resolution,
+            Some(ProfileEngineResolution {
+                sequence: vec!["knitr".to_string()],
+                ownership: vec![
+                    ("r".to_string(), "knitr".to_string()),
+                    ("python".to_string(), "knitr".to_string()),
+                ],
+            })
+        );
+    }
+
+    /// A fallen-through document's `None` also survives the round-trip
+    /// (distinct from "field absent" — `None` is a legitimate, advisory
+    /// value, not an error; see the field doc comment).
+    #[test]
+    fn profile_engine_resolution_round_trip_none() {
+        let p = DocumentProfile {
+            engine_resolution: None,
+            ..Default::default()
+        };
+        let json = p.to_json().expect("serialize");
+        let restored = DocumentProfile::from_json(&json).expect("deserialize");
+        assert_eq!(restored.engine_resolution, None);
+    }
+
+    /// A v6 profile (pre-Phase-5 shape) must be rejected by `from_json`
+    /// with a clean version-mismatch error, not a silent default-None
+    /// read — the cache layer regenerates rather than trusting an old
+    /// shape's missing field.
+    #[test]
+    fn profile_v6_json_rejected_with_clean_error() {
+        let payload = r#"{
+            "profile_version": 6,
+            "source_path": "x.qmd",
+            "output_href": "x.html",
+            "format_id": "html",
+            "title": null,
+            "subtitle": null,
+            "description": null,
+            "authors": [],
+            "date": null,
+            "categories": [],
+            "keywords": [],
+            "image": null,
+            "draft": false,
+            "outline": []
+        }"#;
+        match DocumentProfile::from_json(payload) {
+            Err(DocumentProfileError::VersionMismatch { expected, found }) => {
+                assert_eq!(expected, DOCUMENT_PROFILE_VERSION);
+                assert_eq!(found, 6);
+            }
+            other => panic!("expected VersionMismatch from v6 payload, got {:?}", other),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Task 2: ListingItemInfo::from_map with unknown-key policy
+    // ─────────────────────────────────────────────────────────────────
+
+    fn cv_s(v: &str) -> ConfigValue {
+        ConfigValue::new_string(v, quarto_source_map::SourceInfo::for_test())
+    }
+
+    fn cv_map(entries: Vec<(&str, ConfigValue)>) -> ConfigValue {
+        use quarto_pandoc_types::config_value::ConfigMapEntry;
+        ConfigValue::new_map(
+            entries
+                .into_iter()
+                .map(|(k, v)| ConfigMapEntry {
+                    key: k.to_string(),
+                    key_source: quarto_source_map::SourceInfo::for_test(),
+                    value: v,
+                })
+                .collect(),
+            quarto_source_map::SourceInfo::for_test(),
+        )
+    }
+
+    #[test]
+    fn from_map_drop_policy_ignores_unknown_keys() {
+        let li = cv_map(vec![("title", cv_s("T")), ("icon", cv_s("bi-star"))]);
+        let info = ListingItemInfo::from_map(&li, UnknownKeyPolicy::Drop);
+        assert_eq!(
+            crate::document_profile::plain(&info.title).as_deref(),
+            Some("T")
+        );
+        assert!(info.extra.is_empty(), "Drop must not forward `icon`");
+    }
+
+    #[test]
+    fn from_map_into_extra_routes_unknown_keys_and_skips_excepted() {
+        let li = cv_map(vec![
+            ("title", cv_s("T")),
+            ("icon", cv_s("bi-star")),
+            ("link", cv_s("x.html")),
+            ("path", cv_s("owned-by-caller.qmd")),
+        ]);
+        let info =
+            ListingItemInfo::from_map(&li, UnknownKeyPolicy::IntoExtra { except: &["path"] });
+        assert_eq!(
+            crate::document_profile::plain(&info.title).as_deref(),
+            Some("T")
+        );
+        assert_eq!(
+            info.extra
+                .get("icon")
+                .and_then(|v| v.as_plain_text())
+                .as_deref(),
+            Some("bi-star")
+        );
+        assert_eq!(
+            info.extra
+                .get("link")
+                .and_then(|v| v.as_plain_text())
+                .as_deref(),
+            Some("x.html")
+        );
+        assert!(
+            !info.extra.contains_key("title"),
+            "curated keys never land in extra"
+        );
+        assert!(
+            !info.extra.contains_key("path"),
+            "excepted keys are the caller's"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Comments (bd-0rsk07il, GH #445, v13). At the checkpoint a comment
+    // is an `Inline::Span` whose classes contain `quarto-edit-comment`
+    // (the reader's postprocess rewrites `Inline::EditComment` into that
+    // form; both `[>> … ]` and `[…]{.quarto-edit-comment}` normalize to
+    // it).
+    // ------------------------------------------------------------------
+
+    fn extract_from(qmd: &str) -> DocumentProfile {
+        let ast = parse_qmd(qmd);
+        DocumentProfile::extract(&ast, Path::new("c.qmd"), "c.html", "html")
+    }
+
+    #[test]
+    fn profile_extract_no_comments_field_empty_and_omitted() {
+        let profile = extract_from("---\ntitle: T\n---\n\nNo comments here.\n");
+        assert!(profile.comments.is_empty());
+        let json = profile.to_json().expect("serialize");
+        assert!(
+            !json.contains("\"comments\""),
+            "empty comments list must be omitted from serialized profiles"
+        );
+    }
+
+    #[test]
+    fn profile_extract_comment_in_paragraph() {
+        let qmd = "---\ntitle: T\n---\n\nSome prose [>> fix this ] and more.\n";
+        let profile = extract_from(qmd);
+        assert_eq!(profile.comments.len(), 1);
+        let c = &profile.comments[0];
+        assert_eq!(c.text, "fix this");
+        assert_eq!(c.author, None);
+        assert_eq!(c.date, None);
+        assert!(c.attributes.is_empty());
+        // The span points back into the source at the mark.
+        let covered = &qmd[c.source.start_offset()..c.source.end_offset()];
+        assert!(
+            covered.contains("fix this"),
+            "source span must cover the mark, got {covered:?}"
+        );
+    }
+
+    #[test]
+    fn profile_extract_comments_across_block_kinds_in_source_order() {
+        let qmd = "\
+---
+title: T
+---
+
+# Head [>> one ]
+
+> Quoted [>> two ]
+
+- item [>> three ]
+
+::: {.some-div}
+Inside *emph [>> four ] tail*.
+:::
+
+::: {.quarto-edit-comment-container}
+```python
+x = 1
+```
+
+[>> five ]
+:::
+";
+        let profile = extract_from(qmd);
+        let texts: Vec<&str> = profile.comments.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["one", "two", "three", "four", "five"],
+            "every container kind is walked, in source order"
+        );
+    }
+
+    #[test]
+    fn profile_extract_comment_author_date_attrs() {
+        // Decorated syntax with attrs, and the equivalent explicit
+        // span form — both normalize to the same shape.
+        let qmd = "---\ntitle: T\n---\n\n\
+[>> attributed ]{author=\"Alice Example\" date=\"2026-08-25T12:00:00Z\" priority=\"high\"}\n\n\
+[span form]{.quarto-edit-comment author=\"Bob\"}\n";
+        let profile = extract_from(qmd);
+        assert_eq!(profile.comments.len(), 2);
+
+        let a = &profile.comments[0];
+        assert_eq!(a.text, "attributed");
+        assert_eq!(a.author.as_deref(), Some("Alice Example"));
+        assert_eq!(a.date.as_deref(), Some("2026-08-25T12:00:00Z"));
+        assert_eq!(
+            a.attributes,
+            vec![("priority".to_string(), "high".to_string())],
+            "author/date are typed fields; other kvs pass through"
+        );
+
+        let b = &profile.comments[1];
+        assert_eq!(b.text, "span form");
+        assert_eq!(b.author.as_deref(), Some("Bob"));
+        assert_eq!(b.date, None);
+        assert!(b.attributes.is_empty());
+    }
+
+    #[test]
+    fn profile_extract_block_comment() {
+        // `::: >>` is a Div.quarto-edit-comment: one comment, its text the
+        // plain projection of all its blocks, author/date from the opener.
+        let qmd = "---\ntitle: T\n---\n\n\
+Before [>> inline ].\n\n\
+::: >> {author=\"Ann\" date=\"2026-09-24T00:00:00Z\" level=\"major\"}\n\n\
+First *paragraph*.\n\n\
+Second paragraph.\n\n\
+:::\n\n\
+After.\n";
+        let profile = extract_from(qmd);
+        assert_eq!(profile.comments.len(), 2, "inline and block comment");
+        assert_eq!(profile.comments[0].text, "inline");
+
+        let c = &profile.comments[1];
+        assert!(
+            c.text.contains("First paragraph.") && c.text.contains("Second paragraph."),
+            "block comment text covers every block, got {:?}",
+            c.text
+        );
+        assert_eq!(c.author.as_deref(), Some("Ann"));
+        assert_eq!(c.date.as_deref(), Some("2026-09-24T00:00:00Z"));
+        assert_eq!(
+            c.attributes,
+            vec![("level".to_string(), "major".to_string())]
+        );
+        let covered = &qmd[c.source.start_offset()..c.source.end_offset()];
+        assert!(
+            covered.starts_with("::: >>") && covered.contains("Second paragraph."),
+            "source span covers the whole block mark, got {covered:?}"
+        );
+    }
+
+    #[test]
+    fn profile_extract_block_comment_is_a_leaf() {
+        // An inline comment nested inside a block comment is part of the
+        // block comment's text, not a comment of its own; the comment
+        // container Div used for code-block threads is not a comment.
+        let qmd = "---\ntitle: T\n---\n\n\
+::: >>\n\nOuter [>> inner ] text.\n\n:::\n\n\
+::: {.quarto-edit-comment-container}\n\n[>> on code ]\n\n:::\n";
+        let profile = extract_from(qmd);
+        let texts: Vec<&str> = profile.comments.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 2, "got {texts:?}");
+        assert!(texts[0].starts_with("Outer"), "got {texts:?}");
+        assert_eq!(texts[1], "on code");
+    }
+
+    #[test]
+    fn profile_comment_to_json_positions_and_fields() {
+        // Transport form for the WASM RenderResponse: 1-based
+        // line/column (Monaco convention, matching JsonDiagnostic)
+        // resolved against the render's SourceContext, plus the file
+        // the mark maps to (relevant when the comment came from an
+        // included file).
+        let qmd = "---\ntitle: T\n---\n\nProse [>> fix this ]{author=\"A\"} end.\n";
+        let profile = extract_from(qmd);
+        assert_eq!(profile.comments.len(), 1);
+
+        let mut sm_ctx = quarto_source_map::SourceContext::new();
+        sm_ctx.add_file("test.qmd".to_string(), Some(qmd.to_string()));
+
+        let json = profile.comments[0].to_json(&sm_ctx);
+        assert_eq!(json.text, "fix this");
+        assert_eq!(json.author.as_deref(), Some("A"));
+        assert_eq!(json.date, None);
+        assert_eq!(json.file.as_deref(), Some("test.qmd"));
+        assert_eq!(json.start_line, Some(5), "mark sits on line 5, 1-based");
+        assert!(json.start_column.is_some());
+        assert_eq!(json.end_line, Some(5));
+
+        let wire = serde_json::to_string(&json).expect("serialize");
+        assert!(wire.contains("\"start_line\":5"), "snake_case keys: {wire}");
+        assert!(
+            !wire.contains("\"date\""),
+            "absent optionals are omitted: {wire}"
+        );
+    }
+
+    #[test]
+    fn profile_comments_roundtrip_json() {
+        let profile =
+            extract_from("---\ntitle: T\n---\n\nProse [>> keep me ]{author=\"A\"} here.\n");
+        assert_eq!(profile.comments.len(), 1);
+        let json = profile.to_json().expect("serialize");
+        let restored = DocumentProfile::from_json(&json).expect("deserialize");
+        assert_eq!(profile, restored);
+        assert_eq!(restored.comments[0].text, "keep me");
+        assert_eq!(restored.comments[0].author.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn from_map_explicit_extra_wins_over_bare_key() {
+        let li = cv_map(vec![
+            ("status", cv_s("bare")),
+            ("extra", cv_map(vec![("status", cv_s("explicit"))])),
+        ]);
+        let info = ListingItemInfo::from_map(&li, UnknownKeyPolicy::IntoExtra { except: &[] });
+        assert_eq!(
+            info.extra
+                .get("status")
+                .and_then(|v| v.as_plain_text())
+                .as_deref(),
+            Some("explicit")
+        );
+        assert_eq!(
+            info.extra.len(),
+            1,
+            "`extra` itself is not forwarded as a key"
         );
     }
 }

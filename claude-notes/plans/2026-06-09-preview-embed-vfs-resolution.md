@@ -1,8 +1,14 @@
-# Preview: resolve embedded static-asset iframes from the VFS source path
+---
+title: 'Preview: resolve embedded static-asset iframes from the VFS source path'
+date: 2026-06-09
+description: 'Lets embedded example iframes resolve in `q2 preview` and hub-client by reading their static deck from the VFS source path, avoiding a copy of every resource into the rendered artifact tree.'
+status: approved  # DESIGN — approach chosen with user; ready to implement on go-ahead.
+braid:
+  strand: bd-kjrpya2d  # discovered-from bd-z1smhvuo
+  priority: P2
+  labels: [docs, revealjs]
+---
 
-**Strand:** bd-kjrpya2d (discovered-from bd-z1smhvuo)
-**Date:** 2026-06-09
-**Status:** DESIGN — approach chosen with user; ready to implement on go-ahead.
 **Builds on:** the embed feature (`2026-06-09-website-example-iframe-embed.md`,
 Phases 1–2) and crossref (`2026-06-09-crossreferenceable-examples.md`).
 
@@ -40,7 +46,7 @@ Rejected alternatives:
   resource copy into the WASM render so `resources:` assets land at
   `/.quarto/project-artifacts/…`. Rejected: the artifact flush
   (`wasm-quarto-hub-client/src/lib.rs:1422`) runs **per render**, so every
-  edit-triggered re-render would re-copy the full `resources:` set (~6 MB of
+  edit-triggered re-render would re-copy the full `resources:` set (\~6 MB of
   decks) into the VFS artifact tree — and in a hub-client project that tree is
   **inside the Automerge document**, bloating the doc and its sync traffic with
   duplicated copies. Confirmed with the user; this is the cost we're avoiding.
@@ -84,7 +90,7 @@ on.
    change for CLI.
 2. Inline strategy for the iframe: data-URI `src` vs `srcdoc` vs blob URL — match
    whatever the post-processor does today for `/.quarto/` resources; a full
-   self-contained deck (~750 KB) as a data URI is large but workable. Decide
+   self-contained deck (\~750 KB) as a data URI is large but workable. Decide
    during implementation.
 3. Does the deck's own relative asset loading (it's self-contained, so likely
    none) need anything? Confirmed earlier the decks embed their assets.

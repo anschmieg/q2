@@ -1,4 +1,11 @@
-# q2 mcp: `--print-config` + `--help` launcher-options discovery (bd-9a8yu2gw)
+---
+title: 'q2 mcp: `--print-config` + `--help` launcher-options discovery (bd-9a8yu2gw)'
+date: 2026-06-13
+description: 'Adds a `--print-config` flag and launcher options to `q2 mcp --help`, so users can generate a `.mcp.json` entry and discover the launcher''s flags and environment variables.'
+braid:
+  strand: bd-9a8yu2gw
+  priority: P2
+---
 
 ## Overview
 
@@ -91,7 +98,7 @@ Two gaps fall out of that design:
 - [x] Tests pass; `cargo nextest run -p quarto-mcp-launcher` (42/42)
 - [x] End-to-end through the real binary (see record below)
 - [x] README: add the `{command:q2,args:[mcp]}` stanza
-- [~] Full `cargo xtask verify` — see verification status below
+- \[\~\] Full `cargo xtask verify` — see verification status below
       (Rust legs green; hub/WASM legs blocked by pre-existing
       environmental state in this checkout, unrelated to this diff)
 

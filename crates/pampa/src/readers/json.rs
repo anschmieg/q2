@@ -209,10 +209,7 @@ impl SourceInfoDeserializer {
         match s_val {
             Some(v) => self.from_json_ref(v),
             None => match &self.completing_default_by {
-                Some(by) => Ok(quarto_source_map::SourceInfo::Generated {
-                    by: by.clone(),
-                    from: SmallVec::new(),
-                }),
+                Some(by) => Ok(quarto_source_map::SourceInfo::generated(by.clone())),
                 None => Err(JsonReadError::MissingSourceInfoRef {
                     node_path: node_path.to_string(),
                 }),
@@ -431,10 +428,10 @@ impl SourceInfoDeserializer {
                             .as_u64()
                             .ok_or(JsonReadError::MalformedSourceInfoPool)?
                             as usize;
-                        quarto_source_map::SourceInfo::Generated {
-                            by: By::filter(filter_path.to_string(), line),
-                            from: SmallVec::new(),
-                        }
+                        quarto_source_map::SourceInfo::generated(By::filter(
+                            filter_path.to_string(),
+                            line,
+                        ))
                     } else {
                         return Err(JsonReadError::MalformedSourceInfoPool);
                     }
@@ -506,7 +503,7 @@ impl SourceInfoDeserializer {
                         }
                     }
 
-                    quarto_source_map::SourceInfo::Generated { by, from }
+                    quarto_source_map::SourceInfo::generated_with(by, from)
                 }
                 _ => {
                     return Err(JsonReadError::MalformedSourceInfoPool);
@@ -924,10 +921,17 @@ fn read_inline(value: &Value, deserializer: &SourceInfoDeserializer) -> Result<I
                 .as_str()
                 .ok_or_else(|| JsonReadError::InvalidType("Math text must be string".to_string()))?
                 .to_string();
+            // `textS` sidecar: provenance of the math text (bd-ieldbghj).
+            // Absent or null in JSON produced by anything but pampa.
+            let text_source = match obj.get("textS") {
+                Some(v) if !v.is_null() => Some(deserializer.from_json_ref(v)?),
+                _ => None,
+            };
             Ok(Inline::Math(Math {
                 math_type,
                 text,
                 source_info,
+                text_source,
             }))
         }
         "Underline" => {
@@ -2646,6 +2650,14 @@ fn read_config_value_top_level(
 
     let mut entries = Vec::new();
     for (key, val) in obj {
+        // `quarto_pandoc_reader_opts` is a write-only sentinel for the
+        // vendored Q1 Lua (Task 7, P2) — it never existed in the user's
+        // document metadata and must not be reconstructed into Q2's own
+        // `ConfigValue::Map`, or it would round-trip back out into qmd
+        // front matter on the next write.
+        if key == "quarto_pandoc_reader_opts" {
+            continue;
+        }
         // Look up key_source from the provided map using deserializer
         let key_source = if let Some(sources) = key_sources {
             if let Some(sources_obj) = sources.as_object() {
@@ -2720,7 +2732,7 @@ fn read_config_value(value: &Value, deserializer: &SourceInfoDeserializer) -> Re
                 JsonReadError::InvalidType("MetaString content must be string".to_string())
             })?;
             Ok(ConfigValue {
-                value: ConfigValueKind::Scalar(yaml_rust2::Yaml::String(c.to_string())),
+                value: ConfigValueKind::scalar(yaml_rust2::Yaml::String(c.to_string())),
                 source_info,
                 merge_op,
             })
@@ -2752,7 +2764,7 @@ fn read_config_value(value: &Value, deserializer: &SourceInfoDeserializer) -> Re
                 JsonReadError::InvalidType("MetaBool content must be boolean".to_string())
             })?;
             Ok(ConfigValue {
-                value: ConfigValueKind::Scalar(yaml_rust2::Yaml::Boolean(c)),
+                value: ConfigValueKind::scalar(yaml_rust2::Yaml::Boolean(c)),
                 source_info,
                 merge_op,
             })
@@ -2778,6 +2790,27 @@ fn read_config_value(value: &Value, deserializer: &SourceInfoDeserializer) -> Re
             let c = obj
                 .get("c")
                 .ok_or_else(|| JsonReadError::MissingField("c".to_string()))?;
+            // Pandoc-superset shape (`JsonConfig { raw: false, .. }`,
+            // matching real Pandoc's own `MetaMap` encoding): `c` is a
+            // genuine JSON object mapping key to MetaValue, with no
+            // `key_source` sidecar. Checked before the array case below,
+            // which is pampa's own raw round-trip shape.
+            if let Some(map_obj) = c.as_object() {
+                let mut entries = Vec::new();
+                for (key, value) in map_obj {
+                    let value = read_config_value(value, deserializer)?;
+                    entries.push(ConfigMapEntry {
+                        key: key.clone(),
+                        key_source: quarto_source_map::SourceInfo::default(),
+                        value,
+                    });
+                }
+                return Ok(ConfigValue {
+                    value: ConfigValueKind::Map(entries),
+                    source_info,
+                    merge_op,
+                });
+            }
             let arr = c.as_array().ok_or_else(|| {
                 JsonReadError::InvalidType("MetaMap content must be array".to_string())
             })?;
@@ -2847,7 +2880,7 @@ fn read_config_value(value: &Value, deserializer: &SourceInfoDeserializer) -> Re
                 JsonReadError::InvalidType("MetaInt content must be integer".to_string())
             })?;
             Ok(ConfigValue {
-                value: ConfigValueKind::Scalar(yaml_rust2::Yaml::Integer(c)),
+                value: ConfigValueKind::scalar(yaml_rust2::Yaml::Integer(c)),
                 source_info,
                 merge_op,
             })
@@ -2858,13 +2891,13 @@ fn read_config_value(value: &Value, deserializer: &SourceInfoDeserializer) -> Re
                 JsonReadError::InvalidType("MetaReal content must be string".to_string())
             })?;
             Ok(ConfigValue {
-                value: ConfigValueKind::Scalar(yaml_rust2::Yaml::Real(c.to_string())),
+                value: ConfigValueKind::scalar(yaml_rust2::Yaml::Real(c.to_string())),
                 source_info,
                 merge_op,
             })
         }
         "MetaNull" if deserializer.raw => Ok(ConfigValue {
-            value: ConfigValueKind::Scalar(yaml_rust2::Yaml::Null),
+            value: ConfigValueKind::scalar(yaml_rust2::Yaml::Null),
             source_info,
             merge_op,
         }),
@@ -3349,7 +3382,8 @@ mod tests {
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         assert_eq!(deserializer.pool.len(), 1);
         match &deserializer.pool[0] {
-            SourceInfo::Generated { by, from } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, from } = &**g;
                 assert!(from.is_empty());
                 let (path, line) = by.as_filter().expect("expected filter By");
                 assert_eq!(path, "/path/to/filter.lua");
@@ -3503,7 +3537,8 @@ mod tests {
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[0] {
-            SourceInfo::Generated { by, from } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, from } = &**g;
                 assert_eq!(by.kind, "sectionize");
                 assert!(by.data.is_null());
                 assert!(from.is_empty());
@@ -3530,7 +3565,8 @@ mod tests {
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[0] {
-            SourceInfo::Generated { by, from } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, from } = &**g;
                 let (path, line) = by.as_filter().expect("expected filter By");
                 assert_eq!(path, "/x.lua");
                 assert_eq!(line, 7);
@@ -3564,7 +3600,8 @@ mod tests {
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[1] {
-            SourceInfo::Generated { by, from } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, from } = &**g;
                 assert_eq!(by.kind, "shortcode");
                 assert_eq!(from.len(), 1);
                 assert!(matches!(from[0].role, AnchorRole::Invocation));
@@ -3598,7 +3635,8 @@ mod tests {
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[3] {
-            SourceInfo::Generated { from, .. } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { from, .. } = &**g;
                 assert_eq!(from.len(), 3);
                 assert!(matches!(from[0].role, AnchorRole::Invocation));
                 assert!(matches!(from[1].role, AnchorRole::ValueSource));
@@ -3625,7 +3663,7 @@ mod tests {
         ]);
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
-        assert!(matches!(deserializer.pool[0], SourceInfo::Generated { .. }));
+        assert!(matches!(deserializer.pool[0], SourceInfo::Generated(_)));
     }
 
     /// Forward-compat: unknown `by.kind` decodes opaquely — the wire
@@ -3647,7 +3685,8 @@ mod tests {
 
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[0] {
-            SourceInfo::Generated { by, from } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, from } = &**g;
                 assert_eq!(by.kind, "ext/future/foo");
                 assert_eq!(by.data["anything"], json!([1, 2, 3]));
                 assert!(from.is_empty());
@@ -3838,7 +3877,8 @@ mod tests {
         ]);
         let deserializer = SourceInfoDeserializer::new(&pool_json).unwrap();
         match &deserializer.pool[0] {
-            SourceInfo::Generated { by, .. } => {
+            SourceInfo::Generated(g) => {
+                let quarto_source_map::Generated { by, .. } = &**g;
                 assert!(by.data.is_null());
             }
             _ => panic!("Expected Generated"),

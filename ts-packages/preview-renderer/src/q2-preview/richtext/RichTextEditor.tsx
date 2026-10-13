@@ -180,6 +180,18 @@ export function RichTextEditor({
     ctx.setEditTarget?.(null);
   };
 
+  // bd-ew0vak6b: the host turned editing off mid-session (the Edit pill).
+  // The dispatcher's edit-target gate keeps this editor mounted, so close it
+  // the way a blur would — `commit` is a no-op close when unchanged and a
+  // real commit when dirty — without a focus-restore (the tile is no longer
+  // focusable once editing is off). `commit` is recreated every render, so
+  // the closure is the one from the render in which the flag flipped.
+  useEffect(() => {
+    if (!ctx.editingDisabled || !editor) return;
+    commit(editor);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.editingDisabled, editor]);
+
   // Keep the commit keymap's handlers pointed at the current closures. Assigned
   // during render (idempotent, no external effect) so a keypress after any
   // render calls fresh `commit`/`cancel` — no stale-closure window.
@@ -248,6 +260,11 @@ export function RichTextEditor({
     const onFocusOut = (e: FocusEvent) => {
       // A surface swap fires this as the editor unmounts — not a commit.
       if (ctx.editorModeSwitchRef?.current) return;
+      // Already committed (toolbar comment-on-selection, key commit): this
+      // is the unmount's focusout. Don't stash a focus restore — it would
+      // later steal focus from wherever the closing action sent it (the
+      // span's comment input). Key commits arm their own restore first.
+      if (committedRef.current) return;
       const next = e.relatedTarget as Node | null;
       // Focus stayed within the edit box (toolbar button / link input) — not a commit.
       if (next && root && root.contains(next)) return;
@@ -273,7 +290,15 @@ export function RichTextEditor({
   // `{editor && …}` defers the toolbar past the transient pre-editor window (as before).
   return (
     <div className="q2-richtext-editor" ref={rootRef}>
-      {editor && <EditToolbar editor={editor} richSupported />}
+      {editor && (
+        <EditToolbar
+          editor={editor}
+          richSupported
+          // Comment-on-selection commits straight away; no focus restore — the
+          // span's comment bubble takes focus once it renders.
+          onCommit={() => commit(editor)}
+        />
+      )}
       {editor && <EditorContent editor={editor} />}
     </div>
   );

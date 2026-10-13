@@ -1,33 +1,15 @@
-import { useContext, type CSSProperties, type ReactNode } from 'react';
+import { useContext, type ReactNode } from 'react';
 import { renderChildren, dataLocProps } from '../../framework';
 import type { DivBlock, NodeArgs } from '../../framework';
 import { IncrementalContext } from '../IncrementalContext';
 import { PreviewContext } from '../PreviewContext';
+import { useCommentAnchorRef } from '../commentAnchor';
 import { ASIDE, NOTES, SECTION } from '../quartoClasses';
-
-/**
- * Convert a CSS declaration string (`"flex-basis: 40%; color: red"`) to the
- * React style object React requires. Property names are camelCased; custom
- * properties (`--foo`) are left as-is.
- */
-function cssStringToObject(css: string): CSSProperties {
-    const style: Record<string, string> = {};
-    for (const decl of css.split(';')) {
-        const idx = decl.indexOf(':');
-        if (idx === -1) continue;
-        const prop = decl.slice(0, idx).trim();
-        const value = decl.slice(idx + 1).trim();
-        if (!prop || !value) continue;
-        const key = prop.startsWith('--')
-            ? prop
-            : prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-        style[key] = value;
-    }
-    return style as CSSProperties;
-}
+import { cssStringToObject } from '../utils';
 
 export const Div = (args: NodeArgs<DivBlock>) => {
     const ctx = useContext(PreviewContext);
+    const anchorRef = useCommentAnchorRef(args.node);
     const poolId = (args.node as any).s as string | number | undefined;
 
     const [[id, classes, kvs]] = args.node.c;
@@ -73,13 +55,13 @@ export const Div = (args: NodeArgs<DivBlock>) => {
     // `q2 render` and `q2 preview`.
     const locProps = dataLocProps(args.node);
     if (classes.includes(SECTION)) {
-        return <section {...props} {...locProps}>{wrap(renderChildren(args))}</section>;
+        return <section ref={anchorRef} {...props} {...locProps}>{wrap(renderChildren(args))}</section>;
     }
     // Revealjs speaker notes / asides — mirror the native writer's
     // `.notes` / `.aside` → <aside>. reveal.css hides `aside.notes`;
     // quarto-reveal.css styles `aside.aside` (bottom of slide, muted).
     if (classes.includes(NOTES) || classes.includes(ASIDE)) {
-        return <aside {...props} {...locProps}>{wrap(renderChildren(args))}</aside>;
+        return <aside ref={anchorRef} {...props} {...locProps}>{wrap(renderChildren(args))}</aside>;
     }
     const resolved = ctx?.resolveSource ? ctx.resolveSource(args.node) : null;
     const isEditable = resolved != null && resolved.reachabilityClass !== 'Opaque' && poolId !== undefined;
@@ -87,5 +69,5 @@ export const Div = (args: NodeArgs<DivBlock>) => {
         props['data-block-pool-id'] = String(poolId);
         props.tabIndex = -1;
     }
-    return <div {...props} {...locProps}>{wrap(renderChildren(args))}</div>;
+    return <div ref={anchorRef} {...props} {...locProps}>{wrap(renderChildren(args))}</div>;
 };

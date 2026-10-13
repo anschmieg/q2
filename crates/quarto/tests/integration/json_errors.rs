@@ -329,3 +329,1045 @@ fn text_mode_unchanged_regression() {
         "text mode must not emit JsonPass1Failure; stderr:\n{stderr}"
     );
 }
+
+/// bd-y56u1gl7: a structured parse error from *project discovery*
+/// (here: Q-5-17 unknown `project.type`) must surface its real code
+/// and location under `--json-errors` — not the generic Q-7-8
+/// "Project Discovery Failed" envelope with the ANSI-rendered text
+/// buried in `problem`.
+#[test]
+fn discovery_parse_error_json_carries_real_code() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(&dir.join("_quarto.yml"), "project:\n  type: posit-docs\n");
+    write_file(&dir.join("index.qmd"), "---\ntitle: x\n---\n\nhi\n");
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit on unknown project.type"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    assert!(
+        !lines.is_empty(),
+        "expected at least one JSON diagnostic on stderr; stderr was:\n{stderr}"
+    );
+
+    let codes: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.get("code").and_then(|c| c.as_str()))
+        .collect();
+    assert!(
+        codes.contains(&"Q-5-17"),
+        "expected the real Q-5-17 code in the stream, got {codes:?}; stderr:\n{stderr}"
+    );
+    assert!(
+        !codes.contains(&"Q-7-8"),
+        "the generic Q-7-8 envelope must not wrap a structured parse error; got {codes:?}"
+    );
+
+    let diag = lines
+        .iter()
+        .find(|l| l.get("code").and_then(|c| c.as_str()) == Some("Q-5-17"))
+        .unwrap();
+    assert!(
+        is_diagnostic_shape(diag),
+        "Q-5-17 line must claim the JsonDiagnostic schema; got:\n{diag:#?}"
+    );
+    assert_eq!(diag.get("kind").and_then(|k| k.as_str()), Some("error"));
+    assert!(
+        diag.get("start_line").is_some(),
+        "the diagnostic must carry its source location; got:\n{diag:#?}"
+    );
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "no ANSI escapes may leak into --json-errors output; got:\n{stderr}"
+    );
+}
+
+/// Wire contract: `source_file` uses the plain path form whenever one
+/// exists, so no Windows `\\?\` verbatim prefix. The test runs from a
+/// plain cwd with a relative argument, as a user would, so any verbatim
+/// prefix on the wire comes from q2 itself.
+#[test]
+fn source_file_json_is_a_plain_path() {
+    let temp = TempDir::new().unwrap();
+    let dir = dunce::simplified(&canonical(temp.path())).to_path_buf();
+    let fixture = dir.join("bad.qmd");
+    write_file(&fixture, "---\ntitle: Bad\n---\n\n```{python\n");
+    // The whole fixture path, not just its directory, must have a plain
+    // form: the file name can push a near-MAX_PATH directory past it.
+    assert!(
+        !dunce::simplified(&canonical(&fixture))
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "test setup: the TEMP root gives the fixture no plain path form: {}",
+        fixture.display()
+    );
+
+    let output = run_q2_render(&dir, &["--json-errors", "bad.qmd"]);
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit on parse error"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let source_files: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.get("source_file").and_then(|s| s.as_str()))
+        .collect();
+    assert!(
+        !source_files.is_empty(),
+        "expected a source_file field on stderr; stderr:\n{stderr}\nparsed:\n{lines:#?}"
+    );
+    for source_file in source_files {
+        assert!(
+            !source_file.starts_with(r"\\?\"),
+            "source_file must be a plain path, got: {source_file}"
+        );
+        assert_eq!(
+            canonical(Path::new(source_file)),
+            canonical(&dir.join("bad.qmd")),
+            "source_file must name the rendered file, got: {source_file}"
+        );
+    }
+}
+
+// ====================================================================
+// Plan 7c Phase 4: structured cell locations for .ipynb documents
+// ====================================================================
+
+/// Plan 7c Phase 4: a parse error inside a notebook cell must carry
+/// the cell's structured `origin` on the wire — `kind=notebook_cell`
+/// with the notebook path, 1-based cell index, nbformat cell id, and
+/// cell type — so agents can link the exact cell instead of parsing
+/// the pseudo-path label `{notebook}[cell N, kind]`.
+///
+/// The origin is attached in quarto-core's ParseDocumentStage (both
+/// SourceContexts) and emitted by quarto-error-reporting's
+/// `diagnostic_to_json` from the mapped start's file metadata; this
+/// test pins the whole wire path through the real binary.
+#[test]
+fn ipynb_parse_error_json_carries_cell_origin() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    // First (markdown) cell holds an unclosed code fence — the same
+    // parse-error trigger as single_doc_parse_error_json. Cells carry
+    // nbformat 4.5 ids.
+    write_file(
+        &dir.join("broken.ipynb"),
+        r##"{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "id": "intro-cell",
+      "metadata": {},
+      "source": ["# Broken\n", "\n", "```{python\n"]
+    },
+    {
+      "cell_type": "code",
+      "id": "code-cell",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": ["1 + 1\n"]
+    }
+  ],
+  "metadata": {"kernelspec": {"language": "python"}},
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
+"##,
+    );
+
+    let out_path = dir.join("broken.html");
+    let output = run_q2_render(
+        &dir,
+        &[
+            "--json-errors",
+            "-o",
+            out_path.to_str().unwrap(),
+            "broken.ipynb",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit on parse error inside a notebook cell"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    assert!(
+        !lines.is_empty(),
+        "expected at least one JSON diagnostic on stderr; stderr was:\n{stderr}"
+    );
+
+    // Collect every diagnostic — flat JsonDiagnostic lines plus those
+    // nested in a JsonPass1Failure.
+    let diags: Vec<&Value> = lines
+        .iter()
+        .flat_map(|l| {
+            if is_pass1_failure_shape(l) {
+                l.get("diagnostics")
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.iter().collect::<Vec<&Value>>())
+                    .unwrap_or_default()
+            } else {
+                vec![l]
+            }
+        })
+        .collect();
+
+    let origin = diags
+        .iter()
+        .filter_map(|d| d.get("origin"))
+        .find(|o| o.get("kind").and_then(|k| k.as_str()) == Some("notebook_cell"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a diagnostic carrying notebook_cell origin; stderr:\n{stderr}\nlines: {lines:#?}"
+            )
+        });
+
+    // The path is whatever LoadedSource resolved (`source.path`). It must be
+    // absolute, since a relative path would resolve against the consumer's
+    // cwd. Wire contract: an emitted path uses the plain form whenever one
+    // exists, so no Windows `\\?\` verbatim prefix.
+    let nb_path = origin
+        .get("notebook_path")
+        .and_then(|v| v.as_str())
+        .expect("origin must carry notebook_path");
+    let notebook = canonical(&dir.join("broken.ipynb"));
+    // `dunce` keeps the verbatim form for reserved or invalid names, paths
+    // over 260 chars, and every network share (even one with a plain
+    // `\\server\share` form).
+    assert!(
+        !dunce::simplified(&notebook)
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "test setup: the TEMP root gives the fixture no plain path form: {}",
+        notebook.display()
+    );
+    assert!(
+        !nb_path.starts_with(r"\\?\"),
+        "notebook_path must be a plain path, got: {nb_path}"
+    );
+    assert!(
+        Path::new(nb_path).is_absolute(),
+        "notebook_path must be absolute, got: {nb_path}"
+    );
+    assert_eq!(
+        canonical(Path::new(nb_path)),
+        notebook,
+        "notebook_path must name the real notebook, got: {nb_path}"
+    );
+    assert_eq!(
+        origin.get("cell_index").and_then(|v| v.as_i64()),
+        Some(1),
+        "the broken fence is in the first cell"
+    );
+    assert_eq!(
+        origin.get("cell_id").and_then(|v| v.as_str()),
+        Some("intro-cell")
+    );
+    assert_eq!(
+        origin.get("cell_type").and_then(|v| v.as_str()),
+        Some("markdown")
+    );
+}
+
+/// Plan 7c Phase 4: the human-readable rendering of a cell diagnostic
+/// must hyperlink the REAL notebook file — `origin.notebook_path`, the
+/// only path that exists on disk — with the pseudo-path label
+/// `broken.ipynb[cell N, kind]` as the visible text. Before `FileOrigin`
+/// landed, the OSC-8 target was the pseudo-path itself, which no
+/// terminal could open.
+///
+/// Origin links also carry no `#line:column` fragment: the diagnostic's
+/// coordinates are relative to the virtual per-cell file, and a
+/// fragment would claim notebook-JSON coordinates QER cannot speak to.
+///
+/// The test parses the link target rather than rebuilding the URL
+/// string: exact URL spelling (drive letters, separators, encoding) is
+/// QER's contract. It asserts a `file` URL, no fragment, and a path that
+/// resolves to the notebook on disk.
+///
+/// bd-ckbqmupi: hyperlinks are a *text-mode* behavior, so the link is
+/// checked on the human-readable stderr of a plain `q2 render` (emitted
+/// even when stderr is not a terminal). Under `--json-errors`,
+/// `rendered` is plain text: the same label with no escapes, while the
+/// link target travels structurally as `origin.notebook_path` (pinned
+/// by `ipynb_parse_error_json_carries_cell_origin`).
+#[test]
+fn ipynb_diagnostic_hyperlinks_real_notebook() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(
+        &dir.join("broken.ipynb"),
+        r##"{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "id": "intro-cell",
+      "metadata": {},
+      "source": ["# Broken\n", "\n", "```{python\n"]
+    },
+    {
+      "cell_type": "code",
+      "id": "code-cell",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": ["1 + 1\n"]
+    }
+  ],
+  "metadata": {"kernelspec": {"language": "python"}},
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
+"##,
+    );
+
+    let out_path = dir.join("broken.html");
+    let render_args = ["-o", out_path.to_str().unwrap(), "broken.ipynb"];
+
+    // The visible label is the pseudo-path. Front-matter synthesis from
+    // the leading H1 reserves "cell 1" for the pseudo-cell
+    // (number_shift, Q1 convention), so the first real cell labels as 2.
+    let label = "broken.ipynb[cell 2, markdown]";
+
+    // --json-errors: `rendered` names the cell plainly, with no escapes.
+    let mut json_args = vec!["--json-errors"];
+    json_args.extend(render_args);
+    let output = run_q2_render(&dir, &json_args);
+    assert!(!output.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let json_rendered = lines
+        .iter()
+        .find_map(|l| {
+            let diags: Vec<&Value> = if is_pass1_failure_shape(l) {
+                l.get("diagnostics")
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.iter().collect())
+                    .unwrap_or_default()
+            } else {
+                vec![l]
+            };
+            diags
+                .iter()
+                .find(|d| {
+                    d.get("origin")
+                        .and_then(|o| o.get("kind"))
+                        .and_then(|k| k.as_str())
+                        == Some("notebook_cell")
+                })
+                .and_then(|d| d.get("rendered").and_then(|r| r.as_str()))
+        })
+        .unwrap_or_else(|| {
+            panic!("expected a rendered diagnostic with notebook_cell origin; stderr:\n{stderr}")
+        });
+    assert!(
+        json_rendered.contains(label) && !json_rendered.contains('\u{1b}'),
+        "JSON rendered must show the plain label with no escapes; got:\n{json_rendered:?}"
+    );
+
+    // Text mode: the label hyperlinks the real notebook.
+    let output = run_q2_render(&dir, &render_args);
+    assert!(!output.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let rendered: &str = &stderr;
+    assert!(
+        rendered.contains(label),
+        "rendered must show the pseudo-path label; got:\n{rendered:?}"
+    );
+
+    let target = osc8_target_for(rendered, label).unwrap_or_else(|| {
+        panic!("rendered must hyperlink the label {label:?}; got:\n{rendered:?}")
+    });
+    let url = url::Url::parse(target)
+        .unwrap_or_else(|e| panic!("link target must be a URL ({e}): {target:?}"));
+    assert_eq!(
+        url.scheme(),
+        "file",
+        "link target must be a file URL: {target:?}"
+    );
+    assert_eq!(
+        url.fragment(),
+        None,
+        "origin links carry no #line:column fragment: {target:?}"
+    );
+    let linked = url
+        .to_file_path()
+        .unwrap_or_else(|()| panic!("link target must name a local file: {target:?}"));
+    assert_eq!(
+        canonical(&linked),
+        canonical(&dir.join("broken.ipynb")),
+        "link target must be the real notebook: {target:?}"
+    );
+}
+
+/// The target of the OSC-8 hyperlink (`ESC]8;;URL ESC\ text`) whose
+/// visible text starts with `label`.
+fn osc8_target_for<'a>(rendered: &'a str, label: &str) -> Option<&'a str> {
+    rendered.split("\u{1b}]8;;").skip(1).find_map(|segment| {
+        let (target, text) = segment.split_once("\u{1b}\\")?;
+        (!target.is_empty() && text.starts_with(label)).then_some(target)
+    })
+}
+
+// ====================================================================
+// C4a: YAML content provenance in the re-parse bases (both YAML paths)
+//
+// `Q-2-9` ("HTML element converted to raw HTML") warnings are emitted
+// by the qmd re-parse `ConfigMarkdownTransform`/`meta.rs` trigger on
+// blessed config strings. Their location is whatever `SourceInfo` was
+// passed as the re-parse *base*: before this task, that base was the
+// node's raw source span (`source_info`, which includes quote
+// delimiters and the per-line indentation block-scalar decoding
+// strips), paired with the already-*decoded* string being re-parsed —
+// wrong by exactly the amount decoding removed. These tests assert
+// exact `start_column`/`end_column` (not just `start_line.is_some()`,
+// which is all older tests in this file check) to catch that drift.
+// ====================================================================
+
+/// Every top-level `JsonDiagnostic` line with the given error `code`,
+/// in emission order.
+fn diagnostics_with_code<'a>(lines: &'a [Value], code: &str) -> Vec<&'a Value> {
+    lines
+        .iter()
+        .filter(|v| is_diagnostic_shape(v) && v.get("code").and_then(|c| c.as_str()) == Some(code))
+        .collect()
+}
+
+/// Read a required integer field off a diagnostic, panicking with the
+/// full diagnostic if it's missing — used for `start_line` /
+/// `start_column` / `end_line` / `end_column`, which this module (unlike
+/// the rest of this file) asserts exactly rather than just checking
+/// presence.
+fn field_i64(v: &Value, field: &str) -> i64 {
+    v.get(field)
+        .and_then(|x| x.as_i64())
+        .unwrap_or_else(|| panic!("expected integer field {field:?} on diagnostic:\n{v:#?}"))
+}
+
+/// `(start_line, start_column, end_line, end_column)` for each diagnostic,
+/// in emission order.
+fn positions(diags: &[&Value]) -> Vec<(i64, i64, i64, i64)> {
+    diags
+        .iter()
+        .map(|d| {
+            (
+                field_i64(d, "start_line"),
+                field_i64(d, "start_column"),
+                field_i64(d, "end_line"),
+                field_i64(d, "end_column"),
+            )
+        })
+        .collect()
+}
+
+/// Test 1 (the canonical case): a multi-line block scalar
+/// (`page-footer.center: |`) containing raw HTML on its third content
+/// line. Decoding a block scalar strips each line's leading indent, so
+/// the decoded content drifts from the raw source span by the
+/// *accumulated* stripped indent — enough, on the third line, to also
+/// misattribute the diagnostic to the wrong *line*, not just the wrong
+/// column. That's why both line and column are asserted here: a
+/// column-only assertion would still pass if only the column half of
+/// the bug were fixed.
+///
+/// Fixture transcribed verbatim from task-C4a-brief.md. Truth values
+/// (`9:7` / `9:26`) are measured there against released q2 0.24.0,
+/// which (pre-fix) reports `8:10` / `9:14` instead — a drift of
+/// exactly 12 = 2 preceding content lines × 6 bytes of stripped indent.
+#[test]
+fn block_scalar_content_provenance_line_and_column() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(
+        &dir.join("_quarto.yml"),
+        "project:\n  type: website\nwebsite:\n  title: \"T\"\n  page-footer:\n    center: |\n      line one\n      line two\n      <span id=\"y\">Footer</span>\n",
+    );
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: \"Index\"\n---\n\nbody\n",
+    );
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    assert!(
+        output.status.success(),
+        "expected a clean render (Q-2-9 is a warning); stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two Q-2-9 warnings (open + close <span> tags); got:\n{lines:#?}"
+    );
+
+    let starts: Vec<(i64, i64)> = positions(&warnings)
+        .into_iter()
+        .map(|(sl, sc, _, _)| (sl, sc))
+        .collect();
+    assert_eq!(
+        starts,
+        vec![(9, 7), (9, 26)],
+        "expected the open <span> tag at 9:7 and the close tag at 9:26 (not 8:10 / 9:14, \
+         the pre-fix drifted values); got {starts:?}\nfull diagnostics:\n{warnings:#?}"
+    );
+
+    // Bonus rigor beyond the brief's minimum (start line+column only):
+    // the exclusive end position, hand-derived from the fixture
+    // (open tag `<span id=\"y\">` spans columns 7-19, so its exclusive
+    // end is column 20; close tag `</span>` spans columns 26-32, so its
+    // exclusive end is column 33).
+    let ends: Vec<(i64, i64)> = positions(&warnings)
+        .into_iter()
+        .map(|(_, _, el, ec)| (el, ec))
+        .collect();
+    assert_eq!(ends, vec![(9, 20), (9, 33)], "unexpected end positions");
+}
+
+/// Test 2: a quoted scalar containing raw HTML, on the **deferred**
+/// project-config path (`ConfigMarkdownTransform` re-parsing
+/// `website.title` after load). A quoted scalar's decoded content
+/// drifts exactly 1 byte from its raw span (the opening quote).
+///
+/// Fixture: `website.title: "A <b>B</b>"` on `_quarto.yml` line 4
+/// (0-based columns shown, then converted to the 1-based wire
+/// convention `diagnostic_to_json` uses — `map_offset(0)`/
+/// `map_offset(length)`, each `row+1`/`col+1`):
+///
+/// ```text
+/// col (0-based): 0123456789012345678901
+/// text:            title: "A <b>B</b>"
+///                  t=2  "=9 A=10 <=12 b=13 >=14 B=15 <=16 /=17 b=18 >=19 "=20
+/// ```
+///
+/// Decoded content is `A <b>B</b>` (10 bytes); `content_source_info`
+/// maps content offset 0 to the `A` at column 10 (0-based) — i.e. one
+/// byte right of the opening quote at column 9, confirming the "quoted
+/// scalar drifts 1 byte" rule. From there:
+/// - `<b>` is content offsets 2..5 → columns 12..15 (0-based) → 1-based
+///   start `(4, 13)`, exclusive end at content offset 5 → column 15
+///   (0-based) → 1-based `(4, 16)`.
+/// - `</b>` is content offsets 6..10 → columns 16..20 (0-based) →
+///   1-based start `(4, 17)`, exclusive end at content offset 10 →
+///   column 20 (0-based) → 1-based `(4, 21)`.
+///
+/// Pre-fix (pairing decoded content with the quote-inclusive raw span)
+/// each of these drifts 1 column left: `(4, 12)`/`(4,15)` and
+/// `(4,16)`/`(4,20)`.
+#[test]
+fn quoted_scalar_raw_html_project_config_provenance() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(
+        &dir.join("_quarto.yml"),
+        "project:\n  type: website\nwebsite:\n  title: \"A <b>B</b>\"\n",
+    );
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: \"Index\"\n---\n\nbody\n",
+    );
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    assert!(
+        output.status.success(),
+        "expected a clean render; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two Q-2-9 warnings (<b> and </b>); got:\n{lines:#?}"
+    );
+
+    assert_eq!(
+        positions(&warnings),
+        vec![(4, 13, 4, 16), (4, 17, 4, 21)],
+        "expected <b> at 4:13-4:16 and </b> at 4:17-4:21 (not the 1-byte-left-drifted \
+         4:12-4:15 / 4:16-4:20); got:\n{warnings:#?}"
+    );
+}
+
+/// Test 3: a quoted `title:` in the document's **own front matter** —
+/// the immediate re-parse path (`meta.rs`'s `DocumentMetadata` default
+/// branch), as opposed to test 2's deferred project-config path.
+///
+/// Fixture: `title: "A <b>B</b>"` as `index.qmd`'s entire front
+/// matter, line 2 (no leading indent this time, so every column below
+/// is exactly 2 less than test 2's, i.e. `title: ` occupies columns
+/// 0-6 (0-based) here instead of `  title: ` 's columns 0-8 there).
+/// Same fixture string, same derivation method as test 2:
+/// - `<b>`: content offsets 2..5 → 1-based start `(2, 11)`, end `(2, 14)`.
+/// - `</b>`: content offsets 6..10 → 1-based start `(2, 15)`, end `(2, 19)`.
+#[test]
+fn quoted_scalar_raw_html_frontmatter_provenance() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let out_path = dir.join("index.html");
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: \"A <b>B</b>\"\n---\n\nbody\n",
+    );
+
+    let output = run_q2_render(
+        &dir,
+        &[
+            "--json-errors",
+            "-o",
+            out_path.to_str().unwrap(),
+            "index.qmd",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "expected a clean render; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two Q-2-9 warnings (<b> and </b>); got:\n{lines:#?}"
+    );
+
+    assert_eq!(
+        positions(&warnings),
+        vec![(2, 11, 2, 14), (2, 15, 2, 19)],
+        "expected <b> at 2:11-2:14 and </b> at 2:15-2:19 (not the 1-byte-left-drifted \
+         2:10-2:13 / 2:14-2:18); got:\n{warnings:#?}"
+    );
+}
+
+/// Test 4a (regression guard): a **plain** (unquoted) scalar has no
+/// delimiter for decoding to strip, so its content and raw spans
+/// coincide already — this must stay correct, not become correct.
+/// Same fixture shape and derivation as test 3, minus the quotes.
+#[test]
+fn plain_scalar_raw_html_frontmatter_unaffected() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let out_path = dir.join("index.html");
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: A <b>B</b>\n---\n\nbody\n",
+    );
+
+    let output = run_q2_render(
+        &dir,
+        &[
+            "--json-errors",
+            "-o",
+            out_path.to_str().unwrap(),
+            "index.qmd",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "expected a clean render; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two Q-2-9 warnings (<b> and </b>); got:\n{lines:#?}"
+    );
+
+    assert_eq!(
+        positions(&warnings),
+        vec![(2, 10, 2, 13), (2, 14, 2, 18)],
+        "plain scalar positions must be unaffected by the content-provenance fix; got:\n{warnings:#?}"
+    );
+}
+
+/// Test 4b (regression guard): a **single-line** block scalar has no
+/// preceding content lines, so it has zero accumulated stripped indent
+/// — the drift this whole fix addresses is exactly zero here. Same
+/// column shape as test 1's canonical third line (`column 7` /
+/// `column 26`), which is the point: it demonstrates the drift really
+/// is a *per preceding line* effect, not something inherent to block
+/// scalars as such.
+#[test]
+fn single_line_block_scalar_raw_html_unaffected() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(
+        &dir.join("_quarto.yml"),
+        "project:\n  type: website\nwebsite:\n  page-footer:\n    center: |\n      <span id=\"z\">Footer</span>\n",
+    );
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: \"Index\"\n---\n\nbody\n",
+    );
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    assert!(
+        output.status.success(),
+        "expected a clean render; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two Q-2-9 warnings (<span> and </span>); got:\n{lines:#?}"
+    );
+
+    assert_eq!(
+        positions(&warnings),
+        vec![(6, 7, 6, 20), (6, 26, 6, 33)],
+        "single-line block scalar positions must be unaffected by the content-provenance fix; got:\n{warnings:#?}"
+    );
+}
+
+// ====================================================================
+// bd-gnw9asuo: stderr is pure NDJSON, and every located record names
+// its file
+// ====================================================================
+
+/// Parse stderr as *strict* NDJSON: every non-blank line must be a
+/// JSON object. Panics naming the first offending line, so a stray
+/// status or text-diagnostic line fails the test instead of being
+/// skipped the way [`parse_ndjson_lines`] skips it.
+fn parse_ndjson_strict(stderr: &str) -> Vec<Value> {
+    stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| match serde_json::from_str::<Value>(line) {
+            Ok(value) if value.is_object() => value,
+            _ => panic!(
+                "--json-errors stderr must be pure NDJSON; non-JSON line:\n{line}\nfull stderr:\n{stderr}"
+            ),
+        })
+        .collect()
+}
+
+/// Every top-level `JsonDiagnostic` record in `lines` (pass-1 failure
+/// wrappers excluded; their nested diagnostics are tagged separately).
+fn top_level_diagnostics(lines: &[Value]) -> Vec<&Value> {
+    lines.iter().filter(|v| is_diagnostic_shape(v)).collect()
+}
+
+/// The single top-level diagnostic carrying `code`, panicking if there
+/// is not exactly one.
+fn only_diagnostic_with_code<'a>(lines: &'a [Value], code: &str) -> &'a Value {
+    let matches: Vec<&Value> = top_level_diagnostics(lines)
+        .into_iter()
+        .filter(|v| v.get("code").and_then(|c| c.as_str()) == Some(code))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one top-level {code} diagnostic; got:\n{lines:#?}"
+    );
+    matches[0]
+}
+
+/// Assert `diag.source_file` is an absolute path naming `expected`.
+fn assert_source_file(diag: &Value, expected: &Path) {
+    let source_file = diag
+        .get("source_file")
+        .and_then(|s| s.as_str())
+        .unwrap_or_else(|| panic!("diagnostic must carry source_file; got:\n{diag:#}"));
+    assert!(
+        Path::new(source_file).is_absolute(),
+        "source_file must be absolute, got: {source_file}"
+    );
+    assert!(
+        !source_file.starts_with(r"\\?\"),
+        "source_file must be a plain path, got: {source_file}"
+    );
+    assert_eq!(
+        canonical(Path::new(source_file)),
+        canonical(expected),
+        "source_file names the wrong file; diagnostic:\n{diag:#}"
+    );
+}
+
+/// A website with one page that renders but warns (a bare `[...]`
+/// span, Q-2-49) and one page that fails pass 1 (unclosed fence).
+fn write_mixed_project(dir: &Path) {
+    write_file(
+        &dir.join("_quarto.yml"),
+        "project:\n  type: website\n  output-dir: _site\n",
+    );
+    write_file(
+        &dir.join("index.qmd"),
+        "---\ntitle: Home\n---\n\nSee [this] here.\n",
+    );
+    write_file(
+        &dir.join("broken.qmd"),
+        "---\ntitle: Broken\n---\n\n```{python\n",
+    );
+}
+
+/// The "Rendering project: …" and "Rendered N of M files …" status
+/// lines are not JSON, so `--json-errors` must silence them.
+#[test]
+fn project_json_errors_stderr_is_pure_ndjson() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_mixed_project(&dir);
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+    assert!(
+        lines.iter().any(is_pass1_failure_shape),
+        "fixture must produce a pass-1 failure record; stderr:\n{stderr}"
+    );
+}
+
+/// The single-file path has its own status line ("Rendering single
+/// file: …").
+#[test]
+fn single_doc_json_errors_stderr_is_pure_ndjson() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_file(
+        &dir.join("warn.qmd"),
+        "---\ntitle: Warn\n---\n\nSee [this] here.\n",
+    );
+
+    let output = run_q2_render(&dir, &["--json-errors", "warn.qmd"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+    assert!(
+        !top_level_diagnostics(&lines).is_empty(),
+        "fixture must produce a diagnostic; stderr:\n{stderr}"
+    );
+}
+
+/// Q-20-8 (multi-format `format:` reduced to one) is emitted by the
+/// CLI before the pipeline runs; under `--json-errors` it must be a
+/// JSON record naming the input, not ariadne text.
+#[test]
+fn multi_format_warning_is_json_with_source_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let input = dir.join("multi.qmd");
+    write_file(
+        &input,
+        "---\ntitle: Multi\nformat:\n  html: default\n  docx: default\n---\n\nBody.\n",
+    );
+    let out_path = dir.join("multi.html");
+
+    let output = run_q2_render(
+        &dir,
+        &[
+            "--json-errors",
+            "-o",
+            out_path.to_str().unwrap(),
+            "multi.qmd",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+    assert_source_file(only_diagnostic_with_code(&lines, "Q-20-8"), &input);
+}
+
+/// Q-5-11 (`project.pre_render` typo) comes from the project config,
+/// which the CLI checks before the pipeline runs. Under
+/// `--json-errors` it must be a JSON record naming `_quarto.yml`.
+#[test]
+fn config_typo_warning_is_json_with_source_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let config = dir.join("_quarto.yml");
+    write_file(
+        &config,
+        "project:\n  type: website\n  output-dir: _site\n  pre_render: gen.py\n",
+    );
+    write_file(&dir.join("index.qmd"), "---\ntitle: Home\n---\n\nHome.\n");
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+    assert_source_file(only_diagnostic_with_code(&lines, "Q-5-11"), &config);
+}
+
+/// The core bug: a warning on a page that rendered successfully must
+/// name that page, so its line/column can be attributed in a
+/// multi-file render.
+#[test]
+fn project_page_warning_json_carries_source_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_mixed_project(&dir);
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warning = only_diagnostic_with_code(&lines, "Q-2-49");
+    assert!(
+        warning.get("start_line").is_some(),
+        "fixture warning must be located; got:\n{warning:#}"
+    );
+    assert_source_file(warning, &dir.join("index.qmd"));
+}
+
+/// `source_file` names the file the coordinates refer to, which is not
+/// always the page being rendered: raw HTML in a `_quarto.yml` page
+/// footer warns (Q-2-9) during each page's render, with coordinates
+/// in `_quarto.yml`.
+#[test]
+fn config_anchored_page_warning_names_config_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let config = dir.join("_quarto.yml");
+    write_file(
+        &config,
+        "project:\n  type: website\nwebsite:\n  page-footer:\n    center: |\n      <span id=\"z\">Footer</span>\n",
+    );
+    write_file(&dir.join("index.qmd"), "---\ntitle: Index\n---\n\nbody\n");
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let warnings = diagnostics_with_code(&lines, "Q-2-9");
+    assert!(
+        !warnings.is_empty(),
+        "fixture must produce Q-2-9; got:\n{lines:#?}"
+    );
+    for warning in warnings {
+        assert_source_file(warning, &config);
+    }
+}
+
+/// D2: a project diagnostic anchored in `_quarto.yml` (Q-5-13, a
+/// `project.render` pattern that matched nothing) names the config.
+#[test]
+fn project_config_diagnostic_json_carries_source_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let config = dir.join("_quarto.yml");
+    write_file(
+        &config,
+        "project:\n  type: website\n  output-dir: _site\n  render:\n    - index.qmd\n    - nothing-here/*.qmd\n",
+    );
+    write_file(&dir.join("index.qmd"), "---\ntitle: Home\n---\n\nHome.\n");
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_lines(&stderr);
+    let diag = only_diagnostic_with_code(&lines, "Q-5-13");
+    assert!(
+        diag.get("start_line").is_some(),
+        "Q-5-13 must be located in _quarto.yml; got:\n{diag:#}"
+    );
+    assert_source_file(diag, &config);
+}
+
+/// An unknown `project.type` fails project discovery with Q-5-17,
+/// located at the `type:` value in `_quarto.yml`, so the record must
+/// name `_quarto.yml`. (This path emits with no known input file; the
+/// file comes from the diagnostic's own location.)
+#[test]
+fn discovery_parse_error_json_carries_source_file() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    let config = dir.join("_quarto.yml");
+    write_file(&config, "project:\n  type: posit-docs\n");
+    write_file(&dir.join("index.qmd"), "---\ntitle: Home\n---\n\nHome.\n");
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    assert!(!output.status.success(), "unknown project type must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+    let diag = only_diagnostic_with_code(&lines, "Q-5-17");
+    assert!(
+        diag.get("start_line").is_some(),
+        "Q-5-17 must be located in _quarto.yml; got:\n{diag:#}"
+    );
+    assert_source_file(diag, &config);
+}
+
+// ====================================================================
+// bd-ckbqmupi: no terminal escapes anywhere on the --json-errors stream
+// ====================================================================
+
+/// Every string value in `value`, recursively, paired with its JSON
+/// path (for failure messages).
+fn string_values<'a>(value: &'a Value, path: String, out: &mut Vec<(String, &'a str)>) {
+    match value {
+        Value::String(s) => out.push((path, s)),
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                string_values(item, format!("{path}[{i}]"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                string_values(item, format!("{path}.{key}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `rendered` (on every diagnostic, nested ones included) and the
+/// pass-1 wrapper's `error` are human-readable text for machine
+/// consumers, so `--json-errors` renders them plain: no SGR color, no
+/// OSC-8 hyperlinks. Checked on *decoded* strings: serde_json writes
+/// ESC as the six characters `\u001b`, so a raw-byte search of stderr
+/// cannot see escapes inside JSON strings.
+#[test]
+fn json_errors_strings_carry_no_terminal_escapes() {
+    let temp = TempDir::new().unwrap();
+    let dir = canonical(temp.path());
+    write_mixed_project(&dir);
+
+    let output = run_q2_render(&dir, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = parse_ndjson_strict(&stderr);
+
+    // The fixture must exercise both blobs, or the check is vacuous.
+    assert!(
+        lines
+            .iter()
+            .any(|l| is_pass1_failure_shape(l) && l.get("error").is_some()),
+        "fixture must produce a pass-1 failure with `error`; got:\n{lines:#?}"
+    );
+    assert!(
+        top_level_diagnostics(&lines)
+            .iter()
+            .any(|d| d.get("rendered").is_some()),
+        "fixture must produce a located diagnostic with `rendered`; got:\n{lines:#?}"
+    );
+
+    let mut strings = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        string_values(line, format!("line{i}"), &mut strings);
+    }
+    let escaped: Vec<&(String, &str)> = strings
+        .iter()
+        .filter(|(_, s)| s.contains('\u{1b}'))
+        .collect();
+    assert!(
+        escaped.is_empty(),
+        "--json-errors strings must carry no terminal escapes; offending fields:\n{escaped:#?}"
+    );
+}

@@ -42,6 +42,26 @@ const BINARY_EXTENSIONS: &[(&str, &str)] = &[
     ("tif", "image/tiff"),
     // Documents
     ("pdf", "application/pdf"),
+    // Import sources (document import I21): stored as-is, and EMF/WMF when
+    // conversion fails. Mirror of `BINARY_EXTENSIONS` in
+    // ts-packages/quarto-automerge-schema.
+    (
+        "docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ("odt", "application/vnd.oasis.opendocument.text"),
+    ("rtf", "application/rtf"),
+    ("epub", "application/epub+zip"),
+    (
+        "pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ),
+    ("emf", "image/emf"),
+    ("wmf", "image/wmf"),
+    // hephaestus plot documents (bd-sxiv2tio). Not an IANA type; the
+    // vendor-tree name keeps the binary document self-describing. Mirror
+    // of `BINARY_EXTENSIONS` in ts-packages/quarto-automerge-schema.
+    ("hep", "application/vnd.hephaestus.plot"),
     // Fonts
     ("woff", "font/woff"),
     ("woff2", "font/woff2"),
@@ -219,7 +239,7 @@ pub fn read_capture_meta(doc: &Automerge) -> Option<CaptureDocMetaRead> {
         doc.get(&meta_obj, key)
             .ok()
             .flatten()
-            .and_then(|(value, _)| value.to_str().map(str::to_string))
+            .and_then(|(value, _)| value.as_str().map(str::to_string))
     };
     let engines = match doc.get(&meta_obj, "engines").ok().flatten() {
         Some((_, engines_obj)) => (0..doc.length(&engines_obj))
@@ -227,7 +247,7 @@ pub fn read_capture_meta(doc: &Automerge) -> Option<CaptureDocMetaRead> {
                 doc.get(&engines_obj, i)
                     .ok()
                     .flatten()
-                    .and_then(|(value, _)| value.to_str().map(str::to_string))
+                    .and_then(|(value, _)| value.as_str().map(str::to_string))
             })
             .collect(),
         None => Vec::new(),
@@ -344,9 +364,29 @@ mod tests {
         assert!(is_binary_extension("PNG"));
         assert!(is_binary_extension("jpg"));
         assert!(is_binary_extension("pdf"));
+        // hephaestus plot documents (bd-sxiv2tio): the preview draws them
+        // in the browser, so their bytes must sync like an image's.
+        assert!(is_binary_extension("hep"));
+        assert!(is_binary_extension("HEP"));
         assert!(!is_binary_extension("qmd"));
         assert!(!is_binary_extension("yml"));
         assert!(!is_binary_extension("txt"));
+    }
+
+    #[test]
+    fn import_sources_and_emf_wmf_are_binary() {
+        // Document import (I21): mirrors the TS `BINARY_EXTENSIONS`.
+        for ext in ["docx", "odt", "rtf", "epub", "pptx", "emf", "wmf"] {
+            assert!(is_binary_extension(ext), "{ext}");
+            assert!(is_binary_extension(&ext.to_uppercase()), "{ext}");
+            assert!(mime_type_from_extension(ext).is_some(), "{ext}");
+        }
+        assert_eq!(mime_type_from_extension("emf"), Some("image/emf"));
+        assert_eq!(mime_type_from_extension("wmf"), Some("image/wmf"));
+        assert_eq!(
+            mime_type_from_extension("docx"),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
     }
 
     #[test]
@@ -357,6 +397,10 @@ mod tests {
         assert_eq!(mime_type_from_extension("jpeg"), Some("image/jpeg"));
         assert_eq!(mime_type_from_extension("pdf"), Some("application/pdf"));
         assert_eq!(mime_type_from_extension("svg"), Some("image/svg+xml"));
+        assert_eq!(
+            mime_type_from_extension("hep"),
+            Some("application/vnd.hephaestus.plot")
+        );
         assert_eq!(mime_type_from_extension("unknown"), None);
     }
 
@@ -470,9 +514,9 @@ mod tests {
         // Standard binary-doc fields intact.
         assert_eq!(detect_document_type(&doc), DocumentType::Binary);
         let (mime, _) = doc.get(ROOT, "mimeType").unwrap().unwrap();
-        assert_eq!(mime.to_str(), Some(CAPTURE_MIME_TYPE));
+        assert_eq!(mime.as_str(), Some(CAPTURE_MIME_TYPE));
         let (hash, _) = doc.get(ROOT, "hash").unwrap().unwrap();
-        assert_eq!(hash.to_str(), Some(compute_hash(b"gzipped-bytes").as_str()));
+        assert_eq!(hash.as_str(), Some(compute_hash(b"gzipped-bytes").as_str()));
     }
 
     #[test]

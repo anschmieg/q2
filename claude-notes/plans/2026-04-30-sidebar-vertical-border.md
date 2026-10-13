@@ -1,4 +1,8 @@
-# Sidebar vertical border (Q1 parity)
+---
+title: 'Sidebar vertical border (Q1 parity)'
+date: 2026-04-30
+description: 'Adds Quarto 1''s faint vertical border between a docked sidebar and the main content, which needs a new hook for document and project metadata to set SCSS variables ahead of the Bootstrap defaults.'
+---
 
 ## Overview
 
@@ -82,7 +86,7 @@ Translation:
 - If user wrote `sidebar.border: true|false` in YAML, use that.
 - Otherwise: `true` for `style: docked`, `false` for `style: floating`.
 - The synthesized `$sidebar-border: <bool>;` snippet is fed in
-  *before* `_bootstrap-variables.scss`'s `!default` line, so it wins
+  *before* `_bootstrap-variables.scss`\'s `!default` line, so it wins
   the `!default` race.
 
 So in `03-nested-sidebar`, both sidebars are `style: docked` and
@@ -241,7 +245,7 @@ Both were caused by missing Q1 rules. Tests + ports:
 - [x] Ported `.quarto-container { min-height: calc(100vh - 132px) }`
   from `quarto-cli/.../quarto-nav.scss:53-55` into
   `_bootstrap-rules.scss`. The 132px constant matches Q1's
-  navbar+footer composite (~64px navbar + 68px footer/margin).
+  navbar+footer composite (\~64px navbar + 68px footer/margin).
 - [x] Re-captured `phase5-single-doc-baseline` styles.css hash
   with a comment documenting why (the new rules don't match
   anything in a single-doc body so doc.html is unchanged).

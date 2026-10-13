@@ -40,7 +40,7 @@
 
 use async_trait::async_trait;
 
-use quarto_error_reporting::{DiagnosticKind, DiagnosticMessage};
+use quarto_error_reporting::{DiagnosticKind, DiagnosticMessage, DiagnosticMessageBuilder};
 
 use crate::Result;
 
@@ -60,6 +60,8 @@ use quarto_system_runtime::SystemRuntime;
 use crate::error::QuartoError;
 
 use crate::format::Format;
+#[cfg(not(target_arch = "wasm32"))] // only the gated single-file-merge dispatch uses it
+use crate::format::FormatIdentifier;
 
 use super::DocumentInfo;
 
@@ -207,6 +209,112 @@ pub fn print_pass2_stats_if_enabled() {
     eprintln!("perf.pass2 docs={docs} threads_used={threads} wall_ms={wall_ms}");
 }
 
+// ── Pass-1 engine-resolution gauge (Plan 6 Phase 5) — mirrors the Pass-1/
+// Pass-2 statics above ──────────────────────────────────────────────────
+
+/// Cumulative count of documents whose `DocumentProfile.engine_resolution`
+/// was `Some` (resolved load-free) since process start.
+static PASS1_ENGINE_LIFTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Cumulative count of documents whose `DocumentProfile.engine_resolution`
+/// was `None` (fell through to Pass-2's loading resolver) since process
+/// start.
+static PASS1_ENGINE_FELL_THROUGH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Add to the cumulative lifted/fell-through tallies. Called once per
+/// `run_inner` invocation, from the SAME tally `run_inner` computes for
+/// the decision-5 warning gate (do not fold a second count elsewhere).
+pub(crate) fn pass1_engine_resolution_record(lifted: usize, fell_through: usize) {
+    PASS1_ENGINE_LIFTED.fetch_add(lifted, std::sync::atomic::Ordering::Relaxed);
+    PASS1_ENGINE_FELL_THROUGH.fetch_add(fell_through, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Print `perf.pass1-engine-resolution lifted=N fell_through=M` to stderr
+/// when `QUARTO_PERF_STATS=1`. Counterpart of
+/// [`print_pass1_stats_if_enabled`] / [`print_pass2_stats_if_enabled`].
+pub fn print_pass1_engine_resolution_stats_if_enabled() {
+    if !std::env::var_os("QUARTO_PERF_STATS").is_some_and(|v| v == "1") {
+        return;
+    }
+    let lifted = PASS1_ENGINE_LIFTED.load(std::sync::atomic::Ordering::Relaxed);
+    let fell_through = PASS1_ENGINE_FELL_THROUGH.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("perf.pass1-engine-resolution lifted={lifted} fell_through={fell_through}");
+}
+
+/// The decision-5 emit GATE: whether the fall-through warning should fire.
+///
+/// `fell_through` is the tally `run_inner` computes from `pass_one`'s
+/// profiles; `engines_needing_load` is the SAME-project
+/// `EngineRegistry::engines_needing_load` result. The two are computed
+/// independently and CAN disagree — a claims-less engine may be registered
+/// (`engines_needing_load` non-empty) while every document still lifts via
+/// P1-P3, e.g. an all-markdown project (`fell_through == 0`); that project
+/// must stay silent (`warning_silent_when_all_lift`). The correct gate
+/// keys ONLY on `fell_through`; `engines_needing_load` is accepted (and
+/// unused) here purely so the two candidate gate expressions have the same
+/// call-site shape and a revert to the alternative is a one-line diff, not
+/// a signature change.
+fn pass1_engine_resolution_should_warn(
+    fell_through: usize,
+    _engines_needing_load: &[(String, Option<std::path::PathBuf>)],
+) -> bool {
+    fell_through > 0
+}
+
+/// Build the Plan 6 decision-5 warning: at least one engine extension
+/// declares no static language claims, so Pass-1 could not resolve every
+/// document load-free. `engines` is `EngineRegistry::engines_needing_load`'s
+/// result for the project-grain tabled-name set (`ProjectContext::
+/// tabled_engines`); `fell_through`/`total` back the impact clause.
+///
+/// The caller decides WHETHER to emit (gate:
+/// `pass1_engine_resolution_should_warn`) — this function only builds the
+/// message text, so it has no opinion on emission and is unit-testable in
+/// isolation.
+///
+/// Engine as subject (title); the impact clause names the affected
+/// document count (problem); both fixes — static `claims:` in
+/// `_extension.yml`, or a claim table in `_quarto.yml` — appear in the
+/// hint. No per-doc language reporting: fall-through is a project-grain
+/// condition, so per-doc detail would add plumbing, not signal.
+fn pass1_engine_resolution_warning(
+    engines: &[(String, Option<std::path::PathBuf>)],
+    fell_through: usize,
+    total: usize,
+) -> DiagnosticMessage {
+    let subject = match engines {
+        [(name, _)] => format!("engine extension `{name}` declares no static language claims"),
+        _ => format!(
+            "{} engine extensions declare no static language claims",
+            engines.len()
+        ),
+    };
+
+    let mut builder = DiagnosticMessageBuilder::warning(subject)
+        .with_code("Q-16-11")
+        .problem(format!(
+            "so engine resolution must wait for render time. Execution-language \
+             indexing is unavailable for {fell_through} of {total} documents."
+        ));
+
+    for (name, path) in engines {
+        let path_str = path
+            .as_ref()
+            .map_or_else(|| "path unknown".to_string(), |p| p.display().to_string());
+        builder = builder.add_detail(format!("`{name}` ({path_str})"));
+    }
+
+    builder
+        .add_hint(
+            "declare the extension's claims statically in its _extension.yml — \
+             e.g. `claims: [python]`, one line — or, if you cannot edit the \
+             extension, supply its claim table in _quarto.yml:\n\n  engines:\n    \
+             - <engine-name>:\n        claims: [<language>]\n\n  Affected documents \
+             will then resolve at index time. Rendering is unaffected.",
+        )
+        .build()
+}
+
 /// Orchestration hooks implemented by each project kind.
 ///
 /// Phase-1 ships [`DefaultProjectType`] (no-op hooks used for
@@ -250,7 +358,17 @@ pub trait ProjectType {
 
     /// Called once per project, after Pass 1 and before Pass 2.
     /// Default: no-op.
-    async fn pre_render(&self, _project: &mut ProjectContext, _index: &ProjectIndex) -> Result<()> {
+    ///
+    /// The `runtime` parameter matches `post_render`/`post_resources`:
+    /// implementations that read project files (e.g. book projects building
+    /// their chapter list) must go through it rather than `std::fs`, so
+    /// the WASM hub-client VFS works the same way.
+    async fn pre_render(
+        &self,
+        _project: &mut ProjectContext,
+        _index: &ProjectIndex,
+        _runtime: &dyn quarto_system_runtime::SystemRuntime,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -290,11 +408,58 @@ pub trait ProjectType {
     /// the path math themselves.
     async fn post_render(
         &self,
-        _project: &ProjectContext,
-        _index: &ProjectIndex,
+        project: &ProjectContext,
+        index: &ProjectIndex,
         _output_paths: &[std::path::PathBuf],
         _project_artifacts: &crate::artifact::ArtifactStore,
         _resolver: &crate::resource_resolver::ResourceResolverContext,
+        _runtime: &dyn quarto_system_runtime::SystemRuntime,
+        diagnostics: &mut Vec<DiagnosticMessage>,
+    ) -> Result<()> {
+        // Only website projects write redirect stubs. Every other
+        // project type says so rather than dropping the key in
+        // silence — the silence *was* the original bug report
+        // (bd-aliases-redirects-missing-sch7cd1g): a porting project
+        // got no signal that its redirects had disappeared.
+        super::aliases::warn_aliases_ignored(index, diagnostics);
+        // Same policy for `website.llms-txt`
+        // (bd-llms-txt-unimplemented-oih6z6j7): only website
+        // projects emit llms.txt + markdown companions, and an
+        // accepted-but-inert key deserves a signal, not silence.
+        if let Some(meta) = project.config.metadata.as_ref()
+            && super::website_config::website_llms_txt_enabled(meta)
+        {
+            diagnostics.push(
+                quarto_error_reporting::DiagnosticMessageBuilder::warning(
+                    "`website.llms-txt: true` has no effect in this project type",
+                )
+                .problem(
+                    "llms.txt and per-page markdown companions are written only for \
+                     `website` projects.",
+                )
+                .add_hint("Set `project: type: website` in `_quarto.yml`?")
+                .build(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Hook that runs **after** the orchestrator's resource-copy pass
+    /// (bd-o8pr) — i.e. after every other producer of output-dir
+    /// files. Native-only in practice: the orchestrator calls it
+    /// inside the same `#[cfg(not(wasm32))]` block as the resource
+    /// copy. Default: no-op.
+    ///
+    /// This late position exists for writes that must consult the
+    /// *complete* set of files on disk before claiming a path — the
+    /// llms companion writes (bd-llms-txt-unimplemented-oih6z6j7)
+    /// refuse to overwrite anything they didn't generate (Q-5-28),
+    /// which is only sound once resource copies have landed.
+    async fn post_resources(
+        &self,
+        _project: &ProjectContext,
+        _index: &ProjectIndex,
+        _project_artifacts: &crate::artifact::ArtifactStore,
         _runtime: &dyn quarto_system_runtime::SystemRuntime,
         _diagnostics: &mut Vec<DiagnosticMessage>,
     ) -> Result<()> {
@@ -377,10 +542,22 @@ impl ProjectType for WebsiteProjectType {
         // them — see Phase 9 plan §Decision 4.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use super::website_post_render::{copy_favicon, write_robots_txt, write_sitemap};
+            use super::website_post_render::{
+                copy_favicon, copy_footer_images, copy_navbar_logo, write_alias_redirects,
+                write_robots_txt, write_sitemap,
+            };
             copy_favicon(project, runtime, diagnostics)?;
+            copy_navbar_logo(project, runtime, diagnostics)?;
+            copy_footer_images(project, runtime, diagnostics)?;
             write_sitemap(project, index, output_paths, runtime)?;
             write_robots_txt(project, runtime)?;
+            // `aliases:` redirect stubs
+            // (bd-aliases-redirects-missing-sch7cd1g). Unlike its
+            // neighbours this hook can *fail* the render: an alias
+            // collision is an error, not a warning, because the
+            // alternative is a redirect silently pointing at the
+            // wrong page. See the `Q-5-23`..`Q-5-26` docs pages.
+            write_alias_redirects(project, index, runtime)?;
             // L7 (`bd-qf7r`): replace listing description / image
             // placeholder envelopes with engine-rendered preview
             // content read from sibling outputs. Bracketed feature
@@ -413,20 +590,53 @@ impl ProjectType for WebsiteProjectType {
         }
         Ok(())
     }
+
+    /// llms.txt + markdown companions
+    /// (bd-llms-txt-unimplemented-oih6z6j7). Runs *after* the
+    /// resource-copy pass, deliberately: the companion writes refuse
+    /// to overwrite any output-dir file they didn't generate
+    /// (Q-5-28), and that ledger check is only sound once every
+    /// other producer — rendered pages, site_libs, resource copies —
+    /// has landed. Reads the captures `LlmsCaptureTransform`
+    /// deposited as path-less Project artifacts.
+    async fn post_resources(
+        &self,
+        project: &ProjectContext,
+        index: &ProjectIndex,
+        project_artifacts: &crate::artifact::ArtifactStore,
+        runtime: &dyn quarto_system_runtime::SystemRuntime,
+        diagnostics: &mut Vec<DiagnosticMessage>,
+    ) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            super::llms_post_render::write_llms_artifacts(
+                project,
+                index,
+                project_artifacts,
+                runtime,
+                diagnostics,
+            )?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (project, index, project_artifacts, runtime, diagnostics);
+        }
+        Ok(())
+    }
 }
 
 /// Factory: pick a [`ProjectType`] based on the project's tag.
 ///
 /// Unknown / not-yet-implemented tags fall back to
 /// [`DefaultProjectType`] so Phase 1 doesn't crash on `_quarto.yml`
-/// files declaring `project.type: book` or `project.type: manuscript`
-/// — those kinds are tracked by Phase-1 dispatch but have no behavior
-/// yet.
+/// files declaring `project.type: manuscript` — that kind is tracked
+/// by Phase-1 dispatch but has no behavior yet.
 pub fn project_type_for(project: &ProjectContext) -> Box<dyn ProjectType> {
     match project.project_kind() {
         ProjectKind::Default => Box::new(DefaultProjectType),
         ProjectKind::Website => Box::new(WebsiteProjectType),
-        ProjectKind::Book | ProjectKind::Manuscript => Box::new(DefaultProjectType),
+        ProjectKind::Book => Box::new(crate::project::book::BookProjectType),
+        ProjectKind::Manuscript => Box::new(DefaultProjectType),
     }
 }
 
@@ -699,6 +909,13 @@ pub enum RenderMode {
     ActivePage(std::path::PathBuf),
 }
 
+/// What the whole-book pandoc request needs beyond the pipeline's own state.
+pub(crate) struct BookRequestParams<'a> {
+    pub prepare_options: crate::pandoc_request::PrepareOptions,
+    pub captures_by_path: &'a std::collections::BTreeMap<String, Vec<u8>>,
+    pub hooks: Option<&'a dyn crate::project::book::BookRenderHooks>,
+}
+
 /// Two-pass project render driver.
 ///
 /// Generic over [`Pass2Renderer`] so the same orchestration logic
@@ -789,6 +1006,368 @@ impl<'a> ProjectPipeline<'a, RenderToFileRenderer<'a>> {
         self.renderer.format_override = to;
         self
     }
+
+    /// Run the project render with book-aware orchestration.
+    ///
+    /// The native CLI entry points call this instead of [`Self::run`].
+    /// For non-book projects it is exactly `run()`: the same
+    /// [`run_inner`](Self::run_inner) body and the same unconditional
+    /// `shutdown_all()` teardown (TS-engine Deno subprocess reaping)
+    /// afterward. For books it adds the format-support gate (Q-5-33,
+    /// Q1's `projectFormatsOnly` + `isSupportedFormat`) before
+    /// rendering; P2/P4/P5's book orchestration (single-file merge,
+    /// multi-file HTML pass 3) slots into the same branch later.
+    pub async fn run_with_book_support(
+        &mut self,
+    ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
+        let result = if self.project_type.kind() == ProjectKind::Book {
+            // Books render only to formats with book support. Unknown
+            // (extension) format identifiers fall through — they may
+            // be html-based; gating known identifiers is the general
+            // rule P3's docx/pptx diagnostic is one instance of.
+            let unsupported = FormatIdentifier::try_from(self.format_str.as_str())
+                .is_ok_and(|id| !crate::project::book::is_supported_format(&id));
+            // A Subset render (`q2 render ch1.qmd`) stays on the ordinary
+            // per-document path: the P5 book orchestration below always
+            // renders the whole book, while the CLI contract for a
+            // named-file render is exactly that file (pinned by
+            // book_project_type::
+            // single_chapter_subset_render_keeps_one_file_render_set).
+            // Typst/Epub keep P2's committed dispatch (merge always); the
+            // per-document typst path has never carried the book
+            // orchestration and its template invocation is unverified.
+            let full_render = matches!(self.mode, RenderMode::Full);
+            if unsupported {
+                Err(crate::project::book::render_item::book_diagnostic(
+                    "Q-5-33",
+                    format!("Book projects cannot render to `{}`", self.format_str),
+                    format!(
+                        "This book project targets the `{}` format, which has no book \
+                         support. Book projects render only to `html`, `typst`, and `epub`.",
+                        self.format_str
+                    ),
+                    "Render to a supported format (`q2 render --to html`), or change the \
+                     project's `format:` key.",
+                ))
+            } else if matches!(
+                self.format.identifier,
+                FormatIdentifier::Typst | FormatIdentifier::Epub
+            ) {
+                // book-projects P2: single-file merge.
+                self.run_book_single_file_merge().await
+            } else if full_render && self.format.identifier == FormatIdentifier::Html {
+                // book-projects P5: multi-file pass 3 (pause at Navigation
+                // / aggregate the crossref registry / resume from
+                // Finalization) — replaces P4's fall-through to
+                // `run_inner()`.
+                self.run_book_multi_file_html().await
+            } else {
+                self.run_inner().await
+            }
+        } else {
+            self.run_inner().await
+        };
+        if let Err(e) = self.project.registry.shutdown_all() {
+            tracing::warn!("engine registry shutdown_all failed at end of project render: {e}");
+        }
+        result
+    }
+
+    /// book-projects P2: the single-file-merge dispatch
+    /// (`run_with_book_support`'s Typst/EPUB branch).
+    ///
+    /// Pass 1 and `pre_render()` still run exactly as [`Self::run_inner`]
+    /// runs them (plan Decision 2, corrected after reading `run_inner`
+    /// directly: `pre_render` is where `project.book_render_items` and the
+    /// book-wide format defaults get computed, and skipping it would leave
+    /// every chapter's metadata merge unprepared) — only the per-document
+    /// Pass-2 dispatch is replaced, by
+    /// [`crate::project::book::single_file_render::render_book_single_file`]'s
+    /// per-chapter partial-render + merge loop, which produces exactly one
+    /// output instead of one per chapter.
+    ///
+    /// The resource-copy + manifest + `post_resources` tail mirrors
+    /// `run_inner`'s own (format-independent) block so a book's
+    /// `resources:` declarations and `.quarto/render-manifest.json` still
+    /// land correctly; `post_render` is correctly *not* called here —
+    /// `run_inner` itself gates it on `is_html_based()`, `false` for
+    /// Typst/Epub.
+    async fn run_book_single_file_merge(
+        &mut self,
+    ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
+        let (profiles, pass1_failures) = self.pass_one().await;
+        if self.fail_fast && !pass1_failures.is_empty() {
+            return Ok(ProjectRenderSummary {
+                outputs: Vec::new(),
+                pass1_failures,
+                pass2_failures: Vec::new(),
+                project_diagnostics: Vec::new(),
+                stopped_early: true,
+            });
+        }
+        let index = Arc::new(ProjectIndex::new(profiles));
+        self.project_type
+            .pre_render(self.project, &index, self.runtime.as_ref())
+            .await
+            .map_err(|e| QuartoError::other(format!("pre_render failed: {e}")))?;
+
+        let book_items = self.project.book_render_items.clone().unwrap_or_default();
+        let render_result = crate::project::book::single_file_render::render_book_single_file(
+            self.project,
+            &book_items,
+            &self.format,
+            self.runtime.clone(),
+            Some(&mut self.project_artifacts),
+            self.renderer.options,
+        )
+        .await;
+
+        let (outputs, pass2_failures) = match render_result {
+            Ok(r) => (vec![r], Vec::new()),
+            Err(e) => (
+                Vec::new(),
+                vec![file_failure_from_error(self.project.dir.clone(), e)],
+            ),
+        };
+
+        let output_paths: Vec<std::path::PathBuf> =
+            outputs.iter().map(|r| r.output_path.clone()).collect();
+        let mut project_diagnostics: Vec<DiagnosticMessage> = Vec::new();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut resource_diagnostics = Vec::new();
+            let mut resolved = crate::project_resources::collect_static_resources_with_diagnostics(
+                self.project,
+                &index,
+                self.runtime.as_ref(),
+                &mut resource_diagnostics,
+            )
+            .map_err(QuartoError::Parse)?;
+            project_diagnostics.extend(resource_diagnostics);
+            for output in &outputs {
+                if !output.resource_report.is_empty() {
+                    let resolved_report = crate::project_resources::resolve_reported_resources(
+                        &self.project.dir,
+                        &output.resource_report,
+                        self.runtime.as_ref(),
+                    )
+                    .map_err(|e| QuartoError::other(e.to_string()))?;
+                    resolved.extend(resolved_report);
+                }
+            }
+            crate::project_resources::copy_resources_to_output_dir(
+                &resolved,
+                &self.project.output_dir,
+                self.runtime.as_ref(),
+            )?;
+
+            let rendered_files: Vec<String> = output_paths
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(&self.project.output_dir)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            let manifest = crate::project_resources::RenderManifest::new(
+                &self.project.dir,
+                rendered_files,
+                &resolved,
+            );
+            crate::project_resources::write_render_manifest(
+                &self.project.dir,
+                &manifest,
+                self.runtime.as_ref(),
+            )?;
+
+            self.project_type
+                .post_resources(
+                    self.project,
+                    &index,
+                    &self.project_artifacts,
+                    self.runtime.as_ref(),
+                    &mut project_diagnostics,
+                )
+                .await
+                .map_err(|e| match e {
+                    QuartoError::Parse(_) => e,
+                    other => QuartoError::other(format!("post_resources failed: {other}")),
+                })?;
+        }
+
+        project_diagnostics.extend(self.drain_registry_diagnostics());
+
+        Ok(ProjectRenderSummary {
+            outputs,
+            pass1_failures,
+            pass2_failures,
+            project_diagnostics,
+            stopped_early: false,
+        })
+    }
+
+    /// book-projects P5: the multi-file-HTML dispatch
+    /// (`run_with_book_support`'s Html branch, replacing P4's
+    /// fall-through to [`Self::run_inner`]).
+    ///
+    /// Pass 1 and `pre_render()` run exactly as `run_inner` runs them;
+    /// only the per-document Pass-2 dispatch is replaced, by
+    /// [`crate::project::book::multi_file_html::render_book_multi_file_html`]'s
+    /// pause / aggregate / resume loop. Unlike the P2 merge, this branch
+    /// DOES call `post_render` (gated on `is_html_based()`, always true
+    /// here — sitemap, robots.txt, alias redirects, feeds: the book type
+    /// delegates to the website implementation) and runs the same
+    /// format-independent resource / manifest / `post_resources` tail.
+    async fn run_book_multi_file_html(
+        &mut self,
+    ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
+        let (profiles, pass1_failures) = self.pass_one().await;
+        if self.fail_fast && !pass1_failures.is_empty() {
+            let mut project_diagnostics = Vec::new();
+            project_diagnostics.extend(self.drain_registry_diagnostics());
+            return Ok(ProjectRenderSummary {
+                outputs: Vec::new(),
+                pass1_failures,
+                pass2_failures: Vec::new(),
+                project_diagnostics,
+                stopped_early: true,
+            });
+        }
+        let index = Arc::new(ProjectIndex::new(profiles));
+        self.project_type
+            .pre_render(self.project, &index, self.runtime.as_ref())
+            .await
+            .map_err(|e| QuartoError::other(format!("pre_render failed: {e}")))?;
+
+        let book_items = self.project.book_render_items.clone().unwrap_or_default();
+        let format_override = self.renderer.format_override();
+        let options = self.renderer.options;
+        let render_result = crate::project::book::multi_file_html::render_book_multi_file_html(
+            self.project,
+            &book_items,
+            &self.format_str,
+            index.clone(),
+            self.runtime.clone(),
+            Some(&mut self.project_artifacts),
+            options,
+            format_override,
+            self.fail_fast,
+        )
+        .await;
+
+        let (outputs, pass2_failures, mut project_diagnostics) = match render_result {
+            Ok((outputs, failures, aggregate_diagnostics)) => {
+                (outputs, failures, aggregate_diagnostics)
+            }
+            Err(e) => (
+                Vec::new(),
+                vec![file_failure_from_error(self.project.dir.clone(), e)],
+                Vec::new(),
+            ),
+        };
+
+        let output_paths: Vec<std::path::PathBuf> =
+            outputs.iter().map(|r| r.output_path.clone()).collect();
+        let lib_dir = self.project_type.lib_dir();
+        let resolver = self.renderer.build_project_resolver(self.project, &lib_dir);
+
+        // The `post_render` hook sequence assumes HTML outputs exist;
+        // every book-HTML output does (see `run_inner`'s gate — mirrored
+        // here so book pages get sitemap/robots/redirects/feeds).
+        if self.format.identifier.is_html_based() {
+            self.project_type
+                .post_render(
+                    self.project,
+                    &index,
+                    &output_paths,
+                    &self.project_artifacts,
+                    &resolver,
+                    self.runtime.as_ref(),
+                    &mut project_diagnostics,
+                )
+                .await
+                .map_err(|e| match e {
+                    QuartoError::Parse(_) => e,
+                    other => QuartoError::other(format!("post_render failed: {other}")),
+                })?;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut resource_diagnostics = Vec::new();
+            let mut resolved = crate::project_resources::collect_static_resources_with_diagnostics(
+                self.project,
+                &index,
+                self.runtime.as_ref(),
+                &mut resource_diagnostics,
+            )
+            .map_err(QuartoError::Parse)?;
+            project_diagnostics.extend(resource_diagnostics);
+            for output in &outputs {
+                if !output.resource_report.is_empty() {
+                    let resolved_report = crate::project_resources::resolve_reported_resources(
+                        &self.project.dir,
+                        &output.resource_report,
+                        self.runtime.as_ref(),
+                    )
+                    .map_err(|e| QuartoError::other(e.to_string()))?;
+                    resolved.extend(resolved_report);
+                }
+            }
+            crate::project_resources::copy_resources_to_output_dir(
+                &resolved,
+                &self.project.output_dir,
+                self.runtime.as_ref(),
+            )?;
+
+            let rendered_files: Vec<String> = output_paths
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(&self.project.output_dir)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            let manifest = crate::project_resources::RenderManifest::new(
+                &self.project.dir,
+                rendered_files,
+                &resolved,
+            );
+            crate::project_resources::write_render_manifest(
+                &self.project.dir,
+                &manifest,
+                self.runtime.as_ref(),
+            )?;
+
+            self.project_type
+                .post_resources(
+                    self.project,
+                    &index,
+                    &self.project_artifacts,
+                    self.runtime.as_ref(),
+                    &mut project_diagnostics,
+                )
+                .await
+                .map_err(|e| match e {
+                    QuartoError::Parse(_) => e,
+                    other => QuartoError::other(format!("post_resources failed: {other}")),
+                })?;
+        }
+
+        project_diagnostics.extend(self.drain_registry_diagnostics());
+
+        let stopped_early = self.fail_fast && !pass2_failures.is_empty();
+        Ok(ProjectRenderSummary {
+            outputs,
+            pass1_failures,
+            pass2_failures,
+            project_diagnostics,
+            stopped_early,
+        })
+    }
 }
 
 impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
@@ -859,9 +1438,117 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
     /// pre/post hooks). Native and WASM share the same body — only
     /// the renderer and project-type implementations differ.
     pub async fn run(&mut self) -> Result<ProjectRenderSummary<R::Output>> {
-        let initial_diagnostics = self.empty_render_set_diagnostic();
+        // Wrap the render body so the orchestrator-driven engine shutdown fires
+        // on *every* exit path — success, the fail-fast early return, or a
+        // `?`-propagated hook/resource error — before `ProjectContext` (and its
+        // `registry`) drops. This is the caller Plan 1a-host deferred to: q2 uses
+        // explicit `registry.shutdown_all()` (not Drop) to reap TS-engine Deno
+        // subprocesses at end-of-render. Best-effort: log at WARN and continue;
+        // the host's own Drop is the backstop if this errs.
+        let result = self.run_inner().await;
+        if let Err(e) = self.project.registry.shutdown_all() {
+            tracing::warn!("engine registry shutdown_all failed at end of project render: {e}");
+        }
+        result
+    }
+
+    /// Take everything the engine registry has accumulated this render and
+    /// hand it to the project-grain diagnostic sink (bd-exhbc6h8).
+    ///
+    /// **Called at END of render, never at registry-build time.** The vec is
+    /// written from two eras: `build_engine_registry` pushes `Q-16-10` while
+    /// constructing the registry, but `TsEngine` pushes into the *same*
+    /// `Arc<Mutex<…>>` during Pass 1 and Pass 2 — `Q-16-12` load failures and
+    /// the intermediate-files warning. Draining early would silently lose the
+    /// second group, which is most of the point.
+    ///
+    /// `drain(..)` rather than `clone()`: the registry can outlive one render
+    /// (`q2 preview` reuses a `ProjectContext`), and a re-render must not
+    /// reprint diagnostics already reported.
+    fn drain_registry_diagnostics(&self) -> Vec<DiagnosticMessage> {
+        self.project
+            .registry
+            .diagnostics
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect()
+    }
+
+    async fn run_inner(&mut self) -> Result<ProjectRenderSummary<R::Output>> {
+        let mut initial_diagnostics = self.empty_render_set_diagnostic();
+        // `project.render` patterns that contributed nothing
+        // (bd-mt7a6uc4 D7). Computed here rather than inside
+        // discovery so `ProjectContext::discover` keeps its
+        // signature; the check is pure and reads the post-exclusion
+        // file list, so it reports what actually happened.
+        initial_diagnostics.extend(crate::project::discovery::render_pattern_diagnostics(
+            &self.project.dir,
+            &self.project.config.render_patterns,
+            &self.project.files,
+        ));
+        // Nested projects the render list skipped or reached into
+        // (bd-nested-projects-xyb28wnl). Discovery stored the report
+        // on the config; reporting it here keeps it once per render.
+        initial_diagnostics.extend(crate::project::discovery::nested_project_diagnostics(
+            &self.project.dir,
+            &self.project.config.nested_projects,
+        ));
+        // Project-config `css:` entries naming missing files warn once
+        // per render here — not once per page in the merge, which is
+        // where document-layer `css:` mistakes are diagnosed instead
+        // (bd-format-css-not-copied-crn3bjdz). Native only: in the WASM
+        // preview/hub the runtime probes the VFS, which is not
+        // authoritative for non-qmd project files (a stylesheet that
+        // exists on disk may simply not be synced), so the same check
+        // there produced false Q-5-29 warnings in the preview overlay.
+        #[cfg(not(target_arch = "wasm32"))]
+        initial_diagnostics.extend(
+            crate::project::format_paths::missing_project_css_diagnostics(
+                self.project,
+                self.format.identifier.as_str(),
+                self.runtime.as_ref(),
+            ),
+        );
 
         let (profiles, pass1_failures) = self.pass_one().await;
+
+        // Plan 6 Phase 5: tally lifted vs. fell-through ONCE here, from the
+        // profiles pass_one just returned — regardless of cache hit/miss (a
+        // cached profile carries `engine_resolution` too). The SAME tally
+        // feeds both the QUARTO_PERF_STATS counter and the decision-5
+        // warning below; do not fold a second count elsewhere.
+        let fell_through = profiles
+            .iter()
+            .filter(|p| p.engine_resolution.is_none())
+            .count();
+        let lifted = profiles.len() - fell_through;
+        pass1_engine_resolution_record(lifted, fell_through);
+
+        // Decision 5: emit the human-facing warning per
+        // `pass1_engine_resolution_should_warn`'s gate. Behaviorally WASM
+        // never fires it — its registry has no TS engines, so
+        // `fell_through` is always 0.
+        //
+        // bd-exhbc6h8: this goes into the project-grain diagnostic vec
+        // rather than a bare `eprintln!`. The print is equivalent (the
+        // `project_diagnostics` loop in `commands/render.rs` is outside the
+        // `quiet` gate, as this was), but routing it here is what makes it
+        // *counted* by `diagnostic_counts` and *promotable* by `--strict`
+        // (bd-yjs54ptg / GH #220) — which a raw stderr write can never be.
+        // It prints at end of render now instead of between the passes.
+        let engines_needing_load = self
+            .project
+            .registry
+            .engines_needing_load(&self.project.tabled_engines);
+        if pass1_engine_resolution_should_warn(fell_through, &engines_needing_load) {
+            initial_diagnostics.push(pass1_engine_resolution_warning(
+                &engines_needing_load,
+                fell_through,
+                profiles.len(),
+            ));
+        }
+
         let index = Arc::new(ProjectIndex::new(profiles));
 
         // Fail-fast barrier: if Pass-1 surfaced any error, stop before
@@ -869,11 +1556,16 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // copy, and the manifest write. We report the failures we have
         // and flag the summary as truncated.
         if self.fail_fast && !pass1_failures.is_empty() {
+            // Drain here too: this early return builds its own summary, so
+            // without it a `--fail-fast` run would swallow every engine
+            // diagnostic the render had already produced (bd-exhbc6h8).
+            let mut project_diagnostics = initial_diagnostics;
+            project_diagnostics.extend(self.drain_registry_diagnostics());
             return Ok(ProjectRenderSummary {
                 outputs: Vec::new(),
                 pass1_failures,
                 pass2_failures: Vec::new(),
-                project_diagnostics: initial_diagnostics,
+                project_diagnostics,
                 stopped_early: true,
             });
         }
@@ -882,9 +1574,22 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // hook failed. The plan specifies hook failures abort the
         // project render entirely (unlike per-file failures).
         self.project_type
-            .pre_render(self.project, &index)
+            .pre_render(self.project, &index, self.runtime.as_ref())
             .await
             .map_err(|e| QuartoError::other(format!("pre_render failed: {e}")))?;
+
+        // Book multi-file HTML (P4): pre_render populated the book
+        // render list; derive the per-chapter seed map from it and hand
+        // it to the Pass-2 renderer (a no-op for renderers without book
+        // state). Only book HTML reaches `run_inner` — Typst/EPUB divert
+        // to the single-file merge — and `book_render_items` stays
+        // `None` for every non-book project, so both gates collapse to
+        // this one `if let`.
+        if let Some(items) = &self.project.book_render_items {
+            let seeds =
+                crate::project::book::render_item::chapter_seed_map(&self.project.dir, items);
+            self.renderer.install_book_chapter_seeds(seeds);
+        }
 
         // Phase 8.2: in Mode B, build the dependency graph from
         // the freshly-loaded profiles, augment the user-named
@@ -913,18 +1618,40 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         let resolver = self.renderer.build_project_resolver(self.project, &lib_dir);
 
         let mut project_diagnostics: Vec<DiagnosticMessage> = initial_diagnostics;
-        self.project_type
-            .post_render(
-                self.project,
-                &index,
-                &output_paths,
-                &self.project_artifacts,
-                &resolver,
-                self.runtime.as_ref(),
-                &mut project_diagnostics,
-            )
-            .await
-            .map_err(|e| QuartoError::other(format!("post_render failed: {e}")))?;
+        // P7-foundation Task 2 (design doc §13, bd-bgeet2mw): the
+        // project-mode containment gate. `post_render`'s hook sequence
+        // (sitemap, robots.txt, alias redirects, ...) assumes HTML
+        // outputs exist; a Pandoc-target render (docx, pptx, ...) has
+        // none, so running it unconditionally would either write bogus
+        // artifacts pointing at files that were never produced, or
+        // hard-fail in `write_alias_redirects` on an HTML-specific
+        // diagnostic. Matches Q1's own `websiteProjectType.postRender`,
+        // which filters `outputFiles` to HTML-only before running this
+        // logic.
+        if self.format.identifier.is_html_based() {
+            self.project_type
+                .post_render(
+                    self.project,
+                    &index,
+                    &output_paths,
+                    &self.project_artifacts,
+                    &resolver,
+                    self.runtime.as_ref(),
+                    &mut project_diagnostics,
+                )
+                .await
+                // A hook that already produced structured diagnostics
+                // passes through intact. Wrapping it in `other` would
+                // flatten Ariadne spans into a string the caller can no
+                // longer inspect, re-render, or serialize — the CLI would
+                // print pre-rendered ANSI inside a generic message, and
+                // `--to json` would lose the diagnostics entirely.
+                // Opaque errors still get the context prefix.
+                .map_err(|e| match e {
+                    QuartoError::Parse(_) => e,
+                    other => QuartoError::other(format!("post_render failed: {other}")),
+                })?;
+        }
 
         // bd-o8pr Phases 1 + 2: copy resources to the output dir.
         // - Phase 1 (static channel): project- and document-level
@@ -940,11 +1667,15 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // dir.
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let mut resource_diagnostics = Vec::new();
             let mut resolved = crate::project_resources::collect_static_resources_with_diagnostics(
                 self.project,
                 &index,
+                self.runtime.as_ref(),
+                &mut resource_diagnostics,
             )
             .map_err(QuartoError::Parse)?;
+            project_diagnostics.extend(resource_diagnostics);
             for output in &outputs {
                 if let Some(report) = R::extract_resource_report(output) {
                     if report.is_empty() {
@@ -953,6 +1684,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
                     let resolved_report = crate::project_resources::resolve_reported_resources(
                         &self.project.dir,
                         report,
+                        self.runtime.as_ref(),
                     )
                     .map_err(|e| QuartoError::other(e.to_string()))?;
                     resolved.extend(resolved_report);
@@ -989,7 +1721,32 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
                 &manifest,
                 self.runtime.as_ref(),
             )?;
+
+            // Post-resources hook: writes that must see the complete
+            // output dir (rendered pages + artifacts + resource
+            // copies) before claiming paths — see
+            // `ProjectType::post_resources`. Same error-passthrough
+            // rationale as `post_render` above.
+            self.project_type
+                .post_resources(
+                    self.project,
+                    &index,
+                    &self.project_artifacts,
+                    self.runtime.as_ref(),
+                    &mut project_diagnostics,
+                )
+                .await
+                .map_err(|e| match e {
+                    QuartoError::Parse(_) => e,
+                    other => QuartoError::other(format!("post_resources failed: {other}")),
+                })?;
         }
+
+        // The end-of-render drain (bd-exhbc6h8). Last diagnostic-producing
+        // point before the summary is sealed, so it catches both registry-build
+        // pushes (Q-16-10) and everything the engines pushed while executing
+        // (Q-16-12, intermediate-files).
+        project_diagnostics.extend(self.drain_registry_diagnostics());
 
         let stopped_early = self.fail_fast && !pass2_failures.is_empty();
         Ok(ProjectRenderSummary {
@@ -1030,13 +1787,52 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         )));
         let has_render_patterns = !self.project.config.render_patterns.is_empty();
         let hint = if has_render_patterns {
-            "Check `project.render` in `_quarto.yml` — its globs matched no `.qmd` files."
+            "Check `project.render` in `_quarto.yml` — its globs matched no renderable files."
         } else {
             "Add a `.qmd` file to the project, or remove `_quarto.yml` to render a single \
              standalone document."
         };
         diag.hints
             .push(quarto_error_reporting::MessageContent::from(hint));
+        // `.md` files are render-list opt-in (bd-6d2wj4zp). When the
+        // project has renderable `.md` files that no pattern matched,
+        // the empty set is likely that policy at work — say so, or
+        // the default reads as Quarto silently ignoring the files.
+        // Mirror the extension set `ProjectContext::discover` walked with, so
+        // this explanatory re-walk sees the same renderable universe. Without
+        // it a project whose only inputs are engine-claimed (e.g. `.echo`)
+        // would re-walk with the fixed set and mis-describe the empty set.
+        let renderable_extensions = crate::project::discovery::RenderableExtensions::new(
+            self.project
+                .extensions
+                .iter()
+                .flat_map(|e| &e.contributes.engines)
+                .flat_map(crate::extension::types::claimed_file_extensions)
+                .chain(
+                    crate::engine::builtin_file_claims()
+                        .into_iter()
+                        .map(|c| c.extension),
+                ),
+        );
+        let discovery_cfg = crate::project::discovery::DiscoveryConfig {
+            project_dir: &self.project.dir,
+            output_dir: &self.project.output_dir,
+            render_patterns: &self.project.config.render_patterns,
+            renderable_extensions: &renderable_extensions,
+        };
+        if let Ok(md) =
+            crate::project::discovery::unmatched_md_files(&discovery_cfg, self.runtime.as_ref())
+            && !md.is_empty()
+        {
+            let n = md.len();
+            let plural = if n == 1 { "" } else { "s" };
+            diag.hints
+                .push(quarto_error_reporting::MessageContent::from(format!(
+                    "The project contains {n} `.md` file{plural}; `.md` files render \
+                     only when matched by a `project.render` pattern such as \
+                     `\"**/*.md\"`."
+                )));
+        }
         vec![diag]
     }
 
@@ -1066,6 +1862,49 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         Vec<FileFailure>,
     ) {
         self.pass_one().await
+    }
+
+    /// The browser's whole-book pandoc request: Pass 1 and the book's
+    /// `pre_render` run as [`Self::run_book_single_file_merge`] runs them
+    /// (the book's render list and format defaults are computed there), then
+    /// the shared single-file-merge core renders every chapter one after
+    /// another and ends in a `PandocRequest` instead of a pandoc process.
+    /// `pass1_failures` are ignored, as native does without `--fail-fast`.
+    /// No engine-registry shutdown or diagnostics drain: the browser has no
+    /// engines.
+    pub(crate) async fn run_book_request(
+        &mut self,
+        params: BookRequestParams<'_>,
+    ) -> crate::pandoc_request::render::PandocRequestOutcome {
+        use crate::pandoc_request::render::PandocRequestOutcome;
+        let (profiles, _pass1_failures) = self.pass_one().await;
+        let index = Arc::new(ProjectIndex::new(profiles));
+        if let Err(e) = self
+            .project_type
+            .pre_render(self.project, &index, self.runtime.as_ref())
+            .await
+        {
+            return match e {
+                QuartoError::Parse(parse_error) => PandocRequestOutcome {
+                    request: None,
+                    diagnostics: parse_error.diagnostics.clone(),
+                    source_context: parse_error.source_context.clone(),
+                    error: Some(QuartoError::Parse(parse_error).to_string()),
+                    unexecuted_cells: 0,
+                    book: None,
+                },
+                other => PandocRequestOutcome::failed_with(format!("pre_render failed: {other}")),
+            };
+        }
+        let book_items = self.project.book_render_items.clone().unwrap_or_default();
+        crate::project::book::request::render_book_request(
+            self.project,
+            &book_items,
+            &self.format,
+            self.runtime.clone(),
+            params,
+        )
+        .await
     }
 
     async fn pass_one(
@@ -1621,6 +2460,30 @@ fn pass1_read_quarto_yml_bytes(runtime: &dyn SystemRuntime, project: &ProjectCon
     Vec::new()
 }
 
+/// Engine-extension `_extension.yml` bytes for the Pass-1 cache-key domain
+/// (Plan 6 decision 9). Gathers `(engine name, _extension.yml path)` pairs
+/// from [`crate::engine::EngineRegistry::engine_extension_provenance`]
+/// (already sorted by name, project-wide — not per-doc) and re-reads each
+/// file's raw bytes at key-build time, the same per-file read idiom
+/// [`pass1_read_quarto_yml_bytes`] and [`pass1_layered_metadata_raw_bytes`]
+/// use: small files, per-doc reads are the established cost model, no bytes
+/// retained at registration. An unreadable file hashes as empty bytes
+/// (over-invalidates, never a stale hit).
+fn pass1_engine_extension_contributions(
+    runtime: &dyn SystemRuntime,
+    project: &ProjectContext,
+) -> Vec<(String, Vec<u8>)> {
+    project
+        .registry
+        .engine_extension_provenance()
+        .into_iter()
+        .map(|(name, path)| {
+            let bytes = runtime.file_read(&path).unwrap_or_default();
+            (name, bytes)
+        })
+        .collect()
+}
+
 /// Try the on-disk profile cache for `doc_info`, falling back to a
 /// live head-pipeline run on miss. See `profile_cache::load` for the
 /// include-verification semantics.
@@ -1653,6 +2516,12 @@ async fn pass1_profile_with_cache(
     let source_path = pass1_project_relative_source_path(&project.dir, &doc_info.input);
     let format_id = format.target_format.clone();
 
+    // The modification date `ListingItemInfoStage` records as
+    // `listing_item.date_modified` — computed by the same function, so
+    // a touched file misses the cache instead of serving a stale date.
+    let source_modified_date =
+        crate::stage::stages::listing_item_info::mtime_iso(runtime.as_ref(), &doc_info.input);
+
     // Layered _metadata.yml raw bytes for the cache-key domain.
     // We re-read the raw bytes (not the parsed ConfigValue) because
     // byte-for-byte changes invalidate the key — a comment-only
@@ -1664,20 +2533,50 @@ async fn pass1_profile_with_cache(
     // has no config file (single-file render).
     let quarto_yml_bytes = pass1_read_quarto_yml_bytes(runtime.as_ref(), project);
 
-    // Format extensions: TODO follow-up. For v1 we pass empty
-    // contributions; extension changes require `--clean`. See
-    // `claude-notes/plans/2026-04-27-websites-phase-8.md` §
-    // "Sub-phase 8.4" for the user-facing escape hatch and
-    // §Decision 2 footnote for the rationale.
-    let extension_contributions: Vec<(String, Vec<u8>)> = Vec::new();
+    // Engine-extension `_extension.yml` bytes (Plan 6 decision 9) — the
+    // stamped `engine_resolution` is a function of the registry (which
+    // engine extensions exist and what claims they declare), so it must be
+    // in the key domain. Proper *format*-extension hashing remains the
+    // pre-existing follow-up: see
+    // `claude-notes/plans/2026-04-27-websites-phase-8.md` §"Sub-phase 8.4"
+    // for the user-facing `--clean` escape hatch and §Decision 2 footnote
+    // for the rationale.
+    let extension_contributions = pass1_engine_extension_contributions(runtime.as_ref(), project);
+
+    // Project-profile inputs (bd-fu16z22k): active names plus raw
+    // bytes of every merged overlay / `_quarto.yml.local`, so a
+    // profile switch or overlay edit invalidates cached pass-1
+    // DocumentProfiles. Paths are hashed project-relative for
+    // machine-independence, same policy as `metadata_files`.
+    let active_profile_names: Vec<String> = project
+        .config
+        .active_config_profiles
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    let profile_config_files: Vec<(std::path::PathBuf, Vec<u8>)> = project
+        .config
+        .profile_config_paths
+        .iter()
+        .map(|path| {
+            let rel = path
+                .strip_prefix(&project.dir)
+                .map_or_else(|_| path.clone(), std::path::Path::to_path_buf);
+            let bytes = runtime.file_read(path).unwrap_or_default();
+            (rel, bytes)
+        })
+        .collect();
 
     let key_inputs = crate::project::cache_key::Pass1KeyInputs {
         format_id: &format_id,
         source_path: &source_path,
         source_bytes: &source_bytes,
+        source_modified_date: source_modified_date.as_deref(),
         metadata_files: &metadata_files,
         quarto_yml_bytes: &quarto_yml_bytes,
         extension_contributions: &extension_contributions,
+        active_config_profiles: &active_profile_names,
+        profile_config_files: &profile_config_files,
     };
     let key_bytes = crate::project::cache_key::pass1_key(&key_inputs);
     let key_hex = crate::project::cache_key::hex_encode(&key_bytes);
@@ -1723,33 +2622,21 @@ async fn pass1_profile_single_file_live(
     doc_info: &DocumentInfo,
     source_bytes: &[u8],
 ) -> Result<crate::document_profile::DocumentProfile> {
-    use crate::pipeline::run_pipeline;
+    use crate::pipeline::{build_head_stages, run_pipeline};
     use crate::render::{BinaryDependencies, RenderContext};
-    use crate::stage::{
-        DocumentProfileStage, IncludeExpansionStage, LinkResolutionStage, MetadataMergeStage,
-        ParseDocumentStage, PipelineStage,
-    };
 
     let source_name = doc_info.input.to_string_lossy().to_string();
     let binaries = BinaryDependencies::new();
     let mut ctx = RenderContext::new(project, doc_info, format, &binaries);
 
-    let stages: Vec<Box<dyn PipelineStage>> = vec![
-        Box::new(ParseDocumentStage::new()),
-        Box::new(MetadataMergeStage::new()),
-        // Include-expansion threads child content through the
-        // profile so transitive `{{< include … >}}` is visible
-        // (bd-xfwx). Phase 8 sub-phase 8.0d's LinkResolutionStage
-        // also depends on it: the AST walk must see post-include
-        // content so a body link inside an included child counts as
-        // a dependency edge of the parent.
-        Box::new(IncludeExpansionStage::new()),
-        Box::new(DocumentProfileStage::new()),
-        // Pass-1 cross-doc body-link resolution. Reads the
-        // post-include AST, writes `profile.body_link_targets` for
-        // the dependency graph.
-        Box::new(LinkResolutionStage::new()),
-    ];
+    // Exactly the full pipeline's head, so the Pass-1 profile equals
+    // the one the full render computes (see `build_head_stages`).
+    // Source conversion runs first: a non-QMD input without it would
+    // yield a garbage DocumentProfile / ProjectIndex entry
+    // (plan1c §1067-1086); include expansion precedes the checkpoint so
+    // transitive `{{< include … >}}` content and body links are visible
+    // (bd-xfwx, Phase 8.0d).
+    let stages = build_head_stages();
 
     let (output, _diagnostics) =
         run_pipeline(source_bytes, &source_name, &mut ctx, runtime, stages).await?;
@@ -1766,7 +2653,503 @@ async fn pass1_profile_single_file_live(
 mod tests {
     use super::*;
     use quarto_system_runtime::NativeRuntime;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    // ── Plan 6 Phase 5: pass1_engine_extension_contributions ──────────────
+
+    /// Build a non-spawned `TsEngine` with the given `_extension.yml` path
+    /// set. `TsEngineHost::new` does not spawn a subprocess, so this is
+    /// safe outside a `deno`-gated test.
+    fn make_ts_engine_with_extension_yml(
+        name: &str,
+        extension_yml_path: PathBuf,
+    ) -> crate::engine::TsEngine {
+        use crate::engine::TsEngine;
+        use crate::engine::ts_process::TsEngineHost;
+        use crate::engine::ts_protocol::HostGlobalConfig;
+        use crate::extension::types::ExtensionId;
+        use std::sync::Mutex;
+
+        let global = HostGlobalConfig {
+            resource_dir: "/res".to_string(),
+            runtime_dir: "/rt".to_string(),
+            data_dir: "/data".to_string(),
+            pandoc_path: None,
+            is_interactive_session: false,
+            running_in_ci: false,
+            quarto_version: "0.1.0".to_string(),
+        };
+        let host = Arc::new(TsEngineHost::new(global));
+        let engine = TsEngine::new(
+            name,
+            true,
+            PathBuf::from("/ext/dist/engine.js"),
+            host,
+            None,
+            None,
+            None,
+            ExtensionId::new(name),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        engine.set_extension_yml_path(extension_yml_path);
+        engine
+    }
+
+    #[test]
+    fn pass1_engine_extension_contributions_empty_for_builtins_only() {
+        let runtime = NativeRuntime::new();
+        let project = ProjectContext::default(); // registry = built-ins only
+        assert!(
+            pass1_engine_extension_contributions(&runtime, &project).is_empty(),
+            "a registry with no External engines contributes nothing to the cache key"
+        );
+    }
+
+    #[test]
+    fn pass1_engine_extension_contributions_reads_real_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let yml_path = tmp.path().join("_extension.yml");
+        std::fs::write(&yml_path, b"title: T\nauthor: A\n").unwrap();
+
+        let mut registry = crate::engine::EngineRegistry::empty();
+        registry.register(Arc::new(make_ts_engine_with_extension_yml(
+            "legacy-python",
+            yml_path.clone(),
+        )));
+
+        let project = ProjectContext {
+            registry: Arc::new(registry),
+            ..Default::default()
+        };
+        let runtime = NativeRuntime::new();
+
+        let contributions = pass1_engine_extension_contributions(&runtime, &project);
+        assert_eq!(
+            contributions,
+            vec![(
+                "legacy-python".to_string(),
+                b"title: T\nauthor: A\n".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn pass1_engine_extension_contributions_unreadable_file_hashes_empty() {
+        // The file doesn't exist — must degrade to empty bytes (over-
+        // invalidation), not error or panic.
+        let mut registry = crate::engine::EngineRegistry::empty();
+        registry.register(Arc::new(make_ts_engine_with_extension_yml(
+            "legacy-python",
+            PathBuf::from("/does/not/exist/_extension.yml"),
+        )));
+        let project = ProjectContext {
+            registry: Arc::new(registry),
+            ..Default::default()
+        };
+        let runtime = NativeRuntime::new();
+
+        let contributions = pass1_engine_extension_contributions(&runtime, &project);
+        assert_eq!(
+            contributions,
+            vec![("legacy-python".to_string(), Vec::<u8>::new())]
+        );
+    }
+
+    /// Binding test for the ACTUAL wiring at `pass1_profile_with_cache`'s
+    /// `pass1_engine_extension_contributions(...)` call site — not a
+    /// hand-built `Pass1KeyInputs` (the `cache_key.rs` relational tests do
+    /// that, and never touch this call site) and not a direct call to the
+    /// gather fn (the `pass1_engine_extension_contributions_*` tests above
+    /// do that, and never touch this call site either). Drives the real
+    /// on-disk cache backend (`NativeRuntime::with_cache_dir`, the exact
+    /// wiring `commands/render.rs` uses) through the real private
+    /// `pass1_profile_with_cache`, twice, editing the registered engine's
+    /// `_extension.yml` bytes on disk in between — the exact author
+    /// workflow the decision-5 warning recommends.
+    ///
+    /// Revert binding: comment out (or stub to `Vec::new()`) the
+    /// `pass1_engine_extension_contributions` call at this function's
+    /// `extension_contributions` binding — the second run then hashes to
+    /// the SAME key as the first (nothing else in the key domain changed),
+    /// producing a cache HIT instead of a fresh entry, so only one cache
+    /// file exists after both runs and the `== 2` assertion below goes RED.
+    /// Verified live: see `.superpowers/sdd/plan6-task-5-report.md` "Fix 1".
+    #[tokio::test]
+    async fn engine_extension_yml_edit_produces_a_new_pass1_cache_entry_at_the_real_seam() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        install_legacy_python_fixture(tmp.path());
+        write_project_file(
+            &tmp.path().join("_quarto.yml"),
+            "project:\n  type: default\n",
+        );
+        write_project_file(&tmp.path().join("a.qmd"), "---\ntitle: A\n---\n\nProse.\n");
+
+        // Mirrors commands/render.rs's production wiring exactly:
+        // NativeRuntime::with_cache_dir(project.join(".quarto/cache")).
+        let cache_dir = tmp.path().join(".quarto/cache");
+        let runtime: Arc<dyn SystemRuntime> =
+            Arc::new(NativeRuntime::with_cache_dir(cache_dir.clone()));
+
+        let project =
+            ProjectContext::discover(tmp.path(), runtime.as_ref()).expect("discover project");
+        assert!(
+            project.registry.has_engine("legacy-python"),
+            "fixture engine must be registered"
+        );
+
+        let format = Format::html();
+        let doc_info = project
+            .files
+            .iter()
+            .find(|f| f.input.ends_with("a.qmd"))
+            .cloned()
+            .expect("a.qmd must be discovered as a project file");
+
+        // Run 1: whatever key the CURRENT _extension.yml bytes produce.
+        pass1_profile_with_cache(&runtime, &project, &format, &doc_info)
+            .await
+            .expect("pass1 run 1");
+
+        let profiles_dir = cache_dir.join("profiles");
+        let keys_after_first: std::collections::HashSet<String> = std::fs::read_dir(&profiles_dir)
+            .expect("profiles cache dir must exist after the first pass1 run")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            keys_after_first.len(),
+            1,
+            "exactly one cache entry after the first pass1 run; got {:?}",
+            keys_after_first
+        );
+
+        // Edit the SAME file the registry's TsEngine.extension_yml_path
+        // already points at — a comment-only byte edit is enough (decision
+        // 9: raw bytes, comment-only edits over-invalidate on purpose).
+        let extension_yml = tmp.path().join("_extensions/legacy-python/_extension.yml");
+        let mut edited = std::fs::read(&extension_yml).unwrap();
+        edited.extend_from_slice(b"\n# edited for the cache-key binding test\n");
+        std::fs::write(&extension_yml, &edited).unwrap();
+
+        // Run 2: same project (same registry, same doc) — only the
+        // extension's on-disk bytes changed.
+        pass1_profile_with_cache(&runtime, &project, &format, &doc_info)
+            .await
+            .expect("pass1 run 2");
+
+        let keys_after_second: std::collections::HashSet<String> = std::fs::read_dir(&profiles_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            keys_after_second.len(),
+            2,
+            "editing the registered engine's _extension.yml must produce a \
+             NEW pass1 cache entry (decision 9) via the REAL \
+             pass1_profile_with_cache seam — got the same cache-entry set \
+             as before the edit: {:?}",
+            keys_after_second
+        );
+        assert!(
+            keys_after_first.is_subset(&keys_after_second),
+            "the first run's cache entry must still be present — this test \
+             proves invalidation (a new key), not eviction of the old one"
+        );
+    }
+
+    // ── Plan 6 Phase 5: pass1_engine_resolution_warning (decision 5) ──────
+
+    /// Single claims-less engine: title names it, problem carries the
+    /// impact clause, detail names its path, hint carries both fixes.
+    /// Revert binding: dropping the impact clause or the path from the
+    /// message must fail this test.
+    #[test]
+    fn warning_single_engine_names_engine_path_and_impact() {
+        let engines = vec![(
+            "legacy-python".to_string(),
+            Some(PathBuf::from(
+                "_extensions/acme/legacy-python/_extension.yml",
+            )),
+        )];
+        let w = pass1_engine_resolution_warning(&engines, 3, 12);
+
+        assert!(
+            w.title.contains("legacy-python"),
+            "title must name the engine: {}",
+            w.title
+        );
+        let problem = w.problem.as_ref().expect("problem must be set");
+        let problem_text = format!("{problem:?}");
+        assert!(
+            problem_text.contains('3') && problem_text.contains("12"),
+            "problem must carry the impact clause (fell_through of total); got: {problem_text}"
+        );
+        let text = w.to_text(None);
+        assert!(
+            text.contains("_extensions/acme/legacy-python/_extension.yml"),
+            "message must name the engine's _extension.yml path; got:\n{text}"
+        );
+        assert!(
+            text.contains("_extension.yml") && text.contains("_quarto.yml"),
+            "hint must mention both fixes (extension claims: and _quarto.yml \
+             engines: table); got:\n{text}"
+        );
+    }
+
+    /// Multiple claims-less engines → one warning listing each engine and
+    /// its path.
+    #[test]
+    fn warning_multiple_engines_lists_each_with_path() {
+        let engines = vec![
+            (
+                "legacy-python".to_string(),
+                Some(PathBuf::from(
+                    "_extensions/acme/legacy-python/_extension.yml",
+                )),
+            ),
+            (
+                "legacy-r".to_string(),
+                Some(PathBuf::from("_extensions/acme/legacy-r/_extension.yml")),
+            ),
+        ];
+        let w = pass1_engine_resolution_warning(&engines, 5, 12);
+        let text = w.to_text(None);
+        assert!(
+            text.contains("legacy-python") && text.contains("legacy-r"),
+            "message must name every claims-less engine; got:\n{text}"
+        );
+        assert!(
+            text.contains("_extensions/acme/legacy-python/_extension.yml")
+                && text.contains("_extensions/acme/legacy-r/_extension.yml"),
+            "message must name every engine's _extension.yml path; got:\n{text}"
+        );
+        assert_eq!(
+            w.title, "2 engine extensions declare no static language claims",
+            "multi-engine title is plural and counts, not a single engine name"
+        );
+    }
+
+    /// `warning_silent_when_all_lift` (missing-test-pass guard for the
+    /// EMIT GATE, exercised end-to-end at the `run_inner` level in
+    /// `pass1_engine_resolution.rs`): this unit-level companion pins the
+    /// builder's own behavior — it always builds a message from whatever
+    /// `engines` list it's given; deciding whether to call it at all
+    /// (`fell_through > 0`) is the caller's job. See the integration test
+    /// for the full gate binding.
+    #[test]
+    fn warning_builder_is_pure_emission_decision_lives_in_caller() {
+        // An empty engines list still builds (just an empty detail list) —
+        // proves the builder itself has no gate opinion; `run_inner` is
+        // solely responsible for the `fell_through > 0` gate.
+        let w = pass1_engine_resolution_warning(&[], 0, 5);
+        assert_eq!(
+            w.title,
+            "0 engine extensions declare no static language claims"
+        );
+    }
+
+    /// Pure-predicate pin for `pass1_engine_resolution_should_warn`: the
+    /// gate keys ONLY on `fell_through`, never on whether
+    /// `engines_needing_load` happens to be non-empty. Revert binding:
+    /// change the function body to `!engines_needing_load.is_empty()` →
+    /// the `fell_through == 0` / non-empty-engines case flips to `true` →
+    /// RED.
+    #[test]
+    fn should_warn_keys_on_fell_through_not_engines_needing_load() {
+        let engines_non_empty = vec![("legacy-python".to_string(), None)];
+        assert!(
+            !pass1_engine_resolution_should_warn(0, &engines_non_empty),
+            "zero fell-through must stay silent even with engines registered"
+        );
+        assert!(
+            pass1_engine_resolution_should_warn(1, &engines_non_empty),
+            "any fell-through must open the gate"
+        );
+        assert!(
+            !pass1_engine_resolution_should_warn(0, &[]),
+            "zero fell-through, no engines: silent (unsurprising baseline)"
+        );
+    }
+
+    // ── Plan 6 Phase 5: warning GATE binding, exercised via real pass_one() ──
+    //
+    // These call the private `ProjectPipeline::pass_one` directly (reachable
+    // here because `mod tests` is a child of this module) against the
+    // committed `legacy-python` claims-less fixture
+    // (`tests/fixtures/extensions/legacy-python`), so the gate is tested
+    // against REAL `ProjectContext::discover`-built registry/tabled_engines
+    // state, not a hand-rolled stand-in. Pass-2 is never invoked — only
+    // `pass_one()` runs — so the fixture's stub `.js` (which throws if
+    // loaded) is never at risk.
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if from.is_dir() {
+                copy_dir_recursive(&from, &to);
+            } else {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+    }
+
+    fn install_legacy_python_fixture(project_dir: &Path) {
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extensions/legacy-python");
+        copy_dir_recursive(&src, &project_dir.join("_extensions/legacy-python"));
+    }
+
+    fn write_project_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Missing-test-pass (Plan 6 Phase 5): a project with the claims-less
+    /// `legacy-python` extension REGISTERED, but every document lifting via
+    /// P1-P3 (all markdown-only, no computational cells anywhere) — the
+    /// real `fell_through` tally must be `0`, even though
+    /// `engines_needing_load` is non-empty (the engine is registered and
+    /// untabled). This is the one scenario distinguishing the actual gate
+    /// (`fell_through > 0`) from the alternative
+    /// `!engines_needing_load(&tabled).is_empty()`.
+    ///
+    /// Revert binding: swap `run_inner`'s gate to
+    /// `!engines_needing_load(&tabled).is_empty()` — that alternative would
+    /// read this scenario's `engines_needing_load()` (asserted non-empty
+    /// below) and fire, while the correct gate — pinned by the
+    /// `fell_through == 0` assertion — stays silent.
+    #[tokio::test]
+    async fn warning_silent_when_all_lift() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        install_legacy_python_fixture(tmp.path());
+        write_project_file(
+            &tmp.path().join("_quarto.yml"),
+            "project:\n  type: default\n",
+        );
+        write_project_file(
+            &tmp.path().join("a.qmd"),
+            "---\ntitle: A\n---\n\nProse only, no cells.\n",
+        );
+        write_project_file(
+            &tmp.path().join("b.qmd"),
+            "---\ntitle: B\n---\n\nMore prose, still no cells.\n",
+        );
+
+        let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+        let mut project =
+            ProjectContext::discover(tmp.path(), runtime.as_ref()).expect("discover project");
+        assert!(
+            project.registry.has_engine("legacy-python"),
+            "fixture engine must be registered"
+        );
+
+        let options = RenderToFileOptions::default();
+        let project_type: Box<dyn ProjectType> = Box::new(DefaultProjectType);
+        let pipeline = ProjectPipeline::new(
+            &mut project,
+            project_type,
+            Format::html(),
+            "html",
+            &options,
+            runtime.clone(),
+        );
+
+        let (profiles, failures) = pipeline.pass_one().await;
+        assert!(
+            failures.is_empty(),
+            "no pass-1 failures expected: {:?}",
+            failures
+        );
+        let fell_through = profiles
+            .iter()
+            .filter(|p| p.engine_resolution.is_none())
+            .count();
+        assert_eq!(
+            fell_through, 0,
+            "every markdown-only doc must lift via P2 — the real gate stays closed"
+        );
+
+        // The discriminating property: engines_needing_load is NON-empty
+        // (the engine is registered, untabled) even though nothing fell
+        // through. A buggy gate keyed on this alone would fire here.
+        let needing = project
+            .registry
+            .engines_needing_load(&project.tabled_engines);
+        assert!(
+            !needing.is_empty(),
+            "legacy-python must be reported as needing load (registered, \
+             untabled) — this is what makes the scenario discriminating"
+        );
+
+        // The actual gate function, fed these REAL inputs, must say no.
+        // Revert binding: change `pass1_engine_resolution_should_warn`'s
+        // body to `!engines_needing_load.is_empty()` → this assertion
+        // flips to `true` → RED.
+        assert!(
+            !pass1_engine_resolution_should_warn(fell_through, &needing),
+            "the gate must stay closed when every doc lifted, even though \
+             engines_needing_load is non-empty"
+        );
+    }
+
+    /// Companion "gate fires" case: a computational cell with no claim
+    /// table anywhere falls through, and `engines_needing_load` also
+    /// reports the engine — both candidate gate expressions agree here,
+    /// unlike `warning_silent_when_all_lift`.
+    #[tokio::test]
+    async fn warning_gate_condition_true_when_a_doc_falls_through() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        install_legacy_python_fixture(tmp.path());
+        write_project_file(
+            &tmp.path().join("_quarto.yml"),
+            "project:\n  type: default\n",
+        );
+        write_project_file(
+            &tmp.path().join("c.qmd"),
+            "---\ntitle: C\n---\n\n```{python}\nprint('hi')\n```\n",
+        );
+
+        let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+        let mut project =
+            ProjectContext::discover(tmp.path(), runtime.as_ref()).expect("discover project");
+
+        let options = RenderToFileOptions::default();
+        let project_type: Box<dyn ProjectType> = Box::new(DefaultProjectType);
+        let pipeline = ProjectPipeline::new(
+            &mut project,
+            project_type,
+            Format::html(),
+            "html",
+            &options,
+            runtime.clone(),
+        );
+
+        let (profiles, _failures) = pipeline.pass_one().await;
+        let fell_through = profiles
+            .iter()
+            .filter(|p| p.engine_resolution.is_none())
+            .count();
+        assert_eq!(
+            fell_through, 1,
+            "the untabled computational-cell doc must fall through"
+        );
+        let needing = project
+            .registry
+            .engines_needing_load(&project.tabled_engines);
+        assert!(
+            !needing.is_empty(),
+            "legacy-python must be reported as needing load here too"
+        );
+        assert!(
+            pass1_engine_resolution_should_warn(fell_through, &needing),
+            "the gate must open when at least one doc fell through"
+        );
+    }
 
     #[test]
     fn default_project_type_reports_kind() {
@@ -1790,6 +3173,8 @@ mod tests {
             is_single_file: true,
             files: Vec::new(),
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let t = DefaultProjectType;
         let index = ProjectIndex::default();
@@ -1799,7 +3184,7 @@ mod tests {
             "",
         );
 
-        assert!(t.pre_render(&mut project, &index).await.is_ok());
+        assert!(t.pre_render(&mut project, &index, &runtime).await.is_ok());
         let mut diags: Vec<DiagnosticMessage> = Vec::new();
         assert!(
             t.post_render(
@@ -2079,6 +3464,8 @@ mod tests {
             is_single_file: false,
             files: Vec::new(),
             output_dir: PathBuf::from("/p"),
+
+            ..Default::default()
         };
         assert_eq!(
             project_type_for(&make(ProjectKind::Default)).kind(),
@@ -2088,10 +3475,11 @@ mod tests {
             project_type_for(&make(ProjectKind::Website)).kind(),
             ProjectKind::Website
         );
-        // Book / Manuscript fall back to Default for Phase 1.
+        // Book has a real ProjectType; Manuscript still falls back to
+        // Default for Phase 1.
         assert_eq!(
             project_type_for(&make(ProjectKind::Book)).kind(),
-            ProjectKind::Default
+            ProjectKind::Book
         );
         assert_eq!(
             project_type_for(&make(ProjectKind::Manuscript)).kind(),

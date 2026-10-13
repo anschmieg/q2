@@ -13,6 +13,7 @@ import { render } from '@testing-library/react';
 import { Ast } from '../framework';
 import type { PandocAST } from '../framework';
 import { previewRegistry } from './registry';
+import { rematerializeScript } from './chromeSlots';
 
 function astJson(meta: Record<string, unknown>, blocks: any[] = []): string {
     const ast: PandocAST = {
@@ -45,7 +46,7 @@ const ms = (c: string) => ({ t: 'MetaString', c });
 const mb = (c: boolean) => ({ t: 'MetaBool', c });
 const mm = (entries: Record<string, unknown>) => ({
     t: 'MetaMap',
-    c: Object.entries(entries).map(([key, value]) => ({ key, value })),
+    c: entries,
 });
 
 // Snapshot body.className so other tests in the suite aren't observed
@@ -131,27 +132,100 @@ describe('PreviewDocument body container', () => {
         // appended — same as the Rust template
         // (`test_full_template_toc_present_yields_empty_body_class`).
         mount({
-            rendered: {
-                t: 'MetaMap',
-                c: [
-                    {
-                        key: 'navigation',
-                        key_source: null,
-                        value: {
-                            t: 'MetaMap',
-                            c: [
-                                {
-                                    key: 'toc',
-                                    key_source: null,
-                                    value: { t: 'MetaString', c: '<nav id="TOC"></nav>' },
-                                },
-                            ],
-                        },
-                    },
-                ],
-            },
+            rendered: renderedNavigation({ toc: '<nav id="TOC"></nav>' }),
         });
         expect(document.body.className).toBe('quarto-light');
+    });
+
+    it('sidebar page with no TOC → fullcontent composes with the sidebar classes', () => {
+        // bd-no-toc-reserves-margin-column-s8nonx0w: `fullcontent` and
+        // the sidebar-supplied structural classes are orthogonal. The
+        // preview mirrors the Rust compose
+        // (`test_full_template_fullcontent_composes_with_sidebar_body_classes`).
+        mount({
+            rendered: mm({
+                navigation: mm({ 'body-classes': ms('nav-sidebar docked') }),
+            }),
+        });
+        expect(document.body.className).toBe(
+            'nav-sidebar docked fullcontent quarto-light',
+        );
+    });
+
+    it('sidebar page with a TOC → no fullcontent', () => {
+        mount({
+            rendered: mm({
+                navigation: mm({
+                    'body-classes': ms('nav-sidebar docked'),
+                    toc: ms('<ul><li>x</li></ul>'),
+                }),
+            }),
+        });
+        expect(document.body.className).toBe('nav-sidebar docked quarto-light');
+    });
+
+    it('margin categories occupy the right margin → no fullcontent', () => {
+        mount({
+            rendered: mm({
+                navigation: mm({
+                    margin_categories: ms('<div class="quarto-listing-category"></div>'),
+                }),
+            }),
+        });
+        expect(document.body.className).toBe('quarto-light');
+    });
+
+    it('page-layout: full with a left sidebar → main.column-page-right, no fullcontent', () => {
+        // bd-no-toc-reserves-margin-column-s8nonx0w: the full-layout
+        // remedy is a column class on <main>, not a body class — Q1
+        // applies one or the other, never both.
+        const { container } = mount({
+            'page-layout': ms('full'),
+            rendered: mm({
+                navigation: mm({
+                    'body-classes': ms('nav-sidebar docked'),
+                    sidebar: ms('<nav id="quarto-sidebar">S</nav>'),
+                }),
+            }),
+        });
+        expect(
+            container.querySelector(
+                'main.content.column-page-right#quarto-document-content',
+            ),
+        ).not.toBeNull();
+        expect(document.body.className).toBe('nav-sidebar docked quarto-light');
+    });
+
+    it('page-layout: full with both margins free → main.column-page', () => {
+        const { container } = mount({ 'page-layout': ms('full') });
+        expect(
+            container.querySelector('main.content.column-page#quarto-document-content'),
+        ).not.toBeNull();
+    });
+
+    it('page-layout: full with both margins occupied → main.column-body', () => {
+        const { container } = mount({
+            'page-layout': ms('full'),
+            rendered: mm({
+                navigation: mm({
+                    sidebar: ms('<nav id="quarto-sidebar">S</nav>'),
+                    toc: ms('<ul><li>x</li></ul>'),
+                }),
+            }),
+        });
+        expect(
+            container.querySelector('main.content.column-body#quarto-document-content'),
+        ).not.toBeNull();
+    });
+
+    it('page-layout: article sets no column class on main', () => {
+        const { container } = mount({
+            rendered: mm({
+                navigation: mm({ sidebar: ms('<nav id="quarto-sidebar">S</nav>') }),
+            }),
+        });
+        const main = container.querySelector('main#quarto-document-content');
+        expect(main!.className).toBe('content');
     });
 
     it('cleanup: unmount restores the pre-mount body.className', () => {
@@ -316,14 +390,15 @@ describe('PreviewDocument iframe document.title wiring', () => {
 // Phase F.2 (bd-kw93.15): chrome HTML-injection slots
 // ──────────────────────────────────────────────────────────────────
 
-/** Build a `MetaMap` value carrying `entries`. Mirrors the JSON
- *  shape from `crates/pampa/src/writers/json.rs::write_config_value`
- *  (with `key_source: null`). */
+/** Build a `MetaMap` value carrying `entries`. `c` is a plain object
+ *  keyed by metadata key — the `JsonConfig { raw: false }` shape
+ *  `write_config_value` emits (see `getMetaPath`'s doc comment in
+ *  `framework/meta.ts`), not the `{key, key_source, value}`-triple
+ *  array shape, which `getMetaPath` explicitly rejects. */
 function metaMap(entries: Array<{ key: string; value: unknown }>): unknown {
-    return {
-        t: 'MetaMap',
-        c: entries.map((e) => ({ key: e.key, key_source: null, value: e.value })),
-    };
+    const c: Record<string, unknown> = {};
+    for (const e of entries) c[e.key] = e.value;
+    return { t: 'MetaMap', c };
 }
 
 /** Convenience: shape the `meta.rendered.navigation.<key>: html`
@@ -384,13 +459,15 @@ describe('PreviewDocument chrome injection (Phase F.2)', () => {
         const tocInnerUl =
             '<ul><li data-test="toc-li"><a href="#sec">Section</a></li></ul>';
         const { container } = mount({
-            navigation: metaMap([
-                {
-                    key: 'toc',
-                    value: metaMap([{ key: 'title', value: ms('Contents') }]),
-                },
-            ]),
-            rendered: renderedNavigation({ toc: tocInnerUl }),
+            // The title comes from `rendered.navigation['toc-title']`,
+            // not `navigation.toc.title`: it carries inline markup, so
+            // TocRenderTransform renders it and both the preview and
+            // q2 render's template read the rendered value
+            // (bd-toc-smart-quotes-6nro57ed).
+            rendered: renderedNavigation({
+                toc: tocInnerUl,
+                'toc-title': 'Contents',
+            }),
         });
         // Wrapper structure mirrors template.rs:189-200.
         const margin = container.querySelector(
@@ -408,15 +485,33 @@ describe('PreviewDocument chrome injection (Phase F.2)', () => {
         expect(tocNav!.querySelector('li[data-test="toc-li"]')).not.toBeNull();
     });
 
-    it('TOC: missing navigation.toc.title omits the <h2>', () => {
+    it('TOC: missing rendered toc-title omits the <h2>', () => {
         const tocInnerUl = '<ul><li>Sec</li></ul>';
         const { container } = mount({
-            // No `navigation.toc.title` → tocTitle is empty → no <h2>.
+            // No `rendered.navigation['toc-title']` → empty → no <h2>.
             rendered: renderedNavigation({ toc: tocInnerUl }),
         });
         const tocNav = container.querySelector('#quarto-margin-sidebar nav#TOC');
         expect(tocNav).not.toBeNull();
         expect(tocNav!.querySelector('h2#toc-title')).toBeNull();
+    });
+
+    it('TOC: toc-title markup renders as HTML, not escaped text', () => {
+        // `toc-title: "On **this** page"` reaches the preview as
+        // rendered HTML. Rendering it as a React text node — which is
+        // what reading `navigation.toc.title` used to do — would show
+        // the tags literally, or drop the title entirely once the
+        // metadata value became PandocInlines.
+        const { container } = mount({
+            rendered: renderedNavigation({
+                toc: '<ul><li>Sec</li></ul>',
+                'toc-title': 'On <strong>this</strong> page',
+            }),
+        });
+        const h2 = container.querySelector('#quarto-margin-sidebar h2#toc-title');
+        expect(h2).not.toBeNull();
+        expect(h2!.querySelector('strong')).not.toBeNull();
+        expect(h2!.textContent).toBe('On this page');
     });
 
     it('renders page-navigation INSIDE main, after children', () => {
@@ -569,7 +664,11 @@ describe('PreviewDocument chrome injection (Phase F.2)', () => {
                 },
             ]),
         });
-        expect(document.body.className).toBe('nav-sidebar floating quarto-light');
+        // No TOC and no margin content, so `fullcontent` composes on
+        // top since bd-no-toc-reserves-margin-column-s8nonx0w.
+        expect(document.body.className).toBe(
+            'nav-sidebar floating fullcontent quarto-light',
+        );
     });
 
     it('user-set top-level body-classes still wins over sidebar-render', () => {
@@ -625,6 +724,76 @@ describe('PreviewDocument chrome injection (Phase F.2)', () => {
         ).toBeNull();
     });
 
+    // bd-5oyk1xce: engine include-in-header can be executable (marimo's
+    // islands module + its inline __MARIMO_EXPORT_CONTEXT__ marker). A
+    // <script> parsed via innerHTML is inert; HeaderIncludesEffect must
+    // re-materialize it so the browser runs it. jsdom (no runScripts) can't
+    // observe execution — that is proven by the real-browser e2e
+    // (engine-capture-splice-marimo). These bind the re-materialization
+    // logic + the head delivery/cleanup wiring.
+    it('rematerializeScript returns a fresh executable <script> copying attrs + inline body', () => {
+        // Build an INERT script the way innerHTML does (the exact node
+        // HeaderIncludesEffect starts from).
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML =
+            '<script type="module" src="https://cdn.jsdelivr.net/npm/@marimo-team/islands/main.js" data-x="1"></script>';
+        const inert = wrapper.firstElementChild as HTMLScriptElement;
+
+        const fresh = rematerializeScript(inert);
+
+        // A DISTINCT node (the whole point — the inert one won't execute).
+        expect(fresh).not.toBe(inert);
+        expect(fresh.tagName).toBe('SCRIPT');
+        expect(fresh.getAttribute('type')).toBe('module');
+        expect(fresh.getAttribute('src')).toBe(
+            'https://cdn.jsdelivr.net/npm/@marimo-team/islands/main.js',
+        );
+        expect(fresh.getAttribute('data-x')).toBe('1');
+
+        // Inline body is copied verbatim (e.g. __MARIMO_EXPORT_CONTEXT__).
+        const inlineWrapper = document.createElement('div');
+        inlineWrapper.innerHTML =
+            '<script>window.__MARIMO_EXPORT_CONTEXT__ = { session: "s" };</script>';
+        const inlineFresh = rematerializeScript(
+            inlineWrapper.firstElementChild as HTMLScriptElement,
+        );
+        expect(inlineFresh.textContent).toBe(
+            'window.__MARIMO_EXPORT_CONTEXT__ = { session: "s" };',
+        );
+    });
+
+    it('header-includes <script> lands in document.head (re-materialized) with cleanup', () => {
+        const scriptHtml =
+            '<script type="module" src="https://cdn.jsdelivr.net/npm/@marimo-team/islands@0.23.13/dist/main.js" data-test="islands"></script>';
+        const { unmount } = mount({
+            rendered: metaMap([
+                {
+                    key: 'includes',
+                    value: metaMap([
+                        {
+                            key: 'header',
+                            value: { t: 'MetaList', c: [ms(scriptHtml)] },
+                        },
+                    ]),
+                },
+            ]),
+        });
+
+        const script = document.head.querySelector(
+            'script[data-test="islands"][data-q2-header-include]',
+        ) as HTMLScriptElement | null;
+        expect(script).not.toBeNull();
+        expect(script!.getAttribute('type')).toBe('module');
+        expect(script!.getAttribute('src')).toBe(
+            'https://cdn.jsdelivr.net/npm/@marimo-team/islands@0.23.13/dist/main.js',
+        );
+
+        unmount();
+        expect(
+            document.head.querySelector('script[data-test="islands"]'),
+        ).toBeNull();
+    });
+
     it('minimal mode skips chrome injection (matches Rust minimal template)', () => {
         // Minimal mode is the rust template that has no chrome
         // substitutions. PreviewDocument's minimal branch returns a
@@ -639,5 +808,53 @@ describe('PreviewDocument chrome injection (Phase F.2)', () => {
         // No chrome elements injected in minimal mode.
         expect(container.querySelector('nav.navbar')).toBeNull();
         expect(container.querySelector('footer.footer')).toBeNull();
+    });
+});
+
+describe('PreviewDocument draft alert (bd-3cpv7dah)', () => {
+    // `DraftAlertTransform` publishes the localized label at
+    // `meta.rendered.draft-alert-text` for `draft: true` pages (it runs in
+    // the q2-preview pipeline; only the template markup was render-only).
+    // The preview mirrors template.rs: the banner is the first thing in
+    // the body, BEFORE the site header, with the icon as an `<i>` sibling
+    // followed by a bare text node — exactly Q1's markup.
+    const NAVBAR = '<nav class="navbar"><span>site</span></nav>';
+
+    it('renders Q1\'s banner markup before the header when the label is present', () => {
+        const { container } = mount({
+            rendered: mm({
+                'draft-alert-text': ms('Borrador'),
+                navigation: mm({ navbar: ms(NAVBAR) }),
+            }),
+        });
+        const banner = container.querySelector('div#quarto-draft-alert');
+        expect(banner).not.toBeNull();
+        expect(banner!.className).toBe('alert alert-warning');
+        expect(banner!.innerHTML).toBe('<i class="bi bi-pencil-square"></i>Borrador');
+
+        const header = container.querySelector('header#quarto-header');
+        expect(header).not.toBeNull();
+        // Banner precedes the header (Q1: insertBefore(header.firstChild);
+        // Q2 template: the banner sits directly above `$quarto-header()$`).
+        expect(
+            banner!.compareDocumentPosition(header!) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+    });
+
+    it('renders the banner on a page with no site header at all', () => {
+        const { container } = mount({
+            rendered: mm({ 'draft-alert-text': ms('Draft') }),
+        });
+        const banner = container.querySelector('div#quarto-draft-alert.alert.alert-warning');
+        expect(banner).not.toBeNull();
+        expect(banner!.textContent).toBe('Draft');
+        expect(container.querySelector('header#quarto-header')).toBeNull();
+    });
+
+    it('renders no banner when the label is absent (non-draft page)', () => {
+        const { container } = mount({
+            rendered: mm({ navigation: mm({ navbar: ms(NAVBAR) }) }),
+        });
+        expect(container.querySelector('#quarto-draft-alert')).toBeNull();
     });
 });

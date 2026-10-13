@@ -1,0 +1,75 @@
+---
+title: "Project type not yet implemented"
+description: "`project.type: manuscript` is accepted for forward compatibility but renders with default-project behavior."
+code: Q-5-18
+subsystem: project
+status: stub
+since: "99.9.9"
+categories:
+  - project
+---
+
+# `Q-5-18` — Project type not yet implemented
+
+> `project.type: manuscript` is accepted for forward compatibility but
+> renders with default-project behavior.
+
+## What this means
+
+Quarto 1 supports a `manuscript` project type. Quarto 2 does not
+implement it yet. (`book` projects are implemented — see the
+[book projects guide](../../guides/projects/book.qmd) — so this
+warning no longer applies to them.)
+
+The type name is still accepted, so a Quarto 1 manuscript project does
+not fail outright on it. But nothing implements the behavior: your
+documents render individually, without manuscript-specific structure
+such as notebook linking or MECA packaging.
+
+The render succeeds. The output is a set of standalone HTML documents
+rather than a manuscript.
+
+## Why this happens
+
+- **A Quarto 1 manuscript project** rendered with Quarto 2.
+- **A project started from a Quarto 1 manuscript template.**
+
+Nothing is wrong with the configuration — the warning reports a gap in
+this Quarto version.
+
+## How to fix
+
+There is no configuration that makes manuscript behavior work in this
+version. Your options are:
+
+**Keep using Quarto 1 for this project.** For a manuscript that
+depends on notebook linking or MECA packaging, this is the practical
+answer today.
+
+**Switch to `website`** if what you need is mainly navigation between
+documents. A website project gives you a sidebar, search, and
+cross-document links, which covers a good deal of what a manuscript
+provides:
+
+```yaml
+project:
+  type: website
+
+website:
+  sidebar:
+    contents:
+      - index.qmd
+      - chapter-01.qmd
+      - chapter-02.qmd
+```
+
+You lose manuscript-specific notebook linking and packaging.
+
+**Leave it as is.** The configuration stays valid, and the warning
+disappears when manuscript is implemented.
+
+## Related errors
+
+- [`Q-5-17`](Q-5-17.qmd) — a type name that matches nothing at all.
+- [`Q-16-9`](../extension/Q-16-9.qmd) — the same "falls back to default
+  behavior" outcome, for an extension that omits its base type.

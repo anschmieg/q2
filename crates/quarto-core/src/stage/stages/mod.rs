@@ -46,20 +46,59 @@ mod code_highlight;
 mod compile_theme_css;
 mod document_profile;
 mod engine_execution;
+// Equation-number encoding (bd-vlhi2zkj): turns the reserved
+// `quarto-eq-number` attribute into `\tag{N}` / ` \qquad(N)` / a sibling
+// label for the selected math renderer. Runs after user post filters so
+// Lua can rewrite the attribute first. Included on native and WASM.
+mod equation_number;
 mod include_expansion;
 mod include_resolve;
+mod inline_table_css;
 mod language_resolve;
 mod link_resolution;
-mod listing_item_info;
+pub(crate) mod listing_item_info;
+mod source_conversion;
 // Math-mode stage: injects a math-rendering JS engine (MathJax / KaTeX)
 // when the document contains Math elements. Included on both native
 // and WASM pipelines (math display is safe under iframe reinit).
 mod math_js;
+// Native MathML (bd-3evfzwal): converts every `Inline::Math` with
+// quarto-math when `html-math-method: mathml`; leftovers fall back to
+// MathJax via math_js. Included on native and WASM.
+mod math_ml;
 mod metadata_merge;
+// Pandoc-hybrid leg's writer stage. `prepare()` is pure and ungated (it builds
+// the `PandocRequest` for the native executor and the wasm host alike);
+// process spawning, disk extraction of the share tree and the typst pre-step
+// stay native-only inside the module.
+mod pandoc_write;
+// R1: ungated (builds the `PandocRequest`; no process, no `std::fs`), so it
+// is testable natively and shared with the wasm pipeline.
+mod pandoc_prepare;
 mod parse_document;
 mod pre_engine_sugaring;
+mod prefetch_remote_images;
+mod rasterize_svg_images;
 mod render_html;
+mod unexecuted_cell_count;
+// book-projects P2c: flushes queued resource copies (images, etc.)
+// through a real `OutputSink` before `TypstCompileStage` shells out to
+// `typst compile`. Native-only, like `pandoc_write`/`typst_compile` —
+// exists only on the Pandoc-hybrid Typst leg.
+#[cfg(not(target_arch = "wasm32"))]
+mod resource_copy_flush;
 mod resource_report;
+// Tabsets-sync JS injection (bd-toc-tabset-titles-zq93gjvf): vendors
+// the grouped-tabset sync module as a Project-scoped artifact whenever
+// Bootstrap is active. Same WASM-exclusion reasoning as `bootstrap_js`.
+#[cfg(not(target_arch = "wasm32"))]
+mod tabsets_js;
+// pandoc-hybrid-typst Phase 2: compiles PandocWriteStage's intermediate
+// `.typ` output to PDF via a real `typst compile` subprocess. Native-only
+// for the same reason as `pandoc_write`: shells out to a real binary, no
+// WASM equivalent.
+#[cfg(not(target_arch = "wasm32"))]
+mod typst_compile;
 mod unwrap_profile;
 mod user_filters;
 
@@ -78,19 +117,46 @@ pub use clipboard_js::ClipboardJsStage;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use clipboard_js::{CLIPBOARD_JS, CODE_COPY_INIT_JS};
 pub use code_highlight::CodeHighlightStage;
-pub use compile_theme_css::{CompileThemeCssStage, theme_fingerprint};
+pub use compile_theme_css::{
+    CompileThemeCssStage, SassPerfCounters, print_sass_stats_if_enabled, sass_cache_version,
+    sass_perf_counters, theme_fingerprint,
+};
 pub use document_profile::DocumentProfileStage;
 pub use engine_execution::{ENGINE_CAPTURE_KIND, EngineExecutionStage};
-pub use include_expansion::{IncludeExpansionStage, extract_include_path};
+pub use equation_number::{
+    EQ_NUMBER_LABEL_CLASS, EQ_SIBLING_NUMBER_CLASS, EquationNumberStage, NumberEncoding,
+};
+pub use include_expansion::{
+    IncludeExpansionStage, collect_include_paths, expand_document_includes, extract_include_path,
+};
 pub use include_resolve::IncludeResolveStage;
+pub use inline_table_css::{InlineTableCssStage, inline_table_css};
 pub use language_resolve::LanguageResolveStage;
 pub use link_resolution::LinkResolutionStage;
 pub use listing_item_info::ListingItemInfoStage;
 pub use math_js::{DEFAULT_KATEX_URL_BASE, DEFAULT_MATHJAX_URL, MathEngine, MathJsStage};
+pub use math_ml::MathMlStage;
 pub use metadata_merge::MetadataMergeStage;
+pub use pandoc_prepare::PandocPrepareStage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pandoc_write::retain_temp_json_unless_success;
+pub use pandoc_write::{PandocWriteStage, PreparedPandoc, TypstPrepInputs};
+pub use prefetch_remote_images::{PrefetchRemoteImagesStage, REMOTE_DIR, REMOTE_SRC_ATTR};
+pub use rasterize_svg_images::{RASTER_DIR, RASTER_SRC_ATTR, RasterizeSvgImagesStage};
+pub use unexecuted_cell_count::{UnexecutedCellCountStage, count_engine_cells};
+// Pure, so ungated (the wasm host classifies a completion with it); the path
+// `stages::classify_pandoc_completion` is unchanged.
+pub use crate::pandoc_filters::diagnostics::classify_pandoc_completion;
 pub use parse_document::ParseDocumentStage;
 pub use pre_engine_sugaring::PreEngineSugaringStage;
 pub use render_html::RenderHtmlBodyStage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use resource_copy_flush::ResourceCopyFlushStage;
 pub use resource_report::ResourceReportStage;
+pub use source_conversion::SourceConversionStage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use tabsets_js::TabsetsJsStage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use typst_compile::TypstCompileStage;
 pub use unwrap_profile::UnwrapProfileStage;
 pub use user_filters::UserFiltersStage;

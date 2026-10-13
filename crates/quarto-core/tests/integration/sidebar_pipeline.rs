@@ -182,11 +182,16 @@ fn pipeline_renders_sidebar_for_two_page_website() {
     // sidebar, the body must carry `nav-sidebar floating`; without these
     // classes the grid mixin produces no left sidebar column and the
     // sidebar falls below the page content. bd-mtzry appends a color-mode
-    // class (`quarto-light`) after the structural classes, so the full
-    // expected body class is `"nav-sidebar floating quarto-light"`.
+    // class (`quarto-light`) after the structural classes. Neither page
+    // renders a TOC or margin content, so since
+    // bd-no-toc-reserves-margin-column-s8nonx0w `fullcontent` also
+    // composes in — the class that reclaims the empty right margin
+    // column, previously unreachable for any page in a sidebar. The
+    // full expected body class is
+    // `"nav-sidebar floating fullcontent quarto-light"`.
     assert!(
-        index_html.contains("<body class=\"nav-sidebar floating quarto-light\">"),
-        "index page body must carry nav-sidebar+floating+quarto-light classes; \
+        index_html.contains("<body class=\"nav-sidebar floating fullcontent quarto-light\">"),
+        "index page body must carry nav-sidebar+floating+fullcontent+quarto-light classes; \
          got body tag: {}",
         index_html
             .find("<body")
@@ -194,8 +199,8 @@ fn pipeline_renders_sidebar_for_two_page_website() {
                 [i..(i + 80).min(index_html.len())])
     );
     assert!(
-        about_html.contains("<body class=\"nav-sidebar floating quarto-light\">"),
-        "about page body must carry nav-sidebar+floating+quarto-light classes; \
+        about_html.contains("<body class=\"nav-sidebar floating fullcontent quarto-light\">"),
+        "about page body must carry nav-sidebar+floating+fullcontent+quarto-light classes; \
          got body tag: {}",
         about_html
             .find("<body")
@@ -468,6 +473,64 @@ fn pipeline_omits_sidebar_header_when_title_false() {
     assert!(!index_html.contains("sidebar-title"));
 }
 
+/// bd-sidebar-title-with-navbar-82wxow6m: when the page also renders a
+/// navbar, the sidebar's own title is suppressed end-to-end — Q1's
+/// `sidebar.ejs:51` gates the title block on `!navbar`. Same fixture as
+/// `pipeline_renders_website_title_in_sidebar_header_by_default` plus a
+/// `navbar:` block; the `navbar-brand` assertion is the positive control
+/// that the navbar really rendered.
+#[test]
+fn pipeline_omits_sidebar_header_when_navbar_present() {
+    let (_dir, outputs) = render_project(|project_dir| {
+        write(
+            &project_dir.join("_quarto.yml"),
+            &[
+                "project:\n  type: website\n  output-dir: _site\n",
+                "website:\n  title: \"Site\"\n",
+                "  navbar:\n    left:\n      - href: index.qmd\n        text: Home\n",
+                "  sidebar:\n    contents:\n      - index.qmd\n      - about.qmd\n",
+            ]
+            .concat(),
+        );
+        write(
+            &project_dir.join("index.qmd"),
+            "---\ntitle: Home\n---\n\nWelcome.\n",
+        );
+        write(
+            &project_dir.join("about.qmd"),
+            "---\ntitle: About\n---\n\nAbout us.\n",
+        );
+    });
+
+    let index_html = find_html(&outputs, "index");
+    // Positive control: the fixture really does render a navbar, so the
+    // two negative assertions below are about the gate, not about a
+    // navbar that failed to appear.
+    assert!(
+        index_html.contains("navbar-brand"),
+        "fixture must render a navbar; got first 1200 chars: {}",
+        &index_html[..index_html.len().min(1200)]
+    );
+    // Positive control: suppression must not become deletion. Both
+    // assertions below are negative, so without this the test would
+    // still pass if the sidebar vanished entirely under a navbar.
+    assert!(
+        index_html.contains("sidebar-menu-container"),
+        "the sidebar itself must still render under a navbar — only its title is suppressed; got first 1200 chars: {}",
+        &index_html[..index_html.len().min(1200)]
+    );
+    assert!(
+        !index_html.contains("sidebar-header"),
+        "a navbar must suppress the sidebar header; got first 1200 chars: {}",
+        &index_html[..index_html.len().min(1200)]
+    );
+    assert!(
+        !index_html.contains("sidebar-title"),
+        "a navbar must suppress the sidebar title; got first 1200 chars: {}",
+        &index_html[..index_html.len().min(1200)]
+    );
+}
+
 /// `sidebar.title: "Custom"` renders literally and wins over
 /// `website.title`.
 #[test]
@@ -498,5 +561,58 @@ fn pipeline_renders_explicit_sidebar_title_literally() {
     assert!(
         !index_html.contains("<a href=\"./\">Site</a>"),
         "website.title must not appear when sidebar.title is explicit"
+    );
+}
+
+// === bd-sidebar-section-text-ignored-sdp5g7ns =============================
+
+/// A sidebar entry with `text:` + `file:` + `contents:` (a section
+/// with an explicit landing page) must display its configured `text:`
+/// — not the landing page's title. Before the fix, the parser dropped
+/// `text:` in the Section branch and `enrich_text_from_index` filled
+/// the gap with the page title.
+#[test]
+fn pipeline_section_with_text_key_shows_configured_text() {
+    let (_dir, outputs) = render_project(|project_dir| {
+        write(
+            &project_dir.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\n\
+             website:\n  sidebar:\n    contents:\n\
+             \x20     - text: \"Short Name\"\n\
+             \x20       file: landing.qmd\n\
+             \x20       contents:\n\
+             \x20         - inner.qmd\n\
+             \x20     - index.qmd\n",
+        );
+        write(
+            &project_dir.join("index.qmd"),
+            "---\ntitle: Home\n---\n\nWelcome.\n",
+        );
+        write(
+            &project_dir.join("landing.qmd"),
+            "---\ntitle: The Much Longer Landing Page Title\n---\n\nLanding.\n",
+        );
+        write(
+            &project_dir.join("inner.qmd"),
+            "---\ntitle: Inner\n---\n\nInner.\n",
+        );
+    });
+
+    // Inspect a page other than landing.html so the landing page's
+    // title can only appear via the sidebar (not the page's own
+    // <title>/<h1>).
+    let index_html = find_html(&outputs, "index");
+    assert!(
+        index_html.contains("class=\"sidebar-item-text sidebar-link\">Short Name</a>"),
+        "sidebar section header must show the configured `text:`; \
+         got sidebar region: {}",
+        index_html
+            .find("<nav id=\"quarto-sidebar\"")
+            .map_or("<no sidebar nav>", |i| &index_html
+                [i..(i + 2000).min(index_html.len())])
+    );
+    assert!(
+        !index_html.contains("The Much Longer Landing Page Title"),
+        "the landing page's title must not leak into another page's sidebar"
     );
 }

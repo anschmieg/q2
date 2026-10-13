@@ -1,10 +1,15 @@
-# Single-file `q2 preview`: the VFS dependency-bootstrapping problem
+---
+title: 'Single-file `q2 preview`: the VFS dependency-bootstrapping problem'
+date: 2026-06-16
+description: 'Investigates how single-file `q2 preview` can learn which sibling files a deck needs before the in-browser file system is populated, weighing static pre-resolution, lazy fetching and render-driven discovery.'
+status: draft  # design exploration — *no implementation committed beyond bd-kpuweafo's direct-image sync*. The point of this doc is to map the space before we commit to a mechanism, because the "obvious" fix (parse harder) has a non-obvious circularity.
+braid:
+  strand: bd-9cyza5vy  # design exploration
+  priority: P2
+  labels: [preview]
+---
 
-**Strand:** bd-9cyza5vy (design exploration)
 **Discovered-from:** bd-kpuweafo (which shipped a partial, direct-image-only fix)
-**Status:** design exploration — *no implementation committed beyond bd-kpuweafo's
-direct-image sync*. The point of this doc is to map the space before we commit to
-a mechanism, because the "obvious" fix (parse harder) has a non-obvious circularity.
 
 ## The core problem (the bootstrapping paradox)
 
@@ -62,7 +67,7 @@ direct `Image` URLs (via bd-kpuweafo, for *sync*) are handled. The full set:
 - `Image` URLs `![](./img.png)` — in the deck **and inside included files**.
 - `_brand.yml` (done: bd-ggvq1j68) and themes (`theme: custom.scss` + its `@import`s).
 - `bibliography:` / `csl:` paths.
-- `{{< embed other.qmd#cell >}}` (embeds another doc's output).
+- `{{{< embed other.qmd#cell >}}}` (embeds another doc's output).
 - `resources:` globs.
 - Raw HTML `<img src>`, `<video>`, `<link>`, `<script src>`; CSS `url(...)`.
 - Listing/sidebar globs (project-shaped; less relevant single-file).

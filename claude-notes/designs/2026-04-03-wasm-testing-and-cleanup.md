@@ -175,7 +175,7 @@ concern testing Rust code on the wasm32 target.
 
 | File | Audience | Content |
 |------|----------|---------|
-| `crates/pampa/CLAUDE.md` | AI assistants | WASM test convention: when/where to add, how to run |
+| `crates/pampa/AGENTS.md` | AI assistants | WASM test convention: when/where to add, how to run |
 | `.claude/rules/wasm.md` | AI assistants | Never add `test` to wasm32 cfg guard; verify WASM tests when editing io_wasm/os_wasm |
 | `dev-docs/wasm.md` | Developers | Single source of truth for WASM architecture, build, and testing |
 | `claude-notes/instructions/testing.md` | AI assistants | Brief pointer to pampa CLAUDE.md for WASM details |
@@ -386,7 +386,7 @@ reference libc symbols (`calloc`, `fprintf`, `snprintf`, `abort`, etc.). On
 Rust `#[no_mangle]` shim functions.
 
 The production build works because `wasm-quarto-hub-client/src/c_shim.rs` provides
-~980 lines of these shims. The WASM test only builds `pampa` and doesn't include
+\~980 lines of these shims. The WASM test only builds `pampa` and doesn't include
 that crate, so the linker can't resolve the symbols.
 
 ### Solution

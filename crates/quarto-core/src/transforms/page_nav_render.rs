@@ -159,7 +159,7 @@ mod tests {
             source_path: PathBuf::from(source),
             output_href: source.replace(".qmd", ".html"),
             format_id: "html".to_string(),
-            title: Some(title.to_string()),
+            title: Some(crate::document_profile::text(title)),
             ..DocumentProfile::default()
         }
     }
@@ -171,6 +171,8 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path("/project/about.qmd")],
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         }
     }
 

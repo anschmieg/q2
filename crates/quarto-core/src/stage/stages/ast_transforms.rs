@@ -57,6 +57,19 @@ pub struct AstTransformsStage {
     /// Custom pipeline (set via `with_pipeline`). If `None`, the pipeline
     /// is built just-in-time in `run()` using `StageContext` data.
     custom_pipeline: Option<TransformPipeline>,
+    /// Phase bounds for transform execution (set via `for_range`). The
+    /// default `(Unbounded, Unbounded)` runs every transform — the
+    /// production behavior. Book-projects P2/P5 pause a document's render
+    /// at a phase boundary (`..=Normalization` per chapter before merge;
+    /// `..=Navigation` per chapter before Pass-3 aggregation) and finish it
+    /// later (`Crossref..` / `Finalization..`), via a stage constructed
+    /// with [`Self::for_range`]. Stored as a `Bound` pair because
+    /// `impl RangeBounds` is not a storeable concrete type; the pair
+    /// itself implements `RangeBounds`.
+    range: (
+        std::ops::Bound<crate::transform::TransformPhase>,
+        std::ops::Bound<crate::transform::TransformPhase>,
+    ),
 }
 
 impl AstTransformsStage {
@@ -67,6 +80,7 @@ impl AstTransformsStage {
     pub fn new() -> Self {
         Self {
             custom_pipeline: None,
+            range: (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
         }
     }
 
@@ -77,6 +91,25 @@ impl AstTransformsStage {
     pub fn with_pipeline(pipeline: TransformPipeline) -> Self {
         Self {
             custom_pipeline: Some(pipeline),
+            range: (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
+        }
+    }
+
+    /// Create an AstTransformsStage whose `run()` executes only the
+    /// transforms whose [`crate::transform::TransformPhase`] falls inside
+    /// `range` (via [`TransformPipeline::execute_range`]). The pipeline
+    /// itself is still built just-in-time from `StageContext`, exactly as
+    /// [`Self::new`] — only execution is bounded.
+    ///
+    /// Book-projects P2/P5: `for_range(..=TransformPhase::Normalization)`
+    /// is the per-chapter partial render before single-file merge;
+    /// `for_range(TransformPhase::Crossref..)` is the merged document's
+    /// finishing pass. Today's full execution is the default case where
+    /// `range == ..`.
+    pub fn for_range(range: impl std::ops::RangeBounds<crate::transform::TransformPhase>) -> Self {
+        Self {
+            custom_pipeline: None,
+            range: (range.start_bound().cloned(), range.end_bound().cloned()),
         }
     }
 }
@@ -116,13 +149,14 @@ impl PipelineStage for AstTransformsStage {
 
         // Build the JIT pipeline if no custom pipeline was provided.
         //
-        // Dispatch on `ctx.format.pipeline_kind` (added in Plan 1
-        // commit 3): `Some("preview")` builds the q2-preview transform
-        // list, everything else builds the standard HTML one. The
-        // `target_format` argument carries the original string
-        // (e.g. `"q2-preview"`, not the base `"html"`) so shortcode
-        // resolution and downstream transforms see the user-facing
-        // format identity, not the pseudo-format's base.
+        // Dispatch on the `PipelineProfile` derived from `ctx.format.
+        // target_format` (the single derivation point replacing the old
+        // `ctx.format.pipeline_kind` string check): `HtmlPreview` /
+        // `RevealjsPreview` build the q2-preview transform list, everything
+        // else builds the standard pipeline. The `target_format` argument
+        // carries the original string (e.g. `"q2-preview"`, not the base
+        // `"html"`) so shortcode resolution and downstream transforms see
+        // the user-facing format identity, not the pseudo-format's base.
         let jit_pipeline;
         let pipeline = if let Some(ref p) = self.custom_pipeline {
             p
@@ -135,20 +169,35 @@ impl PipelineStage for AstTransformsStage {
                 .unwrap_or(std::path::Path::new("."));
             let shortcode_paths =
                 crate::transforms::extract_shortcode_paths(&doc.ast.meta, document_dir);
-            jit_pipeline = match ctx.format.pipeline_kind {
-                Some("preview") => build_q2_preview_transform_pipeline(
-                    shortcode_paths,
-                    ctx.extensions.clone(),
-                    ctx.runtime.clone(),
-                    ctx.format.target_format.clone(),
-                    ctx.variables.clone(),
-                ),
+            let pipeline_profile =
+                crate::format::PipelineProfile::from_format(&ctx.format.target_format);
+            jit_pipeline = match &pipeline_profile {
+                crate::format::PipelineProfile::HtmlPreview
+                | crate::format::PipelineProfile::RevealjsPreview => {
+                    build_q2_preview_transform_pipeline(
+                        shortcode_paths,
+                        ctx.extensions.clone(),
+                        ctx.runtime.clone(),
+                        ctx.format.target_format.clone(),
+                        pipeline_profile,
+                        ctx.variables.clone(),
+                        ctx.project_env.clone(),
+                        crate::project::project_profile::quarto_profile_env_value(
+                            &ctx.project.config.active_config_profiles,
+                        ),
+                    )
+                }
                 _ => build_transform_pipeline(
                     shortcode_paths,
                     ctx.extensions.clone(),
                     ctx.runtime.clone(),
                     ctx.format.target_format.clone(),
+                    pipeline_profile,
                     ctx.variables.clone(),
+                    ctx.project_env.clone(),
+                    crate::project::project_profile::quarto_profile_env_value(
+                        &ctx.project.config.active_config_profiles,
+                    ),
                 ),
             };
             &jit_pipeline
@@ -176,6 +225,14 @@ impl PipelineStage for AstTransformsStage {
         render_ctx.ref_type_registry = ctx.ref_type_registry.take();
         render_ctx.crossref_index = ctx.crossref_index.take();
         render_ctx.observer = ctx.observer.clone();
+        // book-projects P4: the per-chapter seed rides one-way into the
+        // inner context — the crossref index/render transforms read it;
+        // nothing mutates it, so nothing bridges it back.
+        render_ctx.chapter_seed = ctx.chapter_seed;
+        // book-projects P5: the project-wide registry rides one-way in the
+        // same shape — `CrossChapterCrossrefResolveTransform` reads it;
+        // nothing mutates it.
+        render_ctx.cross_chapter_crossref_registry = ctx.cross_chapter_crossref_registry.clone();
         // `project_index` is read-only to transforms, so we clone the
         // `Arc` instead of moving it. Leaving `ctx.project_index`
         // untouched means later stages in the pipeline still see it.
@@ -209,10 +266,26 @@ impl PipelineStage for AstTransformsStage {
         // the outer renderer for the final sink flush. Move ownership
         // across the bridge in both directions, same as `artifacts`.
         render_ctx.resource_copies = std::mem::take(&mut ctx.resource_copies);
+        // book-projects P5: the code-block decoration sideband moves
+        // both ways, like `artifacts` — a book chapter's pause/resume
+        // split puts `code-block-generate` (writer) and
+        // `code-block-render` (reader) in *different* stage-list calls,
+        // so the map must survive on the stage context between them.
+        // Single-shot renders move it straight through, unchanged.
+        render_ctx.code_block_decorations = std::mem::take(&mut ctx.code_block_decorations);
+        // Move the stage context's writer-side options INTO the inner
+        // context before the pipeline runs, so the out-move below hands
+        // back the same struct transforms mutate rather than a fresh
+        // default: without this, any value pre-seeded on the stage
+        // context (P5's resume bridge carries `format_options` across a
+        // chapter pause) is silently replaced by the inner pipeline's
+        // default at the out-move.
+        render_ctx.format_options = std::mem::take(&mut ctx.format_options);
 
-        // Execute the transform pipeline
+        // Execute the transform pipeline (phase-bounded when constructed
+        // with `for_range`; the default range is unbounded).
         let result = pipeline
-            .execute(&mut doc.ast, &doc.ast_context, &mut render_ctx)
+            .execute_range(&mut doc.ast, &doc.ast_context, &mut render_ctx, self.range)
             .await;
 
         // Transfer mutable state back to StageContext
@@ -221,6 +294,7 @@ impl PipelineStage for AstTransformsStage {
         ctx.includes = render_ctx.includes;
         ctx.ref_type_registry = render_ctx.ref_type_registry;
         ctx.crossref_index = render_ctx.crossref_index;
+        ctx.code_block_decorations = render_ctx.code_block_decorations;
         // Bridge `format_options` back so downstream stages
         // (`RenderHtmlBodyStage`, future JSON writer entry) see the
         // attribution lookup + identities populated by
@@ -402,6 +476,8 @@ mod tests {
             is_single_file: true,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::html();
@@ -418,6 +494,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         };
 
         let input = PipelineData::DocumentAst(doc_ast);

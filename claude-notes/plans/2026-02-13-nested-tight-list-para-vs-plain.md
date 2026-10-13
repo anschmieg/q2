@@ -1,6 +1,11 @@
-# Fix: Nested tight lists incorrectly marked as loose (Para instead of Plain)
-
-**Beads issue:** bd-2gc9
+---
+title: 'Fix: Nested tight lists incorrectly marked as loose (Para instead of Plain)'
+date: 2026-02-13
+description: 'Fixes the list parser so a tight list item followed by a nested sublist without a blank line stays tight, instead of wrongly emitting `Para` where `Plain` is correct.'
+braid:
+  strand: bd-2gc9
+  priority: P1
+---
 
 ## Overview
 
@@ -78,7 +83,7 @@ The actual fix propagates blank-line information from tree-sitter level through 
    `pandocnativeintermediate.rs`
 
 2. **Added `list_item_has_blank_line_between_blocks()` helper** in `treesitter.rs` — walks the
-   tree-sitter `list_item_node`'s children to find `pandoc_paragraph` nodes followed by another
+   tree-sitter `list_item_node`\'s children to find `pandoc_paragraph` nodes followed by another
    block-level sibling, and checks if the paragraph contains a `block_continuation` that spans
    multiple rows. In tree-sitter's QMD grammar, a multi-row `block_continuation` indicates it
    absorbed a blank line.

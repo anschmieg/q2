@@ -6,6 +6,8 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import ModalDialog from './ModalDialog';
+import { common, dialogs } from '../strings';
 import './ShareDialog.css';
 
 export interface ShareDialogProps {
@@ -70,50 +72,50 @@ export default function ShareDialog({
     }
   }, [shareableUrl, onCopied, onClose]);
 
+  // Enter copies the link; Escape and Tab containment are owned by ModalDialog.
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      } else if (e.key === 'Enter') {
+      if (e.key === 'Enter') {
+        // Buttons handle their own Enter activation (see the onKeyDown
+        // contract in ModalDialog). The copy path only closes after a
+        // 500ms success-state delay, but prevent the default anyway so
+        // the synthesized click can never land on the restore target if
+        // that delay ever goes away (GH #635 hardening).
+        if (e.target instanceof HTMLButtonElement) return;
+        e.preventDefault();
         handleCopyLink();
       }
     },
-    [onClose, handleCopyLink]
+    [handleCopyLink]
   );
 
   if (!isOpen || !shareableUrl) return null;
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        className="share-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={handleKeyDown}
-      >
-        <div className="dialog-header">
-          <h2>Share Project</h2>
-          <button className="close-btn" onClick={onClose}>
-            &times;
-          </button>
-        </div>
-
+    <ModalDialog
+      title={dialogs.share.title}
+      className="share-dialog"
+      onClose={onClose}
+      onKeyDown={handleKeyDown}
+    >
         <div className="dialog-content">
           <div className="warning-box">
             <span className="warning-icon">&#9888;</span>
             <p>
-              <strong>Anyone with this link can access and edit this project permanently.</strong>
+              <strong>{dialogs.share.warning}</strong>
             </p>
             <p className="warning-detail">
-              Only share with people you trust. This link cannot be revoked.
+              {dialogs.share.warningDetail}
             </p>
           </div>
 
           <div className="url-field">
-            <label htmlFor="shareable-url">Shareable Link:</label>
+            <label htmlFor="shareable-url">{dialogs.share.linkLabel}</label>
             <input
               ref={urlInputRef}
               id="shareable-url"
               type="text"
+              className="qh-input focus-accent"
               value={shareableUrl}
               readOnly
               onClick={(e) => (e.target as HTMLInputElement).select()}
@@ -122,17 +124,16 @@ export default function ShareDialog({
         </div>
 
         <div className="dialog-actions">
-          <button className="cancel-btn" onClick={onClose}>
-            Cancel
+          <button className="qh-btn outline" onClick={onClose}>
+            {common.cancel}
           </button>
           <button
-            className={`copy-btn ${copied ? 'copied' : ''}`}
+            className={`qh-btn primary copy-btn ${copied ? 'copied' : ''}`}
             onClick={handleCopyLink}
           >
-            {copied ? 'Copied!' : 'Copy Link'}
+            {copied ? dialogs.share.copied : dialogs.share.copyLink}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

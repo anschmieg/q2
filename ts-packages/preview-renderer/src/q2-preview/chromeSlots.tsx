@@ -48,14 +48,55 @@ interface SlotProps {
 const TRANSPARENT: CSSProperties = { display: 'contents' };
 
 /**
+ * Draft alert banner — Quarto 1's `#quarto-draft-alert` strip for
+ * `draft: true` pages (bd-3cpv7dah). `DraftAlertTransform` decides
+ * whether a page is a draft and publishes the *localized* label at
+ * `meta.rendered.draft-alert-text` (`Draft`, `Borrador`, …); it runs in
+ * the q2-preview pipeline, so the only render-only piece was the
+ * template's markup, mirrored here byte-for-byte (template.rs
+ * `$if(rendered.draft-alert-text)$`): the icon is an `<i>` sibling
+ * followed by a bare text node, not a wrapping span.
+ *
+ * Unlike the `*-render` slots this is React-owned markup rather than
+ * injected HTML: the transform hands over a label, not HTML. Renders
+ * BEFORE the `<header id="quarto-header">` wrapper (or before
+ * `#quarto-content` when the page has no header) — the banner is the
+ * first thing in the body, where Q1's DOM postprocessor puts it.
+ * Bootstrap's `.alert-warning` and the theme's `#quarto-draft-alert`
+ * rule (`_bootstrap-rules.scss`) are in the preview's compiled theme.
+ */
+export const DraftAlertSlot = memo(({ text }: { text: string }) => (
+    <div id="quarto-draft-alert" className="alert alert-warning">
+        <i className="bi bi-pencil-square"></i>
+        {text}
+    </div>
+));
+DraftAlertSlot.displayName = 'DraftAlertSlot';
+
+/**
  * Navbar HTML — emitted by `NavbarRenderTransform` into
- * `meta.rendered.navigation.navbar`. Renders BEFORE
- * `<div id="quarto-content">` (per template.rs:178-180).
+ * `meta.rendered.navigation.navbar`. Renders INSIDE the React-owned
+ * `<header id="quarto-header">` wrapper, which sits BEFORE
+ * `<div id="quarto-content">` (per template.rs QUARTO_HEADER_PARTIAL
+ * and its call-site gate; bd-ersobfbt).
  */
 export const NavbarSlot = memo(({ html }: SlotProps) => (
     <div style={TRANSPARENT} dangerouslySetInnerHTML={{ __html: html }} />
 ));
 NavbarSlot.displayName = 'NavbarSlot';
+
+/**
+ * Narrow-viewport secondary-nav HTML — emitted by
+ * `SecondaryNavRenderTransform` into
+ * `meta.rendered.navigation.secondary-nav` (bd-ersobfbt lifted that
+ * transform's native-only gate). Renders INSIDE the
+ * `<header id="quarto-header">` wrapper, AFTER the navbar (per
+ * template.rs QUARTO_HEADER_PARTIAL).
+ */
+export const SecondaryNavSlot = memo(({ html }: SlotProps) => (
+    <div style={TRANSPARENT} dangerouslySetInnerHTML={{ __html: html }} />
+));
+SecondaryNavSlot.displayName = 'SecondaryNavSlot';
 
 /**
  * Sidebar HTML — emitted by `SidebarRenderTransform` into
@@ -94,21 +135,35 @@ FooterSlot.displayName = 'FooterSlot';
  * into `meta.rendered.navigation.toc`. The wrapping
  * `<div id="quarto-margin-sidebar"><nav id="TOC"><h2>...</h2>`
  * is supplied by the template (template.rs:189-200), so this slot
- * only fills the inner `<ul>`. Memo keyed on (html, title) so a
+ * only fills the inner `<ul>`. Memo keyed on (html, titleHtml) so a
  * `toc-title:` edit re-renders correctly without tearing the DOM
  * for content edits.
+ *
+ * `titleHtml` is HTML, not text: `toc-title` carries inline markup
+ * (`toc-title: "On **this** page"`), so `TocRenderTransform` renders
+ * it to `meta.rendered.navigation.toc-title` and both this slot and
+ * `q2 render`'s template read that one value
+ * (bd-toc-smart-quotes-6nro57ed). It is writer output, escaped at the
+ * source, which is the same trust boundary as `html` above.
  */
-export const TocSlot = memo(({ html, title }: SlotProps & { title: string }) => (
-    <div
-        id="quarto-margin-sidebar"
-        className="sidebar margin-sidebar"
-    >
-        <nav id="TOC" role="doc-toc" className="toc-active">
-            {title && <h2 id="toc-title">{title}</h2>}
-            <div dangerouslySetInnerHTML={{ __html: html }} />
-        </nav>
-    </div>
-));
+export const TocSlot = memo(
+    ({ html, titleHtml }: SlotProps & { titleHtml: string }) => (
+        <div
+            id="quarto-margin-sidebar"
+            className="sidebar margin-sidebar"
+        >
+            <nav id="TOC" role="doc-toc" className="toc-active">
+                {titleHtml && (
+                    <h2
+                        id="toc-title"
+                        dangerouslySetInnerHTML={{ __html: titleHtml }}
+                    />
+                )}
+                <div dangerouslySetInnerHTML={{ __html: html }} />
+            </nav>
+        </div>
+    ),
+);
 TocSlot.displayName = 'TocSlot';
 
 interface HeaderIncludesProps {
@@ -124,11 +179,42 @@ interface HeaderIncludesProps {
 }
 
 /**
+ * Re-materialize a `<script>` element so the browser will EXECUTE it.
+ *
+ * A `<script>` parsed via `innerHTML` (or `DOMParser` / `insertAdjacentHTML`)
+ * is flagged non-executable by the HTML fragment-parsing algorithm:
+ * appending such a node into a live document does **not** run it. The only
+ * way to get an injected script to execute is to build a fresh element with
+ * `document.createElement('script')` and copy its attributes + inline body
+ * over. This function does exactly that. (bd-5oyk1xce)
+ *
+ * Needed because engine `include-in-header` content can be executable —
+ * e.g. marimo emits `<script type="module" src="…/@marimo-team/islands…">`
+ * plus an inline `__MARIMO_EXPORT_CONTEXT__` marker script; without
+ * re-materialization the islands runtime never loads and widgets stay
+ * inert static markup in the preview pane.
+ */
+export function rematerializeScript(source: HTMLScriptElement): HTMLScriptElement {
+    const script = document.createElement('script');
+    for (const attr of Array.from(source.attributes)) {
+        script.setAttribute(attr.name, attr.value);
+    }
+    // Inline body (e.g. the `__MARIMO_EXPORT_CONTEXT__ = …` assignment).
+    // Empty for `src`-only scripts; copying it is harmless there.
+    script.textContent = source.textContent;
+    return script;
+}
+
+/**
  * Imperative `<head>` injector for `meta.rendered.includes.header`
- * (favicon `<link>`, listing-feed `<link rel="alternate">`, etc.).
- * Not a render-time slot because elements like `<meta>` and `<link>`
- * don't belong in `<body>` — they have to land in `document.head`,
- * which React doesn't own.
+ * (favicon `<link>`, listing-feed `<link rel="alternate">`, engine
+ * `include-in-header` scripts/styles, etc.). Not a render-time slot
+ * because elements like `<meta>` and `<link>` don't belong in `<body>` —
+ * they have to land in `document.head`, which React doesn't own.
+ *
+ * `<script>` children are re-materialized via [`rematerializeScript`] so
+ * they actually execute (see its doc comment); non-script nodes are
+ * inserted as-parsed. Document order is preserved.
  *
  * Cleanup on unmount removes the previously-inserted nodes so
  * test re-mounts (vitest, Playwright) don't accumulate state.
@@ -147,9 +233,13 @@ export function HeaderIncludesEffect({ items }: HeaderIncludesProps) {
         wrapper.innerHTML = items.join('\n');
         const inserted: Element[] = [];
         for (const el of Array.from(wrapper.children)) {
-            el.setAttribute('data-q2-header-include', '1');
-            document.head.appendChild(el);
-            inserted.push(el);
+            const node =
+                el.tagName === 'SCRIPT'
+                    ? rematerializeScript(el as HTMLScriptElement)
+                    : el;
+            node.setAttribute('data-q2-header-include', '1');
+            document.head.appendChild(node);
+            inserted.push(node);
         }
         return () => {
             for (const el of inserted) {

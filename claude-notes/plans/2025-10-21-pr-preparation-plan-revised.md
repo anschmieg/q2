@@ -1,8 +1,11 @@
-# PR Preparation Plan (REVISED): Extract crates/ Changes from kyoto to 2025-10-21
+---
+title: 'PR Preparation Plan (REVISED): Extract crates/ Changes from kyoto to 2025-10-21'
+date: 2025-10-21
+description: 'Describes a selective checkout of only the `crates/` directory from the work branch onto a clean base, excluding `private-crates/` and root-level files, for an upstream pull request.'
+---
 
 <!-- quarto-error-code-audit-ignore-file -->
 
-**Date**: 2025-10-21
 **Goal**: Extract ONLY `crates/` changes from `kyoto` branch to `2025-10-21` branch for PR to quarto-dev/quarto-markdown
 
 **Key Constraint**: NO `private-crates/` changes should be transferred (those stay in the private repo only)
@@ -13,8 +16,8 @@
 - **`main`**: At commit `28840b4` (includes new crates merge)
 - **`2025-10-21`**: At commit `28840b4` (same as main)
 - **`kyoto`**: Diverged from `20887b8`, contains:
-  - ~88 changed files in `crates/`
-  - ~44 changed files in `private-crates/` (EXCLUDE from PR)
+  - \~88 changed files in `crates/`
+  - \~44 changed files in `private-crates/` (EXCLUDE from PR)
   - Many changed files in root (claude-notes, etc.) (EXCLUDE from PR)
 
 ### What We're Transferring

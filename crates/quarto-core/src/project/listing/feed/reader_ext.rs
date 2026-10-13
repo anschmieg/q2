@@ -194,6 +194,7 @@ fn strip_title_block_header(html: &str) -> String {
 /// - All other paths are resolved against `sibling_dir`
 ///   (forward-slashed; empty = output-dir root).
 fn rewrite_relative_urls(html: &str, site_url: &str, sibling_dir: &str) -> String {
+    use quarto_util::is_external_url;
     use regex::{Captures, RegexBuilder};
     let base = site_url.trim_end_matches('/');
 
@@ -243,21 +244,6 @@ fn rewrite_relative_urls(html: &str, site_url: &str, sibling_dir: &str) -> Strin
         .into_owned()
 }
 
-/// True if `s` is already an absolute reference. Includes the
-/// scheme-relative `//host/path` form and the common pseudo-
-/// schemes (`mailto:`, `javascript:`, `data:`) that should pass
-/// through unchanged.
-fn is_external_url(s: &str) -> bool {
-    s.starts_with("http://")
-        || s.starts_with("https://")
-        || s.starts_with("//")
-        || s.starts_with("mailto:")
-        || s.starts_with("javascript:")
-        || s.starts_with("data:")
-        || s.starts_with("tel:")
-        || s.starts_with("ftp://")
-}
-
 /// Collapse `..` / `.` segments in a forward-slash path. Naive
 /// (no normalization across protocol boundaries; we never see
 /// those here because the caller filters first).
@@ -284,19 +270,23 @@ fn parent_href_string(href: &str) -> String {
     }
 }
 
-/// Truncate visible-text length of `html` at a word boundary
-/// ≤ `max`. `0` disables truncation. When truncation actually
-/// fires, the result is plain text (HTML tags stripped) — see
-/// module-level limitations.
+/// Truncate visible-text length of `html` at a word boundary per
+/// Q1's `truncateText(s, n, "space")`, appending `…`. `0` disables
+/// truncation. When truncation actually fires, the result is plain
+/// text (HTML tags stripped) — see module-level limitations. The
+/// fits-check uses strict `<` for Q1 parity (an exactly-`max`-char
+/// text is truncated); the cut itself is
+/// [`crate::project::listing::helpers::truncate_text_at_space`],
+/// shared with the display-side readers.
 fn maybe_truncate_visible(html: &str, max: usize) -> String {
     if max == 0 {
         return html.to_string();
     }
     let visible = visible_text(html);
-    if visible.chars().count() <= max {
+    if visible.chars().count() < max {
         return html.to_string();
     }
-    truncate_plain_at_word_boundary(&visible, max)
+    crate::project::listing::helpers::truncate_text_at_space(&visible, max)
 }
 
 /// Return the visible-text projection of an HTML fragment: drops
@@ -325,29 +315,6 @@ fn decode_basic_entities(s: &str) -> String {
         .replace("&#39;", "'")
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
-}
-
-fn truncate_plain_at_word_boundary(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut last_space_byte: Option<usize> = None;
-    let mut byte_at_max: Option<usize> = None;
-    for (idx, (byte_idx, c)) in s.char_indices().enumerate() {
-        if idx >= max {
-            byte_at_max = Some(byte_idx);
-            break;
-        }
-        if c.is_whitespace() {
-            last_space_byte = Some(byte_idx);
-        }
-    }
-    let cut = match (last_space_byte, byte_at_max) {
-        (Some(b), _) => b,
-        (None, Some(b)) => b,
-        (None, None) => return s.to_string(),
-    };
-    s[..cut].trim_end().to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -402,18 +369,30 @@ mod tests {
 
     // ---- Plan test #32: word-boundary truncation -------------------
 
+    // Expectation updated for bd-listing-ellipsis-no-matching-l963osy1:
+    // the cut mirrors Q1's `truncateText(s, 20, "space")` — take the
+    // first 20 visible chars "The quick brown fox ", drop one, cut at
+    // the last space, append `…`. (The full parity battery lives on
+    // `maybe_truncate` in `post_render_upgrade/reader.rs`; both
+    // wrappers delegate to the same helper.)
     #[test]
     fn extract_first_para_html_truncates_at_word_boundary() {
         let html = r#"<html><body><main class="content"><p>The quick brown fox jumps over the lazy dog.</p></main></body></html>"#;
-        // 20 visible chars, last space before idx 20 ⇒ "The quick brown fox".
         let out = extract_first_para_html(html, 20).expect("para found");
-        assert!(
-            out.chars().count() <= 20,
-            "expected ≤ 20 chars, got {}: `{}`",
-            out.chars().count(),
-            out
-        );
-        assert_eq!(out, "The quick brown fox");
+        assert_eq!(out, "The quick brown…");
+    }
+
+    // Truncation fires on *visible* length; the result is plain text
+    // (tags stripped) ending in the ellipsis, with the trailing-comma
+    // strip applied before it.
+    #[test]
+    fn extract_first_para_html_truncated_output_strips_tags_and_comma() {
+        // Visible text: "Hello there, world of examples" (30 chars).
+        // max=18 → first 18 "Hello there, world", drop one, last
+        // space at 12 → "Hello there," → comma stripped → ellipsis.
+        let html = r#"<html><body><main class="content"><p>Hello <em>there</em>, world of examples</p></main></body></html>"#;
+        let out = extract_first_para_html(html, 18).expect("para found");
+        assert_eq!(out, "Hello there…");
     }
 
     #[test]
@@ -462,6 +441,25 @@ mod tests {
         assert!(
             out.contains(r#"href="mailto:hi@example.com""#),
             "mailto must pass through; got: {}",
+            out
+        );
+    }
+
+    /// bd-scheme-href-path-normalized-w5zya82r — any scheme passes
+    /// through, not just the allowlisted few.
+    #[test]
+    fn extract_full_contents_passes_any_scheme_through() {
+        let html = r#"<html><body><main class="content"><p><a href="positron://settings/x">p</a> <a href="vscode://schemas/settings">v</a></p></main></body></html>"#;
+        let out = extract_full_contents(html, "https://example.com", "posts/foo.html")
+            .expect("main.content found");
+        assert!(
+            out.contains(r#"href="positron://settings/x""#),
+            "custom scheme must pass through; got: {}",
+            out
+        );
+        assert!(
+            out.contains(r#"href="vscode://schemas/settings""#),
+            "custom scheme must pass through; got: {}",
             out
         );
     }

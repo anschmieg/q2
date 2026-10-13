@@ -2,13 +2,24 @@ import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react'
 import type { ProjectEntry, FileEntry } from '@quarto/preview-renderer/types/project';
 import ProjectSelector from './components/ProjectSelector';
 import ProjectsHome from './components/ProjectsHome';
-import JoinCollectionLanding from './components/JoinCollectionLanding';
-import ProjectSetSetup from './components/ProjectSetSetup';
+import InviteLanding from './components/InviteLanding';
+import EditorWelcomeBanner from './components/EditorWelcomeBanner';
+import ProjectSetError from './components/ProjectSetError';
 
 // Lazy-loaded dev harness — only fetched when navigating to #/dev/... routes.
-// In production builds, the DevRoute type is never parsed, so this code is never reached.
-const DevHarnessRaw = lazy(() => import('./components/DevHarness'));
+// Dev routes are parsed only in development builds and VITE_E2E=1 test
+// builds (see routing.ts). Both flags are compile-time constants, so in
+// production and preview-embed builds rollup evaluates DEV_ROUTES_ENABLED
+// to false and tree-shakes the dynamic import: no DevHarness chunk is
+// emitted at all (it was dead weight in the q2 binary's embedded SPA).
+const DEV_ROUTES_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E === '1';
+const DevHarnessRaw = DEV_ROUTES_ENABLED
+  ? lazy(() => import('./components/DevHarness'))
+  : null;
 function DevHarnessLazy({ page }: { page: string }) {
+  // Unreachable when dev routes are disabled (the route never parses);
+  // the guard keeps the null union honest.
+  if (!DevHarnessRaw) return null;
   return (
     <Suspense fallback={null}>
       <DevHarnessRaw page={page} />
@@ -16,11 +27,15 @@ function DevHarnessLazy({ page }: { page: string }) {
   );
 }
 import Editor from './components/Editor';
+import { notifications } from './strings';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import LoadingIndicator from './components/Loading';
+import SkipLink from './components/SkipLink';
 import Toast from './components/Toast';
 import { ViewModeProvider } from './components/ViewModeContext';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { readAuthErrorReason } from './auth/authError';
+import { useAuthProvider } from './auth/AuthProvider';
 import {
   connect,
   disconnect,
@@ -28,38 +43,32 @@ import {
   getFileContent,
   applyEditorOperations,
   createNewProject,
+  getProjectChoices,
+  createProject as wasmCreateProject,
   type ActorIdentity,
   type CaptureRef,
   type EditorContentChange,
 } from '@quarto/preview-runtime';
 import type { ProjectFile } from '@quarto/preview-runtime';
 import * as projectStorage from './services/projectStorage';
+import { seedExampleProjects } from './services/seedExamples';
 import { installDebugApi } from './services/debugApi';
-import { getUserIdentity, updateUserName, actorIdFromUserId } from './services/userSettings';
+import { getUserIdentity, updateUserName, authorIdFromUserId } from './services/userSettings';
 import { useRouting } from './hooks/useRouting';
 import { useCollectionSets } from './hooks/useCollectionSets';
+import { useAutoEstablishRoot } from './hooks/useAutoEstablishRoot';
 import { useAuth } from './hooks/useAuth';
 import { useAuthProbe } from './hooks/useAuthProbe';
 import { useSessionKeepAlive } from './hooks/useSessionKeepAlive';
 import { useExecutionChannel } from './hooks/useExecutionChannel';
-import { resolveActorId as resolveActorIdRequest } from './services/authService';
-import type { Route, ShareRoute, LinkProjectSetRoute } from './utils/routing';
-import { resolveSyncServerUrl, DEFAULT_SYNC_SERVER } from './utils/routing';
+import { usePreviewSession } from './hooks/usePreviewSession';
+import { resolveAuthorId as resolveAuthorIdRequest } from './services/authService';
+import type { Route, ShareRoute, LinkProjectSetRoute, JoinCollectionRoute } from './utils/routing';
+import { resolveSyncServerUrl, DEFAULT_SYNC_SERVER, parseHashRoute, hubPath, savePreAuthHash, clearPreAuthHash, buildHashRoute } from './utils/routing';
+import { isEphemeralStorage } from './services/ephemeralStorage';
+import { fetchPreviewSessionConfig } from './services/previewConfig';
+import type { StorageKind } from '@quarto/quarto-sync-client';
 import './App.css';
-
-/**
- * Production budget for the initial peer connect. `waitForPeer` resolves the
- * *instant* the peer connects, so in the common (online) case this adds only
- * the real connect latency and lets `connect()` resolve as Online — the header
- * (which mounts only after connect() resolves) then shows Online right away
- * with the *live* document, instead of the 1 ms probe that always resolved
- * offline-first and made the indicator flash Offline → Online. If the connect
- * is slower than this budget the header mounts Offline and flips to Online when
- * the peer lands — the rare tail, and still an improvement on always-first
- * Offline. A genuinely-offline user waits at most this long before cached
- * content appears (bounded regression of offline-first).
- */
-const PRODUCTION_PEER_TIMEOUT_MS = 400;
 
 /**
  * Connect to a sync server and load all file contents into a Map.
@@ -68,30 +77,34 @@ const PRODUCTION_PEER_TIMEOUT_MS = 400;
 async function connectAndLoadContents(
   syncServer: string,
   indexDocId: string,
-  actorId?: string,
+  authorId?: string,
   screenName?: string,
   color?: string,
 ): Promise<{ files: FileEntry[]; contents: Map<string, string> }> {
-  // E2E builds: honour __QUARTO_TEST_ACTOR_ID__ so getActorId() returns a
+  // E2E builds: honour __QUARTO_TEST_AUTHOR_ID__ so getAuthorId() returns a
   // stable, known value inside the preview iframe. Tree-shaken in production.
   if (import.meta.env.VITE_E2E === '1') {
-    actorId = (window as any).__QUARTO_TEST_ACTOR_ID__ as string | undefined ?? actorId;
+    authorId = (window as any).__QUARTO_TEST_AUTHOR_ID__ as string | undefined ?? authorId;
   }
-  // Production gives the peer a modest budget (PRODUCTION_PEER_TIMEOUT_MS) so
-  // the common (online) open resolves as Online with the live document, rather
-  // than the 1 ms offline-first probe that made the indicator always flash
-  // Offline → Online. waitForPeer resolves the instant the peer connects, so a
-  // fast connection pays only its real latency; a genuinely-offline user waits
-  // at most the budget before cached content appears.
+  // Offline-first: a 1 ms peer probe, so a cached project opens straight
+  // from IndexedDB and the socket lands in the background. (This was
+  // briefly 400 ms so the online indicator wouldn't flash Offline→Online
+  // on open; instant opens won over that cosmetic — see
+  // claude-notes/plans/2026-08-28-instant-project-open.md.)
   //
-  // The smoke-all E2E env always starts with EMPTY storage and must sync every
-  // doc from the (local) server, so it needs a much longer wait: opening before
-  // the socket connects means loadFileDocuments races it — under CI contention
-  // the render-target doc loses, is marked unavailable, and the preview fails
-  // "Path not found" (stage EDITOR_NO_PREVIEW; sometimes the index loses it too
-  // → CONNECT_STALL).
-  const peerTimeoutMs = import.meta.env.VITE_E2E === '1' ? 15000 : PRODUCTION_PEER_TIMEOUT_MS;
-  const files = await connect(resolveSyncServerUrl(syncServer), indexDocId, actorId, screenName, color, peerTimeoutMs);
+  // The smoke-all E2E env always starts with EMPTY storage and must sync
+  // every doc from the (local) server, so it needs a much longer wait:
+  // opening before the socket connects means loadFileDocuments races it —
+  // under CI contention the render-target doc loses, is marked
+  // unavailable, and the preview fails "Path not found" (stage
+  // EDITOR_NO_PREVIEW; sometimes the index loses it too → CONNECT_STALL).
+  const peerTimeoutMs = import.meta.env.VITE_E2E === '1' ? 15000 : 1;
+  // Ephemeral storage mode (bd-sw4xy1vw): the q2 preview embed build
+  // keeps the automerge document cache in memory — each preview session
+  // is a fresh origin, so a persisted cache could never hit and would
+  // just accumulate in IndexedDB.
+  const storage: StorageKind = isEphemeralStorage() ? 'memory' : 'indexeddb';
+  const files = await connect(resolveSyncServerUrl(syncServer), indexDocId, authorId, screenName, color, { peerTimeoutMs, storage });
   const contents = new Map<string, string>();
   for (const file of files) {
     const content = getFileContent(file.path);
@@ -101,7 +114,15 @@ async function connectAndLoadContents(
 }
 
 /** Whether auth is configured (build-time env var). */
-const AUTH_ENABLED = !!import.meta.env.VITE_GOOGLE_CLIENT_ID;
+// E2E builds may force the flag on via __QUARTO_TEST_AUTH_ENABLED__ so the
+// author-attribution suite can exercise the authenticated code paths
+// against a mock-OIDC hub without a second client build carrying
+// VITE_GOOGLE_CLIENT_ID. Tree-shaken with the other VITE_E2E branches in
+// production.
+const AUTH_ENABLED =
+  !!import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+  (import.meta.env.VITE_E2E === '1' &&
+    (window as any).__QUARTO_TEST_AUTH_ENABLED__ === true);
 
 
 function App() {
@@ -113,22 +134,27 @@ function App() {
     expireSession,
     applyAuth,
   } = useAuth();
+  const authProvider = useAuthProvider();
 
   const [project, setProject] = useState<ProjectEntry | null>(null);
   const [files, setFiles] = useState<FileEntry[]>([]);
-  const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [fileContents, setFileContents] = useState<Map<string, string>>(new Map());
+  // Path -> change counter for binary docs (images). The bytes themselves
+  // stay in the sync client; the counter tells the image viewer to re-read.
+  const [binaryFileVersions, setBinaryFileVersions] = useState<Map<string, number>>(new Map());
   const [showSaveToast, setShowSaveToast] = useState(false);
   const [screenName, setScreenName] = useState<string | undefined>();
   const [cursorColor, setCursorColor] = useState<string | undefined>();
-  // Local user id → stable Automerge actor when auth is disabled (local-prod).
-  const [localActorId, setLocalActorId] = useState<string | undefined>();
+  // Local user id → stable Automerge author when auth is disabled (local-prod).
+  const [localAuthorId, setLocalAuthorId] = useState<string | undefined>();
   const [identities, setIdentities] = useState<Record<string, ActorIdentity>>({});
   // bd-sfet3264 (Phase 1C): IndexDocument V2 capture sidecar (path → CaptureRef).
   // Populated by the sync client's onCapturesChange; threaded down to the
   // preview so recorded engine output can be spliced into the rendered AST.
   const [captures, setCaptures] = useState<Record<string, CaptureRef>>({});
+  // IndexDocument V3 explicit-folder set: folders that exist with no files.
+  const [folders, setFolders] = useState<string[]>([]);
   const [isOnline, setIsOnline] = useState<boolean>(false);
 
   // bd-sfet3264 (Phase 2D + Phase 4b): track which q2 executors are online for
@@ -168,12 +194,20 @@ function App() {
   const projectSetStateRef = useRef(projectSetState);
   projectSetStateRef.current = projectSetState;
 
-  // Resolve the per-project actor ID before opening a document. See
-  // `resolveActorIdRequest` for the three-valued contract; callers abandon
+  // Publish the project-set status on <html> so E2E specs can wait for
+  // 'connected'. The home renders while the root is still connecting, and
+  // the root's doc id exists before its pointers are saved, so neither a
+  // visible home nor a non-null getProjectSetDocId() means the set is ready.
+  useEffect(() => {
+    document.documentElement.dataset.projectSetStatus = projectSetState.status;
+  }, [projectSetState.status]);
+
+  // Resolve the per-project author ID before opening a document. See
+  // `resolveAuthorIdRequest` for the three-valued contract; callers abandon
   // the open only on `null` (auth failure), proceed on `string`/`undefined`.
-  const resolveActorId = useCallback(
-    (indexDocId: string) => resolveActorIdRequest(indexDocId, AUTH_ENABLED, expireSession, localActorId),
-    [expireSession, localActorId],
+  const resolveAuthorId = useCallback(
+    (indexDocId: string) => resolveAuthorIdRequest(indexDocId, AUTH_ENABLED, expireSession, localAuthorId),
+    [expireSession, localAuthorId],
   );
 
   // Capture the auth error reason from the redirect query param (once,
@@ -188,13 +222,100 @@ function App() {
     return reason;
   });
 
+  // Capture the ephemeral-hub flag from the boot URL (once, before the
+  // share handler below clears the hash from the address bar). Only
+  // `q2 preview --ui editor` emits it: the serving hub is a throwaway
+  // per-session server, so project-set onboarding is skipped entirely
+  // (bd-zf4ryvuq). The preview-embed build (VITE_EPHEMERAL_STORAGE=1,
+  // bd-sw4xy1vw) only ever serves such a hub, so the flag holds for the
+  // whole artifact — including after a reload, when the boot URL's
+  // share hash is gone.
+  const [ephemeralHub] = useState(() => {
+    if (isEphemeralStorage()) return true;
+    const bootRoute = parseHashRoute(window.location.hash);
+    return bootRoute.type === 'share' && bootRoute.ephemeral === true;
+  });
+
+  // First-run onboarding (bd-4h1hv60p): when no project set exists, create
+  // the personal root silently against DEFAULT_SYNC_SERVER (or migrate
+  // legacy IDB projects into one) and land on the home — there is no setup
+  // screen. The one boot URL that owns setup itself is an inbound
+  // `#/link-project-set/…` link: its handler in the initial-URL effect
+  // links the other browser's set *as the root*, which an auto-created
+  // empty root would pre-empt (the linked set would land as a secondary
+  // collection). Captured once, like `ephemeralHub` — the address bar is
+  // scrubbed before the collections hook resolves.
+  const [bootLinksProjectSet] = useState(
+    () => parseHashRoute(window.location.hash).type === 'link-project-set',
+  );
+
+  // Seed the "Examples / Templates" collection (bd-3fwtdhil) once a
+  // brand-new browser has created its root. Skipped for invite boots
+  // (share and join-collection links), so an invitee lands on what they
+  // were sent and nothing else, and for ephemeral preview hubs, whose
+  // project set is throwaway. Every project comes from a registry choice
+  // flagged `seed`; failures are per project and logged, never fatal.
+  const [bootIsInvite] = useState(() => {
+    const type = parseHashRoute(window.location.hash).type;
+    return type === 'share' || type === 'join-collection';
+  });
+  const seedExamples = useCallback(async () => {
+    const result = await seedExampleProjects({
+      syncServer: DEFAULT_SYNC_SERVER,
+      resolveSyncServerUrl,
+      getProjectChoices,
+      createProject: wasmCreateProject,
+      createNewProject: (opts) =>
+        createNewProject(
+          { ...opts, storage: isEphemeralStorage() ? 'memory' : 'indexeddb' },
+          undefined,
+          screenName,
+          cursorColor,
+          resolveAuthorId,
+        ),
+      addLocalProject: projectStorage.addProject,
+      createCollection: projectSetActions.createCollection,
+      addProjectToCollection: projectSetActions.addProjectToCollection,
+      log: (message, detail) => console.warn(`[seedExamples] ${message}`, detail),
+    });
+    if (result) {
+      console.log(
+        `[seedExamples] seeded ${result.seeded.length} example project(s)` +
+          (result.failed.length > 0 ? `, ${result.failed.length} failed` : ''),
+      );
+    }
+  }, [screenName, cursorColor, resolveAuthorId, projectSetActions]);
+
+  useAutoEstablishRoot({
+    status: projectSetState.status,
+    enabled: !bootLinksProjectSet,
+    createProjectSet: projectSetActions.createProjectSet,
+    migrateProjects: projectSetActions.migrateProjects,
+    // E2E builds skip seeding: every Playwright test boots a fresh profile,
+    // and four surprise projects break fixtures that assume an empty start
+    // (and add connect load that stalls CI). A future e2e test for seeding
+    // itself should opt in explicitly rather than un-gate this.
+    onFreshRoot:
+      bootIsInvite || ephemeralHub || import.meta.env.VITE_E2E === '1'
+        ? undefined
+        : seedExamples,
+  });
+
+  // `q2 preview` session config (bd-ov4gqk3m): when the serving server
+  // is a preview started without --allow-edit, the editor shows an
+  // ephemeral-session banner. Null on a standalone hub (no such
+  // endpoint), which never shows the banner. Unlike the boot-URL flag
+  // above this survives reloads and works for --join guests, whose
+  // proxy splices every connection through to the host.
+  const previewSession = usePreviewSession();
+
   // Load screen name from IndexedDB (for identity mapping in Automerge docs).
   // When auth is enabled, wait for it to resolve so we can upgrade anonymous
   // names to the OIDC display name on first login. Without auth, load immediately.
   useEffect(() => {
     if (AUTH_ENABLED && authLoading) return;
     getUserIdentity().then(async (settings) => {
-      setLocalActorId(actorIdFromUserId(settings.userId));
+      setLocalAuthorId(authorIdFromUserId(settings.userId));
       if (auth?.name && settings.createdAt === settings.updatedAt) {
         const updated = await updateUserName(auth.name);
         setScreenName(updated.userName);
@@ -206,6 +327,31 @@ function App() {
     });
   }, [authLoading]);
 
+
+  // Unified invite landing (bd-fxdcxbpq): capture a non-ephemeral share
+  // route once at boot. The share URL is scrubbed from the address bar on
+  // mount as before, but connection now happens on the landing's CTA click
+  // instead of on route load; this state carries the invite until then.
+  // Cleared once the document is opened. Ephemeral preview boots keep the
+  // eager auto-connect path (the preview session is not an invite).
+  const [pendingShare, setPendingShare] = useState<ShareRoute | null>(() => {
+    const bootRoute = parseHashRoute(window.location.hash);
+    return bootRoute.type === 'share' && !bootRoute.ephemeral ? bootRoute : null;
+  });
+  const [inviteJoinState, setInviteJoinState] = useState<'idle' | 'joining'>('idle');
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  // Set after a successful invite join/open; drives the one-time editor
+  // welcome banner (dismissal persists per target id inside the banner).
+  const [welcomeInvite, setWelcomeInvite] = useState<{
+    kind: 'collection' | 'project';
+    targetId: string;
+    targetName: string;
+    inviter: string;
+  } | null>(null);
+  // Set after joining a collection via an invite: the home screen sorts
+  // this collection to the top so the invitee lands looking at what they
+  // just accepted. Session-scoped on purpose.
+  const [promotedCollectionId, setPromotedCollectionId] = useState<string | null>(null);
 
   // Track if we've done the initial URL-based navigation
   const initialLoadRef = useRef(false);
@@ -229,27 +375,154 @@ function App() {
     navigateToFile,
   } = useRouting();
 
-  // Invite-first onboarding: opening a collection invite establishes a
-  // personal root behind the landing screen, so the invitee only ever sees
-  // "join Team docs" — never the setup or migration prompts. A browser with a
-  // stray legacy project (needs-migration) migrates it silently into the new
-  // root (non-destructive: the legacy store is retained); a fresh browser
-  // (needs-setup) just creates an empty root. The landing shows "Connecting…"
-  // until the root is ready, then Join subscribes to the collection.
-  const inviteRootInitiatedRef = useRef(false);
+  // Find-or-create the local project entry for a shared document, then
+  // connect and open the file. Shared by the invite landing's CTA
+  // (bd-fxdcxbpq), the collection-invite start target, and the ephemeral
+  // preview boot/reload paths. Returns null on success, or the error
+  // message on failure. `quiet` skips the global connectionError (the
+  // invite landing renders the error inside its card); `addToSet: false`
+  // skips the personal project-set entry (a collection invite's start
+  // target already belongs to the joined collection).
+  const connectToSharedProject = useCallback(
+    async (
+      share: { indexDocId: string; syncServer: string; name: string; filePath: string },
+      opts?: { quiet?: boolean; addToSet?: boolean },
+    ): Promise<string | null> => {
+      // Normalize the indexDocId (add 'automerge:' prefix if not present)
+      const normalizedIndexDocId = share.indexDocId.startsWith('automerge:')
+        ? share.indexDocId
+        : `automerge:${share.indexDocId}`;
+
+      // Check if we already have this project locally, or auto-create it
+      let targetProject = await projectStorage.getProjectByIndexDocId(normalizedIndexDocId);
+      if (!targetProject) {
+        targetProject = await projectStorage.addProject(
+          normalizedIndexDocId,
+          share.syncServer,
+          share.name
+        );
+      }
+
+      // Also add to the synced project set (if connected)
+      if (opts?.addToSet !== false && projectSetStateRef.current.status === 'connected') {
+        try {
+          projectSetActions.addProject({
+            indexDocId: normalizedIndexDocId,
+            syncServer: share.syncServer,
+            description: share.name,
+          });
+        } catch {
+          // Non-fatal: project set update failed, but project is in IDB
+        }
+      }
+
+      setConnectionError(null);
+      try {
+        const newAuthorId = await resolveAuthorId(targetProject.indexDocId);
+        if (newAuthorId === null) return 'Your session has expired. Please sign in again.';
+        const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newAuthorId, screenName, cursorColor);
+        setProject(targetProject);
+        setFiles(loadedFiles);
+        setFileContents(contents);
+
+        navigateToFile(targetProject.id, share.filePath, { replace: true });
+        return null;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!opts?.quiet) setConnectionError(message);
+        return message;
+      }
+    },
+    [projectSetActions, resolveAuthorId, screenName, cursorColor, navigateToFile],
+  );
+
+  // Invite-first onboarding (bd-fxdcxbpq): the personal root is established
+  // behind the landing screen by useAutoEstablishRoot above (it runs for
+  // every boot now), so the invitee only ever sees "join Team docs". The
+  // landing's CTA stays disabled until the root is connected.
+
+  // Keep the invite hash reachable across the OAuth round trip: share
+  // URLs are scrubbed from the address bar on mount, so re-save the
+  // reconstructed hash whenever the signed-out landing is showing
+  // (main.tsx saved it at boot, but a stray restore may have consumed it).
   useEffect(() => {
-    if (route.type !== 'join-collection' || inviteRootInitiatedRef.current) return;
-    if (projectSetState.status === 'needs-setup') {
-      inviteRootInitiatedRef.current = true;
-      projectSetActions.createProjectSet(DEFAULT_SYNC_SERVER);
-    } else if (projectSetState.status === 'needs-migration') {
-      // Fire once: migrateProjects resets to needs-migration on failure, so
-      // an unguarded effect would retry-loop against an unreachable server.
-      inviteRootInitiatedRef.current = true;
-      projectSetActions.migrateProjects(DEFAULT_SYNC_SERVER);
+    if (AUTH_ENABLED && !auth && !authLoading && pendingShare) {
+      savePreAuthHash(buildHashRoute(pendingShare));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.type, projectSetState.status]);
+  }, [auth, authLoading, pendingShare]);
+
+  // Invite landing CTA (project invite): connect to the shared project
+  // and open the editor on the shared file. Connection deliberately
+  // happens here, on the click, not on route load (bd-fxdcxbpq).
+  const handleShareCta = useCallback(async () => {
+    if (!pendingShare) return;
+    setInviteJoinState('joining');
+    setInviteError(null);
+    const error = await connectToSharedProject(
+      {
+        indexDocId: pendingShare.indexDocId,
+        syncServer: pendingShare.syncServer,
+        name: pendingShare.name,
+        filePath: pendingShare.filePath,
+      },
+      { quiet: true },
+    );
+    if (error) {
+      setInviteError(error);
+      setInviteJoinState('idle');
+      return;
+    }
+    // The invite is consumed — drop the stashed pre-auth hash so a later
+    // visit to the app root doesn't bounce back onto the landing card.
+    clearPreAuthHash();
+    setWelcomeInvite({
+      kind: 'project',
+      targetId: pendingShare.indexDocId,
+      targetName: pendingShare.name,
+      inviter: pendingShare.from ?? 'A collaborator',
+    });
+    setPendingShare(null);
+    setInviteJoinState('idle');
+  }, [pendingShare, connectToSharedProject]);
+
+  // Invite landing CTA (collection invite): subscribe with the identity
+  // from the account (no name/color form), then land on the home screen
+  // with the joined collection promoted to the top — the invite was to
+  // the collection, not to any particular document. The welcome banner
+  // shows later, on the first project opened from that collection.
+  const handleCollectionCta = useCallback(
+    async (inviteRoute: JoinCollectionRoute) => {
+      setInviteJoinState('joining');
+      setInviteError(null);
+      try {
+        await projectSetActions.subscribeCollection(
+          inviteRoute.collectionId,
+          inviteRoute.syncServer || DEFAULT_SYNC_SERVER,
+        );
+      } catch (err) {
+        setInviteError(err instanceof Error ? err.message : 'Could not join the collection.');
+        setInviteJoinState('idle');
+        return;
+      }
+      clearPreAuthHash();
+      setWelcomeInvite({
+        kind: 'collection',
+        targetId: inviteRoute.collectionId,
+        targetName: inviteRoute.collectionName,
+        inviter: inviteRoute.inviter,
+      });
+      setPromotedCollectionId(inviteRoute.collectionId);
+      setInviteJoinState('idle');
+      navigateToProjectSelector({ replace: true });
+    },
+    [projectSetActions, navigateToProjectSelector],
+  );
+
+  // Ephemeral preview boot (bd-zf4ryvuq): the personal root is established
+  // silently by useAutoEstablishRoot above. DEFAULT_SYNC_SERVER is '/ws' in
+  // the preview-embed build, i.e. the ephemeral hub itself; the root doc
+  // lives in IndexedDB and re-syncs to whatever ephemeral hub serves this
+  // origin next.
 
   // Denormalize a peek summary onto this user's project-set entry while a
   // project is open. Kept current as files and identities change (both are
@@ -337,6 +610,7 @@ function App() {
         setProject(null);
         setFiles([]);
         setFileContents(new Map());
+        setBinaryFileVersions(new Map());
         setConnectionError(null);
       } else if (route.type === 'project' || route.type === 'file') {
         // Navigating to a project (possibly different from current)
@@ -345,20 +619,17 @@ function App() {
           // Different project - need to load it
           const targetProject = await projectStorage.getProject(route.projectId);
           if (targetProject) {
-            setIsConnecting(true);
             setConnectionError(null);
             try {
-              const newActorId = await resolveActorId(targetProject.indexDocId);
-              if (newActorId === null) return;
-              const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newActorId, screenName, cursorColor);
+              const newAuthorId = await resolveAuthorId(targetProject.indexDocId);
+              if (newAuthorId === null) return;
+              const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newAuthorId, screenName, cursorColor);
               setProject(targetProject);
               setFiles(loadedFiles);
               setFileContents(contents);
             } catch (err) {
               setConnectionError(err instanceof Error ? err.message : String(err));
               navigateToProjectSelector({ replace: true });
-            } finally {
-              setIsConnecting(false);
             }
           } else {
             // Project not found in IndexedDB
@@ -376,6 +647,12 @@ function App() {
   // Handle initial URL-based navigation
   useEffect(() => {
     if (initialLoadRef.current) return;
+    // Connect only once the local identity has loaded. `resolveAuthorId` and the screen name
+    // are read from this render; before the async `getUserIdentity()` lands they are undefined,
+    // and a connection opened without them stamps no author on its edits and registers no
+    // identity, so a docx download names comment authors by raw actor-id prefix. (With auth on,
+    // the author id comes from the server, but the screen name is still needed for the identity.)
+    if (screenName === undefined || (!AUTH_ENABLED && localAuthorId === undefined)) return;
     initialLoadRef.current = true;
 
     const loadFromUrl = async () => {
@@ -414,7 +691,15 @@ function App() {
 
         const shareRoute = route as ShareRoute;
 
-        // Validate required fields
+        // Non-ephemeral share links render the InviteLanding card
+        // (bd-fxdcxbpq): connection happens on the CTA click, not here.
+        // The route was captured into pendingShare at boot.
+        if (!shareRoute.ephemeral) {
+          return;
+        }
+
+        // Ephemeral preview boots keep the eager connect: the user asked
+        // for a preview session, not an invite.
         if (!shareRoute.syncServer || !shareRoute.filePath || !shareRoute.name) {
           setConnectionError(
             'This share link is incomplete. Please ask the sender to share a new link.'
@@ -422,50 +707,12 @@ function App() {
           return;
         }
 
-        // Normalize the indexDocId (add 'automerge:' prefix if not present)
-        const normalizedIndexDocId = shareRoute.indexDocId.startsWith('automerge:')
-          ? shareRoute.indexDocId
-          : `automerge:${shareRoute.indexDocId}`;
-
-        // Check if we already have this project locally, or auto-create it
-        let targetProject = await projectStorage.getProjectByIndexDocId(normalizedIndexDocId);
-        if (!targetProject) {
-          targetProject = await projectStorage.addProject(
-            normalizedIndexDocId,
-            shareRoute.syncServer,
-            shareRoute.name
-          );
-        }
-
-        // Also add to the synced project set (if connected)
-        if (projectSetStateRef.current.status === 'connected') {
-          try {
-            projectSetActions.addProject({
-              indexDocId: normalizedIndexDocId,
-              syncServer: shareRoute.syncServer,
-              description: shareRoute.name,
-            });
-          } catch {
-            // Non-fatal: project set update failed, but project is in IDB
-          }
-        }
-
-        setIsConnecting(true);
-        setConnectionError(null);
-        try {
-          const newActorId = await resolveActorId(targetProject.indexDocId);
-          if (newActorId === null) return;
-          const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newActorId, screenName, cursorColor);
-          setProject(targetProject);
-          setFiles(loadedFiles);
-          setFileContents(contents);
-
-          navigateToFile(targetProject.id, shareRoute.filePath, { replace: true });
-        } catch (err) {
-          setConnectionError(err instanceof Error ? err.message : String(err));
-        } finally {
-          setIsConnecting(false);
-        }
+        await connectToSharedProject({
+          indexDocId: shareRoute.indexDocId,
+          syncServer: shareRoute.syncServer,
+          name: shareRoute.name,
+          filePath: shareRoute.filePath,
+        });
         return;
       }
 
@@ -473,22 +720,38 @@ function App() {
         // URL specifies a project - try to load it
         const targetProject = await projectStorage.getProject(route.projectId);
         if (targetProject) {
-          setIsConnecting(true);
           setConnectionError(null);
           try {
-            const newActorId = await resolveActorId(targetProject.indexDocId);
-            if (newActorId === null) return;
-            const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newActorId, screenName, cursorColor);
+            const newAuthorId = await resolveAuthorId(targetProject.indexDocId);
+            if (newAuthorId === null) return;
+            const { files: loadedFiles, contents } = await connectAndLoadContents(targetProject.syncServer, targetProject.indexDocId, newAuthorId, screenName, cursorColor);
             setProject(targetProject);
             setFiles(loadedFiles);
             setFileContents(contents);
-            
+
           } catch (err) {
             setConnectionError(err instanceof Error ? err.message : String(err));
             navigateToProjectSelector({ replace: true });
-          } finally {
-            setIsConnecting(false);
           }
+        } else if (isEphemeralStorage()) {
+          // Ephemeral storage mode (bd-sw4xy1vw) keeps no project
+          // records across page reloads. Rebuild the session from the
+          // preview server's boot params (every editor-UI session
+          // serves them at /api/preview/config, bd-7htq16rx) instead of
+          // reporting a missing project. A non-preview server answers
+          // without editorBoot and falls through to the error.
+          const config = await fetchPreviewSessionConfig();
+          if (config?.editorBoot) {
+            await connectToSharedProject({
+              indexDocId: config.editorBoot.indexDocId,
+              syncServer: hubPath('/ws'),
+              name: config.editorBoot.name,
+              filePath: config.editorBoot.file,
+            });
+            return;
+          }
+          setConnectionError(`Project not found. It may have been deleted.`);
+          navigateToProjectSelector({ replace: true });
         } else {
           // Project not found - show error and stay on project selector
           setConnectionError(`Project not found. It may have been deleted.`);
@@ -499,7 +762,7 @@ function App() {
     };
 
     loadFromUrl();
-  }, [route, navigateToProjectSelector, navigateToProject, navigateToFile]);
+  }, [route, navigateToProjectSelector, navigateToProject, navigateToFile, connectToSharedProject, screenName, localAuthorId]);
 
   // Disconnect sync when auth is lost (token expired or user logged out).
   // Without this, the WebSocket adapter keeps retrying with an expired cookie
@@ -551,11 +814,21 @@ function App() {
       onCapturesChange: (newCaptures) => {
         setCaptures(newCaptures);
       },
+      onFoldersChange: (newFolders) => {
+        setFolders(newFolders);
+      },
       onFileContent: (path, content, _patches) => {
         // Note: patches are ignored - we use diff-based sync in Editor.tsx
         setFileContents((prev) => {
           const next = new Map(prev);
           next.set(path, content);
+          return next;
+        });
+      },
+      onBinaryContent: (path) => {
+        setBinaryFileVersions((prev) => {
+          const next = new Map(prev);
+          next.set(path, (prev.get(path) ?? 0) + 1);
           return next;
         });
       },
@@ -575,18 +848,27 @@ function App() {
     });
   }, [project]);
 
+  // The last project-open attempt, kept so the connection error banner
+  // on the projects home can offer a "Try again" recovery action
+  // (Phase 3). Cleared on success, on disconnect, and when a different
+  // action (project creation) is what might have failed.
+  const [lastOpenAttempt, setLastOpenAttempt] = useState<
+    { project: ProjectEntry; filePathOverride?: string } | null
+  >(null);
+
   const handleSelectProject = useCallback(async (selectedProject: ProjectEntry, filePathOverride?: string) => {
-    setIsConnecting(true);
     setConnectionError(null);
+    setLastOpenAttempt({ project: selectedProject, filePathOverride });
 
     try {
-      const newActorId = await resolveActorId(selectedProject.indexDocId);
-      if (newActorId === null) return;
-      const { files: loadedFiles, contents } = await connectAndLoadContents(selectedProject.syncServer, selectedProject.indexDocId, newActorId, screenName, cursorColor);
+      const newAuthorId = await resolveAuthorId(selectedProject.indexDocId);
+      if (newAuthorId === null) return;
+      const { files: loadedFiles, contents } = await connectAndLoadContents(selectedProject.syncServer, selectedProject.indexDocId, newAuthorId, screenName, cursorColor);
       setProject(selectedProject);
       setFiles(loadedFiles);
       setFileContents(contents);
-      
+      setLastOpenAttempt(null);
+
 
       if (filePathOverride) {
         navigateToFile(selectedProject.id, filePathOverride, { replace: true });
@@ -595,10 +877,8 @@ function App() {
       }
     } catch (err) {
       setConnectionError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsConnecting(false);
     }
-  }, [navigateToProject, navigateToFile, resolveActorId, screenName, cursorColor]);
+  }, [navigateToProject, navigateToFile, resolveAuthorId, screenName, cursorColor]);
 
   const handleDisconnect = useCallback(async () => {
     await disconnect();
@@ -606,6 +886,7 @@ function App() {
     setFiles([]);
     setFileContents(new Map());
     setConnectionError(null);
+    setLastOpenAttempt(null);
     // Update URL to show project selector
     navigateToProjectSelector({ replace: true });
   }, [navigateToProjectSelector]);
@@ -620,8 +901,8 @@ function App() {
     _projectType: string,
     syncServer: string
   ) => {
-    setIsConnecting(true);
     setConnectionError(null);
+    setLastOpenAttempt(null);
 
     try {
       // Convert scaffold files to the format expected by createNewProject
@@ -632,8 +913,8 @@ function App() {
         mimeType: f.mime_type,
       }));
 
-      // Create the Automerge documents. The resolveActorId callback is
-      // called after the index doc is created (to derive the HMAC actor
+      // Create the Automerge documents. The resolveAuthorId callback is
+      // called after the index doc is created (to derive the HMAC author
       // ID from the indexDocId) but before any file docs are written.
       //
       // Resolve only the runtime connection value (the WS adapter needs an
@@ -642,7 +923,9 @@ function App() {
       const result = await createNewProject({
         syncServer: resolveSyncServerUrl(syncServer),
         files,
-      }, undefined, screenName, cursorColor, resolveActorId);
+        // Ephemeral storage mode (bd-sw4xy1vw): no IndexedDB cache.
+        storage: isEphemeralStorage() ? 'memory' : 'indexeddb',
+      }, undefined, screenName, cursorColor, resolveAuthorId);
 
       // Store the project in IndexedDB
       const projectEntry = await projectStorage.addProject(
@@ -681,22 +964,82 @@ function App() {
       navigateToProject(projectEntry.id, { replace: true });
     } catch (err) {
       setConnectionError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsConnecting(false);
     }
-  }, [navigateToProject, resolveActorId, screenName, cursorColor]);
+  }, [navigateToProject, resolveAuthorId, screenName, cursorColor]);
+
+  // Whether the welcome banner belongs on the currently open project: a
+  // project invite's banner only on that project; a collection
+  // invite's banner on the first project opened from that collection.
+  const welcomeMatchesProject = (
+    invite: { kind: 'collection' | 'project'; targetId: string },
+    proj: ProjectEntry,
+  ): boolean => {
+    const bare = (id: string) => id.replace(/^automerge:/, '');
+    if (invite.kind === 'project') {
+      return bare(invite.targetId) === bare(proj.indexDocId);
+    }
+    const collection = projectSetState.collections.find(
+      (c) => bare(c.docId) === bare(invite.targetId),
+    );
+    return !!collection?.entries.some((e) => bare(e.indexDocId) === bare(proj.indexDocId));
+  };
 
   // Auth gate: when auth is enabled, require login before showing the app.
   // Show a loading spinner while checking auth status to avoid login flash.
   if (AUTH_ENABLED && authLoading) {
     return (
       <div className="project-selector" style={{ alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Loading...</div>
+        <LoadingIndicator />
       </div>
     );
   }
 
   if (AUTH_ENABLED && !auth) {
+    // Invite routes render the InviteLanding card instead of the generic
+    // login screen (bd-fxdcxbpq): who invited you, what to, and a single
+    // Google CTA. The OAuth round trip returns to the same invite URL via
+    // the pre-auth hash save/restore, then shows the signed-in variant.
+    const signInCta = (
+      <authProvider.SignInButton
+        loginUri={window.location.origin + hubPath('/auth/callback')}
+        text="continue_with"
+      />
+    );
+    if (pendingShare) {
+      const incomplete =
+        !pendingShare.syncServer || !pendingShare.filePath || !pendingShare.name;
+      return (
+        <InviteLanding
+          kind="project"
+          inviter={pendingShare.from ?? 'A collaborator'}
+          title={pendingShare.name || 'Shared project'}
+          preview={pendingShare.preview}
+          signedIn={false}
+          signInCta={signInCta}
+          joinState="idle"
+          error={
+            incomplete
+              ? 'This share link is incomplete. Please ask the sender to share a new link.'
+              : null
+          }
+          onCta={() => {}}
+        />
+      );
+    }
+    if (route.type === 'join-collection') {
+      return (
+        <InviteLanding
+          kind="collection"
+          inviter={route.inviter}
+          title={route.collectionName}
+          preview={route.preview}
+          signedIn={false}
+          signInCta={signInCta}
+          joinState="idle"
+          onCta={() => {}}
+        />
+      );
+    }
     return (
       <LoginScreen
         errorReason={authErrorReason}
@@ -710,76 +1053,93 @@ function App() {
   if (screenName === undefined) {
     return (
       <div className="project-selector" style={{ alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Loading...</div>
+        <LoadingIndicator />
       </div>
     );
   }
 
   // Dev harness: render components in isolation for visual testing.
-  // Only available in development builds; the DevRoute type is never parsed in production.
+  // Only reachable in development builds and VITE_E2E=1 test builds; in
+  // production the DevRoute type is never parsed (see routing.ts).
   if (route.type === 'dev') {
     return <DevHarnessLazy page={route.page} />;
   }
 
-  // Collection invite landing (explore/projects-collections-ui). Always shown
-  // for an invite route, ahead of the setup/migration screens: the effect
-  // above establishes the personal root (creating or silently migrating) so
-  // the invitee only ever sees "join <collection>", never onboarding prompts.
+  // Invite landings (bd-fxdcxbpq). Always shown for an invite route, ahead
+  // of the setup/migration screens: the effect above establishes the
+  // personal root (creating or silently migrating) so the invitee only
+  // ever sees the invite card, never onboarding prompts. The CTA stays
+  // disabled until the root is connected (was "Connecting…" previously).
   if (route.type === 'join-collection') {
     return (
-      <JoinCollectionLanding
-        route={route}
-        status={projectSetState.status}
-        onSubscribe={projectSetActions.subscribeCollection}
-        onDone={() => navigateToProjectSelector({ replace: true })}
+      <InviteLanding
+        kind="collection"
+        inviter={route.inviter}
+        title={route.collectionName}
+        preview={route.preview}
+        signedIn={true}
+        joinState={inviteJoinState}
+        ctaDisabled={projectSetState.status !== 'connected'}
+        error={inviteError}
+        onCta={() => void handleCollectionCta(route)}
       />
     );
   }
 
-  // Show project set setup/migration screen if needed
-  if (
-    projectSetState.status === 'needs-setup' ||
-    projectSetState.status === 'needs-migration'
-  ) {
+  // Document invite landing: shown until the CTA connects and opens the
+  // editor (share routes no longer auto-connect on load).
+  if (pendingShare && !project) {
+    const incomplete =
+      !pendingShare.syncServer || !pendingShare.filePath || !pendingShare.name;
     return (
-      <ProjectSetSetup
-        hasMigration={projectSetState.status === 'needs-migration'}
-        legacyProjects={projectSetState.legacyProjects}
-        error={projectSetState.error}
-        isConnecting={false}
-        onCreateProjectSet={projectSetActions.createProjectSet}
-        onLinkProjectSet={projectSetActions.linkProjectSet}
-        onMigrateProjects={projectSetActions.migrateProjects}
-        onMergeIntoProjectSet={projectSetActions.mergeIntoProjectSet}
+      <InviteLanding
+        kind="project"
+        inviter={pendingShare.from ?? 'A collaborator'}
+        title={pendingShare.name || 'Shared project'}
+        preview={pendingShare.preview}
+        signedIn={true}
+        joinState={inviteJoinState}
+        ctaDisabled={incomplete}
+        error={
+          inviteError ??
+          (incomplete
+            ? 'This share link is incomplete. Please ask the sender to share a new link.'
+            : null)
+        }
+        onCta={() => void handleShareCta()}
       />
     );
   }
 
-  // Show error if project set connection failed
-  if (projectSetState.status === 'error') {
+  // The root could not be established or reconnected: offer another
+  // attempt (bd-4h1hv60p). `needs-setup` / `needs-migration` fall through
+  // to the home: useAutoEstablishRoot flips them to 'connecting' in the
+  // same commit, and the home's skeleton covers both. Ephemeral preview
+  // boots skip the error card: the preview works without a project set,
+  // so a set failure must not block it.
+  if (!ephemeralHub && projectSetState.status === 'error') {
     return (
-      <ProjectSetSetup
-        hasMigration={false}
-        legacyProjects={[]}
+      <ProjectSetError
         error={projectSetState.error}
-        isConnecting={false}
-        onCreateProjectSet={projectSetActions.createProjectSet}
-        onLinkProjectSet={projectSetActions.linkProjectSet}
-        onMigrateProjects={projectSetActions.migrateProjects}
-        onMergeIntoProjectSet={projectSetActions.mergeIntoProjectSet}
+        onRetry={() => void projectSetActions.retry()}
       />
     );
   }
 
   return (
     <>
+      <SkipLink />
       {!project ? (
         uiVariant === 'collections' ? (
           <ProjectsHome
             onSelectProject={handleSelectProject}
             onProjectCreated={handleProjectCreated}
-            isConnecting={isConnecting}
             error={connectionError}
+            onRetry={
+              lastOpenAttempt
+                ? () => void handleSelectProject(lastOpenAttempt.project, lastOpenAttempt.filePathOverride)
+                : undefined
+            }
             onSignOut={AUTH_ENABLED ? logout : undefined}
             authEmail={auth?.email}
             authPicture={auth?.picture}
@@ -792,9 +1152,12 @@ function App() {
             onRemoveProjectFromSet={projectSetActions.removeProject}
             onTouchProject={projectSetActions.touchProject}
             onAddProjectToSet={projectSetActions.addProject}
+            onImportProjects={projectSetActions.importProjects}
+            onSubscribeCollection={projectSetActions.subscribeCollection}
             onRenameProject={projectSetActions.updateProjectDescription}
             onUpdateProjectSummary={projectSetActions.updateProjectSummary}
             collections={projectSetState.collections}
+            promoteCollectionId={promotedCollectionId ?? undefined}
             onCreateCollection={projectSetActions.createCollection}
             onUnsubscribeCollection={projectSetActions.unsubscribeCollection}
             onRenameCollection={projectSetActions.renameCollection}
@@ -808,7 +1171,6 @@ function App() {
             <ProjectSelector
               onSelectProject={handleSelectProject}
               onProjectCreated={handleProjectCreated}
-              isConnecting={isConnecting}
               error={connectionError}
               onSignOut={AUTH_ENABLED ? logout : undefined}
               authEmail={auth?.email}
@@ -839,7 +1201,9 @@ function App() {
             <Editor
               project={project}
               files={files}
+              folders={folders}
               fileContents={fileContents}
+              binaryFileVersions={binaryFileVersions}
               onDisconnect={handleDisconnect}
               onContentOperations={handleContentOperations}
               route={route}
@@ -851,12 +1215,29 @@ function App() {
               executorsOnline={liveExecutors.length > 0}
               onRequestExecution={requestExecution}
               isOnline={isOnline}
+              sessionEphemeral={previewSession?.allowEdit === false}
+              userName={screenName}
+              banner={
+                welcomeInvite && screenName && welcomeMatchesProject(welcomeInvite, project) ? (
+                  <EditorWelcomeBanner
+                    kind={welcomeInvite.kind}
+                    targetId={welcomeInvite.targetId}
+                    targetName={welcomeInvite.targetName}
+                    inviter={welcomeInvite.inviter}
+                    userName={screenName}
+                    onRename={async (name) => {
+                      const updated = await updateUserName(name);
+                      setScreenName(updated.userName);
+                    }}
+                  />
+                ) : undefined
+              }
             />
           </ErrorBoundary>
         </ViewModeProvider>
       )}
       <Toast
-        message="Auto-saved"
+        message={notifications.autoSaved}
         visible={showSaveToast}
         onHide={() => setShowSaveToast(false)}
       />

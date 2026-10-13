@@ -14,7 +14,10 @@ use quarto_config::MergedConfig;
 use quarto_pandoc_types::{ConfigValue, ConfigValueKind};
 use quarto_system_runtime::SystemRuntime;
 
-use super::types::{Contributes, Extension, ExtensionFilter, ExtensionId};
+use super::types::{
+    ClaimKind, Contributes, EngineContribution, Extension, ExtensionFilter, ExtensionId, FileClaim,
+    ProcessorSpec, StaticLanguageClaim,
+};
 use crate::error::Result;
 
 /// Read and parse an `_extension.yml` file.
@@ -60,11 +63,13 @@ pub fn read_extension_with_org(
     };
 
     let filename = extension_file.display().to_string();
+    // Discovery reports this as prose inside a Q-16-1 warning, so the
+    // position goes into the text (bd-x30aq7ae).
     let yaml = quarto_yaml::parse_file(&content, &filename).map_err(|e| {
         crate::error::QuartoError::Other(format!(
             "Failed to parse {}: {}",
             extension_file.display(),
-            e
+            pampa::utils::yaml_syntax_error::describe_yaml_error(&content, e)
         ))
     })?;
 
@@ -94,7 +99,7 @@ pub fn read_extension_with_org(
         ))
     })?;
 
-    let contributes = parse_contributes(contributes_cv, ext_dir)?;
+    let contributes = parse_contributes(contributes_cv, ext_dir, extension_file, runtime)?;
 
     Ok(Extension {
         id: if let Some(org) = ext_org {
@@ -135,12 +140,22 @@ fn derive_extension_id(ext_dir: &Path) -> (String, Option<String>) {
 }
 
 /// Parse the `contributes` section of an `_extension.yml`.
-fn parse_contributes(contributes: &ConfigValue, ext_dir: &Path) -> Result<Contributes> {
+///
+/// `extension_file` is the absolute path to the `_extension.yml` itself
+/// (distinct from `ext_dir`, its parent directory) — threaded down to
+/// `parse_external_engine` so each `EngineContribution::External` carries
+/// its provenance (Plan 6 Phase 5).
+fn parse_contributes(
+    contributes: &ConfigValue,
+    ext_dir: &Path,
+    extension_file: &Path,
+    runtime: &dyn SystemRuntime,
+) -> Result<Contributes> {
     let mut result = Contributes::default();
 
     // Parse formats with "common" key merging
     if let Some(formats_cv) = contributes.get("formats") {
-        result.formats = parse_formats(formats_cv, ext_dir)?;
+        result.formats = parse_formats(formats_cv, ext_dir, runtime)?;
     }
 
     // Parse filters
@@ -157,15 +172,21 @@ fn parse_contributes(contributes: &ConfigValue, ext_dir: &Path) -> Result<Contri
     result.metadata = contributes.get("metadata").cloned();
     result.project = contributes.get("project").cloned();
 
-    // Validate that contributes has at least one sub-field
+    // Parse engines
+    if let Some(engines_cv) = contributes.get("engines") {
+        result.engines = parse_engines(engines_cv, ext_dir, extension_file)?;
+    }
+
+    // Validate that contributes has at least one sub-field (engines count too)
     if result.formats.is_empty()
         && result.filters.is_empty()
         && result.shortcodes.is_empty()
         && result.metadata.is_none()
         && result.project.is_none()
+        && result.engines.is_empty()
     {
         return Err(crate::error::QuartoError::Other(
-            "Extension 'contributes' must have at least one of: formats, filters, shortcodes, metadata, project".to_string(),
+            "Extension 'contributes' must have at least one of: formats, filters, shortcodes, metadata, project, engines".to_string(),
         ));
     }
 
@@ -177,7 +198,8 @@ fn parse_contributes(contributes: &ConfigValue, ext_dir: &Path) -> Result<Contri
 /// The `common` key's values serve as defaults for all other format keys.
 fn parse_formats(
     formats_cv: &ConfigValue,
-    _ext_dir: &Path,
+    ext_dir: &Path,
+    runtime: &dyn SystemRuntime,
 ) -> Result<HashMap<String, ConfigValue>> {
     let mut result = HashMap::new();
 
@@ -207,6 +229,11 @@ fn parse_formats(
         // adjust_paths_to_document_dir() will rebase them during metadata merge.
         mark_path_valued_keys(&mut merged_value);
 
+        // Existence-driven marking for keys whose strings may be either
+        // bundled files or something else (builtin theme names, doc-relative
+        // references) — the filesystem disambiguates (bd-of20unsb).
+        super::paths::mark_bundled_format_assets(&mut merged_value, ext_dir, runtime);
+
         result.insert(entry.key.clone(), merged_value);
     }
 
@@ -235,7 +262,7 @@ fn mark_path_valued_keys(format_config: &mut ConfigValue) {
                 for item in items.iter_mut() {
                     match &mut item.value {
                         // String form: mark as Path unless reserved
-                        ConfigValueKind::Scalar(yaml) => {
+                        ConfigValueKind::Scalar { yaml, .. } => {
                             if let Some(s) = yaml.as_str()
                                 && !FILTER_RESERVED_NAMES.contains(&s)
                             {
@@ -247,7 +274,8 @@ fn mark_path_valued_keys(format_config: &mut ConfigValue) {
                         ConfigValueKind::Map(map_entries) => {
                             if let Some(path_entry) =
                                 map_entries.iter_mut().find(|e| e.key == "path")
-                                && let ConfigValueKind::Scalar(yaml) = &path_entry.value.value
+                                && let ConfigValueKind::Scalar { yaml, .. } =
+                                    &path_entry.value.value
                                 && let Some(s) = yaml.as_str()
                             {
                                 path_entry.value.value = ConfigValueKind::Path(s.to_string());
@@ -264,14 +292,14 @@ fn mark_path_valued_keys(format_config: &mut ConfigValue) {
             continue;
         }
         match &mut entry.value.value {
-            ConfigValueKind::Scalar(yaml) => {
+            ConfigValueKind::Scalar { yaml, .. } => {
                 if let Some(s) = yaml.as_str() {
                     entry.value.value = ConfigValueKind::Path(s.to_string());
                 }
             }
             ConfigValueKind::Array(items) => {
                 for item in items.iter_mut() {
-                    if let ConfigValueKind::Scalar(yaml) = &item.value
+                    if let ConfigValueKind::Scalar { yaml, .. } = &item.value
                         && let Some(s) = yaml.as_str()
                     {
                         item.value = ConfigValueKind::Path(s.to_string());
@@ -294,7 +322,7 @@ fn parse_filters(filters_cv: &ConfigValue, ext_dir: &Path) -> Vec<ExtensionFilte
         .filter_map(|item| {
             match &item.value {
                 // Simple string form: "filter.lua"
-                ConfigValueKind::Scalar(_) => {
+                ConfigValueKind::Scalar { .. } => {
                     let path_str = item.as_str()?;
                     Some(ExtensionFilter {
                         path: ext_dir.join(path_str),
@@ -317,6 +345,418 @@ fn parse_filters(filters_cv: &ConfigValue, ext_dir: &Path) -> Vec<ExtensionFilte
             }
         })
         .collect()
+}
+
+/// Parse the `contributes.engines` array.
+///
+/// Each element is either:
+/// - A bare string → `EngineContribution::Reorder { name }`.
+/// - A map with a `path` key → `EngineContribution::External { .. }`.
+fn parse_engines(
+    engines_cv: &ConfigValue,
+    ext_dir: &Path,
+    extension_file: &Path,
+) -> Result<Vec<EngineContribution>> {
+    let ConfigValueKind::Array(items) = &engines_cv.value else {
+        return Ok(vec![]);
+    };
+
+    let mut result = Vec::new();
+    for item in items {
+        match &item.value {
+            ConfigValueKind::Scalar { .. } | ConfigValueKind::PandocInlines(_) => {
+                // Bare string → Reorder hint
+                if let Some(name) = item.as_str().map(|s| s.to_string()) {
+                    result.push(EngineContribution::Reorder { name });
+                }
+            }
+            ConfigValueKind::Map(_) => {
+                let contribution = parse_external_engine(item, ext_dir, extension_file)?;
+                result.push(contribution);
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+/// Parse one object element of `contributes.engines` into an `External` contribution.
+fn parse_external_engine(
+    item: &ConfigValue,
+    ext_dir: &Path,
+    extension_file: &Path,
+) -> Result<EngineContribution> {
+    // `path` is required
+    let path_str = item.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+        crate::error::QuartoError::Other(
+            "Engine entry is missing required 'path' field".to_string(),
+        )
+    })?;
+
+    // Validate: path must end in a lowercase `.js` extension
+    let raw_path = std::path::Path::new(path_str);
+    let ext_lower = raw_path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned());
+
+    if ext_lower.as_deref() != Some("js") {
+        let ext_name = ext_dir.file_name().map_or_else(
+            || "unknown".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        // Best-effort: replace extension with .js
+        let expected_js_path = raw_path.with_extension("js").to_string_lossy().into_owned();
+        return Err(crate::error::QuartoError::Other(format!(
+            "Engine extension '{}' has 'path: {}'; only pre-built lowercase '.js' bundles are \
+            loadable. Run 'q2 call build-ts-extension' to produce {} and update _extension.yml.",
+            ext_name, path_str, expected_js_path,
+        )));
+    }
+
+    let resolved_path = ext_dir.join(path_str);
+
+    // Optional: `name`
+    let name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Optional: `claims` — None if absent, Some(map) if present (including empty)
+    let claims = item.get("claims").map(parse_claims_map);
+
+    // Optional: `file-extensions` — None if absent, Some(vec) if present.
+    // Each element is normalized to undotted lowercase at parse time (change B).
+    let file_extensions = item.get("file-extensions").map(parse_normalized_ext_list);
+
+    // Optional: `claims-files` — None if absent, Some(vec) if present. Accepts
+    // bare-string shorthand AND `{extension: ...}` mapping form (change A);
+    // each element's extension is normalized to undotted lowercase (change B).
+    // A malformed/unknown `processor:` is a hard parse error (Plan 7b), never
+    // a silent drop.
+    let claims_files = item
+        .get("claims-files")
+        .map(parse_file_claims)
+        .transpose()?;
+
+    Ok(EngineContribution::External {
+        path: resolved_path,
+        extension_yml_path: extension_file.to_path_buf(),
+        name,
+        claims,
+        file_extensions,
+        claims_files,
+    })
+}
+
+/// Parse a `claims` map value into a `HashMap<String, Vec<StaticLanguageClaim>>`
+/// (4c0 Vec-per-language form).
+///
+/// Returns an empty map for `claims: {}` and `claims: []`. The top-level value
+/// may be:
+/// - a YAML **sequence of strings** (shorthand) → each string `lang` gets a
+///   1-element Vec of a default-priority Primary claim (mirrors §3.2's `true`
+///   normalization, applied at the top level instead of per-language);
+///   non-string elements are skipped;
+/// - a per-language **map**, where a language key's value may be:
+///   - a YAML sequence of claim objects → each element parsed via
+///     `parse_static_language_claim`, collected into the Vec (elements that
+///     parse to `None`, e.g. `false`/null, are dropped);
+///   - a scalar/bool/int/single-object value (pre-4c0 shape) → parsed via the
+///     same single-claim path and wrapped as a 1-element Vec (back-compat).
+///
+/// A key whose value produces zero claims (an empty sequence, or a
+/// scalar/object that parses to `None`) is omitted from the map entirely —
+/// matching the pre-4c0 "false/null → skip" behavior.
+pub(crate) fn parse_claims_map(cv: &ConfigValue) -> HashMap<String, Vec<StaticLanguageClaim>> {
+    if let ConfigValueKind::Array(items) = &cv.value {
+        let mut map = HashMap::new();
+        for item in items {
+            // `as_plain_text()`, not `as_str()`: a bare YAML string in
+            // document-frontmatter interpretation context is
+            // `ConfigValueKind::PandocInlines`, not `Scalar(String)` (the
+            // `metadata-as-str` lint's exact concern) — Plan 6 Phase 3 calls
+            // this parser on merged document metadata, not just
+            // `_extension.yml`, which never produces `PandocInlines` here.
+            if let Some(lang) = item.as_plain_text() {
+                map.insert(
+                    lang.to_lowercase(),
+                    vec![StaticLanguageClaim {
+                        kind: ClaimKind::Primary,
+                        priority: None,
+                        when_class: None,
+                    }],
+                );
+            }
+        }
+        return map;
+    }
+    let ConfigValueKind::Map(entries) = &cv.value else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for entry in entries {
+        let claims = parse_static_language_claims(&entry.key, &entry.value);
+        if !claims.is_empty() {
+            // F5 (julia epic Step 3): normalize to lowercase, mirroring
+            // `normalize_ext`'s file-extensions precedent. Dynamic claiming
+            // lowercases the language (`claimsLanguage: (language) =>
+            // language.toLowerCase() === "julia"`); without this, a
+            // `{Julia}` cell claims dynamically but silently misses static
+            // (zero-load) resolution. See `lookup_static_claim`'s matching
+            // lowercase lookup.
+            map.insert(entry.key.to_lowercase(), claims);
+        }
+    }
+    map
+}
+
+/// Parse one `claims` map entry's value into a `Vec<StaticLanguageClaim>`.
+///
+/// A YAML sequence parses each element via `parse_static_language_claim` and
+/// collects the `Some` results (order-preserving; dropped `None` elements do
+/// not shift the rest). Any other shape (scalar/object) delegates to the
+/// single-claim parser and wraps a `Some` result as a 1-element Vec.
+pub(crate) fn parse_static_language_claims(
+    key: &str,
+    cv: &ConfigValue,
+) -> Vec<StaticLanguageClaim> {
+    if let ConfigValueKind::Array(items) = &cv.value {
+        return items
+            .iter()
+            .filter_map(|item| parse_static_language_claim(key, item))
+            .collect();
+    }
+    parse_static_language_claim(key, cv).into_iter().collect()
+}
+
+/// Parse one entry in the `claims` map.
+///
+/// Rules (§3.2 of engine-resolution.md):
+/// - `true`  → Primary, priority: None
+/// - integer → Primary, priority: Some(n)
+/// - `false` / null → skip (no entry)
+/// - bare string `primary`/`interop`/`fallback` → that kind, priority: None
+///   (concise sugar for `{ kind: <string> }`); any other string → skip
+/// - object (key == "fallback") → `{ priority?: int }` with kind Fallback
+/// - object (other key) → `{ kind: primary|interop|fallback, priority?: int, whenClass?: str }`
+pub(crate) fn parse_static_language_claim(
+    key: &str,
+    cv: &ConfigValue,
+) -> Option<StaticLanguageClaim> {
+    match &cv.value {
+        // false or null → skip
+        ConfigValueKind::Scalar {
+            yaml: yaml_rust2::Yaml::Boolean(false) | yaml_rust2::Yaml::Null,
+            ..
+        } => None,
+        // true → Primary, use default priority
+        ConfigValueKind::Scalar {
+            yaml: yaml_rust2::Yaml::Boolean(true),
+            ..
+        } => Some(StaticLanguageClaim {
+            kind: ClaimKind::Primary,
+            priority: None,
+            when_class: None,
+        }),
+        // integer → Primary with explicit priority
+        ConfigValueKind::Scalar {
+            yaml: yaml_rust2::Yaml::Integer(n),
+            ..
+        } => Some(StaticLanguageClaim {
+            kind: ClaimKind::Primary,
+            priority: Some(*n as i32),
+            when_class: None,
+        }),
+        // bare kind string → that kind, default priority (sugar for `{ kind: <string> }`)
+        ConfigValueKind::Scalar {
+            yaml: yaml_rust2::Yaml::String(s),
+            ..
+        } => {
+            let kind = match s.as_str() {
+                "primary" => ClaimKind::Primary,
+                "interop" => ClaimKind::Interop,
+                "fallback" => ClaimKind::Fallback,
+                _ => return None,
+            };
+            Some(StaticLanguageClaim {
+                kind,
+                priority: None,
+                when_class: None,
+            })
+        }
+        // object
+        ConfigValueKind::Map(_) => {
+            if key == "fallback" {
+                // fallback key: object form is `{ priority?: int }`, kind is implicit Fallback
+                let priority = cv
+                    .get("priority")
+                    .and_then(|v| v.as_int_lenient())
+                    .map(|n| n as i32);
+                Some(StaticLanguageClaim {
+                    kind: ClaimKind::Fallback,
+                    priority,
+                    when_class: None,
+                })
+            } else {
+                // regular claim: { kind: primary|interop|fallback, priority?: int, whenClass?: str }
+                let kind_str = cv.get("kind")?.as_str()?;
+                let kind = match kind_str {
+                    "primary" => ClaimKind::Primary,
+                    "interop" => ClaimKind::Interop,
+                    "fallback" => ClaimKind::Fallback,
+                    _ => return None,
+                };
+                let priority = cv
+                    .get("priority")
+                    .and_then(|v| v.as_int_lenient())
+                    .map(|n| n as i32);
+                let when_class = cv
+                    .get("whenClass")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(StaticLanguageClaim {
+                    kind,
+                    priority,
+                    when_class,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Normalize a declared extension to the canonical Rust-side form: strip a
+/// single leading `.` if present, then lowercase. `".ECHO"` -> `"echo"`,
+/// `"Echo"` -> `"echo"`, `""` -> `""`.
+///
+/// Extensions are undotted everywhere on the Rust side (change C); the wire
+/// adapter (`to_wire_ext` in `engine/ts_engine.rs`) re-dots only at the
+/// Rust -> TS seam.
+fn normalize_ext(raw: &str) -> String {
+    let stripped = raw.strip_prefix('.').unwrap_or(raw);
+    stripped.to_lowercase()
+}
+
+/// Parse a YAML array of strings into a `Vec<String>`, normalizing each
+/// element via `normalize_ext` (undotted, lowercase).
+///
+/// Non-string elements are silently skipped.
+fn parse_normalized_ext_list(cv: &ConfigValue) -> Vec<String> {
+    let ConfigValueKind::Array(items) = &cv.value else {
+        return vec![];
+    };
+    items
+        .iter()
+        .filter_map(|item| item.as_str().map(normalize_ext))
+        .collect()
+}
+
+/// Parse a `claims-files` array into `Vec<FileClaim>`.
+///
+/// Each element is either:
+/// - a **scalar** string (`.echo`) -> `FileClaim { extension: normalize_ext(...), processor: None }`
+/// - a **mapping** `{extension: ".echo", processor?: ...}` -> same, reading the
+///   `extension` key, plus an optional `processor:` (Plan 7b)
+///
+/// A mapping missing `extension` is silently skipped, mirroring
+/// `parse_normalized_ext_list`'s non-string-skip behavior. A **malformed or
+/// unknown `processor:`** is a hard parse error — never a silent drop, since
+/// silently dropping it would mean the extension quietly loses its native
+/// conversion path.
+fn parse_file_claims(cv: &ConfigValue) -> Result<Vec<FileClaim>> {
+    let ConfigValueKind::Array(items) = &cv.value else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::new();
+    for item in items {
+        match &item.value {
+            ConfigValueKind::Scalar { .. } | ConfigValueKind::PandocInlines(_) => {
+                if let Some(s) = item.as_str() {
+                    out.push(FileClaim {
+                        extension: normalize_ext(s),
+                        processor: None,
+                    });
+                }
+            }
+            ConfigValueKind::Map(_) => {
+                let Some(ext) = item.get("extension").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let processor = item
+                    .get("processor")
+                    .map(parse_processor_spec)
+                    .transpose()?;
+                out.push(FileClaim {
+                    extension: normalize_ext(ext),
+                    processor,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a `processor:` value (Plan 7b) into a validated `ProcessorSpec`.
+///
+/// Accepts a bare name (`processor: spin`) or a map (`processor: { name:
+/// percent, language: julia, comment?: "#" }`). `percent` has no valid bare
+/// form (`language` is required); `comment` defaults to `"#"` when absent.
+/// An unknown name, or `percent` missing `language`, is a hard error.
+fn parse_processor_spec(cv: &ConfigValue) -> Result<ProcessorSpec> {
+    match &cv.value {
+        ConfigValueKind::Scalar {
+            yaml: yaml_rust2::Yaml::String(s),
+            ..
+        } => match s.as_str() {
+            "spin" => Ok(ProcessorSpec::Spin),
+            "ipynb" => Ok(ProcessorSpec::Ipynb),
+            "percent" => Err(crate::error::QuartoError::Other(
+                "processor 'percent' requires a 'language' parameter — use \
+                 '{ name: percent, language: <lang> }', not the bare name 'percent'"
+                    .to_string(),
+            )),
+            other => Err(crate::error::QuartoError::Other(format!(
+                "unknown content processor '{other}' in claims-files entry \
+                 (known processors: percent, spin, ipynb)"
+            ))),
+        },
+        ConfigValueKind::Map(_) => {
+            let name = cv.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                crate::error::QuartoError::Other(
+                    "processor entry is missing required 'name' field".to_string(),
+                )
+            })?;
+            match name {
+                "spin" => Ok(ProcessorSpec::Spin),
+                "ipynb" => Ok(ProcessorSpec::Ipynb),
+                "percent" => {
+                    let language =
+                        cv.get("language").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::QuartoError::Other(
+                                "processor 'percent' requires a 'language' field".to_string(),
+                            )
+                        })?;
+                    let comment = cv
+                        .get("comment")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("#")
+                        .to_string();
+                    Ok(ProcessorSpec::Percent {
+                        language: language.to_string(),
+                        comment,
+                    })
+                }
+                other => Err(crate::error::QuartoError::Other(format!(
+                    "unknown content processor '{other}' in claims-files entry \
+                     (known processors: percent, spin, ipynb)"
+                ))),
+            }
+        }
+        _ => Err(crate::error::QuartoError::Other(
+            "processor entry must be a string name or a map with a 'name' field".to_string(),
+        )),
+    }
 }
 
 /// Parse shortcodes from the contributes section.
@@ -349,6 +789,20 @@ mod tests {
         let file = dir.join("_extension.yml");
         fs::write(&file, yaml).unwrap();
         file
+    }
+
+    #[test]
+    fn test_read_extension_yaml_syntax_error_names_the_position() {
+        // bd-x30aq7ae: quarto-yaml >= 0.4.0 keeps the position out of the
+        // message; discovery shows this as prose, so it must be spelled out.
+        // The unclosed flow sequence fails at the `:` of `author:`.
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/test-ext");
+        let file = write_extension(&ext_dir, "title: x\ncontributes: [a\nauthor: b\n");
+        let err = read_extension(&file, &make_runtime())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("(line 3, column 7)"), "{err}");
     }
 
     #[test]
@@ -507,6 +961,15 @@ contributes:
         );
     }
 
+    /// Q1 does not require `title` (`schema/extension.yml` has no top-level
+    /// `required:` marker; `readExtension` reads it leniently and falls back to
+    /// `extension.title || extension.id.name`). A manifest omitting `title` must
+    /// therefore load, with the title defaulting to the extension's id name.
+    ///
+    /// Named revert (H-title, read.rs ~L82): restoring the `.ok_or_else(...)?`
+    /// requiredness makes this `.unwrap()` panic (missing-title error). The
+    /// `== "test-ext"` discriminator also reddens under a lazy
+    /// `unwrap_or_default()` (empty string ≠ id name), pinning the id-name default.
     #[test]
     fn test_read_extension_missing_title() {
         // Q1-compat intake (bd-8b0af414): missing title is NOT an error;
@@ -527,6 +990,68 @@ contributes:
         let ext = read_extension(&file, &runtime).unwrap();
         assert_eq!(ext.title, None);
         assert_eq!(ext.author.as_deref(), Some("Author"));
+    }
+
+    /// Q1 does not require `author` (no schema `required:`; a real shipped Q1
+    /// extension — julia-engine — has none). A manifest omitting `author` must
+    /// load, with `author` left `None`.
+    ///
+    /// Named revert (H-author, read.rs ~L93): restoring `.ok_or_else(...)?`
+    /// requiredness makes this `.unwrap()` panic (missing-author error). `title`
+    /// is present here, so H-title's revert does not affect this test (clean
+    /// isolation of the author relaxation).
+    #[test]
+    fn test_read_extension_author_optional() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/test-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Author-less Extension
+contributes:
+  shortcodes:
+    - hello.lua
+"#,
+        );
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        assert_eq!(ext.title.as_deref(), Some("Author-less Extension"));
+        assert!(ext.author.is_none(), "author should be None when omitted");
+        // Contribution is actually carried.
+        assert_eq!(ext.contributes.shortcodes.len(), 1);
+    }
+
+    /// Reproduces the exact confirmed failure shape: a Q1 engine extension
+    /// (modeled on julia-engine) — `title` + `version` + `quarto-required` +
+    /// `contributes.engines`, and **no `author`**. Before the relaxation this
+    /// was rejected outright and the engine never registered; now it must load.
+    ///
+    /// Named revert (H-author): restoring author requiredness reddens this.
+    #[test]
+    fn test_read_extension_q1_engine_shape() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/julia-engine");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Julia Engine
+version: 0.5.0
+quarto-required: ">=1.4.0"
+contributes:
+  engines:
+    - path: julia-engine.js
+"#,
+        );
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        assert_eq!(ext.title.as_deref(), Some("Julia Engine"));
+        assert!(ext.author.is_none(), "author should be None when omitted");
+        assert_eq!(ext.version.as_deref(), Some("0.5.0"));
+        assert_eq!(ext.contributes.engines.len(), 1);
     }
 
     #[test]
@@ -784,7 +1309,7 @@ contributes:
         let items = filters.as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert!(
-            matches!(&items[0].value, ConfigValueKind::Scalar(_)),
+            matches!(&items[0].value, ConfigValueKind::Scalar { .. }),
             "expected Scalar for citeproc, got {:?}",
             items[0].value
         );
@@ -815,7 +1340,7 @@ contributes:
         let items = filters.as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert!(
-            matches!(&items[0].value, ConfigValueKind::Scalar(_)),
+            matches!(&items[0].value, ConfigValueKind::Scalar { .. }),
             "expected Scalar for quarto, got {:?}",
             items[0].value
         );
@@ -858,13 +1383,13 @@ contributes:
         );
         // citeproc → Scalar (not marked)
         assert!(
-            matches!(&items[1].value, ConfigValueKind::Scalar(_)),
+            matches!(&items[1].value, ConfigValueKind::Scalar { .. }),
             "expected Scalar for citeproc, got {:?}",
             items[1].value
         );
         // quarto → Scalar (not marked)
         assert!(
-            matches!(&items[2].value, ConfigValueKind::Scalar(_)),
+            matches!(&items[2].value, ConfigValueKind::Scalar { .. }),
             "expected Scalar for quarto, got {:?}",
             items[2].value
         );
@@ -977,6 +1502,267 @@ contributes:
         }
     }
 
+    // --- bd-of20unsb: existence-driven Path marking for bundled ---
+    // --- format assets (theme / css / include-* / format-resources) ---
+
+    /// Create an asset file at `rel` under the extension dir, so the
+    /// existence-driven marking classifies the string as a bundled file.
+    fn write_asset(ext_dir: &Path, rel: &str) {
+        let p = ext_dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "/* asset */\n").unwrap();
+    }
+
+    #[test]
+    fn test_theme_bundled_scss_marked_as_path_builtin_stays_scalar() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      theme: [cosmo, fmt-theme.scss]
+"#,
+        );
+        write_asset(&ext_dir, "fmt-theme.scss");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let items = html_meta.get("theme").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        // Built-in theme name: no such file under the extension dir,
+        // so it must stay Scalar (the theme stage resolves it by name).
+        assert!(
+            matches!(&items[0].value, ConfigValueKind::Scalar { .. }),
+            "expected Scalar for builtin name `cosmo`, got {:?}",
+            items[0].value
+        );
+        // Bundled file: exists next to _extension.yml, so it must be
+        // marked Path (ext-dir-relative) for the merge-time rebase.
+        assert!(
+            matches!(&items[1].value, ConfigValueKind::Path(s) if s == "fmt-theme.scss"),
+            "expected Path(\"fmt-theme.scss\"), got {:?}",
+            items[1].value
+        );
+    }
+
+    #[test]
+    fn test_theme_scalar_bundled_file_marked_as_path() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      theme: fmt-theme.scss
+"#,
+        );
+        write_asset(&ext_dir, "fmt-theme.scss");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let theme = html_meta.get("theme").unwrap();
+        assert!(
+            matches!(&theme.value, ConfigValueKind::Path(s) if s == "fmt-theme.scss"),
+            "expected Path(\"fmt-theme.scss\"), got {:?}",
+            theme.value
+        );
+    }
+
+    #[test]
+    fn test_theme_missing_file_stays_scalar() {
+        // A `.scss` string with no matching bundled file is NOT the
+        // extension's to claim — it stays Scalar and resolves (or
+        // hard-errors) downstream relative to the document.
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      theme: [missing.scss]
+"#,
+        );
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let items = html_meta.get("theme").unwrap().as_array().unwrap();
+        assert!(
+            matches!(&items[0].value, ConfigValueKind::Scalar { .. }),
+            "expected Scalar for missing.scss (no bundled file), got {:?}",
+            items[0].value
+        );
+    }
+
+    #[test]
+    fn test_theme_nested_map_leaves_marked() {
+        // The light/dark map form: pattern exhaustion at `theme` marks
+        // every string leaf underneath, existence-driven per leaf.
+        // (Consumption of light/dark maps is bd-o76p01wb; marking now
+        // means that fix composes with this one.)
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      theme:
+        light: [flatly, fmt-light.scss]
+        dark: fmt-dark.scss
+"#,
+        );
+        write_asset(&ext_dir, "fmt-light.scss");
+        write_asset(&ext_dir, "fmt-dark.scss");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let theme = html_meta.get("theme").unwrap();
+        let light = theme.get("light").unwrap().as_array().unwrap();
+        assert!(
+            matches!(&light[0].value, ConfigValueKind::Scalar { .. }),
+            "expected Scalar for builtin `flatly`, got {:?}",
+            light[0].value
+        );
+        assert!(
+            matches!(&light[1].value, ConfigValueKind::Path(s) if s == "fmt-light.scss"),
+            "expected Path(\"fmt-light.scss\"), got {:?}",
+            light[1].value
+        );
+        let dark = theme.get("dark").unwrap();
+        assert!(
+            matches!(&dark.value, ConfigValueKind::Path(s) if s == "fmt-dark.scss"),
+            "expected Path(\"fmt-dark.scss\"), got {:?}",
+            dark.value
+        );
+    }
+
+    #[test]
+    fn test_css_bundled_file_marked_missing_stays_scalar() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      css: [fmt-style.css, not-bundled.css]
+"#,
+        );
+        write_asset(&ext_dir, "fmt-style.css");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let items = html_meta.get("css").unwrap().as_array().unwrap();
+        assert!(
+            matches!(&items[0].value, ConfigValueKind::Path(s) if s == "fmt-style.css"),
+            "expected Path(\"fmt-style.css\"), got {:?}",
+            items[0].value
+        );
+        assert!(
+            matches!(&items[1].value, ConfigValueKind::Scalar { .. }),
+            "expected Scalar for not-bundled.css, got {:?}",
+            items[1].value
+        );
+    }
+
+    #[test]
+    fn test_include_keys_bundled_files_marked() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      include-in-header: header.html
+      include-before-body: [before.html]
+      include-after-body: after.html
+"#,
+        );
+        write_asset(&ext_dir, "header.html");
+        write_asset(&ext_dir, "before.html");
+        write_asset(&ext_dir, "after.html");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        for (key, expected) in [
+            ("include-in-header", "header.html"),
+            ("include-after-body", "after.html"),
+        ] {
+            let v = html_meta.get(key).unwrap();
+            assert!(
+                matches!(&v.value, ConfigValueKind::Path(s) if s == expected),
+                "{}: expected Path(\"{}\"), got {:?}",
+                key,
+                expected,
+                v.value
+            );
+        }
+        let before = html_meta
+            .get("include-before-body")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            matches!(&before[0].value, ConfigValueKind::Path(s) if s == "before.html"),
+            "expected Path(\"before.html\"), got {:?}",
+            before[0].value
+        );
+    }
+
+    #[test]
+    fn test_format_resources_bundled_subdir_file_marked() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/fancyfmt");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+contributes:
+  formats:
+    html:
+      format-resources: [fonts/fancy.woff2]
+"#,
+        );
+        write_asset(&ext_dir, "fonts/fancy.woff2");
+
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        let html_meta = &ext.contributes.formats["html"];
+        let items = html_meta
+            .get("format-resources")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(
+            matches!(&items[0].value, ConfigValueKind::Path(s) if s == "fonts/fancy.woff2"),
+            "expected Path(\"fonts/fancy.woff2\"), got {:?}",
+            items[0].value
+        );
+    }
+
     #[test]
     fn test_shortcode_marking_doesnt_affect_other_keys() {
         let tmp = TempDir::new().unwrap();
@@ -1007,5 +1793,1033 @@ contributes:
         // other keys should be unchanged
         assert_eq!(html_meta.get("toc").unwrap().as_bool(), Some(true));
         assert_eq!(html_meta.get("theme").unwrap().as_str(), Some("cosmo"));
+    }
+
+    // --- Engine parsing tests (P1-8, P1-9, happy path, None vs Some(empty), shorthand) ---
+
+    /// P1-8: a `.ts` path is rejected with an actionable message naming
+    /// `q2 call build-ts-extension`. (RED if the .js validation is removed.)
+    #[test]
+    fn test_engine_ts_path_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: src/engine.ts
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).unwrap_err();
+        assert!(
+            err.to_string().contains("call build-ts-extension"),
+            "Error should mention 'call build-ts-extension': {}",
+            err
+        );
+    }
+
+    /// P1-9a: uppercase `.JS` extension is rejected. (Shares P1-8 revert hunk.)
+    #[test]
+    fn test_engine_uppercase_js_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: bundle.JS
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).unwrap_err();
+        assert!(
+            err.to_string().contains("call build-ts-extension"),
+            "Error should mention 'call build-ts-extension': {}",
+            err
+        );
+    }
+
+    /// P1-9b: `.mjs` extension is rejected. (Shares P1-8 revert hunk.)
+    #[test]
+    fn test_engine_mjs_path_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: bundle.mjs
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).unwrap_err();
+        assert!(
+            err.to_string().contains("call build-ts-extension"),
+            "Error should mention 'call build-ts-extension': {}",
+            err
+        );
+    }
+
+    /// Happy parse: full External engine + a bare Reorder string alongside it.
+    #[test]
+    fn test_engine_external_happy_parse() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      name: echo
+      claims:
+        echo:
+          kind: primary
+          priority: 1
+      file-extensions:
+        - ".echo"
+      claims-files:
+        - ".echo"
+    - jupyter
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        assert_eq!(ext.contributes.engines.len(), 2);
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External {
+                path,
+                extension_yml_path,
+                name,
+                claims,
+                file_extensions,
+                claims_files,
+            } => {
+                assert!(path.is_absolute(), "path should be absolute");
+                assert!(
+                    path.to_string_lossy().ends_with(".js"),
+                    "path should end with .js"
+                );
+                assert_eq!(
+                    extension_yml_path, &file,
+                    "extension_yml_path must be the _extension.yml this engine was parsed from"
+                );
+                assert_eq!(name.as_deref(), Some("echo"));
+                let claims = claims.as_ref().unwrap();
+                let echo_claims = claims.get("echo").unwrap();
+                assert_eq!(
+                    echo_claims.len(),
+                    1,
+                    "single object claim value must parse to a 1-element Vec"
+                );
+                let echo_claim = &echo_claims[0];
+                assert_eq!(echo_claim.kind, ClaimKind::Primary);
+                assert_eq!(echo_claim.priority, Some(1));
+                assert!(echo_claim.when_class.is_none());
+                assert_eq!(
+                    file_extensions.as_deref(),
+                    Some(&["echo".to_string()][..]),
+                    "file-extensions must normalize to undotted lowercase at parse time"
+                );
+                assert_eq!(
+                    claims_files.as_deref(),
+                    Some(
+                        &[FileClaim {
+                            extension: "echo".to_string(),
+                            processor: None,
+                        }][..]
+                    ),
+                    "claims-files bare-string shorthand must normalize to undotted lowercase"
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+
+        match &ext.contributes.engines[1] {
+            EngineContribution::Reorder { name } => assert_eq!(name, "jupyter"),
+            other => panic!("expected Reorder, got {:?}", other),
+        }
+    }
+
+    /// T9 (1c.2 Task 1, changes A+B): `claims-files` parses BOTH the
+    /// bare-string shorthand (`.Echo`) AND the `{extension: ...}` mapping
+    /// form, and BOTH axes (`file-extensions`, `claims-files`) normalize to
+    /// undotted lowercase at parse time.
+    ///
+    /// REDs (manually verified — see task report):
+    /// 1. Revert `normalize_ext` to a no-op (identity fn) → stored values are
+    ///    `".ECHO"` / `".Echo"`, which != `"echo"` → assertions fail.
+    /// 2. Revert the `ConfigValueKind::Map` arm out of `parse_file_claims`
+    ///    (drop scalar-or-mapping accept) → the object-form element parses to
+    ///    `None` and is dropped → `claims.len()` is 1, not 2 → assertion fails.
+    #[test]
+    fn t9_claims_files_bare_and_object_forms_normalize_undotted_lowercase() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      file-extensions:
+        - ".ECHO"
+      claims-files:
+        - ".Echo"
+        - extension: ".Echo"
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External {
+                file_extensions,
+                claims_files,
+                ..
+            } => {
+                assert_eq!(
+                    file_extensions.as_deref(),
+                    Some(&["echo".to_string()][..]),
+                    "file-extensions must normalize undotted lowercase"
+                );
+                let claims = claims_files.as_ref().expect("claims-files must be Some");
+                assert_eq!(
+                    claims.len(),
+                    2,
+                    "both bare-string and object-map forms must parse to one entry each; got {:?}",
+                    claims
+                );
+                assert_eq!(
+                    claims[0],
+                    FileClaim {
+                        extension: "echo".to_string(),
+                        processor: None,
+                    },
+                    "bare-string form must normalize undotted lowercase"
+                );
+                assert_eq!(
+                    claims[1],
+                    FileClaim {
+                        extension: "echo".to_string(),
+                        processor: None,
+                    },
+                    "object-map form must normalize undotted lowercase"
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    // --- T-schema (Plan 7b Phase 1): `processor:` on `claims-files`. ---
+
+    /// Bare-name `processor: spin` parses to `ProcessorSpec::Spin`.
+    #[test]
+    fn t_schema_processor_bare_spin() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".R"
+          processor: spin
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims_files, .. } => {
+                let claims = claims_files.as_ref().unwrap();
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].extension, "r");
+                assert_eq!(claims[0].processor, Some(ProcessorSpec::Spin));
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Bare-name `processor: ipynb` parses to `ProcessorSpec::Ipynb`
+    /// (Plan 7c Phase 2 registry wiring).
+    #[test]
+    fn t_schema_processor_bare_ipynb() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".ipynb"
+          processor: ipynb
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims_files, .. } => {
+                let claims = claims_files.as_ref().unwrap();
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].extension, "ipynb");
+                assert_eq!(claims[0].processor, Some(ProcessorSpec::Ipynb));
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Map-form `processor: { name: percent, language: julia }` parses with
+    /// `comment` defaulted to `"#"`.
+    #[test]
+    fn t_schema_processor_map_percent_comment_defaults_hash() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".jl"
+          processor: { name: percent, language: julia }
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims_files, .. } => {
+                let claims = claims_files.as_ref().unwrap();
+                assert_eq!(claims[0].extension, "jl");
+                assert_eq!(
+                    claims[0].processor,
+                    Some(ProcessorSpec::Percent {
+                        language: "julia".to_string(),
+                        comment: "#".to_string(),
+                    })
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// An explicit `comment:` overrides the `"#"` default (e.g. `q`'s `/`).
+    #[test]
+    fn t_schema_processor_map_percent_explicit_comment() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".q"
+          processor: { name: percent, language: q, comment: "/" }
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims_files, .. } => {
+                let claims = claims_files.as_ref().unwrap();
+                assert_eq!(
+                    claims[0].processor,
+                    Some(ProcessorSpec::Percent {
+                        language: "q".to_string(),
+                        comment: "/".to_string(),
+                    })
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// An unknown processor name is a loud parse error, never a silent drop.
+    #[test]
+    fn t_schema_processor_unknown_name_is_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".foo"
+          processor: bogus
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).expect_err("unknown processor must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bogus"),
+            "error should name the unknown processor: {msg}"
+        );
+    }
+
+    /// A bare `processor: percent` (missing the required `language`) is a
+    /// loud parse error — percent has no valid bare form.
+    #[test]
+    fn t_schema_processor_bare_percent_missing_language_is_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".py"
+          processor: percent
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).expect_err("bare percent must error");
+        assert!(
+            err.to_string().contains("language"),
+            "error should mention the missing 'language' param: {err}"
+        );
+    }
+
+    /// A map-form `processor: { name: percent }` (missing `language`) is
+    /// also a loud parse error.
+    #[test]
+    fn t_schema_processor_map_percent_missing_language_is_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims-files:
+        - extension: ".py"
+          processor: { name: percent }
+"#,
+        );
+        let runtime = make_runtime();
+        let err = read_extension(&file, &runtime).expect_err("percent without language must error");
+        assert!(
+            err.to_string().contains("language"),
+            "error should mention the missing 'language' param: {err}"
+        );
+    }
+
+    /// Field-absent → `None`; present-but-empty → `Some(empty)`.
+    #[test]
+    fn test_engine_claims_present_but_empty_is_some() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims: {}
+      file-extensions: []
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External {
+                claims,
+                file_extensions,
+                ..
+            } => {
+                assert!(
+                    claims.is_some(),
+                    "present-but-empty claims should be Some(empty), not None"
+                );
+                assert!(claims.as_ref().unwrap().is_empty());
+                assert!(
+                    file_extensions.is_some(),
+                    "present-but-empty file-extensions should be Some(empty), not None"
+                );
+                assert!(file_extensions.as_ref().unwrap().is_empty());
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Absent `claims` and `file-extensions` fields → `None`.
+    #[test]
+    fn test_engine_absent_optional_fields_are_none() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External {
+                name,
+                claims,
+                file_extensions,
+                claims_files,
+                ..
+            } => {
+                assert!(name.is_none(), "absent name should be None");
+                assert!(claims.is_none(), "absent claims should be None");
+                assert!(
+                    file_extensions.is_none(),
+                    "absent file-extensions should be None"
+                );
+                assert!(claims_files.is_none(), "absent claims-files should be None");
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Shorthand claim values: `true` → Primary(None), number → Primary(Some(n)),
+    /// bd-yjsz6hdu Phase 3: a quoted `priority: "2"` arrives as a
+    /// string scalar, which the strict `as_int()` missed — the
+    /// priority silently dropped to `None`.
+    #[test]
+    fn test_engine_claim_priority_accepts_quoted_integer() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        sql:
+          kind: interop
+          priority: "2"
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let sql = &claims.as_ref().unwrap().get("sql").unwrap()[0];
+                assert_eq!(sql.kind, ClaimKind::Interop);
+                assert_eq!(sql.priority, Some(2));
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// `fallback: { priority: 0 }` → Fallback entry. Each still parses to a
+    /// 1-element Vec (4c0 back-compat for the scalar/single-object shape).
+    #[test]
+    fn test_engine_claims_shorthand_forms() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        echo: true
+        fast: 3
+        fallback:
+          priority: 0
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+
+                let echo_claims = claims.get("echo").unwrap();
+                assert_eq!(
+                    echo_claims.len(),
+                    1,
+                    "scalar `true` must parse to a 1-element Vec"
+                );
+                assert_eq!(echo_claims[0].kind, ClaimKind::Primary);
+                assert_eq!(echo_claims[0].priority, None);
+
+                let fast_claims = claims.get("fast").unwrap();
+                assert_eq!(
+                    fast_claims.len(),
+                    1,
+                    "scalar integer must parse to a 1-element Vec"
+                );
+                assert_eq!(fast_claims[0].kind, ClaimKind::Primary);
+                assert_eq!(fast_claims[0].priority, Some(3));
+
+                let fallback_claims = claims.get("fallback").unwrap();
+                assert_eq!(
+                    fallback_claims.len(),
+                    1,
+                    "single fallback object must parse to a 1-element Vec"
+                );
+                assert_eq!(fallback_claims[0].kind, ClaimKind::Fallback);
+                assert_eq!(fallback_claims[0].priority, Some(0));
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// SC2: a YAML **sequence** value for a `claims` key parses to a
+    /// multi-element Vec — one `StaticLanguageClaim` per sequence element,
+    /// preserving each element's kind/priority/whenClass (the marimo
+    /// bare-`{sql}` shape: a whenClass-conditioned primary claim alongside
+    /// an unconditional interop claim, both under the `sql` key).
+    #[test]
+    fn sc2_engine_claims_sequence_form_parses_multi_element_vec() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        sql:
+          - kind: primary
+            priority: 2
+            whenClass: marimo
+          - kind: interop
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                let sql = claims.get("sql").unwrap();
+                assert_eq!(
+                    sql.len(),
+                    2,
+                    "a 2-element YAML sequence must parse to a 2-element Vec"
+                );
+                assert_eq!(sql[0].kind, ClaimKind::Primary);
+                assert_eq!(sql[0].priority, Some(2));
+                assert_eq!(sql[0].when_class.as_deref(), Some("marimo"));
+                assert_eq!(sql[1].kind, ClaimKind::Interop);
+                assert_eq!(sql[1].priority, None);
+                assert!(sql[1].when_class.is_none());
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Top-level `claims: [r, sql]` shorthand: each language string maps to a
+    /// 1-element Vec of a default-priority Primary claim (mirrors §3.2's
+    /// `true` normalization, applied at the top level instead of per-language).
+    #[test]
+    fn parse_claims_list_shorthand_primary_default() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims: [r, sql]
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                assert_eq!(claims.len(), 2, "both languages must be present");
+
+                let r_claims = claims.get("r").unwrap();
+                assert_eq!(r_claims.len(), 1);
+                assert_eq!(r_claims[0].kind, ClaimKind::Primary);
+                assert_eq!(r_claims[0].priority, None);
+                assert!(r_claims[0].when_class.is_none());
+
+                let sql_claims = claims.get("sql").unwrap();
+                assert_eq!(sql_claims.len(), 1);
+                assert_eq!(sql_claims[0].kind, ClaimKind::Primary);
+                assert_eq!(sql_claims[0].priority, None);
+                assert!(sql_claims[0].when_class.is_none());
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// A non-string element in the top-level list shorthand is skipped
+    /// (same lenient behavior the map parser uses for unparseable entries);
+    /// the remaining string element still parses.
+    #[test]
+    fn parse_claims_list_shorthand_skips_non_string() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims: [r, 3]
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                assert_eq!(claims.len(), 1, "the non-string entry must be skipped");
+                assert!(claims.get("r").is_some());
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// The top-level string-list shorthand must NOT be confused with 4c0's
+    /// *per-language* claim-object sequence: `claims: {sql: [...]}` still
+    /// dispatches through `parse_static_language_claims` exactly as before.
+    #[test]
+    fn parse_claims_list_shorthand_distinct_from_4c0_form() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        sql:
+          - kind: primary
+          - kind: interop
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                let sql = claims.get("sql").unwrap();
+                assert_eq!(
+                    sql.len(),
+                    2,
+                    "per-language claim-object sequence must still be a 2-element Vec"
+                );
+                assert_eq!(sql[0].kind, ClaimKind::Primary);
+                assert_eq!(sql[1].kind, ClaimKind::Interop);
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Both an empty map (`{}`) and an empty list (`[]`) for `claims` parse
+    /// to an empty map — no error, no panic. Present-but-empty stays
+    /// distinguishable from absent at the caller (`Some(empty)`), which
+    /// `test_engine_claims_present_but_empty_is_some` already covers for the
+    /// `{}` shape; this test adds the `[]` shape.
+    #[test]
+    fn parse_claims_empty_table_yields_empty_map() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims: []
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                assert!(
+                    claims.is_some(),
+                    "present-but-empty claims should be Some(empty), not None"
+                );
+                assert!(claims.as_ref().unwrap().is_empty());
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Per-language MAP-VALUE claim sugar: a bare kind string (`{r: primary}`)
+    /// is concise sugar for `{r: {kind: primary}}` — same three kinds as the
+    /// object form's `kind` field, default priority/when_class. Do not
+    /// confuse this with the *top-level* list shorthand (`claims: [r]`,
+    /// tested above) — that's sugar one level up; this is sugar for a single
+    /// per-language map entry's value. An unrecognized bare string (`banana`)
+    /// stays lenient and is dropped, same as any other unparseable claim
+    /// value.
+    #[test]
+    fn parse_claims_map_bare_kind_string() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        r: primary
+        s: interop
+        f: fallback
+        x: banana
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+
+                let r_claims = claims.get("r").unwrap();
+                assert_eq!(r_claims.len(), 1);
+                assert_eq!(r_claims[0].kind, ClaimKind::Primary);
+                assert_eq!(r_claims[0].priority, None);
+                assert!(r_claims[0].when_class.is_none());
+
+                let s_claims = claims.get("s").unwrap();
+                assert_eq!(s_claims.len(), 1);
+                assert_eq!(s_claims[0].kind, ClaimKind::Interop);
+                assert_eq!(s_claims[0].priority, None);
+                assert!(s_claims[0].when_class.is_none());
+
+                let f_claims = claims.get("f").unwrap();
+                assert_eq!(f_claims.len(), 1);
+                assert_eq!(f_claims[0].kind, ClaimKind::Fallback);
+                assert_eq!(f_claims[0].priority, None);
+                assert!(f_claims[0].when_class.is_none());
+
+                assert!(
+                    claims.get("x").is_none(),
+                    "unrecognized bare kind string must be dropped, not panic"
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// F5 (julia epic Step 3): dynamic claiming lowercases the language
+    /// (`claimsLanguage: (language) => language.toLowerCase() === "julia"`),
+    /// so a `{Julia}` cell claims dynamically -- but static claim keys were
+    /// never normalized, so the same cell would silently miss the pass-1
+    /// static resolution `claims:` exists to provide. Mirrors how
+    /// `file-extensions` already normalizes (undotted, lowercase) at parse
+    /// via `normalize_ext` -- claim keys get the same treatment here, both
+    /// for the per-language map form and the top-level list-shorthand form.
+    #[test]
+    fn parse_claims_map_lowercases_language_keys() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims:
+        Julia: primary
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                assert!(
+                    claims.get("julia").is_some(),
+                    "map-form claim key 'Julia' should be normalized to lowercase 'julia'"
+                );
+                assert!(
+                    claims.get("Julia").is_none(),
+                    "the original-case key should not survive as a separate entry"
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// F5, list-shorthand form (`claims: [Julia]`, sugar for
+    /// `claims: {Julia: primary}`): same normalization requirement as the
+    /// map form above.
+    #[test]
+    fn parse_claims_map_lowercases_list_shorthand_language() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+      claims: [Julia]
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        match &ext.contributes.engines[0] {
+            EngineContribution::External { claims, .. } => {
+                let claims = claims.as_ref().unwrap();
+                assert!(
+                    claims.get("julia").is_some(),
+                    "list-shorthand claim 'Julia' should be normalized to lowercase 'julia'"
+                );
+            }
+            other => panic!("expected External, got {:?}", other),
+        }
+    }
+
+    /// Regression (found while wiring Plan 6 Phase 3's claim-table reader,
+    /// which calls `parse_claims_map` on merged DOCUMENT metadata, not just
+    /// `_extension.yml`): the top-level list-shorthand branch used
+    /// `item.as_str()`, which returns `None` for `ConfigValueKind::PandocInlines`
+    /// — the shape a bare YAML string takes in document-frontmatter
+    /// interpretation context (the `metadata-as-str` lint's exact concern).
+    /// `_extension.yml`'s own interpretation context never produces
+    /// `PandocInlines`, so this silently never fired for the ORIGINAL caller
+    /// — only for Phase 3's new document-metadata call site. Constructs the
+    /// `PandocInlines` shape directly (bypassing the YAML pipeline) to
+    /// isolate the parser from the interpretation-context question.
+    ///
+    /// Revert binding: `item.as_str()` → `item.as_plain_text()` in the
+    /// array branch — reverting it makes both languages vanish (RED).
+    #[test]
+    fn parse_claims_list_shorthand_accepts_pandoc_inlines() {
+        use quarto_pandoc_types::{Inline, Str};
+        use quarto_source_map::SourceInfo;
+
+        fn inline_str(s: &str) -> ConfigValue {
+            ConfigValue::new_inlines(
+                vec![Inline::Str(Str {
+                    text: s.to_string(),
+                    source_info: SourceInfo::for_test(),
+                })],
+                SourceInfo::for_test(),
+            )
+        }
+
+        let claims_value = ConfigValue::new_array(
+            vec![inline_str("r"), inline_str("sql")],
+            SourceInfo::for_test(),
+        );
+
+        let claims = parse_claims_map(&claims_value);
+
+        assert_eq!(
+            claims.len(),
+            2,
+            "both PandocInlines-shaped language names must parse; got: {:?}",
+            claims
+        );
+        assert_eq!(claims["r"][0].kind, ClaimKind::Primary);
+        assert_eq!(claims["sql"][0].kind, ClaimKind::Primary);
+    }
+
+    /// An extension that contributes ONLY engines (no formats/filters/etc.) is valid.
+    /// (RED if the `&& result.engines.is_empty()` conjunct is missing.)
+    #[test]
+    fn test_engines_only_extension_is_valid() {
+        let tmp = TempDir::new().unwrap();
+        let ext_dir = tmp.path().join("_extensions/my-ext");
+        let file = write_extension(
+            &ext_dir,
+            r#"
+title: Engine Only Extension
+author: Author
+contributes:
+  engines:
+    - path: engine.js
+"#,
+        );
+        let runtime = make_runtime();
+        let ext = read_extension(&file, &runtime).unwrap();
+
+        assert_eq!(ext.contributes.engines.len(), 1);
+        assert!(ext.contributes.formats.is_empty());
+        assert!(ext.contributes.filters.is_empty());
+        assert!(ext.contributes.shortcodes.is_empty());
+        assert!(ext.contributes.metadata.is_none());
+        assert!(ext.contributes.project.is_none());
     }
 }

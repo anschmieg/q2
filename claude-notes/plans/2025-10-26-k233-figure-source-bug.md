@@ -1,7 +1,13 @@
-# K-233: Figure Block Source Range Bug in quarto-markdown-pandoc
+---
+title: 'K-233: Figure Block Source Range Bug in quarto-markdown-pandoc'
+date: 2025-10-26
+description: 'Diagnoses why Figure blocks and their nested Plain blocks get `[0, 0]` source ranges in JSON output, and proposes deriving valid ranges from the image syntax.'
+status: approved  # Diagnosed - Ready for Rust fix
+braid:
+  strand: k-233
+  priority: P0
+---
 
-**Date**: 2025-10-26
-**Status**: Diagnosed - Ready for Rust fix
 **Priority**: Critical (P0)
 **Discovered By**: Tree validation tests in k-228 (Phase 4)
 
@@ -84,7 +90,7 @@ The Rust parser is not tracking source locations when constructing Figure blocks
 
 2. **Missing instrumentation**: The code that builds Figure blocks may not be calling the source tracking functions.
 
-3. **Tree-sitter gaps**: The tree-sitter parser may not have Figure-specific rules, causing it to fall back to default [0, 0] ranges.
+3. **Tree-sitter gaps**: The tree-sitter parser may not have Figure-specific rules, causing it to fall back to default `[0, 0]` ranges.
 
 ## Impact
 

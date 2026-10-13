@@ -48,6 +48,25 @@ interface UseScrollSyncReturn {
   handlePreviewScroll: () => void;
   handlePreviewClick: () => void;
   /**
+   * Preview→editor click sync (click-to-editor-scroll): align `line` in the
+   * editor to the same on-screen y as the clicked block, `hostY` (2026-08-22
+   * click-align-editor-y plan). `hostY` omitted ⇒ top-align. Scroll-only —
+   * calls `editor.setScrollTop` and nothing else. Deliberately narrower than
+   * `syncPreviewToEditor`: in q2-preview the click that reaches this also
+   * opens an inline editor *inside the preview*, so pulling focus to Monaco
+   * (`setPosition` / `setSelection` / `focus()`) would break the gesture the
+   * same click just started, and `setPosition` would additionally fire
+   * `onDidChangeCursorPosition`, feeding editor→preview sync and bouncing.
+   * Not focus-gated (an explicit click is unambiguous user intent, unlike
+   * the scroll-ratio feedback loop `syncPreviewToEditor` guards against),
+   * and not debounced (there's exactly one click, not a scroll stream).
+   * Also, deliberately, not gated on `enabled` (decision A6): with the
+   * scroll-sync toggle off, click-align is the only scroll coupling left in
+   * either direction, which is how the feature is best evaluated — see A1h.
+   * Do not add an `enabledRef.current` check here.
+   */
+  revealEditorLine: (line: number, hostY?: number) => void;
+  /**
    * Call when the preview iframe reports it committed a new AST
    * (`AST_RENDERED`). Flushes any editor→preview scroll deferred while the
    * render was in flight — once, against the up-to-date DOM. A no-op when no
@@ -241,6 +260,46 @@ export function useScrollSync({
     syncPreviewToEditor();
   }, [syncPreviewToEditor]);
 
+  // Preview→editor click sync (click-to-editor-scroll): align, not just
+  // reveal — see the UseScrollSyncReturn doc comment for why (D1/D1b in the
+  // original click-to-editor-scroll plan; alignment computation in the
+  // 2026-08-22 click-align-editor-y plan). Not routed through
+  // syncPreviewToEditor.
+  //
+  // On screen a source line sits at editorTop + (topForLine - scrollTop);
+  // to land it at hostY we solve for scrollTop. Clamped to the editor's
+  // scrollable range — near the start or end of the document the clamp
+  // wins and the two panes won't line up exactly, which is a limit of the
+  // geometry, not a bug. hostY omitted (decision A3) falls back to
+  // top-aligning the line.
+  //
+  // Bracketed with isSyncingRef the same way flushPendingScroll and
+  // syncPreviewToEditor already bracket their own scroll calls: a click that
+  // activates an inline editor can produce a tiny, real reflow-driven scroll
+  // in the preview a few ms later, which would otherwise reach
+  // syncPreviewToEditor unguarded and overwrite this reveal with a
+  // ratio-derived position ~50ms after it lands correctly (task-9 fix for
+  // the race found in task-8's report).
+  const revealEditorLine = useCallback((line: number, hostY?: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const topForLine = editor.getTopForLineNumber(line);
+    const editorTop = editor.getDomNode()?.getBoundingClientRect().top;
+
+    const desired =
+      hostY !== undefined && editorTop !== undefined ? topForLine - (hostY - editorTop) : topForLine;
+
+    const maxScroll = Math.max(0, editor.getScrollHeight() - editor.getLayoutInfo().height);
+    const clamped = Math.min(Math.max(desired, 0), maxScroll);
+
+    isSyncingRef.current = true;
+    editor.setScrollTop(clamped, 1);
+    setTimeout(() => {
+      isSyncingRef.current = false;
+    }, 300);
+  }, [editorRef]);
+
   // The preview iframe committed a new AST: fresh data-loc DOM is in place,
   // so flush the deferred editor→preview scroll once.
   const handleAstRendered = useCallback(() => {
@@ -276,6 +335,7 @@ export function useScrollSync({
   return {
     handlePreviewScroll,
     handlePreviewClick,
+    revealEditorLine,
     handleAstRendered,
     scrollToLineDeferred,
   };

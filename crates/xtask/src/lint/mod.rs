@@ -3,8 +3,14 @@
 //! This module provides lint checks that catch issues standard Rust linters miss.
 //! Each lint rule is implemented as a separate submodule.
 
+mod add_file_with_id;
+mod ci_test_wiring;
+mod error_docs;
+mod error_docs_sidebar;
 mod external_sources;
 mod metadata_as_str;
+mod pandoc_pin;
+mod vendored_pandoc_filters;
 
 use std::path::{Path, PathBuf};
 
@@ -84,6 +90,33 @@ pub fn run_check(config: &LintConfig) -> Result<()> {
         let violations = check_file(file)?;
         all_violations.extend(violations);
     }
+
+    // Repo-level checks: these reconcile whole trees rather than grepping a
+    // single Rust file, so they run once instead of per file.
+    if config.verbose {
+        eprintln!("Checking error catalog against docs/errors/");
+    }
+    all_violations.extend(error_docs::check(&workspace_root)?);
+
+    if config.verbose {
+        eprintln!("Checking docs/errors/ against the errors sidebar in docs/_quarto.yml");
+    }
+    all_violations.extend(error_docs_sidebar::check(&workspace_root)?);
+
+    if config.verbose {
+        eprintln!("Checking npm-workspace test scripts against the CI workflows");
+    }
+    all_violations.extend(ci_test_wiring::check(&workspace_root)?);
+
+    if config.verbose {
+        eprintln!("Checking vendored pandoc filters 'Ours vs. pinned' section");
+    }
+    all_violations.extend(vendored_pandoc_filters::check(&workspace_root)?);
+
+    if config.verbose {
+        eprintln!("Checking pandoc version pin agreement across CI/dev-setup/README");
+    }
+    all_violations.extend(pandoc_pin::check(&workspace_root)?);
 
     // Report results
     if all_violations.is_empty() {
@@ -200,6 +233,7 @@ fn check_file(path: &Path) -> Result<Vec<Violation>> {
     let mut violations = Vec::new();
 
     // Run each lint rule
+    violations.extend(add_file_with_id::check(path, &content)?);
     violations.extend(external_sources::check(path, &content)?);
     violations.extend(metadata_as_str::check(path, &content)?);
 

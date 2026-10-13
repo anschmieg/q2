@@ -1,4 +1,11 @@
-# q2-preview scroll sync (bd-9kzfi)
+---
+title: 'q2-preview scroll sync (bd-9kzfi)'
+date: 2026-05-29
+description: 'Adds editor-to-preview scroll sync for the q2-preview renderer by stamping source-line `data-loc` attributes on block elements and wiring the iframe scroll handle, matching the HTML preview''s behavior.'
+braid:
+  strand: bd-9kzfi
+  priority: P1
+---
 
 ## Overview
 
@@ -18,7 +25,7 @@ Two gaps:
 Per-node line numbers already ride the wire: `renderPageInProject` emits
 `include_inline_locations: true`, so every node carries an `l` field
 (`{f, b:{o,l,c}, e:{o,l,c}}`). The q2-preview iframe is `allow-same-origin`,
-so the parent can reach `contentDocument` directly and reuse `MorphIframe`'s
+so the parent can reach `contentDocument` directly and reuse `MorphIframe`\'s
 exact scroll logic. **No Rust change, no new postMessage protocol.**
 
 Scope (confirmed with user): **block-level scroll sync only.** No inline

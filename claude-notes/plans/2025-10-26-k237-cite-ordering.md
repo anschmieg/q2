@@ -1,4 +1,8 @@
-# K-237: Citation Component Ordering Issue
+---
+title: 'K-237: Citation Component Ordering Issue'
+date: 2025-10-26
+description: 'Fixes the TypeScript converter so citation-id components of multi-citation `Cite` inlines are interleaved with their rendered content in source order rather than appended after all content.'
+---
 
 ## Problem
 
@@ -97,8 +101,8 @@ Cite [
 
 ## Related Work
 
-- Fixed similar issues for Image/Link (k-234) - components were [attr, content, target] but should be [content, target, attr]
-- Fixed similar issues for Table (k-236) - components were [attr, caption, ...] but should be [..., caption, attr]
+- Fixed similar issues for Image/Link (k-234) - components were `[attr, content, target]` but should be `[content, target, attr]`
+- Fixed similar issues for Table (k-236) - components were `[attr, caption, ...]` but should be `[..., caption, attr]`
 - The pattern is: components should be ordered by their source position
 
 ## Next Steps

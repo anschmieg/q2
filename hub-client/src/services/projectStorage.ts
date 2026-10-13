@@ -5,7 +5,9 @@
  * with the schema versioning/migration system.
  */
 import type { ProjectEntry } from '@quarto/preview-renderer/types/project';
+import { projectSetKey } from '@quarto/quarto-automerge-schema';
 import type { ExportData, UserSettings } from './storage/types';
+import { getCollectionPointers } from './projectSetStorage';
 import {
   STORES,
   CURRENT_SCHEMA_VERSION,
@@ -104,6 +106,34 @@ export async function deleteProject(id: string): Promise<void> {
 }
 
 /**
+ * Delete every project entry matching an index document ID.
+ *
+ * Historical rows exist both with and without the `automerge:` prefix
+ * (see projectSetReconciler), so both variants are matched. The reconciler
+ * uses this to purge rows that lost to a deletion tombstone, so a stale
+ * local copy can never resurrect a deleted project.
+ *
+ * @returns The number of rows deleted.
+ */
+export async function deleteProjectByIndexDocId(indexDocId: string): Promise<number> {
+  const db = await getDb();
+  const key = projectSetKey(indexDocId);
+  const tx = db.transaction(STORES.PROJECTS, 'readwrite');
+  const store = tx.objectStore(STORES.PROJECTS);
+  const index = store.index('indexDocId');
+  let deleted = 0;
+  for (const variant of [key, `automerge:${key}`]) {
+    const primaryKey = await index.getKey(variant);
+    if (primaryKey !== undefined) {
+      await store.delete(primaryKey);
+      deleted++;
+    }
+  }
+  await tx.done;
+  return deleted;
+}
+
+/**
  * Export all data as JSON with schema version.
  *
  * The exported data includes:
@@ -122,11 +152,20 @@ export async function exportData(): Promise<string> {
     userSettings = await db.get(STORES.USER_SETTINGS, 'identity');
   }
 
+  // Collection pointers: collections are synced ProjectSetDocuments, so the
+  // docId + syncServer pair is everything a restoring browser needs to
+  // re-subscribe (names/membership arrive with sync).
+  const pointers = await getCollectionPointers();
+
   const exportData: ExportData = {
     schemaVersion,
     exportedAt: new Date().toISOString(),
     projects,
     userSettings,
+    collections: pointers.map((p) => ({
+      projectSetDocId: p.projectSetDocId,
+      syncServer: p.syncServer,
+    })),
   };
 
   return JSON.stringify(exportData, null, 2);

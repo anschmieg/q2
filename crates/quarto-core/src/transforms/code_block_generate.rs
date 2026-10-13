@@ -45,8 +45,10 @@ use crate::transform::{AstTransform, TransformPhase};
 /// (decision pinned in
 /// `claude-notes/plans/2026-05-19-code-block-features.md`). Generate
 /// populates the map; Render reads it. Both transforms run inside
-/// `AstTransformsStage` so they share the same `RenderContext` —
-/// no `StageContext` bridge needed.
+/// `AstTransformsStage` so they share the same `RenderContext` within
+/// one stage-list call; across a book chapter's pause/resume split
+/// (book-projects P5) the map survives on the `StageContext` bridge
+/// between the two calls.
 ///
 /// Per-feature fields land in Phases 1 – 3:
 /// - Phase 1 (filename): see `filename` below.
@@ -364,6 +366,8 @@ mod tests {
             is_single_file: true,
             files: vec![DocumentInfo::from_path("/project/doc.qmd")],
             output_dir: std::path::PathBuf::from("/project"),
+
+            ..Default::default()
         }
     }
 
@@ -415,11 +419,11 @@ mod tests {
     }
 
     fn yaml_bool(b: bool) -> quarto_pandoc_types::ConfigValueKind {
-        quarto_pandoc_types::ConfigValueKind::Scalar(yaml_rust2::Yaml::Boolean(b))
+        quarto_pandoc_types::ConfigValueKind::scalar(yaml_rust2::Yaml::Boolean(b))
     }
 
     fn yaml_str(s: &str) -> quarto_pandoc_types::ConfigValueKind {
-        quarto_pandoc_types::ConfigValueKind::Scalar(yaml_rust2::Yaml::String(s.to_string()))
+        quarto_pandoc_types::ConfigValueKind::scalar(yaml_rust2::Yaml::String(s.to_string()))
     }
 
     /// A `code-copy` value as it is actually stored after a bare front-matter

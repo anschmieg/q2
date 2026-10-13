@@ -2,8 +2,12 @@
 //! See bd-xvdop / claude-notes/plans/2026-05-28-integration-test-consolidation.md.
 
 pub mod apostrophe_quotes_test;
+pub mod attr_provenance_splice_test;
 pub mod attribute_ordering_test;
+pub mod bracket_analysis_test;
 pub mod grid_tables_test;
+pub mod literal_brackets_test;
+pub mod parse_masking_test;
 pub mod q_2_11_test;
 pub mod q_2_12_test;
 pub mod q_2_13_test;
@@ -20,6 +24,9 @@ pub mod q_2_24_test;
 pub mod q_2_25_test;
 pub mod q_2_26_test;
 pub mod q_2_28_test;
+pub mod q_2_52_test;
 pub mod q_2_5_test;
+pub mod q_5_37_test;
+pub mod reference_links_test;
 
 fn main() {}

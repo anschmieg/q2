@@ -20,27 +20,30 @@ use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 /// Searches `_extensions/` directories in the project hierarchy,
 /// walking from the input file's directory up to the project root.
 ///
-/// When `builtin_extensions_dir` is provided, it is scanned **first**
-/// (lowest priority). User extensions discovered later appear later in
-/// the vec, and `find_extension()` returns the last match — so user
-/// extensions override built-ins with the same name.
+/// `builtin_extension_roots` are scanned **first, in order** (lowest
+/// priority) — e.g. the regular built-in extensions dir followed by any
+/// vendored extension-subtree payloads. User extensions discovered later
+/// appear later in the vec, and `find_extension()` returns the last match —
+/// so user extensions override built-ins with the same name, regardless of
+/// which builtin root contributed them.
 pub fn discover_extensions(
     input: &Path,
     project_dir: Option<&Path>,
-    builtin_extensions_dir: Option<&Path>,
+    builtin_extension_roots: &[&Path],
     runtime: &dyn SystemRuntime,
 ) -> (Vec<Extension>, Vec<DiagnosticMessage>) {
     let mut extensions = Vec::new();
     let mut diagnostics = Vec::new();
     let mut dirs_to_search = Vec::new();
 
-    // Built-in extensions first (lowest priority)
-    if let Some(builtin_dir) = builtin_extensions_dir
-        && runtime
+    // Built-in extensions first (lowest priority), each root in order.
+    for builtin_dir in builtin_extension_roots {
+        if runtime
             .path_exists(builtin_dir, Some(PathKind::Directory))
             .unwrap_or(false)
-    {
-        scan_extensions_dir(builtin_dir, runtime, &mut extensions, &mut diagnostics);
+        {
+            scan_extensions_dir(builtin_dir, runtime, &mut extensions, &mut diagnostics);
+        }
     }
 
     let start_dir = input.parent().unwrap_or(input);
@@ -74,6 +77,52 @@ pub fn discover_extensions(
         }
 
         scan_extensions_dir(ext_dir, runtime, &mut extensions, &mut diagnostics);
+    }
+
+    (extensions, diagnostics)
+}
+
+/// Discover extensions visible at **project-config** time (bd-ad7i1pc6).
+///
+/// Project-scoped counterpart to [`discover_extensions`]: scans the
+/// embedded built-in extensions (lowest priority, when provided) and
+/// the **project root's** `_extensions/` only. Per-directory
+/// `_extensions/` in subdirectories are deliberately not consulted —
+/// this discovery feeds project-level concerns (resolving a custom
+/// `project.type` via `contributes.project`, and merging
+/// `contributes.metadata.project`), which must not vary per document.
+///
+/// Runs during `ProjectContext::parse_config`, i.e. *before* the
+/// per-document discovery in `StageContext::new`; the two are
+/// independent (per-document discovery re-scans and additionally sees
+/// subdirectory extensions).
+///
+/// Same ordering contract as [`discover_extensions`]: built-ins first,
+/// user extensions later, so [`find_extension`]'s last-match-wins gives
+/// user extensions priority.
+pub fn discover_project_extensions(
+    project_dir: &Path,
+    builtin_extension_roots: &[&Path],
+    runtime: &dyn SystemRuntime,
+) -> (Vec<Extension>, Vec<DiagnosticMessage>) {
+    let mut extensions = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    for builtin_dir in builtin_extension_roots {
+        if runtime
+            .path_exists(builtin_dir, Some(PathKind::Directory))
+            .unwrap_or(false)
+        {
+            scan_extensions_dir(builtin_dir, runtime, &mut extensions, &mut diagnostics);
+        }
+    }
+
+    let ext_dir = project_dir.join("_extensions");
+    if runtime
+        .path_exists(&ext_dir, Some(PathKind::Directory))
+        .unwrap_or(false)
+    {
+        scan_extensions_dir(&ext_dir, runtime, &mut extensions, &mut diagnostics);
     }
 
     (extensions, diagnostics)
@@ -197,11 +246,71 @@ const KNOWN_BASE_FORMATS: &[&str] = &[
     "html",
     "pdf",
     "docx",
+    "pptx",
     "epub",
     "typst",
     "revealjs",
     "gfm",
     "commonmark",
+    // Long-tail Phase 2 (Tier A)
+    "odt",
+    "opendocument",
+    "rtf",
+    "fb2",
+    "plain",
+    "rst",
+    "org",
+    "muse",
+    "ms",
+    "man",
+    "texinfo",
+    "tei",
+    "zimwiki",
+    "dokuwiki",
+    "haddock",
+    "json",
+    "native",
+    "icml",
+    "jira",
+    "mediawiki",
+    "xwiki",
+    "textile",
+    "docbook",
+    "docbook4",
+    "docbook5",
+    // Long-tail Phase 3 (Tier B) — the markdown family. The suffixed
+    // flavors use pandoc's underscore spelling (`markdown_strict`, not
+    // `markdown-strict`), so `parse_format_descriptor`'s last-hyphen split
+    // treats each whole string as the base format rather than an
+    // extension-prefixed variant.
+    "markdown",
+    "markdown_strict",
+    "markdown_phpextra",
+    "markdown_github",
+    "markdown_mmd",
+    "markua",
+    "commonmark_x",
+    // Long-tail Phase 4 (Tier C). The underscore bbcode flavors use
+    // pandoc's underscore spelling, so the last-hyphen split treats each
+    // whole string as the base (`acm-bbcode_steam` → base
+    // `bbcode_steam`).
+    "djot",
+    "t2t",
+    "xml",
+    "ansi",
+    "vimdoc",
+    "bbcode",
+    "bbcode_steam",
+    "bbcode_phpbb",
+    "bbcode_fluxbb",
+    "bbcode_hubzilla",
+    "bbcode_xenforo",
+    "chunkedhtml",
+    // Long-tail Phase 5 (Tier D) — the JS slide family.
+    "s5",
+    "dzslides",
+    "slidy",
+    "slideous",
 ];
 
 pub fn parse_format_descriptor(format: &str) -> FormatDescriptor {
@@ -223,6 +332,29 @@ pub fn parse_format_descriptor(format: &str) -> FormatDescriptor {
         extension_name: None,
         base_format: format.to_string(),
     }
+}
+
+/// The bundled extension Q1 auto-loads for a Typst **book** target with no
+/// explicit format extension named (`render-contexts.ts`
+/// `readExtensionFormat`, quarto-dev/quarto-cli): `orange-book`.
+///
+/// Q2 mirrors that single zero-config outcome (book-projects epic P2;
+/// `claude-notes/designs/book-projects-architecture.md` §5) — hard-coded to
+/// the `book` + `typst` pairing, not a general extension-dispatch
+/// mechanism. The extension itself is vendored under
+/// `resources/extensions/`, so the ordinary built-in discovery path finds
+/// it with no new infrastructure.
+pub const TYPST_BOOK_DEFAULT_EXTENSION: &str = "orange-book";
+
+/// Apply the Typst-book default extension to a parsed format descriptor: a
+/// book project targeting bare `typst` (no explicit extension prefix)
+/// resolves to [`TYPST_BOOK_DEFAULT_EXTENSION`]; everything else passes
+/// through unchanged.
+pub fn with_typst_book_default(mut desc: FormatDescriptor, is_book: bool) -> FormatDescriptor {
+    if is_book && desc.extension_name.is_none() && desc.base_format == "typst" {
+        desc.extension_name = Some(TYPST_BOOK_DEFAULT_EXTENSION.to_string());
+    }
+    desc
 }
 
 #[cfg(test)]
@@ -261,7 +393,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = tmp.path().join("test.qmd");
-        let (extensions, _diags) = discover_extensions(&input, None, None, &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[], &runtime);
 
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].id.name, "test-ext");
@@ -284,7 +416,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = tmp.path().join("test.qmd");
-        let (extensions, _diags) = discover_extensions(&input, None, None, &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[], &runtime);
 
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].id.name, "ext");
@@ -326,7 +458,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = sub_dir.join("test.qmd");
-        let (extensions, _diags) = discover_extensions(&input, Some(project_dir), None, &runtime);
+        let (extensions, _diags) = discover_extensions(&input, Some(project_dir), &[], &runtime);
 
         assert_eq!(extensions.len(), 2);
         // Project-level should come first (lower priority)
@@ -341,7 +473,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = tmp.path().join("test.qmd");
-        let (extensions, _diags) = discover_extensions(&input, None, None, &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[], &runtime);
 
         assert!(extensions.is_empty());
     }
@@ -352,7 +484,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = tmp.path().join("test.qmd");
-        let (extensions, _diags) = discover_extensions(&input, None, None, &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[], &runtime);
 
         assert!(extensions.is_empty());
     }
@@ -382,7 +514,7 @@ contributes:
 
         let runtime = make_runtime();
         let input = tmp.path().join("test.qmd");
-        let (extensions, diags) = discover_extensions(&input, None, None, &runtime);
+        let (extensions, diags) = discover_extensions(&input, None, &[], &runtime);
 
         // Only the valid extension should be discovered, and the broken one
         // must surface as a Q-16-1 diagnostic naming its manifest file
@@ -393,6 +525,108 @@ contributes:
         let rendered = format!("{:?}", diags[0]);
         assert!(rendered.contains("Q-16-1"), "diagnostic: {rendered}");
         assert!(rendered.contains("bad-ext"), "diagnostic: {rendered}");
+    }
+
+    // === discover_project_extensions tests (bd-ad7i1pc6 Phase 2) ===
+
+    #[test]
+    fn project_discovery_finds_root_extensions_org_and_orgless() {
+        let tmp = TempDir::new().unwrap();
+        write_extension(
+            &tmp.path().join("_extensions/plain-ext"),
+            "contributes:\n  shortcodes:\n    - hello.lua\n",
+        );
+        write_extension(
+            &tmp.path().join("_extensions/acme/fancy"),
+            "contributes:\n  project:\n    project:\n      type: website\n",
+        );
+
+        let runtime = make_runtime();
+        let (extensions, diags) = discover_project_extensions(tmp.path(), &[], &runtime);
+
+        assert_eq!(diags.len(), 0, "diags: {diags:?}");
+        assert_eq!(extensions.len(), 2);
+        let mut ids: Vec<(Option<&str>, &str)> = extensions
+            .iter()
+            .map(|e| (e.id.organization.as_deref(), e.id.name.as_str()))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec![(None, "plain-ext"), (Some("acme"), "fancy")]);
+    }
+
+    #[test]
+    fn project_discovery_ignores_subdirectory_extensions() {
+        // Project-scoped discovery feeds project-level concerns
+        // (`contributes.project` / `contributes.metadata.project`),
+        // which must not vary per document — so `_extensions/` dirs in
+        // subdirectories are deliberately not consulted, unlike the
+        // per-document walk in `discover_extensions`.
+        let tmp = TempDir::new().unwrap();
+        write_extension(
+            &tmp.path().join("_extensions/root-ext"),
+            "contributes:\n  shortcodes:\n    - a.lua\n",
+        );
+        write_extension(
+            &tmp.path().join("subdir/_extensions/sub-ext"),
+            "contributes:\n  shortcodes:\n    - b.lua\n",
+        );
+
+        let runtime = make_runtime();
+        let (extensions, _diags) = discover_project_extensions(tmp.path(), &[], &runtime);
+
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].id.name, "root-ext");
+    }
+
+    #[test]
+    fn project_discovery_scans_builtins_first() {
+        // Built-ins come first in the vec (lowest priority), so a user
+        // extension with the same name wins under last-match-wins.
+        let builtin_tmp = TempDir::new().unwrap();
+        write_extension(
+            &builtin_tmp.path().join("quarto/lipsum"),
+            "contributes:\n  shortcodes:\n    - lipsum.lua\n",
+        );
+        let tmp = TempDir::new().unwrap();
+        write_extension(
+            &tmp.path().join("_extensions/lipsum"),
+            "contributes:\n  shortcodes:\n    - lipsum.lua\n",
+        );
+
+        let runtime = make_runtime();
+        let (extensions, _diags) =
+            discover_project_extensions(tmp.path(), &[builtin_tmp.path()], &runtime);
+
+        assert_eq!(extensions.len(), 2);
+        assert_eq!(extensions[0].id.organization.as_deref(), Some("quarto"));
+        assert_eq!(extensions[0].id.name, "lipsum");
+        assert_eq!(extensions[1].id.organization, None);
+        assert_eq!(extensions[1].id.name, "lipsum");
+        assert_eq!(
+            find_extension("lipsum", &extensions)
+                .unwrap()
+                .id
+                .organization,
+            None,
+            "user extension must win over the built-in"
+        );
+    }
+
+    #[test]
+    fn project_discovery_reports_broken_manifests() {
+        let tmp = TempDir::new().unwrap();
+        write_extension(
+            &tmp.path().join("_extensions/bad-ext"),
+            "contributes: [unclosed\n  nonsense: {{{{",
+        );
+
+        let runtime = make_runtime();
+        let (extensions, diags) = discover_project_extensions(tmp.path(), &[], &runtime);
+
+        assert!(extensions.is_empty());
+        assert_eq!(diags.len(), 1);
+        let rendered = format!("{:?}", diags[0]);
+        assert!(rendered.contains("Q-16-1"), "diagnostic: {rendered}");
     }
 
     // === find_extension tests ===
@@ -510,7 +744,7 @@ contributes:
         fs::create_dir_all(&input_dir).unwrap();
         let input = input_dir.join("test.qmd");
 
-        let (extensions, _diags) = discover_extensions(&input, None, Some(&builtin_dir), &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[&builtin_dir], &runtime);
 
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].id.name, "lipsum");
@@ -550,7 +784,7 @@ contributes:
         let runtime = make_runtime();
         let input = project_dir.join("test.qmd");
 
-        let (extensions, _diags) = discover_extensions(&input, None, Some(&builtin_dir), &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[&builtin_dir], &runtime);
 
         // Both should be discovered
         assert_eq!(extensions.len(), 2);
@@ -596,7 +830,7 @@ contributes:
         let runtime = make_runtime();
         let input = project_dir.join("test.qmd");
 
-        let (extensions, _diags) = discover_extensions(&input, None, Some(&builtin_dir), &runtime);
+        let (extensions, _diags) = discover_extensions(&input, None, &[&builtin_dir], &runtime);
 
         assert_eq!(extensions.len(), 2);
 
@@ -607,6 +841,119 @@ contributes:
         // find_extension with bare name should also return user
         let found = find_extension("lipsum", &extensions).unwrap();
         assert_eq!(found.title.as_deref(), Some("Lipsum User Org"));
+    }
+
+    // === Multi-root builtin discovery tests (extension-subtree infra) ===
+
+    #[test]
+    fn test_multiple_builtin_roots_scanned_in_order_before_user() {
+        let tmp = TempDir::new().unwrap();
+
+        // First builtin root (e.g. the regular builtin extensions dir).
+        let builtin_a = tmp.path().join("builtin-a");
+        write_extension(
+            &builtin_a.join("alpha"),
+            r#"
+title: Alpha
+author: A
+contributes:
+  shortcodes:
+    - alpha.lua
+"#,
+        );
+
+        // Second builtin root (e.g. a vendored extension-subtree payload).
+        let builtin_b = tmp.path().join("builtin-b");
+        write_extension(
+            &builtin_b.join("beta"),
+            r#"
+title: Beta
+author: B
+contributes:
+  shortcodes:
+    - beta.lua
+"#,
+        );
+
+        // User extension.
+        let project_dir = tmp.path().join("project");
+        write_extension(
+            &project_dir.join("_extensions/gamma"),
+            r#"
+title: Gamma
+author: C
+contributes:
+  shortcodes:
+    - gamma.lua
+"#,
+        );
+
+        let runtime = make_runtime();
+        let input = project_dir.join("test.qmd");
+        let (extensions, _diags) =
+            discover_extensions(&input, None, &[&builtin_a, &builtin_b], &runtime);
+
+        // Both builtin roots scanned, in order, before the user extension.
+        assert_eq!(extensions.len(), 3);
+        assert_eq!(extensions[0].title.as_deref(), Some("Alpha"));
+        assert_eq!(extensions[1].title.as_deref(), Some("Beta"));
+        assert_eq!(extensions[2].title.as_deref(), Some("Gamma"));
+    }
+
+    #[test]
+    fn test_user_extension_overrides_subtree_bundled_extension() {
+        let tmp = TempDir::new().unwrap();
+
+        // Regular builtin root.
+        let builtin_dir = tmp.path().join("builtin");
+        write_extension(
+            &builtin_dir.join("lipsum"),
+            r#"
+title: Lipsum Built-in
+author: Charles Teague
+contributes:
+  shortcodes:
+    - lipsum.lua
+"#,
+        );
+
+        // Subtree-bundled root, same extension name.
+        let subtree_dir = tmp.path().join("subtree");
+        write_extension(
+            &subtree_dir.join("lipsum"),
+            r#"
+title: Lipsum Subtree
+author: Vendor
+contributes:
+  shortcodes:
+    - lipsum.lua
+"#,
+        );
+
+        // User extension, same name again.
+        let project_dir = tmp.path().join("project");
+        write_extension(
+            &project_dir.join("_extensions/lipsum"),
+            r#"
+title: Lipsum User
+author: User
+contributes:
+  shortcodes:
+    - lipsum.lua
+"#,
+        );
+
+        let runtime = make_runtime();
+        let input = project_dir.join("test.qmd");
+        let (extensions, _diags) =
+            discover_extensions(&input, None, &[&builtin_dir, &subtree_dir], &runtime);
+
+        assert_eq!(extensions.len(), 3);
+        // Last-match-wins holds across the new root boundary: the user
+        // extension overrides the subtree-bundled one, which in turn was
+        // scanned after (and would override) the regular builtin.
+        let found = find_extension("lipsum", &extensions).unwrap();
+        assert_eq!(found.title.as_deref(), Some("Lipsum User"));
     }
 
     // === Format descriptor tests ===
@@ -660,5 +1007,154 @@ contributes:
             );
             assert_eq!(desc.base_format, *base, "Failed for {}", base);
         }
+    }
+
+    /// `pptx` must be a recognized base format so `acm-pptx`-style
+    /// descriptors resolve to the pptx base (long-tail Phase 1 wrinkle 5:
+    /// pptx was missing from the list, so `acm-pptx` read as extension
+    /// `acm-pptx` with base `html`).
+    #[test]
+    fn test_parse_format_descriptor_pptx() {
+        let desc = parse_format_descriptor("acm-pptx");
+        assert_eq!(desc.extension_name.as_deref(), Some("acm"));
+        assert_eq!(desc.base_format, "pptx");
+
+        let bare = parse_format_descriptor("pptx");
+        assert_eq!(bare.extension_name, None);
+        assert_eq!(bare.base_format, "pptx");
+    }
+
+    /// Long-tail Phase 2: Tier A bases must resolve in extension-style
+    /// descriptors (`acm-odt` → base `odt`, not extension `acm-odt` with
+    /// base `html`), and `zimwiki` — whose output extension (`zim`)
+    /// differs from its name — must still be recognized as a bare base.
+    /// Runtime-red until the names join `KNOWN_BASE_FORMATS`.
+    #[test]
+    fn test_parse_format_descriptor_tier_a_bases() {
+        for (input, expected_base) in [
+            ("acm-odt", "odt"),
+            ("acm-docbook", "docbook"),
+            ("acm-rst", "rst"),
+            ("journal-xwiki", "xwiki"),
+        ] {
+            let desc = parse_format_descriptor(input);
+            assert_eq!(
+                desc.base_format, expected_base,
+                "base format for descriptor {input}"
+            );
+            assert_eq!(
+                desc.extension_name.as_deref(),
+                Some(input.split('-').next().unwrap()),
+                "extension name for descriptor {input}"
+            );
+        }
+
+        let bare = parse_format_descriptor("zimwiki");
+        assert_eq!(bare.extension_name, None);
+        assert_eq!(bare.base_format, "zimwiki");
+    }
+
+    /// Long-tail Phase 4: Tier C bases must resolve in extension-style
+    /// descriptors too — including an underscore flavor (`bbcode_steam`)
+    /// riding the last-hyphen split, and `chunkedhtml`/`xml` whose names
+    /// are not output extensions. Runtime-red until the names join
+    /// `KNOWN_BASE_FORMATS`.
+    #[test]
+    fn test_parse_format_descriptor_tier_c_bases() {
+        for (input, expected_base) in [
+            ("acm-djot", "djot"),
+            ("acm-chunkedhtml", "chunkedhtml"),
+            ("acm-xml", "xml"),
+            ("acm-ansi", "ansi"),
+            ("acm-bbcode_steam", "bbcode_steam"),
+            ("journal-vimdoc", "vimdoc"),
+        ] {
+            let desc = parse_format_descriptor(input);
+            assert_eq!(
+                desc.base_format, expected_base,
+                "base format for descriptor {input}"
+            );
+            assert_eq!(
+                desc.extension_name.as_deref(),
+                Some(input.split('-').next().unwrap()),
+                "extension name for descriptor {input}"
+            );
+        }
+
+        for bare_name in ["ansi", "vimdoc", "bbcode_xenforo"] {
+            let bare = parse_format_descriptor(bare_name);
+            assert_eq!(bare.extension_name, None, "bare {bare_name}");
+            assert_eq!(bare.base_format, bare_name, "bare {bare_name}");
+        }
+    }
+
+    /// Long-tail Phase 5 (Tier D): the JS slide bases participate in
+    /// extension-descriptor parsing the same way (`acm-slidy` → base
+    /// `slidy`), and the bare names stay bare.
+    #[test]
+    fn test_parse_format_descriptor_tier_d_bases() {
+        for (input, expected_base) in [
+            ("acm-s5", "s5"),
+            ("acm-dzslides", "dzslides"),
+            ("acm-slidy", "slidy"),
+            ("journal-slideous", "slideous"),
+        ] {
+            let desc = parse_format_descriptor(input);
+            assert_eq!(
+                desc.base_format, expected_base,
+                "base format for descriptor {input}"
+            );
+            assert_eq!(
+                desc.extension_name.as_deref(),
+                Some(input.split('-').next().unwrap()),
+                "extension name for descriptor {input}"
+            );
+        }
+
+        for bare_name in ["s5", "dzslides", "slidy", "slideous"] {
+            let bare = parse_format_descriptor(bare_name);
+            assert_eq!(bare.extension_name, None, "bare {bare_name}");
+            assert_eq!(bare.base_format, bare_name, "bare {bare_name}");
+        }
+    }
+
+    // === Typst-book default extension tests (book-projects P2) ===
+
+    #[test]
+    fn test_typst_book_default_applies_for_book_typst() {
+        let desc = with_typst_book_default(parse_format_descriptor("typst"), true);
+        assert_eq!(
+            desc.extension_name.as_deref(),
+            Some(TYPST_BOOK_DEFAULT_EXTENSION)
+        );
+        assert_eq!(desc.base_format, "typst");
+    }
+
+    #[test]
+    fn test_typst_book_default_respects_explicit_extension() {
+        // A book project that names its own Typst extension keeps it.
+        let desc = with_typst_book_default(parse_format_descriptor("acm-typst"), true);
+        assert_eq!(desc.extension_name.as_deref(), Some("acm"));
+        assert_eq!(desc.base_format, "typst");
+    }
+
+    #[test]
+    fn test_typst_book_default_ignores_other_formats() {
+        // The default is hard-coded to the book + typst pairing only.
+        for format in ["html", "pdf", "epub", "docx"] {
+            let desc = with_typst_book_default(parse_format_descriptor(format), true);
+            assert!(
+                desc.extension_name.is_none(),
+                "book + {} must not gain a default extension",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn test_typst_book_default_ignores_non_book() {
+        let desc = with_typst_book_default(parse_format_descriptor("typst"), false);
+        assert!(desc.extension_name.is_none());
+        assert_eq!(desc.base_format, "typst");
     }
 }

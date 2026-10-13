@@ -1,8 +1,13 @@
-# Plan: Knitr Engine Implementation (Phase 4)
+---
+title: 'Plan: Knitr Engine Implementation (Phase 4)'
+date: 2026-01-07
+description: 'Plans a knitr execution engine that renders `{r}` code cells by spawning Rscript with embedded copies of the quarto-cli R scripts and exchanging JSON over stdin and a temp results file.'
+status: approved  # Ready for Implementation
+braid:
+  strand: k-ydzc
+  priority: P1
+---
 
-**Issue**: k-ydzc
-**Date**: 2026-01-07
-**Status**: Ready for Implementation
 **Blocks**: k-oomv (ExecutionEngine infrastructure)
 
 ## Decisions Made
@@ -977,7 +982,7 @@ where
 
 ### Integration Tests (require R)
 
-```rust
+````rust
 #[cfg(test)]
 mod integration_tests {
     use super::*;
@@ -1137,7 +1142,7 @@ plot(1:10)
         assert!(result.markdown.contains("4"));
     }
 }
-```
+````
 
 ### CI Setup (based on quarto-cli)
 

@@ -3,7 +3,7 @@
 - **GitHub**: https://github.com/quarto-dev/q2/issues/175
 - **Reporter**: @rundel (Colin Rundel), 2026-05-11
 - **Triage date**: 2026-05-11
-- **Worktree**: `.worktrees/issue-175` (branch `issue-175`, based on `main` @ `53394156`)
+- **Worktree**: `.worktrees/issue-175` (branch `issue-175`, based on `main` \@ `53394156`)
 - **Beads issue**: bd-7mpv
 - **Scope**: the single round-trip bug described in the issue body. No other reports.
 
@@ -165,7 +165,7 @@ cargo run --quiet --bin pampa -- -t qmd claude-notes/issue-reports/175/exp-empty
 - `crates/pampa/src/writers/qmd.rs:1120-1214` — `write_table` (root cause)
 - `crates/pampa/src/writers/qmd.rs:870-910` — `table_can_use_pipe_format`
   (predicate that should grow a multi-header guard)
-- `tests/roundtrip_tests/qmd-json-qmd` — per `crates/pampa/CLAUDE.md`,
+- `tests/roundtrip_tests/qmd-json-qmd` — per `crates/pampa/AGENTS.md`,
   this is the directory for round-trip regression tests; the fix should
   add a fixture there.
 - quarto-web files exercised by the bug (from the GH issue):

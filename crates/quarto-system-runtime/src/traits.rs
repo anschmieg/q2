@@ -16,6 +16,43 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Limits for [`SystemRuntime::fetch_url_hardened`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchPolicy {
+    /// The response body may not exceed this many bytes.
+    pub max_bytes: u64,
+    /// The whole request (headers and body) is abandoned after this long.
+    pub timeout_ms: u32,
+}
+
+impl Default for FetchPolicy {
+    fn default() -> Self {
+        Self {
+            max_bytes: 20 * 1024 * 1024,
+            timeout_ms: 15_000,
+        }
+    }
+}
+
+/// The URL policy of [`SystemRuntime::fetch_url_hardened`]: an absolute
+/// `https://` URL with a host. Relative URLs are refused rather than resolved
+/// (against the hub origin they would reach the hub's own endpoints), as are
+/// protocol-relative (`//host/x`), `http:`, `data:`, `file:` and everything
+/// else. Returns the reason when refused.
+pub fn validate_fetch_url(url: &str) -> Result<(), String> {
+    let lower = url.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("https://") else {
+        return Err(format!(
+            "{url}: only absolute https:// URLs are fetched (relative, protocol-relative and non-https URLs are not)"
+        ));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.starts_with('@') || authority.starts_with(':') {
+        return Err(format!("{url}: the URL has no host"));
+    }
+    Ok(())
+}
+
 /// Result type for runtime operations
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -97,7 +134,38 @@ pub enum PathKind {
     Symlink,
 }
 
-/// Metadata about a file or directory
+/// What a SASS compile produced (bd-m3hga05o).
+///
+/// `loaded_files` is every file the compiler resolved **through the
+/// runtime** while following `@import` / `@use` — the import closure,
+/// each path once, in first-load order, spelled the way the compiler
+/// opened it (so `file_read` accepts it back). Embedded resources
+/// (Bootstrap and the other built-in SCSS) are served without the
+/// runtime and never appear here. The compiled-SCSS cache stores this
+/// list beside the CSS and re-hashes the files on its next lookup, so
+/// an edit to an imported partial invalidates the entry even though the
+/// cache key sees only the top-level theme file.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SassOutput {
+    /// The compiled CSS.
+    pub css: String,
+    /// Files loaded through the runtime during the compile.
+    pub loaded_files: Vec<PathBuf>,
+}
+
+/// One entry of a cache namespace, as enumerated by
+/// [`SystemRuntime::cache_list`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEntryInfo {
+    /// The entry's key (file name in the native backend).
+    pub key: String,
+    /// Value size in bytes.
+    pub size: u64,
+    /// Last-modified time in milliseconds since the Unix epoch, when the
+    /// backend can report one.
+    pub modified_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PathMetadata {
     /// Type of path (file, directory, symlink)
@@ -410,6 +478,20 @@ pub trait SystemRuntime: Send + Sync {
         None
     }
 
+    /// True if q2 is attached to an interactive terminal. Default false
+    /// (non-interactive, e.g. WASM); `NativeRuntime` overrides via stdin TTY
+    /// detection.
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
+    /// True if running under CI (the `CI` env var is set to a non-empty value).
+    /// Reads via `env_get`, so the default works for every runtime (WASM
+    /// `env_get` → `None` → false).
+    fn running_in_ci(&self) -> bool {
+        matches!(self.env_get("CI"), Ok(Some(v)) if !v.is_empty())
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // NETWORK
     // ═══════════════════════════════════════════════════════════════════════
@@ -420,6 +502,53 @@ pub trait SystemRuntime: Send + Sync {
     ///
     /// Corresponds to: `pandoc.mediabag.fetch` (for URLs)
     async fn fetch_url(&self, url: &str) -> RuntimeResult<(Vec<u8>, String)>;
+
+    /// [`fetch_url`](Self::fetch_url) under a [`FetchPolicy`]: https only, no
+    /// ambient credentials, a byte cap and a timeout; a runtime that carries a
+    /// cancellation signal (the browser's per-call snapshot) also stops when
+    /// it fires. Used for fetches the *document* asks for (remote images),
+    /// where the URL is untrusted. The default validates the URL, delegates to
+    /// `fetch_url` and enforces the byte cap on what came back; the browser
+    /// runtime overrides it to enforce all of it before the body is read.
+    async fn fetch_url_hardened(
+        &self,
+        url: &str,
+        policy: &FetchPolicy,
+    ) -> RuntimeResult<(Vec<u8>, String)> {
+        validate_fetch_url(url).map_err(RuntimeError::Network)?;
+        let (bytes, mime) = self.fetch_url(url).await?;
+        if bytes.len() as u64 > policy.max_bytes {
+            return Err(RuntimeError::Network(format!(
+                "{url} is {} bytes; the limit is {}",
+                bytes.len(),
+                policy.max_bytes
+            )));
+        }
+        Ok((bytes, mime))
+    }
+
+    /// Whether [`rasterize_svg`](Self::rasterize_svg) can run here. Synchronous so
+    /// callers can skip work (walking a document for SVGs) when it cannot.
+    /// Default: `false`; only the browser runtime, which has a DOM, overrides it.
+    fn can_rasterize_svg(&self) -> bool {
+        false
+    }
+
+    /// Rasterize an SVG to a PNG whose longest side is at most `max_side` pixels.
+    ///
+    /// pandoc.wasm has no `rsvg-convert`, so its docx and pptx writers need a
+    /// raster image where a document names an SVG. The PNG is rendered at twice
+    /// the SVG's intrinsic size and carries a pHYs chunk, so the SVG's size is
+    /// kept; the implementation, not the caller, parses the SVG's units.
+    ///
+    /// Default: `NotSupported` (native and test runtimes). An `Err` from a
+    /// runtime whose [`can_rasterize_svg`](Self::can_rasterize_svg) is `true`
+    /// means this SVG failed (undecodable, over a limit, timed out, cancelled).
+    async fn rasterize_svg(&self, _svg: &[u8], _max_side: u32) -> RuntimeResult<Vec<u8>> {
+        Err(RuntimeError::NotSupported(
+            "SVG rasterization is not available on this runtime".to_string(),
+        ))
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // SYSTEM INFO
@@ -579,22 +708,25 @@ pub trait SystemRuntime: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Compiled CSS string on success, `RuntimeError::SassError` on compilation failure,
-    /// or `RuntimeError::NotSupported` if SASS compilation is not available.
+    /// The compiled CSS plus the files loaded through this runtime while
+    /// resolving imports (see [`SassOutput`]); `RuntimeError::SassError`
+    /// on compilation failure, or `RuntimeError::NotSupported` if SASS
+    /// compilation is not available.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let scss = "$primary: blue; .btn { color: $primary; }";
-    /// let css = runtime.compile_sass(scss, &[], false).await?;
-    /// assert!(css.contains(".btn"));
+    /// let out = runtime.compile_sass(scss, &[], false).await?;
+    /// assert!(out.css.contains(".btn"));
+    /// assert!(out.loaded_files.is_empty());
     /// ```
     async fn compile_sass(
         &self,
         scss: &str,
         load_paths: &[PathBuf],
         minified: bool,
-    ) -> RuntimeResult<String> {
+    ) -> RuntimeResult<SassOutput> {
         let _ = (scss, load_paths, minified);
         Err(RuntimeError::NotSupported(
             "SASS compilation is not available on this runtime".to_string(),
@@ -645,6 +777,19 @@ pub trait SystemRuntime: Send + Sync {
     async fn cache_clear_namespace(&self, namespace: &str) -> RuntimeResult<()> {
         let _ = namespace;
         Ok(())
+    }
+
+    /// Enumerate the entries of a namespace.
+    ///
+    /// Returns `Ok(None)` when the backend cannot enumerate (the
+    /// default, and caching-disabled runtimes); `Ok(Some(vec![]))` for
+    /// an empty or absent namespace. Reserved bookkeeping keys are
+    /// included — callers filter. Used by the LRU wrapper to reconcile
+    /// its index against what the backend actually holds
+    /// (bd-ddahjqr1).
+    async fn cache_list(&self, namespace: &str) -> RuntimeResult<Option<Vec<CacheEntryInfo>>> {
+        let _ = namespace;
+        Ok(None)
     }
 }
 
@@ -823,5 +968,174 @@ mod tests {
         assert!(validate_cache_namespace("ns/bad").is_err());
         assert!(validate_cache_namespace("..").is_err());
         assert!(validate_cache_namespace("ns.v2").is_err());
+    }
+
+    // ── is_interactive / running_in_ci tests ─────────────────────────────────
+    //
+    // Use a minimal mock that implements only `env_get`; all other required
+    // methods panic via `unimplemented!()`. This avoids touching the real
+    // process environment (no parallel-test races) and stays small.
+
+    /// Minimal mock that controls what `env_get("CI")` returns.
+    struct CiMockRuntime {
+        ci_value: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl SystemRuntime for CiMockRuntime {
+        fn env_get(&self, name: &str) -> RuntimeResult<Option<String>> {
+            if name == "CI" {
+                Ok(self.ci_value.map(str::to_owned))
+            } else {
+                Ok(None)
+            }
+        }
+        fn env_all(&self) -> RuntimeResult<HashMap<String, String>> {
+            unimplemented!()
+        }
+        fn file_read(&self, _: &Path) -> RuntimeResult<Vec<u8>> {
+            unimplemented!()
+        }
+        fn file_write(&self, _: &Path, _: &[u8]) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn path_exists(&self, _: &Path, _: Option<PathKind>) -> RuntimeResult<bool> {
+            unimplemented!()
+        }
+        fn canonicalize(&self, _: &Path) -> RuntimeResult<PathBuf> {
+            unimplemented!()
+        }
+        fn path_metadata(&self, _: &Path) -> RuntimeResult<PathMetadata> {
+            unimplemented!()
+        }
+        fn file_copy(&self, _: &Path, _: &Path) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn path_rename(&self, _: &Path, _: &Path) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn file_remove(&self, _: &Path) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn dir_create(&self, _: &Path, _: bool) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn dir_remove(&self, _: &Path, _: bool) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn dir_list(&self, _: &Path) -> RuntimeResult<Vec<PathBuf>> {
+            unimplemented!()
+        }
+        fn cwd(&self) -> RuntimeResult<PathBuf> {
+            unimplemented!()
+        }
+        fn temp_dir(&self, _: &str) -> RuntimeResult<TempDir> {
+            unimplemented!()
+        }
+        fn exec_pipe(&self, _: &str, _: &[&str], _: &[u8]) -> RuntimeResult<Vec<u8>> {
+            unimplemented!()
+        }
+        fn exec_command(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Option<&[u8]>,
+        ) -> RuntimeResult<CommandOutput> {
+            unimplemented!()
+        }
+        async fn fetch_url(&self, _: &str) -> RuntimeResult<(Vec<u8>, String)> {
+            unimplemented!()
+        }
+        fn os_name(&self) -> &'static str {
+            "mock"
+        }
+        fn arch(&self) -> &'static str {
+            "mock"
+        }
+        fn cpu_time(&self) -> RuntimeResult<u64> {
+            unimplemented!()
+        }
+        fn xdg_dir(&self, _: XdgDirKind, _: Option<&Path>) -> RuntimeResult<PathBuf> {
+            unimplemented!()
+        }
+        fn stdout_write(&self, _: &[u8]) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+        fn stderr_write(&self, _: &[u8]) -> RuntimeResult<()> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn running_in_ci_true_for_nonempty_value() {
+        let rt = CiMockRuntime {
+            ci_value: Some("true"),
+        };
+        assert!(rt.running_in_ci(), "CI=true should be truthy");
+    }
+
+    #[test]
+    fn running_in_ci_true_for_one() {
+        let rt = CiMockRuntime {
+            ci_value: Some("1"),
+        };
+        assert!(rt.running_in_ci(), "CI=1 should be truthy");
+    }
+
+    #[test]
+    fn running_in_ci_false_for_empty_string() {
+        let rt = CiMockRuntime { ci_value: Some("") };
+        assert!(!rt.running_in_ci(), "CI='' should be falsy");
+    }
+
+    #[test]
+    fn running_in_ci_false_when_not_set() {
+        let rt = CiMockRuntime { ci_value: None };
+        assert!(!rt.running_in_ci(), "unset CI should be falsy");
+    }
+
+    #[test]
+    fn is_interactive_default_is_false() {
+        // The default impl returns false; CiMockRuntime inherits it (no override).
+        let rt = CiMockRuntime { ci_value: None };
+        assert!(!rt.is_interactive(), "default is_interactive must be false");
+    }
+}
+
+#[cfg(test)]
+mod fetch_policy_tests {
+    use super::validate_fetch_url;
+
+    #[test]
+    fn https_urls_pass() {
+        for url in [
+            "https://example.com/a.png",
+            "HTTPS://Example.com/a.png",
+            "https://example.com:8443/a.png?x=1#y",
+            "https://example.com",
+        ] {
+            assert!(validate_fetch_url(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        for url in [
+            "",
+            "a.png",
+            "/a.png",
+            "./a.png",
+            "../a.png",
+            "//example.com/a.png",
+            "http://example.com/a.png",
+            "data:image/png;base64,AAAA",
+            "file:///etc/passwd",
+            "ftp://example.com/a.png",
+            "https://",
+            "https:///a.png",
+            "https://?x=1",
+        ] {
+            assert!(validate_fetch_url(url).is_err(), "{url:?}");
+        }
     }
 }

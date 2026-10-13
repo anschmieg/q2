@@ -1,8 +1,12 @@
-# Resource-copy failure → structured diagnostic
-
-**Strand:** bd-bxrkxblx
-**Date:** 2026-06-19
-**Status:** assessment / awaiting go-ahead (DO NOT execute yet)
+---
+title: 'Resource-copy failure → structured diagnostic'
+date: 2026-06-19
+description: 'Converts resource-copy failures, which currently print as an unstructured string with no span, into span-aware diagnostics: a warning for missing referenced images and an error for environment failures like permission denial.'
+status: approved  # assessment / awaiting go-ahead (DO NOT execute yet)
+braid:
+  strand: bd-bxrkxblx
+  priority: P2
+---
 
 ## Overview
 
@@ -110,7 +114,7 @@ already hold a `runtime: &dyn SystemRuntime` exposing
 identical** to "collection time" from the user's perspective — the check
 happens *before any copy is attempted* — but sites the I/O where a runtime
 already exists. It is therefore the originally-described "option C" semantics at
-**~the same cost as option B** (the only real cost is threading the span, which
+**\~the same cost as option B** (the only real cost is threading the span, which
 B needs anyway; the stat itself is one `runtime.is_file(src)` call). My earlier
 "C is the most work" assessment wrongly assumed the stat had to live inside the
 transform.

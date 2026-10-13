@@ -56,7 +56,7 @@ const mi = (...inlines: any[]) => ({ t: 'MetaInlines', c: inlines });
 const mb = (c: boolean) => ({ t: 'MetaBool', c });
 const mm = (entries: Record<string, unknown>) => ({
     t: 'MetaMap',
-    c: Object.entries(entries).map(([key, value]) => ({ key, value })),
+    c: entries,
 });
 
 /** Normalized `by-author` entry list, as `AuthorsNormalizeTransform` writes it. */
@@ -651,6 +651,37 @@ describe('PreviewTitleBlock — banner mode (P5, bd-364ol5lu)', () => {
                 'div.quarto-title-banner div.quarto-title > p.subtitle.lead',
             ),
         ).not.toBeNull();
+    });
+
+    it('banner under page-layout: full tracks the suggested main column', () => {
+        // bd-no-toc-reserves-margin-column-s8nonx0w: `.page-columns > *`
+        // and `.page-columns .column-body` resolve to the same tracks, so
+        // the banner title has to move with `<main>` or the two grids fall
+        // out of alignment. The default blog scaffold is exactly this
+        // shape: page-layout full + banner + margin categories.
+        const { container } = mount({
+            title: ms('Doc'),
+            'page-layout': ms('full'),
+            rendered: mm({
+                'has-title-block': mb(true),
+                'title-block-banner': mb(true),
+                navigation: mm({
+                    margin_categories: ms(
+                        '<div class="quarto-listing-category"></div>',
+                    ),
+                }),
+            }),
+        });
+        expect(
+            container.querySelector(
+                'div.quarto-title-banner > div.quarto-title.column-page-left',
+            ),
+        ).not.toBeNull();
+        expect(
+            container.querySelector(
+                'div.quarto-title-banner > div.quarto-title.column-body',
+            ),
+        ).toBeNull();
     });
 
     it('banner → description and categories render inside the banner div', () => {

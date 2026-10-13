@@ -391,13 +391,15 @@ fn html_escape_text(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::project::listing::config::{Listing, ListingCategoriesMode, ListingType};
-    use crate::project::listing::item::ListingItem;
+    use crate::project::listing::item::{ItemOrigin, ItemTarget, ListingItem};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn item(title: &str, categories: &[&str]) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
             description: None,
             author: None,
@@ -410,8 +412,12 @@ mod tests {
             image_lazy_loading: None,
             reading_time_minutes: None,
             word_count: None,
-            source_path: PathBuf::from(format!("posts/{}.qmd", title)),
-            output_href: format!("posts/{}.html", title),
+            order: None,
+            target: ItemTarget::document(
+                format!("posts/{}.qmd", title),
+                format!("posts/{}.html", title),
+            ),
+            origin: ItemOrigin::Document,
             extra: BTreeMap::new(),
         }
     }
@@ -742,6 +748,8 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path("/project/posts/index.qmd")],
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         }
     }
 

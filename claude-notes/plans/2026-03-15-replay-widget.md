@@ -1,4 +1,8 @@
-# Replay Widget Implementation Plan
+---
+title: 'Replay Widget Implementation Plan'
+date: 2026-03-15
+description: 'Adds a bottom-drawer history replay to hub-client that scrubs read-only through an Automerge document''s change history, with an Apply button that writes the viewed text back as a new change.'
+---
 
 ## Overview
 
@@ -60,7 +64,7 @@ Follow existing pattern: a `useReplayMode` hook (like `usePresence`, `usePrefere
 
 A **bottom drawer** that slides up from the bottom of `.editor-container`. This is separate from the sidebar (which is for navigation/panels) and is architecturally more appropriate for a transient media-player control. The drawer has two states:
 - **Collapsed**: A thin bar at the bottom with a clock/history icon and "History" label. Clicking expands.
-- **Expanded**: A ~80px tall panel with timeline scrubber, play/pause, step buttons, timestamp display, and Apply button.
+- **Expanded**: A \~80px tall panel with timeline scrubber, play/pause, step buttons, timestamp display, and Apply button.
 
 ## Design Decisions
 
@@ -131,7 +135,7 @@ A **bottom drawer** that slides up from the bottom of `.editor-container`. This 
   ```
 - [x] On `enter()`: guard `getFileHandle(path)` for `null` return (no-op if unavailable), load `handle.history()` (guard against `undefined` return), set index to last (current state). Wrapped in try-catch.
 - [x] On `seekTo(index)`: extract text via `handle.view(history[index])` then `viewedHandle.doc()`, read `doc.text ?? ''`
-- [x] On `play()`: start `setInterval` that increments index (default ~200ms per step)
+- [x] On `play()`: start `setInterval` that increments index (default \~200ms per step)
 - [x] On `exit()`: clear replay state (no network operations)
 - [x] On `apply()`: read content at current index, call `updateFileContent(path, content)`, reset state
 - [x] `metadata()` receives `history[index][0]` (single change hash string), NOT the full `UrlHeads` array
@@ -152,7 +156,7 @@ A **bottom drawer** that slides up from the bottom of `.editor-container`. This 
 - [x] Create `hub-client/src/components/ReplayDrawer.tsx`
 - [x] Create `hub-client/src/components/ReplayDrawer.css`
 - [x] Collapsed state: thin bar (32px) with clock icon + "History" label
-- [x] Expanded state (~80px):
+- [x] Expanded state (\~80px):
   - Timeline scrubber: `<input type="range" min={0} max={historyLength - 1} value={currentIndex} />`
   - Transport controls: |◀ (step back), ▶/⏸ (play/pause), ▶| (step forward)
   - Timestamp display: formatted date/time of current change

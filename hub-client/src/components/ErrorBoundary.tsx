@@ -58,19 +58,19 @@ function DefaultFallback({ error, onReset }: { error: Error; onReset: () => void
       style={{
         padding: '24px',
         margin: '16px',
-        backgroundColor: '#fee',
-        border: '1px solid #fcc',
+        backgroundColor: 'var(--error-bg-subtle)',
+        border: '1px solid var(--diagnostics-border)',
         borderRadius: '6px',
         fontFamily: 'system-ui, sans-serif',
         fontSize: '14px',
-        color: '#900',
+        color: 'var(--error-text)',
       }}
     >
       <h3 style={{ margin: '0 0 8px 0' }}>Something went wrong</h3>
       <p style={{ margin: '0 0 12px 0' }}>{error.message}</p>
       <div style={{ display: 'flex', gap: '8px' }}>
-        <button onClick={onReset}>Try again</button>
-        <button onClick={() => window.location.reload()}>Reload</button>
+        <button className="qh-btn outline" onClick={onReset}>Try again</button>
+        <button className="qh-btn outline" onClick={() => window.location.reload()}>Reload</button>
       </div>
     </div>
   );

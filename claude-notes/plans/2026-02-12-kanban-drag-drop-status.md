@@ -1,7 +1,11 @@
-# Kanban: Drag-and-Drop Status Changes
-
-**Issue:** bd-3okv
-**Date:** 2026-02-12
+---
+title: 'Kanban: Drag-and-Drop Status Changes'
+date: 2026-02-12
+description: 'Replaces the per-card status dropdown in the board view with drag-and-drop between status sections using `@dnd-kit`, so a card''s position alone shows its status.'
+braid:
+  strand: bd-3okv
+  priority: P2
+---
 
 ## Overview
 
@@ -16,7 +20,7 @@ In the BoardView, card status is currently displayed redundantly: each card has 
 ### Drag-and-drop approach: @dnd-kit
 - Use `@dnd-kit/core` and `@dnd-kit/sortable` for drag-and-drop
 - Provides touch/pointer support (works on tablets), keyboard accessibility, smooth drop animations, and customizable drag overlays
-- ~15KB gzipped for core + sortable — reasonable for a real application
+- \~15KB gzipped for core + sortable — reasonable for a real application
 - Clean React hooks API (`useDraggable`, `useDroppable`, `DndContext`)
 
 ### Conditional status dropdown hiding

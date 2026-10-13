@@ -41,6 +41,8 @@ mod convert;
 mod format;
 mod materialize;
 mod merged;
+#[cfg(feature = "span-assert")]
+pub mod span_assert;
 mod tag;
 mod types;
 mod website;
@@ -51,8 +53,6 @@ pub use types::{
 };
 
 pub use tag::{ParsedTag, parse_tag};
-
-pub use convert::config_value_from_yaml;
 
 pub use merged::{
     MergedArray, MergedArrayItem, MergedConfig, MergedCursor, MergedMap, MergedScalar, MergedValue,

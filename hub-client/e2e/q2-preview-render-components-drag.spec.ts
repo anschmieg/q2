@@ -36,7 +36,7 @@ const qmdContent = readFileSync(resolve(FIXTURE_DIR, 'render-components-drag.qmd
 const tsxContent = readFileSync(resolve(FIXTURE_DIR, 'drag.tsx'), 'utf-8');
 const quartoYmlContent = readFileSync(resolve(FIXTURE_DIR, '_quarto.yml'), 'utf-8');
 
-const TEST_ACTOR_ID = 'e2e7e1f02a30000000000000000007e3';
+const TEST_AUTHOR_ID = 'e2e7e1f02a30000000000000000007e3';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ async function openDragFixture(page: Page): Promise<FrameLocator> {
         { path: 'drag.tsx', content: tsxContent, contentType: 'text' },
         { path: 'render-components-drag.qmd', content: qmdContent, contentType: 'text' },
     ]);
-    await bootstrapProjectSet(page, serverUrl);
+    await bootstrapProjectSet(page);
     const localId = await seedProjectInBrowser(page, indexDocId, serverUrl);
     await page.goto(`/#/p/${localId}/file/${encodeURIComponent('render-components-drag.qmd')}`);
     await waitForPreviewRender(page, { kind: 'q2-preview', timeout: 30_000 });
@@ -64,8 +64,8 @@ test.describe('q2-preview render-components-drag', () => {
 
     test.beforeEach(async ({ page }, testInfo) => {
         await page.addInitScript((id) => {
-            (window as any).__QUARTO_TEST_ACTOR_ID__ = id;
-        }, TEST_ACTOR_ID);
+            (window as any).__QUARTO_TEST_AUTHOR_ID__ = id;
+        }, TEST_AUTHOR_ID);
         if (testInfo.workerIndex > 0) await page.waitForTimeout(1000);
     });
 

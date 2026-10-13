@@ -1,4 +1,8 @@
-# Tree-sitter Corpus CRLF Parity Check — Design
+---
+title: 'Tree-sitter Corpus CRLF Parity Check — Design'
+date: 2026-04-29
+description: 'Adds a step to `cargo xtask verify` that reruns the tree-sitter corpus tests against a CRLF-converted copy of the grammar, checking that parses and errors stay identical under Windows line endings.'
+---
 
 ## Context
 
@@ -32,7 +36,7 @@ A new step in `cargo xtask verify`, sequenced after step 4 ("tree-sitter test").
    - **(b) Full copy of the grammar dir.** Heavier (includes generated `src/parser.c`, bindings) but mechanically simpler.
 
    Implementation plan picks one based on what works cleanly cross-platform.
-3. For each `*.txt` file in `test/corpus/`, normalize line endings to LF first (idempotency: handle files already CRLF), then replace LF with CRLF. The whole file is converted, including the `===`/`---` separators and the expected S-expression block — `tree-sitter test`'s parser of the corpus format is line-oriented and tolerates either ending.
+3. For each `*.txt` file in `test/corpus/`, normalize line endings to LF first (idempotency: handle files already CRLF), then replace LF with CRLF. The whole file is converted, including the `===`/`---` separators and the expected S-expression block — `tree-sitter test`\'s parser of the corpus format is line-oriented and tolerates either ending.
 4. Invoke `tree-sitter test` with the temp grammar dir as cwd.
 5. Surface the same exit code as step 4. Skippable via a new `--skip-treesitter-crlf-tests` flag, mirroring the existing `--skip-treesitter-tests`.
 

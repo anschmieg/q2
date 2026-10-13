@@ -1,0 +1,29 @@
+---
+title: Scheme hrefs (one level deep)
+format: html
+_quarto:
+  tests:
+    html:
+      noErrors: true
+      ensureFileRegexMatches:
+        - [
+            # Navbar items with a scheme are emitted unchanged at depth.
+            'href="javascript:void\(0\);"',
+            'href="mailto:someone@example\.com"',
+            'href="positron://settings/positron\.notebook\.enabled"',
+          ]
+        - [
+            # Guard only: the smoke-all runner does not relativize nav
+            # hrefs on nested pages (bd-sqa9h5ne), so these cannot fail here.
+            # Symptom 2 (`../javascript:void(0);` under `q2 render`) is
+            # pinned by the unit test
+            # nav_href_with_custom_scheme_passes_through_at_depth.
+            '\.\./javascript:',
+            '\.\./mailto:',
+            '\.\./positron:',
+            # Symptom 1: the `//` must survive at depth too.
+            'positron:/settings',
+          ]
+---
+
+A page one directory deep; the navbar above is what's under test.

@@ -1,7 +1,11 @@
-# Plan: Add pandoc.List metatable to all list-like tables in Lua API
-
-**Beads issue**: `bd-y9zl`
-**Date**: 2026-04-10
+---
+title: 'Plan: Add pandoc.List metatable to all list-like tables in Lua API'
+date: 2026-04-10
+description: 'Applies the pandoc.List metatable to every list-like table returned by the Lua AST API, such as `classes` and container `content` fields, so Quarto 1 filters can call methods like `:includes()` and `:map()`.'
+braid:
+  strand: bd-y9zl
+  priority: P1
+---
 
 ## Overview
 
@@ -75,7 +79,7 @@ In `LuaInline::set_field()`:
 - [x] Create helper `create_string_list_table(lua, strings)` in `list.rs` that
       creates a table with the List metatable applied
 - [x] Create helper `create_list_table(lua, values)` in `list.rs` for
-      wrapping Vec<Value> in a List table
+      wrapping `Vec<Value>` in a List table
 - [x] Replace all `classes` field construction in `LuaInline::get_field()` with
       the helper (8 locations)
 - [x] Replace `classes` field construction in `LuaBlock::get_field()` (3 locations)

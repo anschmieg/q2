@@ -1,13 +1,18 @@
-# Schema Module Refactoring Structure
+---
+title: 'Schema Module Refactoring Structure'
+date: 2025-10-27
+description: 'Splits the 1299-line `schema.rs` in `quarto-yaml-validation` into a `schema/` module tree of smaller files, grouped by primitive, combinator, array and object parsers, to cut editing context and prepare for new schema forms.'
+braid:
+  strand: k-243
+  priority: P1
+---
 
-**Date**: 2025-10-27
-**Issue**: k-243 - Refactor schema.rs into smaller modules
 **Current Size**: 1299 lines in single file
 **Target**: Multiple files, each <300 lines
 
 ## Problem
 
-The `private-crates/quarto-yaml-validation/src/schema.rs` file is currently 1299 lines and will grow to ~1500+ lines with Phase 2 additions (arrayOf, maybeArrayOf, record, schema wrapper). This creates:
+The `private-crates/quarto-yaml-validation/src/schema.rs` file is currently 1299 lines and will grow to \~1500+ lines with Phase 2 additions (arrayOf, maybeArrayOf, record, schema wrapper). This creates:
 - High token usage when editing
 - Difficulty navigating and maintaining
 - Longer context windows for LLM assistance
@@ -100,33 +105,33 @@ private-crates/quarto-yaml-validation/src/schema/
 - schema.rs: 1299 lines
 
 ### After Refactoring (before Phase 2)
-- mod.rs: ~150 lines
-- types.rs: ~250 lines
-- annotations.rs: ~100 lines
-- parser.rs: ~100 lines
-- parsers/primitive.rs: ~200 lines
-- parsers/enum.rs: ~100 lines
-- parsers/ref.rs: ~50 lines
-- parsers/combinators.rs: ~120 lines
-- parsers/arrays.rs: ~90 lines
-- parsers/objects.rs: ~250 lines
-- helpers.rs: ~200 lines
-- **Total**: ~1610 lines (includes module overhead)
+- mod.rs: \~150 lines
+- types.rs: \~250 lines
+- annotations.rs: \~100 lines
+- parser.rs: \~100 lines
+- parsers/primitive.rs: \~200 lines
+- parsers/enum.rs: \~100 lines
+- parsers/ref.rs: \~50 lines
+- parsers/combinators.rs: \~120 lines
+- parsers/arrays.rs: \~90 lines
+- parsers/objects.rs: \~250 lines
+- helpers.rs: \~200 lines
+- **Total**: \~1610 lines (includes module overhead)
 - **Largest file**: 250 lines (types.rs, objects.rs)
 
 ### After Phase 2 (with new parsers)
-- parsers/combinators.rs: ~150 lines (+30 for maybeArrayOf)
-- parsers/arrays.rs: ~140 lines (+50 for arrayOf)
-- parsers/objects.rs: ~280 lines (+30 for record)
-- parsers/wrappers.rs: ~50 lines (new file)
-- **Total**: ~1720 lines
+- parsers/combinators.rs: \~150 lines (+30 for maybeArrayOf)
+- parsers/arrays.rs: \~140 lines (+50 for arrayOf)
+- parsers/objects.rs: \~280 lines (+30 for record)
+- parsers/wrappers.rs: \~50 lines (new file)
+- **Total**: \~1720 lines
 - **Largest file**: 280 lines (objects.rs)
 
 ## Benefits
 
 1. **Reduced Token Usage**
-   - Working on primitive parsers: read ~200 lines instead of 1299
-   - Working on object parser: read ~250 lines instead of 1299
+   - Working on primitive parsers: read \~200 lines instead of 1299
+   - Working on object parser: read \~250 lines instead of 1299
    - 80%+ reduction in context size for most edits
 
 2. **Clear Organization**

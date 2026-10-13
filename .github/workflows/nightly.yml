@@ -1,0 +1,242 @@
+# Nightly (bd-p4ljdp2e): every night, if `main` has changes no release
+# has shipped, build it through the shared release pipeline and publish
+# the result as the rolling `nightly` PRERELEASE.
+#
+#   gate ──(build=true)──▶ release-pipeline.yml ──▶ install-smoke ×4
+#
+# - `gate` runs scripts/nightly-gate.sh: skip iff HEAD is exactly the
+#   newest `v*` tag (main is fully released) or exactly the current
+#   `nightly` tag (last night already built this tree). Otherwise it
+#   picks the version — the NEXT minor of Cargo.toml with a dated
+#   prerelease, e.g. 0.33.0-nightly.20260919 — and the sha to build.
+#   A skipped night costs one small runner for a few seconds.
+# - The pipeline is the same file release.yml calls, with
+#   channel: nightly (build-time QUARTO_VERSION_OVERRIDE, rolling tag,
+#   prerelease, nightly install notes). Every release gate applies.
+# - `install-smoke` then runs the README one-liners with the nightly
+#   flag on linux, macOS and Windows (x64 and ARM64) against the
+#   just-published release and asserts `q2 --version` reports the
+#   gate's version, and on Windows that the installer picked the
+#   runner's native architecture: the
+#   end-to-end check the AGENTS.md rule asks for, every night, and the
+#   only CI that exercises install.sh/install.ps1 against a real release.
+#
+# Stable installs are unaffected: releases/latest never returns a
+# prerelease. Nightlies install with `install.sh --nightly` /
+# `install.ps1 -Nightly`.
+#
+# Manual runs (workflow_dispatch) can force a build of a released HEAD
+# and/or dry-run without publishing; from a branch, that is how to test
+# changes to this file or the pipeline before they reach main.
+#
+# Plan: claude-notes/plans/2026-09-19-nightly-release-workflow.md
+
+name: Nightly
+
+run-name: >-
+  ${{
+    github.event_name == 'schedule' && 'Nightly'
+    || format('Nightly (manual{0}{1})',
+              inputs.force && ', forced' || '',
+              (!inputs.publish) && ', dry run' || '')
+  }}
+
+on:
+  schedule:
+    # 03:00 EST / 04:00 EDT — an hour after the e2e nightly
+    # (hub-client-e2e.yml, 0 7 * * *) so the two never race for the
+    # same rust-cache write window.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if HEAD is already released / already the current nightly'
+        type: boolean
+        default: false
+      publish:
+        description: 'Publish the nightly release (untick for a dry run: build, verify, sign, upload as artifact)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Unreleased changes on ${{ github.ref_name }}?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.repository == 'quarto-dev/q2'
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+      reason: ${{ steps.gate.outputs.reason }}
+      version: ${{ steps.gate.outputs.version }}
+      sha: ${{ steps.gate.outputs.sha }}
+      prev_release_tag: ${{ steps.gate.outputs.prev_release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The gate compares HEAD against tags; it needs all of them.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - id: gate
+        shell: bash
+        env:
+          NIGHTLY_FORCE: ${{ inputs.force && '1' || '0' }}
+        run: bash scripts/nightly-gate.sh
+
+      - name: Summary
+        shell: bash
+        env:
+          BUILD: ${{ steps.gate.outputs.build }}
+          REASON: ${{ steps.gate.outputs.reason }}
+          VERSION: ${{ steps.gate.outputs.version }}
+          SHA: ${{ steps.gate.outputs.sha }}
+          PREV: ${{ steps.gate.outputs.prev_release_tag }}
+        run: |
+          {
+            if [ "$BUILD" = true ]; then
+              echo "### Building nightly \`$VERSION\` from \`${SHA:0:12}\` ($REASON)"
+            else
+              echo "### Skipped: \`${SHA:0:12}\` is $REASON"
+            fi
+            echo
+            echo "Last release: \`${PREV:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  pipeline:
+    name: Nightly pipeline
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/release-pipeline.yml
+    with:
+      # The exact sha the gate looked at, not the branch: a merge landing
+      # mid-run must not change what this nightly is built from.
+      ref: ${{ needs.gate.outputs.sha }}
+      version: ${{ needs.gate.outputs.version }}
+      tag: nightly
+      channel: nightly
+      # Scheduled runs have no inputs; they always publish.
+      publish: ${{ github.event_name == 'schedule' || inputs.publish }}
+      notes_range: >-
+        ${{ needs.gate.outputs.prev_release_tag != ''
+            && format('{0}..{1}', needs.gate.outputs.prev_release_tag, needs.gate.outputs.sha)
+            || '' }}
+    secrets: inherit
+
+  # The real user path: the README one-liners, fetched from this ref
+  # (`main` on a scheduled run), installing the release the pipeline just
+  # published, verified with the key pinned in the installers. The
+  # installed binary must report exactly the gate's version.
+  install-smoke:
+    name: Install smoke (${{ matrix.os }})
+    needs: [gate, pipeline]
+    if: >-
+      needs.gate.outputs.build == 'true'
+      && (github.event_name == 'schedule' || inputs.publish)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest, windows-11-arm]
+        include:
+          # PE machine type install.ps1 must have picked on each Windows
+          # runner: 0x8664 = x64, 0xAA64 = ARM64. On windows-11-arm this
+          # is what catches a missing or misnamed windows_arm64 asset,
+          # which the installer's x64 fallback would otherwise paper over.
+          - os: windows-latest
+            pe_machine: '8664'
+          - os: windows-11-arm
+            pe_machine: 'AA64'
+    env:
+      EXPECTED: ${{ needs.gate.outputs.version }}
+      RAW_BASE: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}
+      # The installers' release lookup reads the GitHub API. Anonymous,
+      # that shares a 60/hour budget per runner IP, which GitHub's macOS
+      # fleet routinely exhausts (bd-n9yh30c8); with the job token it
+      # counts against the repo's own 1000/hour instead.
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install minisign (the installer requires it)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install minisign
+          else sudo apt-get update && sudo apt-get install -y minisign; fi
+
+      - name: install.sh --nightly
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL "$RAW_BASE/install.sh" | bash -s -- --nightly --dest "$RUNNER_TEMP/q2-bin"
+          RAW=$("$RUNNER_TEMP/q2-bin/q2" --version)
+          echo "$RAW"
+          if [ "${RAW##* }" != "$EXPECTED" ]; then
+            echo "::error::installed nightly reports '$RAW', expected version $EXPECTED"
+            exit 1
+          fi
+
+      # Twice: under PowerShell 7 and under Windows PowerShell 5.1 (the
+      # .NET Framework one most `irm | iex` users run). The architecture
+      # detection in install.ps1 leans on different APIs in each.
+      - name: install.ps1 -Nightly (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PE_MACHINE: ${{ matrix.pe_machine }}
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'q2-bin-pwsh'
+          & ([scriptblock]::Create((irm "$env:RAW_BASE/install.ps1"))) -Nightly -Dest $dest
+          $exe = Join-Path $dest 'q2.exe'
+          $raw = & $exe --version
+          Write-Host $raw
+          if (($raw -split '\s+')[-1] -ne $env:EXPECTED) {
+            Write-Host "::error::installed nightly reports '$raw', expected version $env:EXPECTED"
+            exit 1
+          }
+          # PE header: e_lfanew at 0x3C points at 'PE\0\0', then the
+          # 2-byte machine field.
+          $fs = [System.IO.File]::OpenRead($exe)
+          $b = New-Object byte[] 4096
+          [void]$fs.Read($b, 0, $b.Length)
+          $fs.Close()
+          $machine = '{0:X4}' -f [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3C) + 4)
+          Write-Host "q2.exe PE machine: 0x$machine"
+          if ($machine -ne $env:PE_MACHINE) {
+            Write-Host "::error::install.ps1 installed a 0x$machine binary on this runner, expected 0x$env:PE_MACHINE"
+            exit 1
+          }
+
+      - name: install.ps1 -Nightly (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          PE_MACHINE: ${{ matrix.pe_machine }}
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'q2-bin-powershell'
+          & ([scriptblock]::Create((irm "$env:RAW_BASE/install.ps1"))) -Nightly -Dest $dest
+          $exe = Join-Path $dest 'q2.exe'
+          $raw = & $exe --version
+          Write-Host $raw
+          if (($raw -split '\s+')[-1] -ne $env:EXPECTED) {
+            Write-Host "::error::installed nightly reports '$raw', expected version $env:EXPECTED"
+            exit 1
+          }
+          # PE header: e_lfanew at 0x3C points at 'PE\0\0', then the
+          # 2-byte machine field.
+          $fs = [System.IO.File]::OpenRead($exe)
+          $b = New-Object byte[] 4096
+          [void]$fs.Read($b, 0, $b.Length)
+          $fs.Close()
+          $machine = '{0:X4}' -f [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3C) + 4)
+          Write-Host "q2.exe PE machine: 0x$machine"
+          if ($machine -ne $env:PE_MACHINE) {
+            Write-Host "::error::install.ps1 installed a 0x$machine binary on this runner, expected 0x$env:PE_MACHINE"
+            exit 1
+          }

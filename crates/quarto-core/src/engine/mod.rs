@@ -55,14 +55,27 @@
 
 pub mod capture_files;
 pub mod capture_splice;
+pub mod content_processors;
 mod context;
 mod detection;
+pub mod diagnostics;
 mod error;
 mod markdown;
+pub mod nested_cell_mask;
 pub mod preview_record;
 mod registry;
 mod replay;
+pub mod resolution;
 mod traits;
+pub mod ts_protocol;
+
+// Native-only: subprocess management + demux for TS engine extensions.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ts_process;
+
+// Native-only: TsEngine struct implementing ExecutionEngine via TsEngineHost.
+#[cfg(not(target_arch = "wasm32"))]
+mod ts_engine;
 
 // File-backed test engine for exercising multi-engine sequencing
 // (bd-5yff4). Native-only test utility; never registered in the default
@@ -73,14 +86,81 @@ mod fixture;
 // Native-only modules
 #[cfg(not(target_arch = "wasm32"))]
 pub mod jupyter;
+// `pub(crate)`, not private: Plan 7b Phase 6's launch-free test
+// (`stage::stages::source_conversion`) reads `knitr::subprocess::
+// rscript_spawn_count()` from outside the `engine` module tree.
 #[cfg(not(target_arch = "wasm32"))]
-mod knitr;
+pub(crate) mod knitr;
+
+/// Static file claims every built-in engine declares (Plan 7b Phase 5),
+/// without constructing any engine or probing the environment (unlike
+/// `JupyterEngine::new()`/`KnitrEngine::new()`, which search `PATH`). Feeds
+/// discovery's gate 1 (`RenderableExtensions`) so a percent `.py`/`.jl`/
+/// `.r`/`.q` or spin `.r` is renderable *when listed* by
+/// `project.render`, exactly like an extension-contributed claim.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn builtin_file_claims() -> Vec<crate::extension::types::FileClaim> {
+    let mut claims = jupyter::JupyterEngine::static_file_claims();
+    claims.extend(knitr::KnitrEngine::static_file_claims());
+    claims
+}
+
+/// WASM has no built-in jupyter/knitr engines (no subprocess host) — empty,
+/// so callers need no `#[cfg]` of their own (mirrors how `claimed_file_extensions`
+/// already degrades to `{qmd}` on WASM via an empty extension list).
+#[cfg(target_arch = "wasm32")]
+pub fn builtin_file_claims() -> Vec<crate::extension::types::FileClaim> {
+    Vec::new()
+}
+
+use std::time::Duration;
+
+// ── Shared, WASM-clean types consumed by traits, resolution, and TsEngine ──
+
+/// Resolution tier for multi-engine language ownership.
+///
+/// See `claude-notes/designs/engine-resolution.md` §3.1 for the full contract.
+///
+/// **Semantics:**
+/// - `kind` sets the resolution tier; `priority` orders *only within* a kind
+///   (kind dominates priority — `Primary(-100)` beats `Fallback(100)`).
+/// - `Interop` is presence-gated: fires only for an engine already in the
+///   sequence via a positive claim ("extend if I'm already here," not "claim
+///   anywhere").
+/// - `Fallback` is the universal-kernel role; no longer hardcoded to jupyter —
+///   any engine can declare it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageClaim {
+    /// I execute this language. (default priority 1)
+    Primary(i32),
+    /// Extend my ownership to this language iff I'm already present. (default priority 0)
+    Interop(i32),
+    /// Universal-kernel role: I will execute any language as a fallback. (default priority 0)
+    Fallback(i32),
+    /// I make no claim on this language.
+    None,
+}
+
+/// Languages that Quarto handles downstream via cell handlers (ojs, mermaid, dot).
+///
+/// Engines must **leave these blocks unchanged** in their output — they are
+/// pass-through cell handlers, not languages the engine executes. This is an
+/// instruction to engines, not documentation: when q2 grows real cell-handler
+/// support, this constant migrates to a registry. Single source of truth until
+/// then.
+pub const HANDLED_LANGUAGES: &[&str] = &["ojs", "mermaid", "dot"];
+
+/// Default per-request timeout for engine execution (5 minutes).
+///
+/// Promoted from `engine/jupyter/execute.rs` so it can be shared by the
+/// `ExecutionContext` builder and future TS-engine callers without a native-only
+/// import path.
+pub const DEFAULT_EXECUTE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // Re-export public types
 pub use context::{ExecuteResult, ExecutionContext};
 pub use detection::{
-    DetectedEngine, EngineSequence, KNOWN_ENGINES, detect_engine, detect_engine_sequence,
-    detect_engines, is_known_engine,
+    DetectedEngine, EngineSequence, detect_engine, detect_engine_sequence, detect_engines,
 };
 pub use error::ExecutionError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,13 +168,21 @@ pub use fixture::FixtureEngine;
 pub use markdown::MarkdownEngine;
 pub use registry::EngineRegistry;
 pub use replay::ReplayEngine;
+pub(crate) use resolution::explicitly_declared_engines;
+pub use resolution::{EngineResolution, ResolutionNote, resolve_engines, resolve_engines_pass1};
 pub use traits::ExecutionEngine;
+
+pub mod execution_policy;
+pub use execution_policy::ExecutionPolicy;
 
 // Re-export native-only engines
 #[cfg(not(target_arch = "wasm32"))]
 pub use jupyter::JupyterEngine;
 #[cfg(not(target_arch = "wasm32"))]
 pub use knitr::KnitrEngine;
+#[cfg(not(target_arch = "wasm32"))]
+pub use ts_engine::TsEngine;
+
 // Rscript discovery, shared with the project render-script dispatcher
 // (`project::render_scripts`).
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,6 +216,21 @@ mod tests {
     use quarto_source_map::SourceInfo;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    // --- Plan 7b Phase 5: builtin_file_claims (construction-free). ---
+
+    #[test]
+    fn builtin_file_claims_returns_jupyter_and_knitr_claims() {
+        let claims = builtin_file_claims();
+        // Jupyter's 4 percent claims (.py/.jl/.r/.q) + ipynb (Plan 7c) +
+        // knitr's 1 spin claim.
+        assert_eq!(claims.len(), 6);
+        assert!(claims.iter().any(|c| c.extension == "py"));
+        assert!(claims.iter().any(|c| c.extension == "jl"));
+        assert!(claims.iter().any(|c| c.extension == "q"));
+        assert!(claims.iter().any(|c| c.extension == "ipynb"));
+        assert_eq!(claims.iter().filter(|c| c.extension == "r").count(), 2);
+    }
 
     /// Helper to create a map ConfigValue
     fn map_config(entries: Vec<(&str, ConfigValue)>) -> ConfigValue {
@@ -247,5 +350,13 @@ mod tests {
         assert_eq!(detected.name, "markdown");
         assert!(detected.is_markdown());
         assert!(!detected.requires_runtime());
+    }
+
+    /// Pin the contract: HANDLED_LANGUAGES must be exactly ["ojs", "mermaid", "dot"].
+    /// All three knitr sites read from this constant; any accidental change here
+    /// would silently alter the leave-alone set sent to the R subprocess.
+    #[test]
+    fn test_handled_languages_constant() {
+        assert_eq!(HANDLED_LANGUAGES, &["ojs", "mermaid", "dot"]);
     }
 }

@@ -1,7 +1,13 @@
-# Vendored / non-cargo dependency audit — plan
+---
+title: 'Vendored / non-cargo dependency audit — plan'
+date: 2026-05-04
+description: 'Sets up an inventory and audit procedure for vendored non-Cargo assets such as Bootstrap SCSS and CSL styles, so upstream updates are checked on the same cadence as Cargo dependencies.'
+braid:
+  strand: bd-xm7l
+  priority: P2
+  labels: [deps, vendored]
+---
 
-**Date opened:** 2026-05-04
-**Beads issue:** bd-xm7l (epic)
 **Related skill:** `.claude/skills/upgrade-cargo-deps/SKILL.md`
 **Inventory doc:** `claude-notes/research/vendored-dependencies-inventory.md`
 
@@ -53,7 +59,7 @@ under § *Discovery strategies*. The five top-level approaches:
 5. **Inspect static-asset roots** (`hub-client/public/`,
    `trace-viewer/public/`).
 6. **Find sub-package `package.json`s** outside `hub-client/` —
-   they often produce JS bundles `include_str!`'d into Rust.
+   they often produce JS bundles `include_str!`\'d into Rust.
 7. **Note tree-sitter parser grammar forks** (those are massive;
    they appear in the inventory only to silence repeated discovery,
    not as audit candidates).
@@ -89,7 +95,7 @@ The `upgrade-cargo-deps` skill should grow a sibling phase — call it
     `npm outdated --prefix crates/quarto-system-runtime/js` and
     capture the result.
   - For quarto-cli-derived assets (extensions, knitr R, Pandoc HTML
-    template): compare against `external-sources/quarto-cli`'s
+    template): compare against `external-sources/quarto-cli`\'s
     current SHA *if* it's checked out; otherwise note as "no
     upstream check available this run".
 - **Update** the `Last reviewed` date on each entry in the inventory

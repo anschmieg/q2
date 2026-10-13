@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 
 use crate::error_table::{ErrorCapture, ErrorTableEntry, lookup_error_entry};
+use crate::suggestion::{Suggestion, suggest};
 use crate::tree_sitter_log::{ConsumedToken, TreeSitterLogObserver};
 use quarto_error_reporting::DiagnosticMessage;
 
@@ -36,7 +37,7 @@ pub fn produce_diagnostic_messages(
     assert!(tree_sitter_log.had_errors());
     assert!(!tree_sitter_log.parses.is_empty());
 
-    let mut result: Vec<quarto_error_reporting::DiagnosticMessage> = vec![];
+    let mut result: Vec<(quarto_error_reporting::DiagnosticMessage, bool)> = vec![];
     let mut seen_errors: std::collections::HashSet<(usize, usize)> =
         std::collections::HashSet::new();
 
@@ -61,10 +62,56 @@ pub fn produce_diagnostic_messages(
         }
     }
 
-    // Sort diagnostics by file position (start offset)
-    result.sort_by_key(|diag| diag.location.as_ref().map_or(0, |loc| loc.start_offset()));
+    truncate_after_desynchronizing(result)
+}
 
-    result
+/// Sort diagnostics by position and stop at the first one the corpus marks
+/// as desynchronising.
+///
+/// Some mistakes do not merely fail where they are written; they leave the
+/// parser in a state from which recovery consumes unrelated text. A
+/// shortcode written `{{<fa plus>}}` is one: recovery swallows the opening
+/// `:::` of a div five lines below, and its closing `:::` — correct Quarto
+/// — is then reported as a third parse error. Every error after such a one
+/// is an artefact of the first, so reporting them aims the author at code
+/// that is not wrong.
+///
+/// Errors *before* it are kept. Those were found while the parser was still
+/// synchronised, so they stand on their own — and they are the ones the
+/// author should fix first anyway.
+fn truncate_after_desynchronizing(
+    mut diagnostics: Vec<(quarto_error_reporting::DiagnosticMessage, bool)>,
+) -> Vec<quarto_error_reporting::DiagnosticMessage> {
+    diagnostics.sort_by_key(|(diag, _)| diag.location.as_ref().map_or(0, |loc| loc.start_offset()));
+
+    let cutoff = diagnostics
+        .iter()
+        .position(|(_, desynchronizes)| *desynchronizes)
+        .map_or(diagnostics.len(), |index| index + 1);
+
+    let suppressed = diagnostics.len() - cutoff;
+    let mut kept: Vec<quarto_error_reporting::DiagnosticMessage> = diagnostics
+        .into_iter()
+        .take(cutoff)
+        .map(|(diag, _)| diag)
+        .collect();
+
+    // Say that the list was cut short. Silently reporting one error when
+    // more were found reads as "this is the only problem", and the author
+    // fixes it, re-renders, and meets a fresh error they were given no
+    // reason to expect. No count is given: what was dropped is mostly
+    // recovery debris, and a number would imply more real problems than
+    // there are.
+    if suppressed > 0
+        && let Some(last) = kept.last_mut()
+    {
+        last.hints.push(
+            "Parsing could not continue reliably past this point, so any further errors in this file were not reported. Fix this one and try again."
+                .into(),
+        );
+    }
+
+    kept
 }
 
 fn appears_not_after(
@@ -92,7 +139,8 @@ pub fn diagnostic_score(diag: &DiagnosticMessage) -> usize {
     diag.hints.len() + diag.details.len() + diag.code.as_ref().map_or(0, |_| 1)
 }
 
-/// Convert a parse state error into a structured DiagnosticMessage
+/// Convert a parse state error into a structured DiagnosticMessage,
+/// paired with whether the matched entry declares itself desynchronising.
 fn error_diagnostic_from_parse_state(
     input_bytes: &[u8],
     parse_state: &crate::tree_sitter_log::ProcessMessage,
@@ -101,11 +149,8 @@ fn error_diagnostic_from_parse_state(
     error_table: &[ErrorTableEntry],
     _filename: &str,
     _source_context: &quarto_source_map::SourceContext,
-) -> quarto_error_reporting::DiagnosticMessage {
+) -> (quarto_error_reporting::DiagnosticMessage, bool) {
     use quarto_error_reporting::DiagnosticMessageBuilder;
-
-    // Look up the error entry from the table
-    let error_entry = lookup_error_entry(error_table, parse_state);
 
     // All offset arithmetic operates on `input_bytes` directly.
     // Tree-sitter reports `parse_state.row` / `parse_state.column` as
@@ -117,6 +162,12 @@ fn error_diagnostic_from_parse_state(
 
     let byte_offset = calculate_byte_offset(input_bytes, parse_state.row, parse_state.column);
     let span_end = advance_chars(input_bytes, byte_offset, parse_state.size.max(1));
+
+    // Look up the error entry from the table. Entries may discriminate on
+    // the source text at the error position when the parser state alone
+    // does not tell two mistakes apart — see `lookup_error_entry`.
+    let error_text = source_text_at_error(input_bytes, byte_offset);
+    let error_entry = lookup_error_entry(error_table, parse_state, &error_text);
 
     let start_location =
         offset_to_location_bytes(input_bytes, byte_offset).unwrap_or(quarto_source_map::Location {
@@ -143,8 +194,20 @@ fn error_diagnostic_from_parse_state(
 
     error_entry
         .into_iter()
-        .map(|entry| {
-            // if let Some(entry) = error_entry {
+        .filter_map(|entry| {
+            // A suggester can recognise that the source is not the mistake
+            // this entry describes (same parser state, different cause) and
+            // drop the entry, leaving any other candidate or the generic
+            // fallback to answer.
+            let suggested_hint = match entry.error_info.suggestion {
+                Some(name) => match suggest(name, input_bytes, byte_offset) {
+                    Suggestion::Hint(hint) => Some(hint),
+                    Suggestion::Nothing => None,
+                    Suggestion::Reject => return None,
+                },
+                None => None,
+            };
+
             // Build diagnostic from error table entry
             let mut builder = DiagnosticMessageBuilder::error(entry.error_info.title)
                 .with_location(source_info.clone())
@@ -236,17 +299,43 @@ fn error_diagnostic_from_parse_state(
             for hint in entry.error_info.hints {
                 builder = builder.add_hint(*hint);
             }
+            if let Some(hint) = suggested_hint {
+                builder = builder.add_hint(hint);
+            }
 
-            builder.build()
+            Some((builder.build(), entry.error_info.desynchronizes))
         })
-        .max_by(|diag1, diag2| diagnostic_score(diag1).cmp(&diagnostic_score(diag2)))
-        .unwrap_or(
+        .max_by(|(diag1, _), (diag2, _)| diagnostic_score(diag1).cmp(&diagnostic_score(diag2)))
+        .unwrap_or_else(|| {
             // Fallback for errors not in the table
-            DiagnosticMessageBuilder::error("Parse error")
-                .with_location(source_info)
-                .problem("unexpected character or token here")
-                .build(),
-        )
+            (
+                DiagnosticMessageBuilder::error("Parse error")
+                    .with_location(source_info)
+                    .problem("unexpected character or token here")
+                    .build(),
+                false,
+            )
+        })
+}
+
+/// The source text a guard is matched against: from the error position
+/// to the end of its line.
+///
+/// One line is enough for every discriminator the corpus needs so far —
+/// the mistakes that share a parser state differ in the few characters
+/// right at the failure — and it keeps the text a guard sees bounded
+/// regardless of how large the document is. Invalid UTF-8 is replaced
+/// rather than rejected, so a guard still gets to run on a file that is
+/// not valid text.
+fn source_text_at_error(input_bytes: &[u8], byte_offset: usize) -> String {
+    let start = byte_offset.min(input_bytes.len());
+    let rest = &input_bytes[start..];
+    let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+    let line = String::from_utf8_lossy(&rest[..end]);
+    // Drop a CRLF's carriage return. Both guards in the corpus today are
+    // `^`-anchored and would not notice, but a `$`-anchored one would
+    // silently never match on a Windows-authored file.
+    line.trim_end_matches('\r').to_owned()
 }
 
 /// Compute a byte offset into `input` given tree-sitter's (row,
@@ -278,10 +367,30 @@ fn calculate_byte_offset(input: &[u8], row: usize, column: usize) -> usize {
 /// Advance `size` characters from `start` within `input`, returning
 /// the resulting byte offset. Decodes UTF-8 a codepoint at a time;
 /// each byte that fails to start a valid sequence counts as one
-/// "character" and advances by one byte. That matches what
-/// `from_utf8_lossy` would emit (each maximal ill-formed subpart
-/// becomes one `U+FFFD`) while keeping all offsets in the original
-/// byte domain.
+/// "character" and advances by one byte, keeping all offsets in the
+/// original byte domain.
+///
+/// **This is not `from_utf8_lossy`'s rule, despite an earlier version of
+/// this comment claiming it was** (corrected 2026-08-23, Plan 3 Phase 2).
+/// `from_utf8_lossy` folds each maximal ill-formed *subpart* into one
+/// `U+FFFD`, while this walker advances **one byte per ill-formed byte**.
+///
+/// So the two coincide exactly when every maximal ill-formed subpart is a
+/// **single byte**, and diverge as soon as one spans two or more.
+/// `[0xFF, 0xFE, 0xFD]` coincides (three one-byte subparts), and so do
+/// `[0xC2]` and `[0xC2, 0x41]` — `0xC2` is a *valid* 2-byte lead, merely
+/// truncated or mis-continued, and its maximal subpart is still just
+/// `[0xC2]`. `[0xE2, 0x82]` diverges 2 vs 1, because a valid 2-byte prefix
+/// of a 3-byte sequence is a 2-byte subpart. (An earlier version of this
+/// sentence said the rules coincide "only when every ill-formed byte is
+/// independently invalid" — false, as `[0xC2]` shows; corrected in fix
+/// round 2.) Exhaustively pinned by
+/// `ill_formed_counting_diverges_exactly_when_a_subpart_spans_multiple_bytes`.
+///
+/// Counting each byte separately is the deliberate choice: it keeps a
+/// character step from ever crossing more bytes than it can account for.
+/// [`offset_to_location_bytes`] uses this same walker, so the two agree with
+/// each other — which is what actually matters.
 fn advance_chars(input: &[u8], start: usize, size: usize) -> usize {
     let mut pos = start.min(input.len());
     let mut count = 0_usize;
@@ -322,11 +431,47 @@ fn next_codepoint_size(bytes: &[u8]) -> usize {
 }
 
 /// Bytes-aware sibling of `quarto_source_map::utils::offset_to_location`.
-/// Returns `None` if the offset is out of bounds. Column is reported
-/// as the number of characters on the current line as a
-/// `from_utf8_lossy` reader would count them — for valid UTF-8 this
-/// matches the source-map utility exactly; for invalid UTF-8 it
-/// counts each ill-formed byte as a single replacement character.
+/// Returns `None` if the offset is out of bounds.
+///
+/// Column is the number of characters preceding `offset` on its line,
+/// counted with [`next_codepoint_size`] — the same walker
+/// [`advance_chars`] uses, so the two agree on what a "character" is.
+/// **Each ill-formed byte counts as one**, and this differs from
+/// `from_utf8_lossy`, which folds a maximal ill-formed subpart into a
+/// single `U+FFFD`: `[0xE2, 0x82]` is one replacement character to it and
+/// **two** characters here. Pinned by
+/// `offset_to_location_bytes_counts_each_ill_formed_byte_separately`.
+///
+/// An `offset` landing *inside* a character is **floored** to that
+/// character's first byte, and that character is not counted. Both
+/// `quarto-source-map` implementations do this — `utils::offset_to_location`
+/// and `FileInformation::offset_to_location`, which Plan 1 measured
+/// disagreeing by one column here and made agree — and a consumer that
+/// slices with the returned offset needs a char boundary. Pinned by
+/// `offset_to_location_bytes_agrees_with_source_map_on_mid_character_offsets`.
+///
+/// **Flooring is not unconditionally safe on corrupt input.** It cannot
+/// panic and `start <= end` always holds, but flooring the *end* of a span
+/// can collapse it: for a 4-byte codepoint at `0..4` with `byte_offset = 2`
+/// and `size = 1`, `advance_chars` yields `span_end = 3` and both ends floor
+/// to `0` — a zero-width span. That is strictly better than the pre-fix
+/// panic and is only reachable when a tree-sitter offset lands mid-character,
+/// which valid UTF-8 does not produce.
+///
+/// **Only `offset` reaches production.** All four call sites (`:122`, `:128`,
+/// `:203`, `:210`) hand the result to `SourceInfo::from_range`, which keeps
+/// `range.start.offset` and `range.end.offset` and discards `row` and
+/// `column` (`quarto-source-map-0.1.3/src/source_info.rs:185-191`). The
+/// column rule below is therefore documentation and test surface, not
+/// something a diagnostic renders today; the floored **offset** is the half
+/// that actually ships.
+///
+/// *Measured 2026-08-23 (Plan 3 Phase 2, `bd-mxa44voa`).* Before that test,
+/// this function returned the raw offset and a column overcounted by one for
+/// a mid-character offset — slicing mid-character leaves a truncated tail
+/// that `from_utf8_lossy` renders as a single `U+FFFD`. The doc comment
+/// nevertheless claimed it "matches the source-map utility exactly" on valid
+/// UTF-8. It did not; the claim had never been exercised.
 fn offset_to_location_bytes(input: &[u8], offset: usize) -> Option<quarto_source_map::Location> {
     if offset > input.len() {
         return None;
@@ -339,11 +484,23 @@ fn offset_to_location_bytes(input: &[u8], offset: usize) -> Option<quarto_source
             line_start = i + 1;
         }
     }
-    let column = String::from_utf8_lossy(&input[line_start..offset])
-        .chars()
-        .count();
+    // Walk the line a character at a time. `pos` ends on the first byte of
+    // the character containing `offset` (== `offset` when it is already a
+    // boundary), which is the floor both source-map implementations return.
+    let mut column = 0_usize;
+    let mut pos = line_start;
+    while pos < offset {
+        let step = next_codepoint_size(&input[pos..]);
+        // `pos < offset <= input.len()` keeps the slice non-empty, so `step`
+        // is always >= 1; the `== 0` arm is belt-and-braces against a spin.
+        if step == 0 || pos + step > offset {
+            break; // `offset` is inside this character — floor to its start.
+        }
+        pos += step;
+        column += 1;
+    }
     Some(quarto_source_map::Location {
-        offset,
+        offset: pos,
         row,
         column,
     })
@@ -665,6 +822,185 @@ mod tests {
     };
     use hashlink::LinkedHashMap as HashMap;
 
+    /// Pins the exact boundary between this crate's character rule and
+    /// `from_utf8_lossy`'s, as a biconditional rather than an example.
+    ///
+    /// Written because this phase asserted the boundary in prose **twice** and
+    /// got it wrong both times: first that the two rules matched, then that
+    /// they "coincide only when every ill-formed byte is independently
+    /// invalid". `[0xC2]` refutes the second — `0xC2` is a perfectly valid
+    /// 2-byte lead, merely truncated by end of input, and the rules coincide
+    /// there anyway.
+    ///
+    /// The real rule is about subpart *length*: [`next_codepoint_size`]
+    /// advances one byte for every ill-formed byte, while `from_utf8_lossy`
+    /// emits one `U+FFFD` per maximal ill-formed subpart. The counts are
+    /// therefore equal iff every such subpart is exactly one byte long.
+    ///
+    /// The predicate is derived from `from_utf8_lossy`'s own output rather
+    /// than reimplemented: bytes not accounted for by a non-replacement
+    /// character are the ill-formed ones, and each `U+FFFD` is one subpart,
+    /// so "every subpart is one byte" is `ill_formed_bytes == n_replacements`.
+    /// The alphabet deliberately excludes a genuine `U+FFFD`
+    /// (`[0xEF, 0xBF, 0xBD]`), which would otherwise be counted as a
+    /// replacement it is not.
+    #[test]
+    fn ill_formed_counting_diverges_exactly_when_a_subpart_spans_multiple_bytes() {
+        // One representative of each class the `next_codepoint_size` arms
+        // distinguish: ASCII, a 2-/3-/4-byte lead, a bare continuation byte,
+        // and a byte that is no lead at all.
+        const ALPHABET: [u8; 6] = [0x41, 0xC2, 0xE2, 0xF0, 0x82, 0xFF];
+
+        let mut sequences: Vec<Vec<u8>> = ALPHABET.iter().map(|&b| vec![b]).collect();
+        let mut all = sequences.clone();
+        for _ in 0..3 {
+            sequences = sequences
+                .iter()
+                .flat_map(|seq| {
+                    ALPHABET.iter().map(move |&b| {
+                        let mut next = seq.clone();
+                        next.push(b);
+                        next
+                    })
+                })
+                .collect();
+            all.extend(sequences.iter().cloned());
+        }
+
+        let mut diverging = 0_usize;
+        for bytes in &all {
+            let column = offset_to_location_bytes(bytes, bytes.len())
+                .expect("offset is in bounds at the end of input")
+                .column;
+
+            let lossy = String::from_utf8_lossy(bytes);
+            let replacements = lossy
+                .chars()
+                .filter(|&c| c == char::REPLACEMENT_CHARACTER)
+                .count();
+            let valid_bytes: usize = lossy
+                .chars()
+                .filter(|&c| c != char::REPLACEMENT_CHARACTER)
+                .map(char::len_utf8)
+                .sum();
+            let ill_formed_bytes = bytes.len() - valid_bytes;
+
+            let every_subpart_is_one_byte = ill_formed_bytes == replacements;
+            let counts_agree = column == lossy.chars().count();
+            if !counts_agree {
+                diverging += 1;
+            }
+
+            assert_eq!(
+                counts_agree, every_subpart_is_one_byte,
+                "{bytes:02X?}: column {column}, from_utf8_lossy {:?} \
+                 ({replacements} replacement(s) over {ill_formed_bytes} ill-formed byte(s))",
+                lossy,
+            );
+        }
+
+        // Anti-vacuity: the biconditional would hold trivially over an
+        // alphabet on which the two rules never disagree.
+        assert!(
+            diverging > 0,
+            "alphabet no longer produces any divergence, so the biconditional above proves nothing",
+        );
+    }
+
+    /// The invalid-UTF-8 half of the column rule, which the valid-UTF-8
+    /// agreement test above cannot reach.
+    ///
+    /// **This behaviour changed in Plan 3 Phase 2 and was undocumented as a
+    /// change.** The old implementation counted with `from_utf8_lossy`, which
+    /// folds a maximal ill-formed *subpart* into one `U+FFFD`; the walk
+    /// counts each ill-formed byte separately. The rules coincide only when
+    /// every bad byte is independently invalid — which is exactly what the
+    /// pre-existing `bd-6qbto` regression fixture (`[0xFF, 0xFE, 0xFD]`) is,
+    /// so that test passing across the change proved nothing about it.
+    ///
+    /// The truncated-but-well-formed prefixes below are the discriminating
+    /// cases. Each asserts the column *and* what `from_utf8_lossy` would have
+    /// said, so the divergence is pinned rather than merely described.
+    #[test]
+    fn offset_to_location_bytes_counts_each_ill_formed_byte_separately() {
+        // (bytes, expected column, what `from_utf8_lossy` would count)
+        let cases: [(&[u8], usize, usize); 4] = [
+            // Truncated 3- and 4-byte sequences: one `U+FFFD` to
+            // `from_utf8_lossy`, one character per byte here.
+            (&[0xE2, 0x82], 2, 1),
+            (&[0xF0, 0x9F, 0x98], 3, 1),
+            // A bad lead followed by valid ASCII, and three independently
+            // invalid bytes: the two rules agree on both.
+            (&[0xE2, 0x41, 0x42], 3, 3),
+            (&[0xFF, 0xFE, 0xFD], 3, 3),
+        ];
+
+        for (bytes, expected_column, lossy_column) in cases {
+            let location = offset_to_location_bytes(bytes, bytes.len())
+                .expect("offset is in bounds at the end of input");
+            assert_eq!(location.column, expected_column, "column for {bytes:02X?}",);
+            assert_eq!(
+                String::from_utf8_lossy(bytes).chars().count(),
+                lossy_column,
+                "from_utf8_lossy baseline for {bytes:02X?} — if this moves, the \
+                 divergence documented on offset_to_location_bytes has changed",
+            );
+        }
+    }
+
+    /// `offset_to_location_bytes` documents itself as the bytes-aware sibling
+    /// of `quarto_source_map::utils::offset_to_location` that "for valid UTF-8
+    /// … matches the source-map utility exactly". **Measured 2026-08-23 (Plan
+    /// 3 Phase 2): it did not.** Both source-map implementations floor a
+    /// mid-character offset to the start of the enclosing character and do not
+    /// count that character in the column. This one returned the raw offset and
+    /// a column overcounted by one, because slicing mid-character leaves a
+    /// truncated tail that `from_utf8_lossy` renders as one `U+FFFD`.
+    ///
+    /// Plan 1 measured the two `quarto-source-map` implementations disagreeing
+    /// by one column on exactly this input and made them agree; this test pins
+    /// the third implementation to the same rule.
+    #[test]
+    fn offset_to_location_bytes_agrees_with_source_map_on_mid_character_offsets() {
+        // First fixture: 'a' at 0, 'é' spanning 1..3, ' ' at 3, 'b' at 4.
+        // Second: the same shape on row 1, so the `line_start != 0` path is
+        // exercised too.
+        for content in ["aé b", "xx\nyé z"] {
+            let bytes = content.as_bytes();
+            let file_info = quarto_source_map::FileInformation::new(content);
+            for offset in 0..=bytes.len() {
+                let measured =
+                    offset_to_location_bytes(bytes, offset).expect("offset is in bounds");
+                let utils = quarto_source_map::utils::offset_to_location(content, offset)
+                    .expect("offset is in bounds");
+                let via_file_info = file_info
+                    .offset_to_location(offset, content)
+                    .expect("offset is in bounds");
+                assert_eq!(
+                    measured, utils,
+                    "utils::offset_to_location disagrees at offset {offset} of {content:?}",
+                );
+                assert_eq!(
+                    measured, via_file_info,
+                    "FileInformation::offset_to_location disagrees at offset {offset} of {content:?}",
+                );
+            }
+        }
+
+        // The one discriminating offset, stated outright so a reader need not
+        // rerun the loop to see what the agreement is about: offset 2 lands
+        // inside 'é'.
+        let mid = offset_to_location_bytes("aé b".as_bytes(), 2).expect("offset is in bounds");
+        assert_eq!(
+            mid.offset, 1,
+            "a mid-character offset floors to the char start"
+        );
+        assert_eq!(
+            mid.column, 1,
+            "the character the offset lands inside is not counted"
+        );
+    }
+
     /// Build a minimal observer whose parse log carries one error
     /// state at the given (row, column). The state-machine numbers
     /// don't need to match a real tree-sitter run — the path under
@@ -762,5 +1098,135 @@ mod tests {
         // offset_to_location decided based on chars-from-line-start;
         // for ASCII that's identical to bytes-from-line-start, so 2.
         assert_eq!(location.start_offset(), b"first line\n".len() + 2);
+    }
+
+    /// A synthetic diagnostic at `offset`, carrying `code` so the assertions
+    /// below can name which one survived.
+    fn diagnostic_at(offset: usize, code: &str) -> quarto_error_reporting::DiagnosticMessage {
+        use quarto_error_reporting::DiagnosticMessageBuilder;
+        let location = quarto_source_map::SourceInfo::from_range(
+            quarto_source_map::FileId(0),
+            quarto_source_map::Range {
+                start: quarto_source_map::Location {
+                    offset,
+                    row: 0,
+                    column: offset,
+                },
+                end: quarto_source_map::Location {
+                    offset: offset + 1,
+                    row: 0,
+                    column: offset + 1,
+                },
+            },
+        );
+        DiagnosticMessageBuilder::error("test")
+            .with_location(location)
+            .with_code(code)
+            .problem("test")
+            .build()
+    }
+
+    fn codes_after_truncation(input: Vec<(usize, &str, bool)>) -> Vec<String> {
+        let diagnostics = input
+            .into_iter()
+            .map(|(offset, code, desynchronizes)| (diagnostic_at(offset, code), desynchronizes))
+            .collect();
+        truncate_after_desynchronizing(diagnostics)
+            .into_iter()
+            .map(|diag| diag.code.unwrap_or_default())
+            .collect()
+    }
+
+    fn hints_of(diagnostics: &[quarto_error_reporting::DiagnosticMessage]) -> Vec<String> {
+        diagnostics
+            .last()
+            .map(|diag| diag.hints.iter().map(|h| format!("{h:?}")).collect())
+            .unwrap_or_default()
+    }
+
+    fn truncated(
+        input: Vec<(usize, &str, bool)>,
+    ) -> Vec<quarto_error_reporting::DiagnosticMessage> {
+        truncate_after_desynchronizing(
+            input
+                .into_iter()
+                .map(|(offset, code, desync)| (diagnostic_at(offset, code), desync))
+                .collect(),
+        )
+    }
+
+    /// Cutting the list short is said out loud. An author who sees one
+    /// error, fixes it, and meets another has been misled by silence.
+    #[test]
+    fn truncation_says_that_it_suppressed_something() {
+        let kept = truncated(vec![(0, "A", true), (10, "B", false)]);
+        let hints = hints_of(&kept).join(" ");
+        assert!(
+            hints.contains("not reported"),
+            "the surviving diagnostic should say the list was cut short: {hints}"
+        );
+    }
+
+    /// ...and stays quiet when it dropped nothing, including when the
+    /// desynchronising error is the last one anyway.
+    #[test]
+    fn truncation_is_quiet_when_it_suppressed_nothing() {
+        for input in [
+            vec![(0, "A", false), (10, "B", false)],
+            vec![(0, "A", false), (10, "B", true)],
+        ] {
+            let kept = truncated(input);
+            assert!(
+                hints_of(&kept).is_empty(),
+                "no suppression note is due: {:?}",
+                hints_of(&kept)
+            );
+        }
+    }
+
+    #[test]
+    fn truncation_keeps_everything_when_nothing_desynchronizes() {
+        assert_eq!(
+            codes_after_truncation(vec![(0, "A", false), (10, "B", false), (20, "C", false)]),
+            vec!["A", "B", "C"]
+        );
+    }
+
+    /// The documented half that the integration test does not reach: errors
+    /// found *before* the parser lost its place are still the author's to
+    /// fix, so they survive.
+    #[test]
+    fn truncation_keeps_errors_before_the_desynchronizing_one() {
+        assert_eq!(
+            codes_after_truncation(vec![(0, "A", false), (10, "B", true), (20, "C", false)]),
+            vec!["A", "B"]
+        );
+    }
+
+    #[test]
+    fn truncation_drops_everything_after_a_leading_desynchronizing_error() {
+        assert_eq!(
+            codes_after_truncation(vec![(0, "A", true), (10, "B", false), (20, "C", false)]),
+            vec!["A"]
+        );
+    }
+
+    /// Truncation is by source position, not by the order the parser
+    /// happened to report things in.
+    #[test]
+    fn truncation_sorts_before_cutting() {
+        assert_eq!(
+            codes_after_truncation(vec![(20, "C", false), (0, "A", true), (10, "B", false)]),
+            vec!["A"]
+        );
+    }
+
+    /// The first desynchronising error wins; a later one changes nothing.
+    #[test]
+    fn truncation_stops_at_the_first_desynchronizing_error() {
+        assert_eq!(
+            codes_after_truncation(vec![(0, "A", true), (10, "B", true)]),
+            vec!["A"]
+        );
     }
 }

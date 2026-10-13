@@ -1,7 +1,13 @@
-# Mermaid render component for q2-preview
-
-**Braid:** bd-c3dtpe36
-**Status:** draft / awaiting go-ahead to execute
+---
+title: 'Mermaid render component for q2-preview'
+date: 2026-07-17
+description: 'Prototypes mermaid diagram rendering as a user render component in the q2-preview playground, intercepting code blocks with the mermaid class, before folding the approach into the built-in preview renderer.'
+status: draft  # draft / awaiting go-ahead to execute
+braid:
+  strand: bd-c3dtpe36
+  priority: P2
+  labels: [feature]
+---
 
 > **Security note:** the experiment files live in a quarto-hub demo
 > playground project. That project's automerge index-document id is a
@@ -139,7 +145,7 @@ Studied: `kan_ban.tsx`, `gordon/render-components2/{drag,comment}.tsx`
 > `fileContents` is keyed **with a leading slash** for the `/cscheid/…`
 > subtree (`/cscheid/mermaid/mermaid.tsx`) and `currentFilePath` is
 > `/cscheid/mermaid/hand-written-test.qmd`, but
-> `resolveComponentPath()`'s `normalize()` **always strips the leading
+> `resolveComponentPath()`\'s `normalize()` **always strips the leading
 > slash**, producing the lookup key `cscheid/mermaid/mermaid.tsx` (no
 > slash) → `fileContents.get(...)` misses. Root-level files
 > (e.g. `kan_ban.tsx`) are keyed *without* a leading slash, which is why

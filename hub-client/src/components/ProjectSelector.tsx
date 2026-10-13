@@ -13,14 +13,51 @@ import {
   type ProjectChoice,
   type ProjectFile,
 } from '@quarto/preview-runtime';
+import type { ReactNode } from 'react';
+import { buildChoiceTree, type ChoiceTree, type ChoiceTreeNode } from '../utils/choiceTree';
+
+/**
+ * Render the project-type `<select>` grouped by each choice's `path`
+ * (bd-q33ylfxf). `<optgroup>` cannot nest, so deeper levels flatten to
+ * "Parent / Child" labels; a group with no direct choices emits nothing.
+ */
+function renderChoiceOptions(tree: ChoiceTree<ProjectChoice>): ReactNode {
+  const option = (choice: ProjectChoice) => (
+    <option key={choice.id} value={choice.id}>
+      {choice.name} — {choice.description}
+    </option>
+  );
+  const groups: ReactNode[] = [];
+  const walk = (node: ChoiceTreeNode<ProjectChoice>, prefix: string[]) => {
+    const labels = [...prefix, node.label];
+    if (node.choices.length > 0) {
+      const label = labels.join(' / ');
+      groups.push(
+        <optgroup key={label} label={label}>
+          {node.choices.map(option)}
+        </optgroup>,
+      );
+    }
+    node.children.forEach((child) => walk(child, labels));
+  };
+  tree.nodes.forEach((node) => walk(node, []));
+  return (
+    <>
+      {tree.roots.map(option)}
+      {groups}
+    </>
+  );
+}
 import { DEFAULT_SYNC_SERVER, buildProjectSetLinkUrl } from '../utils/routing';
+import { getCollectionPointers, getProjectSetPointer } from '../services/projectSetStorage';
+import { buildProjectListExport } from '../services/projectListExport';
 import ShareDialog from './ShareDialog';
+import LoadingIndicator from './Loading';
 import './ProjectSelector.css';
 
 interface Props {
   /** Called when a project is selected, with optional file path override from share link */
   onSelectProject: (project: ProjectEntry, filePathOverride?: string) => void;
-  isConnecting?: boolean;
   error?: string | null;
   /** Called when a new project is created with scaffold files */
   onProjectCreated?: (files: ProjectFile[], title: string, projectType: string, syncServer: string) => void;
@@ -61,7 +98,6 @@ const COLOR_PALETTE = [
 
 export default function ProjectSelector({
   onSelectProject,
-  isConnecting,
   error: connectionError,
   onProjectCreated,
   onSignOut,
@@ -492,19 +528,20 @@ export default function ProjectSelector({
     // When using project set, export from the set; otherwise from IDB
     let json: string;
     if (useProjectSet && projectSetEntries) {
-      const exportData = {
-        schemaVersion: 4,
-        exportedAt: new Date().toISOString(),
-        projects: projectSetEntries.map((e) => ({
-          id: '', // Not meaningful for set entries
-          indexDocId: e.indexDocId,
-          syncServer: e.syncServer,
-          description: e.description,
-          createdAt: e.addedAt,
-          lastAccessed: e.lastAccessed,
+      // The classic view doesn't connect collection docs, so it exports
+      // pointer-only collections (no names) from the stored pointer array —
+      // enough for a restoring browser to re-subscribe.
+      const pointers = await getCollectionPointers();
+      const rootDocId = (await getProjectSetPointer())?.projectSetDocId;
+      json = buildProjectListExport(
+        projectSetEntries,
+        pointers.map((p) => ({
+          docId: p.projectSetDocId,
+          syncServer: p.syncServer,
+          isRoot: p.projectSetDocId === rootDocId,
+          entries: [],
         })),
-      };
-      json = JSON.stringify(exportData, null, 2);
+      );
     } else {
       json = await projectStorage.exportProjects();
     }
@@ -539,11 +576,11 @@ export default function ProjectSelector({
   };
 
   if (loading) {
-    return <div className="project-selector"><div className="loading">Loading projects...</div></div>;
+    return <div className="project-selector"><LoadingIndicator label="Loading projects…" /></div>;
   }
 
   return (
-    <div className="project-selector">
+    <main className="project-selector">
       <div className="modal">
         <div className="modal-header">
           <div className="header-text">
@@ -575,7 +612,6 @@ export default function ProjectSelector({
 
         {connectionError && <div className="error">{connectionError}</div>}
         {formError && <div className="error">{formError}</div>}
-        {isConnecting && <div className="connecting">Connecting to sync server...</div>}
 
         <div className="projects-list">
           <h2>Your Projects</h2>
@@ -705,11 +741,7 @@ export default function ProjectSelector({
                   value={createProjectType}
                   onChange={(e) => setCreateProjectType(e.target.value)}
                 >
-                  {projectChoices.map((choice) => (
-                    <option key={choice.id} value={choice.id}>
-                      {choice.name} — {choice.description}
-                    </option>
-                  ))}
+                  {renderChoiceOptions(buildChoiceTree(projectChoices))}
                 </select>
               )}
             </div>
@@ -963,6 +995,6 @@ export default function ProjectSelector({
           </span>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

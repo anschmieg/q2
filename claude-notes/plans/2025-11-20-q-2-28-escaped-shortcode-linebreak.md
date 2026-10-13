@@ -1,6 +1,9 @@
-# Q-2-28: Line Break Before Escaped Shortcode Close
+---
+title: 'Q-2-28: Line Break Before Escaped Shortcode Close'
+date: 2025-11-20
+description: 'Adds a `Q-2-28` diagnostic that flags a line break before the closing `>}}}` of an escaped shortcode, mirroring the existing check for regular shortcodes, with an auto-fix in `qmd-syntax-helper`.'
+---
 
-**Date**: 2025-11-20
 **Error Code**: Q-2-28
 **Related**: Q-2-27 (regular shortcodes)
 
@@ -275,7 +278,7 @@ After running `build_error_table.ts`, we'll analyze:
 - Whether escaped shortcodes have different states than regular shortcodes
 - Duplicate state detection output
 
-**Expected**: Similar to Q-2-27, we should get ~16 unique parser states representing different contexts where the error can occur.
+**Expected**: Similar to Q-2-27, we should get \~16 unique parser states representing different contexts where the error can occur.
 
 ## Verification
 
@@ -320,7 +323,7 @@ cat test-q-2-28.qmd
 2. **Nested shortcodes**: `{{{< meta {{{< inner >}}} >}}}`
    - Make sure we only fix the outer shortcode
 
-3. **Mixed regular and escaped**: `{{< regular >}} {{{< escaped\n>}}}`
+3. **Mixed regular and escaped**: `{{< regular >}} {{{< escaped\n>}}}`{shortcodes="false"}
    - Should only fix Q-2-28, not touch regular shortcode
 
 4. **In different contexts**: Inside links, emphasis, etc.

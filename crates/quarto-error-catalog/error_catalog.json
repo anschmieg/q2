@@ -412,11 +412,53 @@
     "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-35",
     "since_version": "99.9.9"
   },
+  "Q-2-36": {
+    "subsystem": "markdown",
+    "title": "Old-style knitr chunk options are not supported",
+    "message_template": "Quarto Markdown does not support knitr-style chunk options in the header. Move options into the body using `#| key: value` syntax, or use the Pandoc class form `{.r ...}` instead of `{r ...}`.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-36",
+    "since_version": "99.9.9"
+  },
+  "Q-2-37": {
+    "subsystem": "markdown",
+    "title": "Line break in link destination",
+    "message_template": "An inline link destination cannot contain a line break.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-37",
+    "since_version": "99.9.9"
+  },
+  "Q-2-38": {
+    "subsystem": "markdown",
+    "title": "Unclosed Attribute Specifier",
+    "message_template": "I reached the end of the block before finding a closing '}' for the attribute specifier.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-38",
+    "since_version": "99.9.9"
+  },
   "Q-2-39": {
     "subsystem": "markdown",
     "title": "Grid tables are not supported",
     "message_template": "Grid tables aren't supported. Use a list table instead.",
     "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-39",
+    "since_version": "99.9.9"
+  },
+  "Q-2-40": {
+    "subsystem": "markdown",
+    "title": "Engine Specification Ignored for Markdown Input",
+    "message_template": "`.md` documents never execute engines; the engine specification has no effect.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-40",
+    "since_version": "99.9.9"
+  },
+  "Q-2-41": {
+    "subsystem": "markdown",
+    "title": "Curly braces are reserved for attribute syntax",
+    "message_template": "Curly braces are reserved for attribute syntax in Quarto markdown. To write literal braces, escape them as `\\{...\\}`. If you meant to attach an attribute, use `.class` / `#id` / `key=\"value\"` syntax, e.g. `[text]{.class}`.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-41",
+    "since_version": "99.9.9"
+  },
+  "Q-2-42": {
+    "subsystem": "markdown",
+    "title": "Invalid Conditional Content Attribute",
+    "message_template": "A `.content-visible` / `.content-hidden` element carries a condition attribute Quarto does not recognize. The supported conditions are `when-format`, `unless-format`, `when-profile`, `unless-profile`, `when-meta`, and `unless-meta`; anything else starting with `when-` or `unless-` is probably a typo and is ignored (Quarto 1 ignores it silently). Also reported when one element carries both `.content-visible` and `.content-hidden` (the element is hidden).",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-42",
     "since_version": "99.9.9"
   },
   "Q-3-1": {
@@ -528,14 +570,14 @@
     "subsystem": "writer",
     "title": "Shortcode edit dropped",
     "message_template": "An edit to shortcode-resolved (or other atomic-Generated) content was reverted. The resolved text is read-only; edit the invocation token in source instead.",
-    "docs_url": "https://quarto.org/docs/errors/Q-3-42",
+    "docs_url": "https://quarto.org/docs/errors/writer/Q-3-42",
     "since_version": "99.9.9"
   },
   "Q-3-43": {
     "subsystem": "writer",
     "title": "Generated content edit dropped",
     "message_template": "An edit to pipeline-generated content was reverted. The content has no editable source position in this file; edit its upstream definition (an include, metadata key, or other source) instead.",
-    "docs_url": "https://quarto.org/docs/errors/Q-3-43",
+    "docs_url": "https://quarto.org/docs/errors/writer/Q-3-43",
     "since_version": "99.9.9"
   },
   "Q-3-50": {
@@ -881,6 +923,20 @@
     "docs_url": "https://quarto.org/docs/errors/lua/Q-11-5",
     "since_version": "99.9.9"
   },
+  "Q-11-6": {
+    "subsystem": "lua",
+    "title": "Invalid Lua Filter Script Return Value",
+    "message_template": "A Lua filter script returned a value that is not a filter. A filter script may return a table of handler functions, a list of such tables (applied as successive passes), or nothing at all (in which case the handlers are taken from the script's global functions).",
+    "docs_url": "https://quarto.org/docs/errors/lua/Q-11-6",
+    "since_version": "99.9.9"
+  },
+  "Q-11-7": {
+    "subsystem": "lua",
+    "title": "Unrecognized Lua Filter Handler Name",
+    "message_template": "A Lua filter defines a handler whose name is not an element type Quarto knows about, so it will never run. This is usually a typo in the handler name.",
+    "docs_url": "https://quarto.org/docs/errors/lua/Q-11-7",
+    "since_version": "99.9.9"
+  },
   "Q-12-1": {
     "subsystem": "listing",
     "title": "Custom Listing Template Not Yet Supported",
@@ -939,15 +995,15 @@
   },
   "Q-12-9": {
     "subsystem": "listing",
-    "title": "Deprecated .ejs.md Template Extension",
-    "message_template": "The `.ejs.md` template extension is a Q1 idiom and is not supported by Q2 doctemplate. See the Q1 → Q2 migration guide.",
+    "title": "Quarto 1 EJS Listing Template Extension",
+    "message_template": "The `.ejs` / `.ejs.md` extensions mark a Quarto 1 EJS listing template. Quarto 2 does not run EJS; custom listing templates use doctemplate syntax. See the Listings guide, \u201cCustom templates\u201d.",
     "docs_url": "https://quarto.org/docs/errors/listing/Q-12-9",
     "since_version": "99.9.9"
   },
   "Q-12-10": {
     "subsystem": "listing",
     "title": "Listing Markdown Re-parse Diagnostics",
-    "message_template": "Re-parsing the doctemplate output of a listing produced one or more diagnostics. The first diagnostic is included; full source-info threading is a follow-up (bd-0jyl).",
+    "message_template": "Re-parsing the doctemplate output of a listing produced one or more diagnostics. The first diagnostic is included; full source-info threading is a follow-up (bd-0jyl). When the re-parse fails outright the listing is skipped, and this is an error rather than a warning.",
     "docs_url": "https://quarto.org/docs/errors/listing/Q-12-10",
     "since_version": "99.9.9"
   },
@@ -968,7 +1024,7 @@
   "Q-12-13": {
     "subsystem": "listing",
     "title": "Listing Item Produced No Preview Content",
-    "message_template": "Listing item from {href} produced no preview content; using static fallback description. The sibling output file is missing or has no usable first paragraph; the listing remains correct but uses the description from the post's frontmatter / first source paragraph rather than the engine-rendered output.",
+    "message_template": "Listing item from {href} produced no preview content; using static fallback description. The item has no authored description, and its rendered output file is missing or has no usable first paragraph; the listing shows the first paragraph found in the source before rendering instead.",
     "docs_url": "https://quarto.org/docs/errors/listing/Q-12-13",
     "since_version": "99.9.9"
   },
@@ -991,6 +1047,76 @@
     "title": "Listing Feed: Sibling Output Unreadable",
     "message_template": "While building a listing feed, the substitution step tried to read the rendered HTML at {path} for an item but the file could not be opened. The feed was emitted with an empty `<description>` for this item. Re-running the project render usually resolves transient I/O issues; persistent failures suggest a misconfigured output directory.",
     "docs_url": "https://quarto.org/docs/errors/listing/Q-12-16",
+    "since_version": "99.9.9"
+  },
+  "Q-12-17": {
+    "subsystem": "listing",
+    "title": "Listing Contents Pattern Outside Project",
+    "message_template": "A listing `contents:` pattern resolves outside the project directory and matches nothing. Patterns resolve relative to the directory of the file they are written in; `..` segments may not climb above the project root.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-17",
+    "since_version": "99.9.9"
+  },
+  "Q-12-18": {
+    "subsystem": "listing",
+    "title": "Invalid Glob Pattern in Listing `contents:`",
+    "message_template": "A listing `contents:` pattern is not a valid glob and matches nothing.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-18",
+    "since_version": "99.9.9"
+  },
+  "Q-12-19": {
+    "subsystem": "listing",
+    "title": "Listing `contents:` Pattern Matched Nothing",
+    "message_template": "A listing `contents:` pattern matched no project documents.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-19",
+    "since_version": "99.9.9"
+  },
+  "Q-12-20": {
+    "subsystem": "listing",
+    "title": "Listing Record Path Names No Document",
+    "message_template": "An inline `contents:` record's `path:` has a document extension but names no document the project renders; the item keeps the link as written.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-20",
+    "since_version": "99.9.9"
+  },
+  "Q-12-21": {
+    "subsystem": "listing",
+    "title": "Listing Record Has No Title",
+    "message_template": "An inline `contents:` record has neither `title:` nor `path:`; the item renders with an empty title.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-21",
+    "since_version": "99.9.9"
+  },
+  "Q-12-22": {
+    "subsystem": "listing",
+    "title": "Listing Record Key Looks Misspelled",
+    "message_template": "A key in an inline `contents:` record is a near-miss of a listing field; it was kept as a custom field.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-22",
+    "since_version": "99.9.9"
+  },
+  "Q-12-23": {
+    "subsystem": "listing",
+    "title": "YAML-File Listing Contents Not Yet Supported",
+    "message_template": "A `contents:` entry names a YAML file. Quarto 2 does not yet read listing records from YAML files; the entry is skipped.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-23",
+    "since_version": "99.9.9"
+  },
+  "Q-12-24": {
+    "subsystem": "listing",
+    "title": "Custom Listing Template Is Not a Doctemplate",
+    "message_template": "A `type: custom` listing template contains no doctemplate directives, or contains Quarto 1 EJS `<% \u2026 %>` markup. Quarto 2 listing templates use doctemplate syntax; the listing is skipped.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-24",
+    "since_version": "99.9.9"
+  },
+  "Q-12-25": {
+    "subsystem": "listing",
+    "title": "Listing Id Collides With Section Id",
+    "message_template": "A listing's `id` is also the id of a section on the page. Both elements claim the same HTML anchor.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-25",
+    "since_version": "99.9.9"
+  },
+  "Q-12-26": {
+    "subsystem": "listing",
+    "title": "Listing Item Prose Has More Than One Paragraph",
+    "message_template": "A listing item's `title`, `subtitle` or `description` is written as more than one block (paragraphs, a list, ...). A listing shows it as a single paragraph, so its blocks are joined into one.",
+    "docs_url": "https://quarto.org/docs/errors/listing/Q-12-26",
     "since_version": "99.9.9"
   },
   "Q-13-1": {
@@ -1056,6 +1182,48 @@
     "docs_url": "https://quarto.org/docs/errors/theme/Q-14-2",
     "since_version": "99.9.9"
   },
+  "Q-14-4": {
+    "subsystem": "theme",
+    "title": "Theme file not found",
+    "message_template": "A `theme:` entry names a `.scss`/`.css` file that does not exist at its resolved location. Relative theme paths resolve against the document's directory; extension-bundled themes must sit next to the extension's `_extension.yml`. Check the spelling and location of the file.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-4",
+    "since_version": "99.9.9"
+  },
+  "Q-14-5": {
+    "subsystem": "theme",
+    "title": "Unknown highlight style",
+    "message_template": "The `highlight-style:` value does not name a syntax-highlight palette shipped with Quarto; the default palette is used instead. Available palettes: default, a11y (adaptive), a11y-light, a11y-dark.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-5",
+    "since_version": "99.9.9"
+  },
+  "Q-14-8": {
+    "subsystem": "theme",
+    "title": "Invalid brand font weight",
+    "message_template": "A `weight:` value in the brand's `typography` section is not a weight Quarto understands. Use a number from 100 to 900, a weight keyword such as `bold`, a list of those, or \u2014 on `typography.fonts` entries only \u2014 a numeric range such as `400..700`.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-8",
+    "since_version": "99.9.9"
+  },
+  "Q-14-9": {
+    "subsystem": "theme",
+    "title": "Brand font file not found",
+    "message_template": "A `source: file` font in the brand names a file that does not exist, so it was not published. The `@font-face` rule was still written; the browser falls back to the next font. Font paths are relative to the brand file (a leading `/` means the project root).",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-9",
+    "since_version": "99.9.9"
+  },
+  "Q-14-10": {
+    "subsystem": "theme",
+    "title": "Two brand font files publish under the same name",
+    "message_template": "Two `source: file` brand fonts with different contents share a file name. Quarto publishes every brand font as `fonts/<file name>` beside the theme CSS, so two different files cannot share a name. Rename one of them.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-10",
+    "since_version": "99.9.9"
+  },
+  "Q-14-11": {
+    "subsystem": "theme",
+    "title": "Unsupported key on a brand font file entry",
+    "message_template": "A `files:` entry of a `source: file` brand font sets a key Quarto does not support (such as `format:` or `display:`); it was ignored. The `format()` hint is derived from the file's extension.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-11",
+    "since_version": "99.9.9"
+  },
   "Q-15-1": {
     "subsystem": "crossref",
     "title": "Duplicate Crossref Identifier",
@@ -1063,17 +1231,24 @@
     "docs_url": "https://quarto.org/docs/errors/crossref/Q-15-1",
     "since_version": "99.9.9"
   },
+  "Q-15-2": {
+    "subsystem": "crossref",
+    "title": "Duplicate Crossref Identifier Across Chapters",
+    "message_template": "A crossref identifier (e.g. a `fig-`/`tbl-` label or an explicit `#id`) is defined in more than one chapter of the same book. A reference like `@fig-foo` must resolve to exactly one target, so each crossref id must be unique across all chapters. Quarto keeps the first chapter's definition; give one of the duplicates a different label.",
+    "docs_url": "https://quarto.org/docs/errors/crossref/Q-15-2",
+    "since_version": "99.9.9"
+  },
   "Q-5-8": {
     "subsystem": "project",
     "title": "Project Render Script Failed",
-    "message_template": "A `project.pre-render` or `project.post-render` script exited with a non-zero status (or was terminated by a signal). The render is aborted; remaining scripts in the list do not run. The script's own output appears above the diagnostic — fix the script (or remove it from `_quarto.yml`) and render again.",
+    "message_template": "A `project.pre-render` or `project.post-render` script exited with a non-zero status (or was terminated by a signal). The render is aborted; remaining scripts in the list do not run. The script's own output appears above the diagnostic \u2014 fix the script (or remove it from `_quarto.yml`) and render again.",
     "docs_url": "https://quarto.org/docs/errors/project/Q-5-8",
     "since_version": "99.9.9"
   },
   "Q-5-9": {
     "subsystem": "project",
     "title": "Pre-render Script Changed a Forbidden Project Setting",
-    "message_template": "While `project.pre-render` scripts ran, `_quarto.yml` changed its `project.type` or `project.output-dir`. Pre-render scripts may modify the project — add input files, edit configuration — but these two settings must stay fixed, because the scripts already received `QUARTO_PROJECT_OUTPUT_DIR` computed from them. Make the change directly in `_quarto.yml` instead of from a script.",
+    "message_template": "While `project.pre-render` scripts ran, `_quarto.yml` changed its `project.type` or `project.output-dir`. Pre-render scripts may modify the project \u2014 add input files, edit configuration \u2014 but these two settings must stay fixed, because the scripts already received `QUARTO_PROJECT_OUTPUT_DIR` computed from them. Make the change directly in `_quarto.yml` instead of from a script.",
     "docs_url": "https://quarto.org/docs/errors/project/Q-5-9",
     "since_version": "99.9.9"
   },
@@ -1098,11 +1273,102 @@
     "docs_url": "https://quarto.org/docs/errors/project/Q-5-12",
     "since_version": "99.9.9"
   },
+  "Q-5-16": {
+    "subsystem": "project",
+    "title": "`resources:` Pattern Matched No Files",
+    "message_template": "A `resources:` glob matched no files, so nothing was published for it.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-16",
+    "since_version": "99.9.9"
+  },
+  "Q-5-17": {
+    "subsystem": "project",
+    "title": "Unknown Project Type",
+    "message_template": "`_quarto.yml` sets a `project.type` that is not a string, is not a built-in project type (`default`, `website`, `book`, `manuscript`), and does not match any extension contributing a project type (`contributes: project:` in an `_extensions/` manifest), so the project cannot be rendered. The render stops before any document is processed \u2014 earlier Quarto 2 versions silently continued with default-project behavior, which hides a broken site build and scatters per-document copies of shared JS/CSS next to every source file. Check the type name for typos; the hints list the project-contributing extensions that were found, and any manifest that failed to load is reported alongside as Q-16-1 (a broken manifest is a common root cause).",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-17",
+    "since_version": "99.9.9"
+  },
+  "Q-5-18": {
+    "subsystem": "project",
+    "title": "Project Type Not Yet Implemented",
+    "message_template": "`_quarto.yml` sets `project.type: book` or `project.type: manuscript`, which Quarto 2 does not implement yet. The type name is accepted (for forward compatibility with Quarto 1 projects) but the project renders with default-project behavior: documents render individually, with no book/manuscript structure, navigation, or combined output.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-18",
+    "since_version": "99.9.9"
+  },
+  "Q-5-19": {
+    "subsystem": "project",
+    "title": "Unknown Project Profile",
+    "message_template": "An active project profile matches nothing in the project: there is no `_quarto-<name>.yml` overlay, no `_environment-<name>` file, and the name is not declared under `profile:` in `_quarto.yml`. This is usually a typo in `--profile`, `QUARTO_PROFILE`, or `profile.default`. If the profile exists only for conditional content (`when-profile`), declare it under `profile.group` or `profile.default` to silence this warning.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-19",
+    "since_version": "99.9.9"
+  },
+  "Q-5-20": {
+    "subsystem": "project",
+    "title": "Invalid Profile Configuration",
+    "message_template": "The `profile:` key must be a mapping with the keys `default` (a profile name or list of profile names) and `group` (a list of profile names, or a list of such lists). Quarto 1 silently ignores malformed `profile:` configuration; Quarto 2 reports it so a mistyped configuration cannot silently select the wrong profiles.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-20",
+    "since_version": "99.9.9"
+  },
+  "Q-5-21": {
+    "subsystem": "project",
+    "title": "Invalid Profile Name",
+    "message_template": "Project profile names must start with an ASCII letter or digit and contain only ASCII letters, digits, `.`, `_`, and `-` (they name files such as `_quarto-<name>.yml`). An explicitly given but empty selection (for example `--profile \"\"` or `QUARTO_PROFILE=\" , \"`) is also an error: use no flag at all to select no profiles.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-21",
+    "since_version": "99.9.9"
+  },
+  "Q-5-22": {
+    "subsystem": "project",
+    "title": "Profile Key Has No Effect Here",
+    "message_template": "A `profile:` key appears in a file where it has no effect and is ignored: profile overlay files (`_quarto-<name>.yml`) never contribute profile configuration, and `_quarto.yml.local` contributes only `profile.default` (profile groups are read from `_quarto.yml` only).",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-22",
+    "since_version": "99.9.9"
+  },
+  "Q-5-13": {
+    "subsystem": "project",
+    "title": "`project.render` Pattern Matched No Files",
+    "message_template": "A `project.render` pattern matched no renderable `.qmd` files, so it contributed nothing to the render list.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-13",
+    "since_version": "99.9.9"
+  },
+  "Q-5-14": {
+    "subsystem": "project",
+    "title": "`project.render` Pattern Outside the Project Root",
+    "message_template": "A `project.render` pattern's `..` segments climb above the project root, so it matches nothing.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-14",
+    "since_version": "99.9.9"
+  },
+  "Q-5-15": {
+    "subsystem": "project",
+    "title": "Invalid Glob Pattern in `project.render`",
+    "message_template": "A `project.render` pattern is not a valid glob and matches nothing.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-15",
+    "since_version": "99.9.9"
+  },
   "Q-16-1": {
     "subsystem": "extension",
     "title": "Extension Not Loaded",
     "message_template": "An `_extension.yml` manifest could not be read or parsed, so the extension it describes is not active for this render. Any shortcodes, filters, or formats it contributes will be missing (a shortcode from it will report Q-16-3 Unknown Shortcode at its use site). The message names the manifest file and the underlying cause; fix the manifest to restore the extension.",
     "docs_url": "https://quarto.org/docs/errors/extension/Q-16-1",
+    "since_version": "99.9.9"
+  },
+  "Q-16-10": {
+    "subsystem": "extension",
+    "title": "Engine Extension Does Not Declare Static Claims",
+    "message_template": "An engine extension answers `claimsLanguage` / `claimsFile` at run time (the Quarto 1 model) rather than declaring `claims`, `file-extensions`, and `claims-files` in its `_extension.yml`. The engine works, but Quarto cannot tell what it handles without starting it as a subprocess, and must do so for any document that could need an engine. Adding the declarations opts the engine into the no-load path; `[]` or `{}` declares \"this engine handles none of these\".",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-10",
+    "since_version": "99.9.9"
+  },
+  "Q-16-11": {
+    "subsystem": "extension",
+    "title": "Engine Resolution Deferred To Render Time",
+    "message_template": "At least one engine extension in this project declares no static language claims, so Quarto could not decide which engine owns each document before rendering. Documents affected by the fall-through lose execution-language indexing, and the engine must be loaded to resolve them. Declare `claims:` in the extension's `_extension.yml`, or provide a claim table under `engines:` in `_quarto.yml`.",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-11",
+    "since_version": "99.9.9"
+  },
+  "Q-16-12": {
+    "subsystem": "extension",
+    "title": "Engine Failed To Load While Answering A Claim",
+    "message_template": "An engine extension had to be started to answer whether it handles a language or file, and it failed to load. Quarto treats the unanswered question as \"not claimed\", so cells in that language are emitted without being executed, or the file reports that no engine could be determined. The underlying load error is included; the render continues rather than stopping.",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-12",
     "since_version": "99.9.9"
   },
   "Q-16-2": {
@@ -1115,14 +1381,14 @@
   "Q-16-3": {
     "subsystem": "extension",
     "title": "Unknown Shortcode",
-    "message_template": "A shortcode invocation does not match any built-in handler, extension-contributed handler, or document-level `shortcodes:` script. The invocation renders as a visible `?name` marker. Check the shortcode name for typos, and check earlier Q-16-1/Q-16-2 warnings — a failed extension or script load surfaces here at the use site.",
+    "message_template": "A shortcode invocation does not match any built-in handler, extension-contributed handler, or document-level `shortcodes:` script. The invocation renders as a visible `?name` marker. Check the shortcode name for typos, and check earlier Q-16-1/Q-16-2 warnings \u2014 a failed extension or script load surfaces here at the use site.",
     "docs_url": "https://quarto.org/docs/errors/extension/Q-16-3",
     "since_version": "99.9.9"
   },
   "Q-16-4": {
     "subsystem": "extension",
     "title": "Shortcode Handler Shadowed",
-    "message_template": "Two loaded shortcode scripts define a handler with the same name; the later registration wins (document `shortcodes:` scripts load first, then extensions in discovery order, so the more local definition takes precedence). This is informational — overriding a built-in extension is a supported pattern — but if the shadowing is unintentional, rename or remove one of the handlers.",
+    "message_template": "Two loaded shortcode scripts define a handler with the same name; the later registration wins (document `shortcodes:` scripts load first, then extensions in discovery order, so the more local definition takes precedence). This is informational \u2014 overriding a built-in extension is a supported pattern \u2014 but if the shadowing is unintentional, rename or remove one of the handlers.",
     "docs_url": "https://quarto.org/docs/errors/extension/Q-16-4",
     "since_version": "99.9.9"
   },
@@ -1136,8 +1402,652 @@
   "Q-16-6": {
     "subsystem": "extension",
     "title": "Block Shortcode In Inline Position",
-    "message_template": "A shortcode used inline (inside a sentence or other inline content) produced block-level output (for example a raw HTML block from the `video` shortcode), and none of it could be carried into the inline position — the output was dropped. Put the shortcode in its own paragraph, surrounded by blank lines.",
+    "message_template": "A shortcode used inline (inside a sentence or other inline content) produced block-level output (for example a raw HTML block from the `video` shortcode), and none of it could be carried into the inline position \u2014 the output was dropped. Put the shortcode in its own paragraph, surrounded by blank lines.",
     "docs_url": "https://quarto.org/docs/errors/extension/Q-16-6",
+    "since_version": "99.9.9"
+  },
+  "Q-16-7": {
+    "subsystem": "extension",
+    "title": "Invalid Project Type Contribution",
+    "message_template": "An extension resolved a custom `project.type`, but its `contributes.project` fragment is unusable: it is not a mapping, its `project.type` is not a string, it names a base type that is not built-in (chaining custom types is not supported), or it names `book`/`manuscript`, which Quarto 2 does not implement yet. The project cannot be rendered until the extension manifest is fixed (or the type is changed). The message names the extension and its `_extension.yml`.",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-7",
+    "since_version": "99.9.9"
+  },
+  "Q-16-8": {
+    "subsystem": "extension",
+    "title": "Ambiguous Project Type Extension",
+    "message_template": "A bare `project.type` name matched more than one extension contributing a project type. The org-less extension wins, then the lexicographically first organization; the message names the chosen extension and the shadowed candidates. Use the full `organization/name` form in `project.type` to disambiguate.",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-8",
+    "since_version": "99.9.9"
+  },
+  "Q-16-9": {
+    "subsystem": "extension",
+    "title": "Project Type Contribution Missing Base Type",
+    "message_template": "An extension's `contributes.project` fragment does not declare `project.type`, so the custom project type falls back to the `default` base type. This is almost always an authoring mistake in the extension \u2014 a website-styled project type without `project: type: website` silently loses all website behavior. Declare the base type in the extension's `_extension.yml`.",
+    "docs_url": "https://quarto.org/docs/errors/extension/Q-16-9",
+    "since_version": "99.9.9"
+  },
+  "Q-17-1": {
+    "subsystem": "include",
+    "title": "Circular Include",
+    "message_template": "An `{{< include >}}` chain leads back to a file that is already being included, directly or indirectly. The cyclic include cannot supply any content, so the document fails to render rather than being written with the content missing. Break the cycle by removing one of the includes in the chain.",
+    "docs_url": "https://quarto.org/docs/errors/include/Q-17-1",
+    "since_version": "99.9.9"
+  },
+  "Q-17-2": {
+    "subsystem": "include",
+    "title": "Include File Not Found",
+    "message_template": "The file named by an `{{< include >}}` shortcode could not be read. Its content cannot be supplied, so the document fails to render rather than being written with the content missing. The path is resolved relative to the directory of the file containing the shortcode \u2014 check it for typos and check that the file exists.",
+    "docs_url": "https://quarto.org/docs/errors/include/Q-17-2",
+    "since_version": "99.9.9"
+  },
+  "Q-17-3": {
+    "subsystem": "include",
+    "title": "Include File Parse Error",
+    "message_template": "The file named by an `{{< include >}}` shortcode was read but could not be parsed as qmd. Its content cannot be supplied, so the document fails to render rather than being written with the content missing. The included file's own parse errors are reported alongside this one \u2014 fix those and the include will succeed.",
+    "docs_url": "https://quarto.org/docs/errors/include/Q-17-3",
+    "since_version": "99.9.9"
+  },
+  "Q-17-4": {
+    "subsystem": "include",
+    "title": "Include Not Expanded Here",
+    "message_template": "An `{{< include >}}` shortcode appears in a position where include expansion does not apply, so it was not expanded. Includes are only expanded when the shortcode is the sole content of its own paragraph. Put the shortcode on its own line, surrounded by blank lines.",
+    "docs_url": "https://quarto.org/docs/errors/include/Q-17-4",
+    "since_version": "99.9.9"
+  },
+  "Q-20-1": {
+    "subsystem": "pandoc",
+    "title": "Pandoc Not Found",
+    "message_template": "The `pandoc` binary could not be found on `PATH`, and `QUARTO_PANDOC` is not set. This format requires shelling out to a real `pandoc` binary; install pandoc or set `QUARTO_PANDOC` to its path.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-1",
+    "since_version": "99.9.9"
+  },
+  "Q-20-2": {
+    "subsystem": "pandoc",
+    "title": "Pandoc Version Too Old",
+    "message_template": "The `pandoc` binary found on `PATH` reports a version older than the minimum this Quarto version requires. Upgrade pandoc to the required version or newer.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-2",
+    "since_version": "99.9.9"
+  },
+  "Q-20-3": {
+    "subsystem": "pandoc",
+    "title": "Pandoc Exited With An Error",
+    "message_template": "The `pandoc` subprocess exited with a nonzero status. Its stderr is reproduced verbatim below, including any Lua filter traceback.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-3",
+    "since_version": "99.9.9"
+  },
+  "Q-20-4": {
+    "subsystem": "pandoc",
+    "title": "Filter Params Blob Too Large",
+    "message_template": "The `QUARTO_FILTER_PARAMS` payload passed to pandoc's Lua filters exceeds the platform's environment-block size limit. This typically happens when a large `include-in-header` file is inlined into the params blob.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-4",
+    "since_version": "99.9.9"
+  },
+  "Q-20-5": {
+    "subsystem": "pandoc",
+    "title": "Unrecognized Custom Node Type",
+    "message_template": "The pandoc-leg wire-format shim received a custom node type it does not recognize. Its wrapper was dropped and its content passed through unchanged, without the type's normal formatting. This usually means the shim's vendored Q1 filter tree predates a Quarto feature that introduced this type; upgrading Quarto should resolve it.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-5",
+    "since_version": "99.9.9"
+  },
+  "Q-20-6": {
+    "subsystem": "pandoc",
+    "title": "Callout Has No Registered Crossref Category",
+    "message_template": "A callout's identifier prefix is a recognized cross-reference type, but not one registered for callout/figure-style numbering. The callout was rendered without a number instead of aborting the render; any `@ref` to it will not resolve to a number. Give the callout an identifier prefix registered for numbering (e.g. `note-`), or remove the prefix if the callout was not meant to be numbered.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-6",
+    "since_version": "99.9.9"
+  },
+  "Q-20-7": {
+    "subsystem": "pandoc",
+    "title": "Theorem Has No Registered Theorem Type For Its Identifier",
+    "message_template": "A theorem-family block's identifier prefix is a recognized cross-reference type, but not one registered as a theorem type. The block was rendered as a plain, unstyled div without theorem numbering instead of aborting the render; any `@ref` to it will not resolve to a number. Give the block an identifier prefix registered as a theorem type (e.g. `thm-`, `lem-`, `cor-`), or match its class to the identifier's actual cross-reference type.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-7",
+    "since_version": "99.9.9"
+  },
+  "Q-20-8": {
+    "subsystem": "pandoc",
+    "title": "Multiple Formats Declared, Only One Rendered",
+    "message_template": "The document's `format:` declares more than one output format, but Quarto renders only one format per invocation. This message names which format was rendered and which were skipped; the skipped formats were not produced.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-8",
+    "since_version": "99.9.9"
+  },
+  "Q-20-9": {
+    "subsystem": "pandoc",
+    "title": "Remote Image Could Not Be Fetched for Typst in the Browser",
+    "message_template": "A remote image could not be fetched while producing Typst source in the browser, so its alt text is used in its place. The image may be unreachable, over the size limit, not an image, or not served with CORS headers that let a web page read it. Download the image into the project and reference it by path.",
+    "docs_url": "https://quarto.org/docs/errors/pandoc/Q-20-9",
+    "since_version": "99.9.9"
+  },
+  "Q-2-43": {
+    "subsystem": "markdown",
+    "title": "Callout Title Given Twice",
+    "message_template": "A callout carries both a `title=` attribute and a leading heading. Only one title can be shown, so the `title=` attribute is used and the heading is dropped. Quarto 1 silently prefers the attribute and leaves the heading in the callout body, where it reads as a duplicate title; Quarto 2 reports it instead, because carrying both is almost always an authoring mistake. Remove whichever of the two you did not intend.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-43",
+    "since_version": "99.9.9"
+  },
+  "Q-2-44": {
+    "subsystem": "markdown",
+    "title": "Callout Title Is Not Inline Content",
+    "message_template": "A callout's `title=` attribute is parsed as markdown, but it must reduce to a single line of inline content. This value parses to block content (for example it begins with `#`, or contains a blank line), so it cannot fill the callout's title and is ignored. Write the title as plain inline markdown, or move the block content into the callout body.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-44",
+    "since_version": "99.9.9"
+  },
+  "Q-2-45": {
+    "subsystem": "markdown",
+    "title": "Reference-style links are not supported",
+    "message_template": "`[label][ref]` is reference-style link syntax, which quarto-markdown does not support \u2014 `[...]` is reserved for span syntax (`[text]{.class}`). The brackets are discarded and the two halves render as empty spans. Use the inline form `[label](url)`. `qmd-syntax-helper convert -r reference-links` migrates these automatically.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-45",
+    "since_version": "99.9.9"
+  },
+  "Q-2-46": {
+    "subsystem": "markdown",
+    "title": "Link reference definitions are not supported",
+    "message_template": "A line of the form `[ref]: https://example.com` is a link reference definition, which quarto-markdown does not collect. It renders as a visible paragraph instead of disappearing. Move the URL into an inline link \u2014 `[text](url)` \u2014 at each use site and delete the definition line. `qmd-syntax-helper convert -r reference-links` does both.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-46",
+    "since_version": "99.9.9"
+  },
+  "Q-2-47": {
+    "subsystem": "markdown",
+    "title": "Cell option ignored on a diagram cell",
+    "message_template": "A diagram cell has no execution engine to pass unrecognized options to, so this option has no effect. Diagram cells accept `label`, `fig-cap`, `fig-scap`, and `fig-alt`.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-47",
+    "since_version": "99.9.9"
+  },
+  "Q-2-48": {
+    "subsystem": "markdown",
+    "title": "Wrong cell-option marker for a diagram cell",
+    "message_template": "Cell options are written in the cell language's own comment syntax. A mermaid diagram comments with `%%`, so its options are `%%|` \u2014 `#|` is not a mermaid comment and becomes part of the diagram, which mermaid then fails to parse.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-48",
+    "since_version": "99.9.9"
+  },
+  "Q-5-23": {
+    "subsystem": "project",
+    "title": "Alias Would Overwrite a Rendered Page",
+    "message_template": "An `aliases:` entry resolves to a path where the project renders a page. Writing the redirect stub there would replace that page, so the render stops instead.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-23",
+    "since_version": "99.9.9"
+  },
+  "Q-5-24": {
+    "subsystem": "project",
+    "title": "Two Pages Claim the Same Alias",
+    "message_template": "Two pages declare `aliases:` entries that resolve to the same redirect, so only one of them could take effect. Also raised when several pages route fragments through one alias and none claims the fragment-less URL.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-24",
+    "since_version": "99.9.9"
+  },
+  "Q-5-25": {
+    "subsystem": "project",
+    "title": "Alias Paths Differ Only by Case",
+    "message_template": "Two paths differ only in capitalization, which macOS and Windows treat as the same file. Checked on every platform so a Linux build cannot ship a site that breaks when served elsewhere.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-25",
+    "since_version": "99.9.9"
+  },
+  "Q-5-26": {
+    "subsystem": "project",
+    "title": "Alias Resolves Outside the Output Directory",
+    "message_template": "An `aliases:` entry climbs above the site's output directory. Redirect stubs must be written inside the site.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-26",
+    "since_version": "99.9.9"
+  },
+  "Q-2-49": {
+    "subsystem": "markdown",
+    "title": "Bracketed text renders without its brackets",
+    "message_template": "`[...]` is span syntax in quarto-markdown, so a bracket group with no attribute block renders as an empty span and the brackets are discarded. Escape them as `\\[...\\]` to keep them literal.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-49",
+    "since_version": "99.9.9"
+  },
+  "Q-2-50": {
+    "subsystem": "markdown",
+    "title": "Doubled curly braces are not supported",
+    "message_template": "Quarto 2 does not treat doubled curly braces (`{{...}}`) as an escape. To write literal braces in text, escape each brace as `\\{...\\}` or use a code span.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-50",
+    "since_version": "99.9.9"
+  },
+  "Q-2-51": {
+    "subsystem": "markdown",
+    "title": "Engine claim on a Quarto-owned file type ignored",
+    "message_template": "An engine extension claimed `.qmd`, `.md`, `.markdown`, or an extension-less input. Quarto handles markdown natively, so the claim is ignored and the file is rendered by Quarto's own parser.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-51",
+    "since_version": "99.9.9"
+  },
+  "Q-2-52": {
+    "subsystem": "markdown",
+    "title": "Shortcode delimiter not separated by a space",
+    "message_template": "A shortcode's delimiters must be separated from its content by whitespace. Write `{{< fa plus >}}` \u2014 a space after `{{<` and a space before `>}}` \u2014 rather than `{{<fa plus>}}`.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-52",
+    "since_version": "99.9.9"
+  },
+  "Q-2-53": {
+    "subsystem": "markdown",
+    "title": "Fenced div info string starts with `-`",
+    "message_template": "A fenced div's opening line cannot continue with a word that starts with `-`. `::: --` followed by a space or the end of the line opens a block deletion mark; for a class, write `::: {.name}` or a name that starts with a letter, digit or `_`.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-53",
+    "since_version": "99.9.9"
+  },
+  "Q-2-54": {
+    "subsystem": "markdown",
+    "title": "Pandoc definition lists are not supported",
+    "message_template": "A definition line beginning with `:` after a term is Pandoc definition-list syntax, which quarto-markdown does not support. It renders as literal text instead of a definition. Use the supported `::: {.definition-list}` form or run `qmd-syntax-helper convert -r definition-lists` to migrate automatically.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-54",
+    "since_version": "99.9.9"
+  },
+  "Q-2-55": {
+    "subsystem": "markdown",
+    "title": "Class Specifier Before Identifier in Attribute",
+    "message_template": "This identifier appears after a class specifier.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-55",
+    "since_version": "99.9.9"
+  },
+  "Q-2-56": {
+    "subsystem": "markdown",
+    "title": "Key-value Pair Before Identifier in Attribute",
+    "message_template": "This identifier appears after a key-value pair.",
+    "docs_url": "https://quarto.org/docs/errors/markdown/Q-2-56",
+    "since_version": "99.9.9"
+  },
+  "Q-5-27": {
+    "subsystem": "project",
+    "title": "Invalid `diagnostics:` Entry",
+    "message_template": "An entry under `diagnostics:` could not be understood. Each entry maps an error code to a level \u2014 `Q-2-49: off` \u2014 or to a map with a `level:` key and an optional `reason:`.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-27",
+    "since_version": "99.9.9"
+  },
+  "Q-5-28": {
+    "subsystem": "project",
+    "title": "llms-txt Would Overwrite an Existing File",
+    "message_template": "`website.llms-txt: true` wants to write a file that already exists in the output directory and was not generated by llms-txt. Overwriting it silently would destroy that content.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-28",
+    "since_version": "99.9.9"
+  },
+  "Q-5-29": {
+    "subsystem": "project",
+    "title": "Declared Stylesheet Not Found",
+    "message_template": "A `css:` entry names a stylesheet that does not exist, so it was not copied into the output. Every page linking it will request a file that is not there. The path is resolved relative to the file that declares it. The render continues; the (broken) link is still emitted.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-29",
+    "since_version": "99.9.9"
+  },
+  "Q-5-30": {
+    "subsystem": "project",
+    "title": "Pandoc Path Option Not Found",
+    "message_template": "A `reference-doc` or `template` entry names a file that does not exist, so pandoc cannot use it. Resolved relative to the file that declared it (a leading `/` anchors at the project root). Fix the path or add the missing file.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-30",
+    "since_version": "99.9.9"
+  },
+  "Q-5-31": {
+    "subsystem": "project",
+    "title": "Nested Projects Skipped",
+    "message_template": "Subdirectories with their own `_quarto.yml` are nested projects. Their files belong to them, so the render list's implicit patterns (the default `**/*.qmd`, or any glob that doesn't name the directory) skip them. Render the nested project on its own, list a file by a path that names the directory, or exclude the directory with a `!` pattern to silence this warning.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-31",
+    "since_version": "99.9.9"
+  },
+  "Q-5-32": {
+    "subsystem": "project",
+    "title": "Render Pattern Reaches Into Nested Project",
+    "message_template": "A `project.render` pattern names files inside a nested project (a subdirectory with its own `_quarto.yml`). They render as part of this project, with this project's config, not the nested one's.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-32",
+    "since_version": "99.9.9"
+  },
+  "Q-5-33": {
+    "subsystem": "project",
+    "title": "Format Not Supported by Book Projects",
+    "message_template": "Book projects render only to formats with book support (`html`, `typst`, and `epub` in this version). Rendering a book to any other format would produce disconnected per-chapter files with no book structure, so it is rejected instead.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-33",
+    "since_version": "99.9.9"
+  },
+  "Q-5-34": {
+    "subsystem": "project",
+    "title": "Book Parts Cannot Be Nested",
+    "message_template": "A `part:` entry inside another part's `chapters:` list is not supported. Book structure allows parts at the top level of `book.chapters` or `book.appendices` only. Move the nested part to the top level or flatten it into a chapter.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-34",
+    "since_version": "99.9.9"
+  },
+  "Q-5-35": {
+    "subsystem": "project",
+    "title": "Book Chapter File Not Found",
+    "message_template": "A file listed in `book.chapters`, `book.appendices`, or `book.references` does not exist on disk. Book projects render exactly the files these keys name, so every entry must point at a real file. Fix the path or remove the entry.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-35",
+    "since_version": "99.9.9"
+  },
+  "Q-5-36": {
+    "subsystem": "project",
+    "title": "Book Has No Home Page",
+    "message_template": "A book project's chapter list must include a home page: a file whose name starts with `index.` (for example `index.qmd`), serving as the book's landing page. Add an index file to `book.chapters`.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-36",
+    "since_version": "99.9.9"
+  },
+  "Q-5-37": {
+    "subsystem": "project",
+    "title": "Brand File Not Referenced",
+    "message_template": "The project directory contains a brand file (`_brand.yml`, `_brand.yaml`, `_brand/_brand.yml`, or `_brand/_brand.yaml`) but no `brand:` key is set, so the file is ignored. Quarto 1 discovers these files automatically; Quarto 2 requires an explicit `brand:` key. Add `brand: _brand.yml` (or the path to your brand file) to `_quarto.yml`.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-37",
+    "since_version": "99.9.9"
+  },
+  "Q-13-8": {
+    "subsystem": "navigation",
+    "title": "Unsupported toc-location value",
+    "message_template": "The `toc-location` option has a value Quarto 2 does not support. Supported values are `left`, `right` (the default), and `body`. The `left-body` and `right-body` double-TOC values are not implemented yet and fall back to `left` / `right`; any other value falls back to the default `right`.",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-8",
+    "since_version": "99.9.9"
+  },
+  "Q-13-9": {
+    "subsystem": "navigation",
+    "title": "link-format request cannot be honored",
+    "message_template": "A link carries a `link-format` attribute that names an unknown value or targets a page the requested output format does not cover. `link-format=\"llms\"` needs `website.llms-txt: true` on an HTML website render, a target written as a project source path, and a target page that gets a markdown companion (drafts and the 404 page do not). The attribute is ignored and the link resolves as if it were undecorated.",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-9",
+    "since_version": "99.9.9"
+  },
+  "Q-13-10": {
+    "subsystem": "navigation",
+    "title": "Sidebar entry has both section: and text:",
+    "message_template": "A sidebar entry carries both a `section:` and a `text:` key. They are alternate spellings for a section's display label, and `section:` takes precedence \u2014 the `text:` value is ignored. Remove one of the two keys.",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-10",
+    "since_version": "99.9.9"
+  },
+  "Q-13-11": {
+    "subsystem": "navigation",
+    "title": "Repository actions require a repo-url",
+    "message_template": "`repo-actions` lists actions to render, but neither `website.repo-url` nor `website.issue-url` is set, so no link can be built and no actions render. Set `website.repo-url` to the repository's web URL (for example `https://github.com/owner/repo`).",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-11",
+    "since_version": "99.9.9"
+  },
+  "Q-13-12": {
+    "subsystem": "navigation",
+    "title": "Unknown repository action",
+    "message_template": "A `repo-actions` entry names an action Quarto does not recognize. The supported actions are `edit`, `source`, and `issue`; `none` clears the list. The unrecognized entry is skipped and the remaining actions still render.",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-12",
+    "since_version": "99.9.9"
+  },
+  "Q-13-13": {
+    "subsystem": "navigation",
+    "title": "Page-level `repo-actions: true` ignored",
+    "message_template": "A page's front matter sets `repo-actions: true`. This key does not enable repository actions \u2014 the action list always comes from `website.repo-actions` \u2014 it asks only that a page with no table of contents show the actions in the margin rather than the page footer. Quarto 2 does not implement that placement, so the value is ignored and the actions render in the page footer at every width. Page-level `repo-actions: false`, which suppresses the actions for a single page, is supported.",
+    "docs_url": "https://quarto.org/docs/errors/navigation/Q-13-13",
+    "since_version": "99.9.9"
+  },
+  "Q-14-6": {
+    "subsystem": "theme",
+    "title": "Theme SCSS compilation failed",
+    "message_template": "Compiling the theme SCSS bundle failed. The reported line refers to the bundle Quarto assembles from Bootstrap, its own layers, and the files under `theme:`, so it may point into Quarto's own code reacting to a variable set by a theme. Check the variables and rules in the theme files; if no custom theme or brand is configured, this is likely a Quarto bug.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-6",
+    "since_version": "99.9.9"
+  },
+  "Q-14-7": {
+    "subsystem": "theme",
+    "title": "Theme file has no layer boundary markers",
+    "message_template": "A `theme:` entry names an `.scss` file that contains none of the `/*-- scss:... --*/` layer boundary markers Quarto needs to merge it into the Bootstrap bundle. Start the file with a marker such as `/*-- scss:defaults --*/` or `/*-- scss:rules --*/`, or list a plain stylesheet under `css:` instead.",
+    "docs_url": "https://quarto.org/docs/errors/theme/Q-14-7",
+    "since_version": "99.9.9"
+  },
+  "Q-18-1": {
+    "subsystem": "engine",
+    "title": "Engine Returned an Unreadable Result",
+    "message_template": "An execution engine finished, but the result it returned was not in the shape Quarto expects, so the render could not continue. The offending field is named. This is a mismatch between the engine and Quarto's reader, not a problem in the document; the raw result is preserved on disk for a bug report.",
+    "docs_url": "https://quarto.org/docs/errors/engine/Q-18-1",
+    "since_version": "99.9.9"
+  },
+  "Q-18-2": {
+    "subsystem": "engine",
+    "title": "Engine Include File Could Not Be Read",
+    "message_template": "An execution engine asked Quarto to include the contents of a file in the output (header, before body, or after body), but the file could not be read. The render continues without it, so content the engine expected on the page — typically an HTML dependency's scripts and stylesheets — is missing.",
+    "docs_url": "https://quarto.org/docs/errors/engine/Q-18-2",
+    "since_version": "99.9.9"
+  },
+  "Q-18-3": {
+    "subsystem": "engine",
+    "title": "Engine Runtime Not Found",
+    "message_template": "An execution engine needs an external runtime (e.g. Julia, R, or Jupyter) that could not be found on this machine, so the render could not continue. This is a missing local dependency, not a problem in the document.",
+    "docs_url": "https://quarto.org/docs/errors/engine/Q-18-3",
+    "since_version": "99.9.9"
+  },
+  "Q-19-1": {
+    "subsystem": "image",
+    "title": "Plot Document Not Found",
+    "message_template": "The hephaestus plot document (`.hep`) an image refers to could not be read. The image is left as written and the page still renders.",
+    "docs_url": "https://quarto.org/docs/errors/image/Q-19-1",
+    "since_version": "99.9.9"
+  },
+  "Q-19-2": {
+    "subsystem": "image",
+    "title": "Invalid Plot Document",
+    "message_template": "The file an image refers to is not a hephaestus plot document this version of Quarto can read: it does not start with the document magic, was written with an incompatible format version, or uses custom geoms or formatters. The image is left as written and the page still renders.",
+    "docs_url": "https://quarto.org/docs/errors/image/Q-19-2",
+    "since_version": "99.9.9"
+  },
+  "Q-19-3": {
+    "subsystem": "image",
+    "title": "Plot Rendered With Warnings",
+    "message_template": "A hephaestus plot document was rendered to SVG, but the SVG backend could not express some of its features exactly. The message lists what degraded.",
+    "docs_url": "https://quarto.org/docs/errors/image/Q-19-3",
+    "since_version": "99.9.9"
+  },
+  "Q-19-4": {
+    "subsystem": "image",
+    "title": "Brand Color Not Applied To Plot",
+    "message_template": "A brand color that would recolor a hephaestus plot (`background`, `foreground` or `primary`) is not a hex color, so the plot keeps its own color for that slot. The other brand colors still apply.",
+    "docs_url": "https://quarto.org/docs/errors/image/Q-19-4",
+    "since_version": "99.9.9"
+  },
+  "Q-21-1": {
+    "subsystem": "typst",
+    "title": "Typst Not Found",
+    "message_template": "The `typst` binary could not be found on `PATH`, and `QUARTO_TYPST` is not set. Typst output requires shelling out to a real `typst` binary; install typst or set `QUARTO_TYPST` to its path.",
+    "docs_url": "https://quarto.org/docs/errors/typst/Q-21-1",
+    "since_version": "99.9.9"
+  },
+  "Q-21-2": {
+    "subsystem": "typst",
+    "title": "Typst Version Too Old",
+    "message_template": "The `typst` binary found on `PATH` reports a version older than the minimum this Quarto version requires. Upgrade typst to the required version or newer.",
+    "docs_url": "https://quarto.org/docs/errors/typst/Q-21-2",
+    "since_version": "99.9.9"
+  },
+  "Q-21-3": {
+    "subsystem": "typst",
+    "title": "Typst Compile Failed",
+    "message_template": "The `typst compile` subprocess exited with a nonzero status. Its stderr is reproduced verbatim below, including typst's own diagnostic (file/line, if any).",
+    "docs_url": "https://quarto.org/docs/errors/typst/Q-21-3",
+    "since_version": "99.9.9"
+  },
+  "Q-21-4": {
+    "subsystem": "typst",
+    "title": "Brand Font Not Available To Typst",
+    "message_template": "A `brand.typography.fonts` entry could not be made available to Typst, so Typst falls back to another font for that family. Google Fonts entries are downloaded at render time and cached under `.quarto/typst/fonts`; each request is tried three times and gives up after 30 seconds, and the warning names the URL and the error of the last attempt. The download can fail when offline or when the server answers with an error status, or the family may not be offered as a TrueType/OpenType file. Bunny Fonts entries are not supported for Typst. Use `source: file` to supply the font files yourself.",
+    "docs_url": "https://quarto.org/docs/errors/typst/Q-21-4",
+    "since_version": "99.9.9"
+  },
+  "Q-22-1": {
+    "subsystem": "math",
+    "title": "Unknown Math Command",
+    "message_template": "A `\\command` in a math expression is not a known LaTeX math command and was not defined with `\\newcommand` earlier in the same expression, so no writer can render it.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-1",
+    "since_version": "99.9.9"
+  },
+  "Q-22-2": {
+    "subsystem": "math",
+    "title": "Unknown Math Environment",
+    "message_template": "A `\\begin{name}` in a math expression names an environment quarto-math does not know.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-2",
+    "since_version": "99.9.9"
+  },
+  "Q-22-3": {
+    "subsystem": "math",
+    "title": "Mismatched Math Environment",
+    "message_template": "A math environment is closed by the wrong `\\end{…}`, is never closed, or an `\\end{…}` appears without its `\\begin{…}`.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-3",
+    "since_version": "99.9.9"
+  },
+  "Q-22-4": {
+    "subsystem": "math",
+    "title": "Math Command Missing An Argument",
+    "message_template": "A math command was used with fewer arguments than it takes (`\\frac{a}` has one, needs two), or a macro was called with the wrong number of arguments.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-4",
+    "since_version": "99.9.9"
+  },
+  "Q-22-5": {
+    "subsystem": "math",
+    "title": "Unbalanced Brace In Math",
+    "message_template": "A `{` in a math expression is never closed, or a `}` has no matching `{`.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-5",
+    "since_version": "99.9.9"
+  },
+  "Q-22-6": {
+    "subsystem": "math",
+    "title": "Unbalanced Left And Right Delimiters",
+    "message_template": "A `\\left` has no matching `\\right`, or a `\\right` has no matching `\\left`, in the same math expression.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-6",
+    "since_version": "99.9.9"
+  },
+  "Q-22-7": {
+    "subsystem": "math",
+    "title": "Double Subscript Or Superscript",
+    "message_template": "A base has two superscripts (`x^2^3`) or two subscripts (`x_1_2`) in a row.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-7",
+    "since_version": "99.9.9"
+  },
+  "Q-22-8": {
+    "subsystem": "math",
+    "title": "Math Macro Expansion Limit Exceeded",
+    "message_template": "Expanding the `\\newcommand` macros in a math expression produced more tokens than the limit allows, which almost always means a macro refers to itself.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-8",
+    "since_version": "99.9.9"
+  },
+  "Q-22-9": {
+    "subsystem": "math",
+    "title": "Unsupported Math Command",
+    "message_template": "A math command is recognized but has no rendering in the target format, or is a document-level command that has no meaning inside math.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-9",
+    "since_version": "99.9.9"
+  },
+  "Q-22-10": {
+    "subsystem": "math",
+    "title": "Ragged Rows In Math Environment",
+    "message_template": "The rows of a math environment (`pmatrix`, `aligned`, `cases`, …) do not all have the same number of `&`-separated cells.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-10",
+    "since_version": "99.9.9"
+  },
+  "Q-22-11": {
+    "subsystem": "math",
+    "title": "Limits Command Ignored",
+    "message_template": "`\\limits` or `\\nolimits` was applied to something other than a big operator or a function name, so it has no effect.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-11",
+    "since_version": "99.9.9"
+  },
+  "Q-22-12": {
+    "subsystem": "math",
+    "title": "Math Construct Dropped",
+    "message_template": "A construct with no equivalent in the target's math model was dropped from the output; the rest of the expression is unaffected.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-12",
+    "since_version": "99.9.9"
+  },
+  "Q-22-13": {
+    "subsystem": "math",
+    "title": "Math Syntax Error",
+    "message_template": "The math expression contains a construct the parser could not interpret: an alignment `&` outside an environment, a stray `\\begin`/`\\end`, or another malformed piece of syntax.",
+    "docs_url": "https://quarto.org/docs/errors/math/Q-22-13",
+    "since_version": "99.9.9"
+  },
+  "Q-23-1": {
+    "subsystem": "citeproc",
+    "title": "Citeproc Resolves After Book Merge Point",
+    "message_template": "A book chapter orders the built-in citeproc filter into `.post` (after the `quarto` sentinel in `filters:`), so its citations resolve after this chapter pauses for project-wide crossref/bibliography aggregation. Its references will not appear in the book's merged bibliography.",
+    "docs_url": "https://quarto.org/docs/errors/citeproc/Q-23-1",
+    "since_version": "99.9.9"
+  },
+  "Q-24-1": {
+    "subsystem": "import",
+    "title": "Unsupported Import File Type",
+    "message_template": "The file's type is not one the importer reads. Document import supports Word (.docx), OpenDocument text (.odt), Rich Text Format (.rtf), EPUB (.epub) and PowerPoint (.pptx) files.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-1",
+    "since_version": "99.9.9"
+  },
+  "Q-24-2": {
+    "subsystem": "import",
+    "title": "Import File Too Large",
+    "message_template": "The source file is larger than the importer accepts (25 MB). It was refused before the converter was loaded.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-2",
+    "since_version": "99.9.9"
+  },
+  "Q-24-3": {
+    "subsystem": "import",
+    "title": "The Converter Couldn't Read the File",
+    "message_template": "The converter (pandoc) could not read the file. It may be damaged, password-protected, or a different type than its extension says.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-3",
+    "since_version": "99.9.9"
+  },
+  "Q-24-4": {
+    "subsystem": "import",
+    "title": "Warning From the Document Reader",
+    "message_template": "The converter reported a warning while reading the file. The import continued; the message is pandoc's own.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-4",
+    "since_version": "99.9.9"
+  },
+  "Q-24-5": {
+    "subsystem": "import",
+    "title": "Comment Ranges Simplified",
+    "message_template": "Some Word comments could not mark their exact range and were attached to their paragraph instead.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-5",
+    "since_version": "99.9.9"
+  },
+  "Q-24-6": {
+    "subsystem": "import",
+    "title": "Paragraph-Mark Changes Dropped",
+    "message_template": "Tracked insertions or deletions of paragraph breaks were not imported.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-6",
+    "since_version": "99.9.9"
+  },
+  "Q-24-7": {
+    "subsystem": "import",
+    "title": "List Number Styles Lost",
+    "message_template": "Some numbered lists used letters, roman numerals or parenthesised numbers, which Quarto Markdown can't write. They were imported as ordinary numbered lists.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-7",
+    "since_version": "99.9.9"
+  },
+  "Q-24-8": {
+    "subsystem": "import",
+    "title": "Image Skipped",
+    "message_template": "An image was too large to store and was skipped. Its link is left pointing where the image would have been stored.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-8",
+    "since_version": "99.9.9"
+  },
+  "Q-24-9": {
+    "subsystem": "import",
+    "title": "Image Conversion Failed",
+    "message_template": "An EMF or WMF image could not be converted to SVG. The original was stored, but browsers can't display it.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-9",
+    "since_version": "99.9.9"
+  },
+  "Q-24-10": {
+    "subsystem": "import",
+    "title": "Images Converted",
+    "message_template": "EMF or WMF images were converted to SVG so browsers can display them.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-10",
+    "since_version": "99.9.9"
+  },
+  "Q-24-11": {
+    "subsystem": "import",
+    "title": "Image Format Not Displayable",
+    "message_template": "An image was stored in a format browsers can't display, such as TIFF.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-11",
+    "since_version": "99.9.9"
+  },
+  "Q-24-12": {
+    "subsystem": "import",
+    "title": "Internal Import Error",
+    "message_template": "The import failed because of a problem in the importer itself: the converter's output could not be read, an image had no manifest entry, or the converter's host rejected the request.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-12",
+    "since_version": "99.9.9"
+  },
+  "Q-24-13": {
+    "subsystem": "import",
+    "title": "The Converter Failed on This File",
+    "message_template": "The converter ran out of memory or time, or crashed, on this file.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-13",
+    "since_version": "99.9.9"
+  },
+  "Q-24-14": {
+    "subsystem": "import",
+    "title": "Unmatched Comment Markers",
+    "message_template": "Some Word comment markers had no matching start or end. A start without an end became a point comment; an end without a start was removed.",
+    "docs_url": "https://quarto.org/docs/errors/import/Q-24-14",
     "since_version": "99.9.9"
   }
 }

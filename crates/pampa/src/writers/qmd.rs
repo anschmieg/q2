@@ -8,6 +8,7 @@ use crate::pandoc::block::MetaBlock;
 use crate::pandoc::inline::Inline;
 use crate::pandoc::list::{ListNumberDelim, ListNumberStyle};
 use crate::pandoc::table::{Alignment, Cell, ColWidth, Row, Table};
+use crate::pandoc::treesitter_utils::html_block::{starts_block_html, starts_raw_text_element};
 use crate::pandoc::{
     Block, BlockQuote, BulletList, CodeBlock, DefinitionList, Figure, Header, HorizontalRule,
     LineBlock, OrderedList, Pandoc, Paragraph, Plain, RawBlock, Str,
@@ -61,6 +62,52 @@ pub struct QmdWriterContext {
     /// caller emits a leading `\` and the dashes stay Unicode so the reader
     /// recovers them rather than reading a HorizontalRule.
     pub suppress_dash_canonicalization: bool,
+
+    /// When true, this run is being written as a fragment embedded *inside* a
+    /// line of surrounding text rather than as a document of its own, so
+    /// `escape_markdown` may consult [`Self::at_line_start`] instead of
+    /// escaping the line-start-only specials (`#`, `>`) everywhere. Set only
+    /// by [`write_inlines_fragment`].
+    pub inline_fragment: bool,
+
+    /// Whether the next byte written begins a line. Maintained by
+    /// `write_inline` alongside `prev_emitted_alnum`, and read only when
+    /// [`Self::inline_fragment`] is set. Starts `false` because a fragment is
+    /// embedded mid-line; a SoftBreak or LineBreak sets it back to `true`.
+    pub at_line_start: bool,
+
+    /// How many Subscript/Superscript nodes enclose the inline being
+    /// written. Inside one, `write_space` and `write_soft_break` emit `\ `
+    /// instead of a bare space: since bd-star-as-str-qigl02pz the reader
+    /// only opens `~sub~` / `^sup^` when the closer appears before the next
+    /// unescaped whitespace (Pandoc's rule), so `~a b~` would read back as
+    /// literal text. Pandoc's markdown writer does the same.
+    pub sub_sup_depth: usize,
+
+    /// Whether the inline after the one being written is a word boundary
+    /// (a `Space`, a break, or the end of the line's inlines). Set by
+    /// [`write_inline_run`] before each inline and read by `write_str`, which
+    /// uses it to tell a line-start list marker (`1.` then a space) from a
+    /// number or a hyphen that merely begins a word (`1.5`, `-5`).
+    pub next_is_boundary: bool,
+
+    /// The last byte the previous inline wrote, if any inline has written since
+    /// the block started. `write_str` reads it to see that the text before it
+    /// ended in `]`, so a `Str` that begins with `(` can't turn `[span]` into
+    /// the start of a link.
+    pub last_byte: Option<u8>,
+
+    /// The bullet character (`*` or `-`) of the `BulletList` written just
+    /// before the block now being written, at the same nesting level; `None`
+    /// when the previous sibling wasn't a bullet list. `write_block` takes it
+    /// on entry and sets it again on exit, so a list's own contents never leak
+    /// into the siblings around it.
+    pub prev_bullet_marker: Option<char>,
+
+    /// The bullet character the `BulletList` being started should use. Two
+    /// adjacent bullet lists re-read as one unless their markers differ, so
+    /// `write_block` alternates it from `prev_bullet_marker`.
+    pub bullet_marker: char,
 }
 
 impl Default for QmdWriterContext {
@@ -76,7 +123,23 @@ impl QmdWriterContext {
             emphasis_stack: Vec::new(),
             prev_emitted_alnum: false,
             suppress_dash_canonicalization: false,
+            inline_fragment: false,
+            at_line_start: false,
+            sub_sup_depth: 0,
+            next_is_boundary: false,
+            last_byte: None,
+            prev_bullet_marker: None,
+            bullet_marker: '*',
         }
+    }
+
+    /// Mark the start of a new sequence of sibling blocks (a list item's, a
+    /// table cell's, a definition's, a caption's): its first block has no
+    /// previous sibling, so it must not alternate the bullet marker of a list
+    /// that ended the previous sequence. `write_block` already does this for the
+    /// first child of a container; this covers containers with several sequences.
+    fn begin_block_sequence(&mut self) {
+        self.prev_bullet_marker = None;
     }
 
     pub fn push_emphasis(&mut self, delimiter: EmphasisDelimiter, is_strong: bool) {
@@ -153,14 +216,16 @@ impl<'a, W: Write + ?Sized> Write for BlockQuoteContext<'a, W> {
 
 struct BulletListContext<'a, W: Write + ?Sized> {
     inner: &'a mut W,
+    marker: u8,
     at_line_start: bool,
     is_first_line: bool,
 }
 
 impl<'a, W: Write + ?Sized> BulletListContext<'a, W> {
-    fn new(inner: &'a mut W) -> Self {
+    fn new(inner: &'a mut W, marker: char) -> Self {
         Self {
             inner,
+            marker: u8::try_from(marker).expect("bullet marker is ASCII"),
             at_line_start: true,
             is_first_line: true,
         }
@@ -173,7 +238,7 @@ impl<'a, W: Write + ?Sized> Write for BulletListContext<'a, W> {
         for &byte in buf {
             if self.at_line_start {
                 if self.is_first_line {
-                    self.inner.write_all(b"* ")?;
+                    self.inner.write_all(&[self.marker, b' '])?;
                     self.is_first_line = false;
                 } else {
                     self.inner.write_all(b"  ")?;
@@ -276,7 +341,7 @@ impl<'a, W: Write + ?Sized> Write for OrderedListContext<'a, W> {
 /// PandocInlines and PandocBlocks are rendered using the qmd writer
 fn config_value_to_yaml(value: &ConfigValue) -> std::io::Result<Yaml> {
     match &value.value {
-        ConfigValueKind::Scalar(yaml) => {
+        ConfigValueKind::Scalar { yaml, .. } => {
             // Pass through the yaml value directly
             Ok(yaml.clone())
         }
@@ -412,6 +477,17 @@ fn escape_quotes(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// The `{#id}` shorthand token is `[#][._A-Za-z0-9-]+` in the grammar; an
+/// identifier with any other character (e.g. a slash) can only be written in
+/// the `id="..."` key-value form, which the reader promotes back into the
+/// identifier slot.
+fn id_expressible_as_shorthand(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 fn write_attr<W: std::io::Write + ?Sized>(
     attr: &crate::pandoc::Attr,
     writer: &mut W,
@@ -420,7 +496,7 @@ fn write_attr<W: std::io::Write + ?Sized>(
     let (id, classes, keyvals) = attr;
     let mut wrote_something = false;
     write!(writer, "{{")?;
-    if !id.is_empty() {
+    if id_expressible_as_shorthand(id) {
         write!(writer, "#{}", id)?;
         wrote_something = true;
     }
@@ -429,6 +505,70 @@ fn write_attr<W: std::io::Write + ?Sized>(
             write!(writer, " ")?;
         }
         write!(writer, ".{}", class)?;
+        wrote_something = true;
+    }
+    // The grammar orders attr components id → classes → key-values, so an
+    // id that needs the kv fallback goes here, after the classes.
+    if !id.is_empty() && !id_expressible_as_shorthand(id) {
+        if wrote_something {
+            write!(writer, " ")?;
+        }
+        write!(writer, "id=\"{}\"", escape_quotes(id))?;
+        wrote_something = true;
+    }
+    for (key, value) in keyvals {
+        if wrote_something {
+            write!(writer, " ")?;
+        }
+        write!(writer, "{}=\"{}\"", key, escape_quotes(value))?;
+        wrote_something = true;
+    }
+    write!(writer, "}}")?;
+    Ok(())
+}
+
+/// Like `write_attr`, but for the two attr sites (code fences, inline
+/// code spans) where the parser encodes a space-separated `{lang .cls}`
+/// language token as a literal bracket-wrapped class string
+/// (`"{python}"` — see `test_code_block_attributes.rs` and
+/// `engine_cell_lang` in `quarto-core::engine::capture_splice`, the
+/// reader-side unwrap this mirrors). Such a class is written back as a
+/// bare, unprefixed token instead of being dot-prefixed like a normal
+/// class, so `{python .marimo}` round-trips instead of becoming
+/// `{.{python} .marimo}`.
+///
+/// Divs/spans/links/images/tables never receive bracket-wrapped classes
+/// from the parser, so they keep using plain `write_attr`.
+fn write_code_attr<W: std::io::Write + ?Sized>(
+    attr: &crate::pandoc::Attr,
+    writer: &mut W,
+    _ctx: &mut QmdWriterContext,
+) -> std::io::Result<()> {
+    let (id, classes, keyvals) = attr;
+    let mut wrote_something = false;
+    write!(writer, "{{")?;
+    if id_expressible_as_shorthand(id) {
+        write!(writer, "#{}", id)?;
+        wrote_something = true;
+    }
+    for class in classes {
+        if wrote_something {
+            write!(writer, " ")?;
+        }
+        if let Some(lang) = class.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            write!(writer, "{}", lang)?;
+        } else {
+            write!(writer, ".{}", class)?;
+        }
+        wrote_something = true;
+    }
+    // The grammar orders attr components id → classes → key-values, so an
+    // id that needs the kv fallback goes here, after the classes.
+    if !id.is_empty() && !id_expressible_as_shorthand(id) {
+        if wrote_something {
+            write!(writer, " ")?;
+        }
+        write!(writer, "id=\"{}\"", escape_quotes(id))?;
         wrote_something = true;
     }
     for (key, value) in keyvals {
@@ -458,17 +598,136 @@ fn write_blockquote(
     Ok(())
 }
 
+/// Is this line made up solely of complete HTML tags?
+///
+/// Quoted attribute values are skipped, so `<div data-x="a>b">` is one tag.
+fn line_is_only_tags(line: &str) -> bool {
+    let mut rest = line.trim();
+    let mut saw_tag = false;
+    while !rest.is_empty() {
+        if !rest.starts_with('<') {
+            return false;
+        }
+        // A comment ends at `-->`, not at the first `>`: `<!-- a -> b -->`
+        // is one unit, and scanning to `>` would strand `b -->` as non-tag
+        // text and fence a run that did not need it.
+        if let Some(body) = rest.strip_prefix("<!--") {
+            let Some(end) = body.find("-->") else {
+                return false;
+            };
+            rest = body[end + 3..].trim_start();
+            saw_tag = true;
+            continue;
+        }
+        let bytes = rest.as_bytes();
+        let mut i = 1;
+        let mut quote: Option<u8> = None;
+        let mut closed = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == b'"' || c == b'\'' => quote = Some(c),
+                None if c == b'>' => {
+                    closed = true;
+                    i += 1;
+                    break;
+                }
+                None => {}
+            }
+            i += 1;
+        }
+        if !closed {
+            return false;
+        }
+        rest = rest[i..].trim_start();
+        saw_tag = true;
+    }
+    saw_tag
+}
+
+/// Would writing `text` bare — with no ```` ```{=html} ```` fence — read back
+/// as exactly one `RawBlock` holding this same text?
+///
+/// Only two shapes qualify, and they are exactly the two the lift in
+/// `paragraph.rs` produces:
+///
+///   * a pure run of block-level tags, which the lift re-forms on the next
+///     read, and
+///   * a raw-text element (`<pre>`, `<script>`, …), whose interior the reader
+///     deliberately leaves unparsed.
+///
+/// Anything else has to keep its fence. An author-written ```` ```{=html} ````
+/// block may hold arbitrary text, and bare it would be *parsed* on the next
+/// read — a backtick becoming `Code`, a `#` line after a blank line becoming a
+/// real `Header`. That is content corruption through any AST -> qmd -> read
+/// cycle, so the test is on the text, not merely on its first tag.
+fn round_trips_bare_html(text: &str) -> bool {
+    // A blank line ends the HTML block, so the rest would come back separately.
+    if text.lines().any(|line| line.trim().is_empty()) {
+        return false;
+    }
+    if !starts_block_html(text) {
+        return false;
+    }
+    starts_raw_text_element(text) || text.lines().all(line_is_only_tags)
+}
+
+/// Does [`write_rawblock`] emit this raw HTML bare?
+///
+/// The single source of truth for both the writer and the blank-line rule
+/// below, so the two cannot drift apart.
+fn html_writes_bare(text: &str) -> bool {
+    // The comment arm predates the block-tag one (bd-1066) and deliberately
+    // skips `round_trips_bare_html`'s blank-line guard: the grammar keeps a
+    // whole `<!-- … -->` as one `html_element`, blank lines and all, so a
+    // comment the *reader* produced always re-reads as itself. A comment
+    // `RawBlock` synthesised by a filter with markdown after a blank line
+    // inside it would not, but no reader path produces that.
+    is_html_comment(text) || round_trips_bare_html(text)
+}
+
+/// The decorated-syntax marker for an editorial-mark class, as written
+/// after `[` for spans (`[++ …]`) and after `::: ` for divs (`::: ++`).
+/// The reader desugars both forms to these classes.
+fn editorial_marker_for_class(class: &str) -> Option<&'static str> {
+    match class {
+        "quarto-highlight" => Some("!!"),
+        "quarto-insert" => Some("++"),
+        "quarto-delete" => Some("--"),
+        "quarto-edit-comment" => Some(">>"),
+        _ => None,
+    }
+}
+
 fn write_div(
     div: &crate::pandoc::Div,
     writer: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
-    write!(writer, "::: ")?;
-    write_attr(&div.attr, writer, ctx)?;
+    // A div whose first class is an editorial mark's is written with the
+    // block marker (`::: --`), the rest of its attributes following it.
+    // The reader puts the mark's class first, so this round-trips.
+    let (id, classes, keyvals) = &div.attr;
+    match classes.first().and_then(|c| editorial_marker_for_class(c)) {
+        Some(marker) => {
+            write!(writer, "::: {marker}")?;
+            let rest = (id.clone(), classes[1..].to_vec(), keyvals.clone());
+            if !is_empty_attr(&rest) {
+                write!(writer, " ")?;
+                write_attr(&rest, writer, ctx)?;
+            }
+        }
+        None => {
+            write!(writer, "::: ")?;
+            write_attr(&div.attr, writer, ctx)?;
+        }
+    }
     writeln!(writer)?;
 
     for block in div.content.iter() {
-        // Add a blank line between blocks in the blockquote
+        // A blank line opens the div body and separates its blocks.
         writeln!(writer)?;
         write_block(block, writer, ctx)?;
     }
@@ -528,6 +787,9 @@ fn write_bulletlist(
         .iter()
         .all(|item| item.is_empty() || matches!(item[0], Block::Plain(_)));
 
+    // Read before the items are written: nested lists reset the context field.
+    let marker = ctx.bullet_marker;
+
     for (i, item) in bulletlist.content.iter().enumerate() {
         if i > 0 && !is_tight {
             // Add blank line between items in loose lists
@@ -539,7 +801,7 @@ fn write_bulletlist(
             // `*` (or `-`) marker line as an item with zero blocks; that
             // is a distinct AST shape from `[Plain []]` handled below
             // (`* []`, which parses as an inline `[]` inside Plain).
-            writeln!(buf, "*")?;
+            writeln!(buf, "{marker}")?;
             continue;
         }
 
@@ -554,11 +816,12 @@ fn write_bulletlist(
             };
 
         if is_empty_item {
-            writeln!(buf, "* []")?;
+            writeln!(buf, "{marker} []")?;
         } else {
             let task_rewritten = task_item_to_ascii(item);
             let item: &[Block] = task_rewritten.as_deref().unwrap_or(item);
-            let mut item_writer = BulletListContext::new(buf);
+            let mut item_writer = BulletListContext::new(buf, marker);
+            ctx.begin_block_sequence();
             for (j, block) in item.iter().enumerate() {
                 if j > 0 && !is_tight {
                     // Add a blank line between blocks within a list item in loose lists
@@ -613,6 +876,7 @@ fn write_orderedlist(
         let item: &[Block] = task_rewritten.as_deref().unwrap_or(item);
         let mut item_writer =
             OrderedListContext::new(buf, current_num, number_style.clone(), delimiter.clone());
+        ctx.begin_block_sequence();
         for (j, block) in item.iter().enumerate() {
             if j > 0 && !is_tight {
                 // Add a blank line between blocks within a list item in loose lists
@@ -636,9 +900,7 @@ fn write_header(
     write!(buf, " ")?;
 
     // Write the header content
-    for inline in &header.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&header.content, buf, ctx, false)?;
 
     // Compute the effective attr for writing: suppress auto-generated IDs.
     // When AttrSourceInfo.id is None, the ID was auto-generated by postprocessing.
@@ -668,6 +930,7 @@ fn write_cell_content(
     buf: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    ctx.begin_block_sequence();
     for (i, block) in cell.content.iter().enumerate() {
         if i > 0 {
             write!(buf, " ")?; // Join multiple blocks with space
@@ -709,8 +972,11 @@ fn write_codeblock(
         // Single class, no other attributes: write as bare word
         write!(buf, "{}", classes[0])?;
     } else if !id.is_empty() || !classes.is_empty() || !keyvals.is_empty() {
-        // Has attributes: write full attribute block (no space before it)
-        write_attr(&codeblock.attr, buf, ctx)?;
+        // Has attributes: write full attribute block (no space before it).
+        // Uses write_code_attr (not write_attr) because a class here may
+        // be the bracket-wrapped language pseudo-class — see its doc
+        // comment.
+        write_code_attr(&codeblock.attr, buf, ctx)?;
     }
 
     writeln!(buf)?;
@@ -757,6 +1023,28 @@ fn write_rawblock(rawblock: &RawBlock, buf: &mut dyn std::io::Write) -> std::io:
     // Only output raw content if it's for markdown format
     if rawblock.format == "markdown" {
         write!(buf, "{}", rawblock.text)?;
+    } else if rawblock.format == "html" && html_writes_bare(&rawblock.text) {
+        // Block-level raw HTML is emitted as written, not wrapped in a
+        // ```{=html} fence. Comments came first (bd-1066); the rest followed
+        // when the lift started splitting a tight `<div>` into
+        // RawBlock/Plain/RawBlock, because a fence around each tag would
+        // separate it from the `Plain` and break the round-trip.
+        //
+        // The rule is self-consistent: exactly the texts written bare here are
+        // the ones `paragraph.rs` lifts back to a `RawBlock` on the next read.
+        // Raw HTML that is *not* block-level keeps its fence, since bare it
+        // would come back as an inline.
+        //
+        // This reverses the normalisation to the documented ```{=html}
+        // spelling the lift originally shipped with — deliberately, in favour
+        // of round-trip stability and pandoc parity
+        // (bd-block-html-adjacent-markdown-unparsed-0qnjuwuy).
+        // `trim_end` because the text may already end in a newline — a filter
+        // or JSON AST can carry `"<div>\n"` — and `writeln!` would then emit a
+        // second one. Harmless to the parse (blocks are blank-line separated
+        // either way) but it makes the first write idempotent rather than the
+        // second.
+        writeln!(buf, "{}", rawblock.text.trim_end())?;
     } else {
         // For other formats, use fenced raw block notation with `=` prefix
         writeln!(buf, "```{{={}}}", rawblock.format)?;
@@ -791,6 +1079,7 @@ fn write_definitionlist(
         // Write the definitions
         for definition in definitions {
             write!(buf, ":   ")?;
+            ctx.begin_block_sequence();
             for (j, block) in definition.iter().enumerate() {
                 if j > 0 {
                     writeln!(buf)?;
@@ -880,6 +1169,7 @@ fn write_figure(
     if let Some(ref long_caption) = figure.caption.long {
         if !long_caption.is_empty() {
             writeln!(buf)?;
+            ctx.begin_block_sequence();
             for (i, block) in long_caption.iter().enumerate() {
                 if i > 0 {
                     writeln!(buf)?;
@@ -917,9 +1207,7 @@ fn write_inlinerefdef(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[^{}]: ", refdef.id)?;
-    for inline in &refdef.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&refdef.content, buf, ctx, false)?;
     writeln!(buf)?;
     Ok(())
 }
@@ -1028,6 +1316,7 @@ fn write_cell_block_on_marker_line(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     let mut block_buf = Vec::<u8>::new();
+    ctx.begin_block_sequence();
     write_block(block, &mut block_buf, ctx)?;
     let content = String::from_utf8_lossy(&block_buf);
     let mut lines = content.lines();
@@ -1156,6 +1445,7 @@ fn write_list_table(
     if let Some(ref long_caption) = table.caption.long
         && !long_caption.is_empty()
     {
+        ctx.begin_block_sequence();
         for block in long_caption {
             write_block(block, buf, ctx)?;
         }
@@ -1475,6 +1765,23 @@ fn line_is_dash_only_hazard(line: &[Inline]) -> bool {
 // `---`) apart from genuinely-literal hyphens (`--` → `\-\-`). A run short
 // enough to be inert (a lone hyphen, or one/two dots) is emitted verbatim.
 //
+/// How [`escape_markdown`] treats the two characters that are markdown-special
+/// only at the *start of a line*: `#` (ATX heading) and `>` (blockquote).
+///
+/// Every other entry in the escape table is special mid-line as well and is
+/// always escaped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LineStartEscapes {
+    /// Escape `#` and `>` wherever they appear. The whole-document writer
+    /// cannot know where in a line a given `Str` will land, so it escapes
+    /// conservatively.
+    Always,
+    /// Escape `#` and `>` only where they actually begin a line. The payload
+    /// says whether the text being escaped starts one; newlines *within* the
+    /// text move the position along.
+    WhereMeaningful { starts_line: bool },
+}
+
 // The ASCII apostrophe `'` (and its Unicode form `’`) is escaped whenever the
 // reader would otherwise misclassify it as a smart-quote open/close. The
 // reader's smart-quote classifier accepts `'` as an apostrophe only when it sits
@@ -1485,33 +1792,77 @@ fn line_is_dash_only_hazard(line: &[Inline]) -> bool {
 // `start_prev_is_alnum` (carried in from `QmdWriterContext` so the rule can see
 // across inline boundaries — e.g. a closing backtick from a preceding `Code`
 // span; see bd-nsb9 / issue #205), and the next char in the `Str` body.
-fn escape_markdown(text: &str, start_prev_is_alnum: bool) -> String {
+fn escape_markdown(
+    text: &str,
+    start_prev_is_alnum: bool,
+    line_start_escapes: LineStartEscapes,
+) -> String {
+    escape_markdown_at(text, start_prev_is_alnum, line_start_escapes, None)
+}
+
+/// [`escape_markdown`] plus one forced escape: when `force_escape_at` is
+/// `Some(i)`, the character at char index `i` is written with a backslash even
+/// though it is ordinary text elsewhere (see [`line_start_hazard`]).
+fn escape_markdown_at(
+    text: &str,
+    start_prev_is_alnum: bool,
+    line_start_escapes: LineStartEscapes,
+    force_escape_at: Option<usize>,
+) -> String {
     let chars: Vec<char> = text.chars().collect();
+    // Whether `chars[i]` is the first character of a line. Only consulted for
+    // `#` and `>`, and only under `WhereMeaningful`.
+    let begins_line = |i: usize| match line_start_escapes {
+        LineStartEscapes::Always => true,
+        LineStartEscapes::WhereMeaningful { starts_line } => {
+            if i == 0 {
+                starts_line
+            } else {
+                chars[i - 1] == '\n'
+            }
+        }
+    };
     let mut result = String::new();
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
+        if force_escape_at == Some(i) {
+            result.push('\\');
+            result.push(ch);
+            i += 1;
+            continue;
+        }
         match ch {
             // Characters that must be escaped to avoid triggering markdown syntax:
             '\\' => result.push_str("\\\\"), // Escape character itself
             '<' => result.push_str("\\<"),   // HTML tags, autolinks
-            '>' => result.push_str("\\>"),   // Blockquotes (at line start)
-            '#' => result.push_str("\\#"),   // Headers (at line start)
-            '$' => result.push_str("\\$"),   // Math delimiters
-            '*' => result.push_str("\\*"),   // Emphasis, strong, lists
-            '_' => result.push_str("\\_"),   // Emphasis, strong
-            '[' => result.push_str("\\["),   // Links
-            ']' => result.push_str("\\]"),   // Links
-            '`' => result.push_str("\\`"),   // Code spans
-            '|' => result.push_str("\\|"),   // Tables
-            '~' => result.push_str("\\~"),   // Subscript, strikeout
-            '^' => result.push_str("\\^"),   // Superscript
-            '@' => result.push_str("\\@"),   // Citations: every bare @ in
-            // a Str is either a citation start (when followed by alnum/_/{)
-            // or an outright parse error (any other position). Always escape.
+            // Blockquotes and headings exist only at the start of a line.
+            '>' if begins_line(i) => result.push_str("\\>"),
+            '>' => result.push('>'),
+            '#' if begins_line(i) => result.push_str("\\#"),
+            '#' => result.push('#'),
+            '$' => result.push_str("\\$"), // Math delimiters
+            '*' => result.push_str("\\*"), // Emphasis, strong, lists
+            '_' => result.push_str("\\_"), // Emphasis, strong
+            '[' => result.push_str("\\["), // Links
+            ']' => result.push_str("\\]"), // Links
+            '`' => result.push_str("\\`"), // Code spans
+            '|' => result.push_str("\\|"), // Tables
+            '~' => result.push_str("\\~"), // Subscript, strikeout
+            '^' => result.push_str("\\^"), // Superscript
+            '@' => result.push_str("\\@"), // Citations: a bare @ in a Str
+            // may start a citation (followed by alnum/_/{) or be an error
+            // (a likely citation typo such as `@-foo`); only some positions
+            // read back as literal text (bd-bare-at-literal-w3ytmu8e).
+            // Escaping is always correct, so always escape.
             '{' => result.push_str("\\{"), // Attribute span open: bare { in
             '}' => result.push_str("\\}"), // a Str body is always a parse
             // error in qmd. Always escape.
+            '"' => result.push_str("\\\""), // A bare " in a Str body would be
+            // re-read as a smart quote (Quoted DoubleQuote); `\"` re-reads as
+            // the literal straight quote. Str bodies only contain " via
+            // character references (&quot;, &#34;) or programmatic ASTs —
+            // parsed quotation marks become Quoted nodes instead.
 
             // Smart typography → ASCII source spelling, emitted UNescaped so the
             // reader re-converts it back to the Unicode character.
@@ -1568,8 +1919,34 @@ fn escape_markdown(text: &str, start_prev_is_alnum: bool) -> String {
                 }
             }
 
+            // A `&` that begins something the reader would lex as an
+            // `entity_reference` or `numeric_character_reference` must be
+            // escaped, or `Str "&copy;"` (from `\&copy;` in source) re-reads
+            // as `©` — and a literal `Str "&ZeroWidthSpace;"` would be
+            // indistinguishable from the reference the arm below emits for a
+            // real U+200B. Pandoc's markdown writer escapes the same way.
+            // Any other `&` (`AT&T`, `a & b`) is plain text (bd-i18zoy4n).
+            '&' if starts_character_reference(&chars[i..]) => result.push_str("\\&"),
+
+            // Join controls (ZWNJ / ZWJ) are format characters too, but they
+            // parse raw (bd-96fswwce), are ordinary content in Persian/Indic
+            // text, and ZWJ is structural inside emoji sequences — an entity
+            // there would be noise and would split the emoji token on re-read.
+            '\u{200C}' | '\u{200D}' => result.push(ch),
+            // Every other Unicode format character (category Cf: zero width
+            // space, soft hyphen, bidi controls, MathML invisibles, …) is
+            // invisible in source, so spell it as a character reference —
+            // the preferred WHATWG name, else `&#xXXXX;`. The reader decodes
+            // both. See `writers::format_chars` (bd-wuiu1of7, GH #672).
+            c if super::format_chars::is_format_char(c) => {
+                result.push_str(
+                    &super::format_chars::format_char_reference(c)
+                        .expect("is_format_char and format_char_reference agree"),
+                );
+            }
+
             // Characters that don't need escaping in most contexts:
-            // , + ! ? = : ; / ( ) % & "
+            // , + ! ? = : ; / ( ) % &
             // These are only special in very specific contexts and escaping them
             // everywhere would make output unnecessarily verbose.
             _ => result.push(ch),
@@ -1577,6 +1954,69 @@ fn escape_markdown(text: &str, start_prev_is_alnum: bool) -> String {
         i += 1;
     }
     result
+}
+
+/// Would the qmd reader lex the text starting at `rest[0] == '&'` as a
+/// character reference? Mirrors the two grammar tokens in
+/// `crates/tree-sitter-qmd/tree-sitter-markdown/grammar.js`:
+///
+/// * `numeric_character_reference`: `&#([0-9]{1,7}|[xX][0-9a-fA-F]{1,6});`
+/// * `entity_reference`: `&<name>;` for every semicolon-terminated key of
+///   the WHATWG table (the same table the reader decodes with, so the lookup
+///   goes through `entity_table()` rather than a second copy of the names).
+fn starts_character_reference(rest: &[char]) -> bool {
+    debug_assert_eq!(rest.first(), Some(&'&'));
+    let body = &rest[1..];
+    if body.first() == Some(&'#') {
+        let (digits, max_len, is_digit): (&[char], usize, fn(&char) -> bool) = match body.get(1) {
+            Some('x' | 'X') => (&body[2..], 6, |c| c.is_ascii_hexdigit()),
+            _ => (&body[1..], 7, |c| c.is_ascii_digit()),
+        };
+        let n = digits.iter().take_while(|c| is_digit(c)).count();
+        return (1..=max_len).contains(&n) && digits.get(n) == Some(&';');
+    }
+    // WHATWG names are ASCII alphanumerics; the longest is 31 characters.
+    let n = body
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .count();
+    if n == 0 || body.get(n) != Some(&';') {
+        return false;
+    }
+    let candidate: String = std::iter::once('&')
+        .chain(body[..n].iter().copied())
+        .chain(std::iter::once(';'))
+        .collect();
+    crate::pandoc::treesitter_utils::entity_reference::entity_table().contains_key(&candidate)
+}
+
+/// For a `Str` that begins a line, the char index of the character that must
+/// be backslash-escaped so the line doesn't read as block syntax.
+///
+/// Covers the markers `escape_markdown` leaves alone because they are
+/// ordinary text mid-line: a bullet `-` or `+`, an ordered marker (`1.`,
+/// `12)`), the definition-list colon and the fenced-div fence `:::`. A marker
+/// only counts when whitespace follows it, or the text ends and
+/// `next_is_boundary` says a space, a break or the end of the line comes next,
+/// so `1.5` and `-5` stay as they are. `*`, `#`, `>`, `|`, backticks, `~` and
+/// runs of `-` are already escaped everywhere or by `escape_markdown`.
+fn line_start_hazard(text: &str, next_is_boundary: bool) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let ends_token = |i: usize| match chars.get(i) {
+        None => next_is_boundary,
+        Some(c) => c.is_whitespace(),
+    };
+    match *chars.first()? {
+        '-' | '+' if ends_token(1) => Some(0),
+        ':' if ends_token(1) || chars.starts_with(&[':', ':', ':']) => Some(0),
+        '0'..='9' => {
+            let digits = chars.iter().take_while(|c| c.is_ascii_digit()).count();
+            // The reader reads at most 9 digits as a list number.
+            let marker = chars.get(digits)?;
+            (digits <= 9 && matches!(marker, '.' | ')') && ends_token(digits + 1)).then_some(digits)
+        }
+        _ => None,
+    }
 }
 
 fn write_str(
@@ -1603,23 +2043,49 @@ fn write_str(
         }
         return Ok(());
     }
-    let escaped = escape_markdown(&s.text, ctx.prev_emitted_alnum);
+    let line_start_escapes = if ctx.inline_fragment {
+        LineStartEscapes::WhereMeaningful {
+            starts_line: ctx.at_line_start,
+        }
+    } else {
+        LineStartEscapes::Always
+    };
+    // Text that begins a line must not read as a list, definition or div, and
+    // text right after a `]` must not turn that bracket into a link.
+    let hazard = if ctx.at_line_start {
+        line_start_hazard(&s.text, ctx.next_is_boundary)
+    } else if ctx.last_byte == Some(b']') && s.text.starts_with('(') {
+        Some(0)
+    } else {
+        None
+    };
+    let escaped = escape_markdown_at(&s.text, ctx.prev_emitted_alnum, line_start_escapes, hazard);
     write!(buf, "{}", escaped)
 }
 
 fn write_space(
     _: &crate::pandoc::Space,
     buf: &mut dyn std::io::Write,
-    _ctx: &mut QmdWriterContext,
+    ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    if ctx.sub_sup_depth > 0 {
+        // See `QmdWriterContext::sub_sup_depth`.
+        return write!(buf, "\\ ");
+    }
     write!(buf, " ")
 }
 
 fn write_soft_break(
     _: &crate::pandoc::SoftBreak,
     buf: &mut dyn std::io::Write,
-    _ctx: &mut QmdWriterContext,
+    ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    if ctx.sub_sup_depth > 0 {
+        // A newline inside `~sub~` would end the subscript on re-read
+        // (see `QmdWriterContext::sub_sup_depth`); a soft break is a
+        // space semantically, so write it as an escaped space.
+        return write!(buf, "\\ ");
+    }
     // Pandoc's writer for markdown outputs a space for soft breaks
     // We choose to deviate from Pandoc for roundtripping purposes
     writeln!(buf)
@@ -1640,9 +2106,7 @@ fn write_emph(
     write!(buf, "{}", delim_str)?;
     ctx.push_emphasis(delimiter, false);
 
-    for inline in &emph.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&emph.content, buf, ctx, false)?;
 
     ctx.pop_emphasis();
     write!(buf, "{}", delim_str)
@@ -1663,9 +2127,7 @@ fn write_strong(
     write!(buf, "{}", delim_str)?;
     ctx.push_emphasis(delimiter, true);
 
-    for inline in &strong.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&strong.content, buf, ctx, false)?;
 
     ctx.pop_emphasis();
     write!(buf, "{}", delim_str)
@@ -1687,8 +2149,11 @@ fn write_code(
     }
     write!(buf, "{}", backticks)?;
     // TODO: Handle attributes if non-empty
+    // Uses write_code_attr (not write_attr): inline code shares the
+    // parser's bracket-wrapped language-class encoding with code fences
+    // — see write_code_attr's doc comment.
     if !is_empty_attr(&code.attr) {
-        write_attr(&code.attr, buf, _ctx)?;
+        write_code_attr(&code.attr, buf, _ctx)?;
     }
     Ok(())
 }
@@ -1740,9 +2205,7 @@ fn write_link(
         return write!(buf, "<#{}>", anchor_id);
     }
     write!(buf, "[")?;
-    for inline in &link.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&link.content, buf, ctx, false)?;
     write!(buf, "](")?;
     write!(buf, "{}", link.target.0)?;
     if !link.target.1.is_empty() {
@@ -1761,9 +2224,7 @@ fn write_image(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "![")?;
-    for inline in &image.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&image.content, buf, ctx, false)?;
     write!(buf, "](")?;
     write!(buf, "{}", image.target.0)?;
     if !image.target.1.is_empty() {
@@ -1782,9 +2243,7 @@ fn write_strikeout(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "~~")?;
-    for inline in &strikeout.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&strikeout.content, buf, ctx, false)?;
     write!(buf, "~~")
 }
 
@@ -1794,9 +2253,13 @@ fn write_subscript(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "~")?;
-    for inline in &subscript.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    ctx.sub_sup_depth += 1;
+    let result = subscript
+        .content
+        .iter()
+        .try_for_each(|inline| write_inline(inline, buf, ctx));
+    ctx.sub_sup_depth -= 1;
+    result?;
     write!(buf, "~")
 }
 
@@ -1806,9 +2269,13 @@ fn write_superscript(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "^")?;
-    for inline in &superscript.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    ctx.sub_sup_depth += 1;
+    let result = superscript
+        .content
+        .iter()
+        .try_for_each(|inline| write_inline(inline, buf, ctx));
+    ctx.sub_sup_depth -= 1;
+    result?;
     write!(buf, "^")
 }
 
@@ -1858,26 +2325,24 @@ fn write_span(
 ) -> std::io::Result<()> {
     let (id, classes, keyvals) = &span.attr;
 
-    // Check if this is an editorial mark span that should use decorated syntax
-    // These spans have exactly one class, no ID, and no key-value pairs
-    if id.is_empty() && classes.len() == 1 && keyvals.is_empty() {
-        let marker = match classes[0].as_str() {
-            "quarto-highlight" => Some("!! "),
-            "quarto-insert" => Some("++ "),
-            "quarto-delete" => Some("-- "),
-            "quarto-edit-comment" => Some(">> "),
-            _ => None,
-        };
-
-        if let Some(marker) = marker {
-            // Write using decorated syntax
-            write!(buf, "[{}", marker)?;
-            for inline in &span.content {
-                write_inline(inline, buf, ctx)?;
-            }
-            write!(buf, "]")?;
-            return Ok(());
+    // A span whose first class is an editorial mark's is written with the
+    // decorated syntax (`[++ …]`), the rest of its attributes following in
+    // braces. The reader puts the mark's class first, so only a span with the
+    // mark first round-trips; one with the mark later, or with two marks, keeps
+    // the generic form below. `write_div` follows the same rule.
+    if let Some(marker) = classes.first().and_then(|c| editorial_marker_for_class(c))
+        && !classes[1..]
+            .iter()
+            .any(|c| editorial_marker_for_class(c).is_some())
+    {
+        write!(buf, "[{} ", marker)?;
+        write_inline_run(&span.content, buf, ctx, false)?;
+        write!(buf, "]")?;
+        let rest = (id.clone(), classes[1..].to_vec(), keyvals.clone());
+        if !is_empty_attr(&rest) {
+            write_attr(&rest, buf, ctx)?;
         }
+        return Ok(());
     }
 
     // Spans use bracket syntax: [content]{#id .class key=value}
@@ -1889,9 +2354,7 @@ fn write_span(
         write!(buf, " ]")?;
         return Ok(());
     }
-    for inline in &span.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&span.content, buf, ctx, false)?;
     write!(buf, "]")?;
     if !is_empty_attr(&span.attr) {
         write_attr(&span.attr, buf, ctx)?;
@@ -1905,9 +2368,7 @@ fn write_underline(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[")?;
-    for inline in &underline.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&underline.content, buf, ctx, false)?;
     write!(buf, "]{{.underline}}")
 }
 fn write_smallcaps(
@@ -1916,9 +2377,7 @@ fn write_smallcaps(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[")?;
-    for inline in &smallcaps.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&smallcaps.content, buf, ctx, false)?;
     write!(buf, "]{{.smallcaps}}")
 }
 fn write_cite(
@@ -2058,10 +2517,20 @@ fn write_notereference(
 ) -> std::io::Result<()> {
     write!(buf, "[^{}]", noteref.id)
 }
+/// Serialize a shortcode back to its qmd source form (`{{< … >}}`;
+/// escaped: `{{{< … >}}}`), including grammar-accurate arg quoting.
+/// Public so non-writer consumers (e.g. quarto-core's include-slot
+/// handling) can reconstruct literal shortcode text for later
+/// text-level expansion.
+pub fn shortcode_source_text(shortcode: &crate::pandoc::Shortcode) -> String {
+    let mut buf = Vec::new();
+    write_shortcode(shortcode, &mut buf).expect("writing to a Vec cannot fail");
+    String::from_utf8(buf).expect("qmd shortcode serialization is UTF-8")
+}
+
 fn write_shortcode(
     shortcode: &crate::pandoc::Shortcode,
     buf: &mut dyn std::io::Write,
-    ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     let (open, close) = if shortcode.is_escaped {
         ("{{{<", ">}}}")
@@ -2071,11 +2540,11 @@ fn write_shortcode(
     write!(buf, "{} {}", open, shortcode.name)?;
     for arg in &shortcode.positional_args {
         write!(buf, " ")?;
-        write_shortcode_arg(arg, buf, ctx)?;
+        write_shortcode_arg(arg, buf)?;
     }
     for (key, value) in &shortcode.keyword_args {
         write!(buf, " {}=", key)?;
-        write_shortcode_arg(value, buf, ctx)?;
+        write_shortcode_arg(value, buf)?;
     }
     write!(buf, " {}", close)
 }
@@ -2083,14 +2552,13 @@ fn write_shortcode(
 fn write_shortcode_arg(
     arg: &crate::pandoc::ShortcodeArg,
     buf: &mut dyn std::io::Write,
-    ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     use crate::pandoc::ShortcodeArg;
     match arg {
         ShortcodeArg::String(s) => write_shortcode_string_value(s, buf),
         ShortcodeArg::Number(n) => write!(buf, "{}", n),
         ShortcodeArg::Boolean(b) => write!(buf, "{}", b),
-        ShortcodeArg::Shortcode(inner) => write_shortcode(inner, buf, ctx),
+        ShortcodeArg::Shortcode(inner) => write_shortcode(inner, buf),
         ShortcodeArg::KeyValue(map) => {
             // Positional `key=value` pair(s). The qmd parser doesn't currently
             // produce this variant from source — it's reachable only via Lua
@@ -2103,7 +2571,7 @@ fn write_shortcode_arg(
                 }
                 first = false;
                 write!(buf, "{}=", k)?;
-                write_shortcode_arg(v, buf, ctx)?;
+                write_shortcode_arg(v, buf)?;
             }
             Ok(())
         }
@@ -2134,43 +2602,47 @@ fn write_shortcode_string_value(s: &str, buf: &mut dyn std::io::Write) -> std::i
 }
 
 fn shortcode_string_needs_quoting(s: &str) -> bool {
-    if s.is_empty() {
-        return true;
-    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return true; // empty string: the parser would fail to match
+    };
     if shortcode_string_looks_like_number(s) {
         return true;
     }
-    !s.chars().all(is_shortcode_naked_char)
+    !is_shortcode_naked_first_char(first) || !chars.all(is_shortcode_naked_char)
 }
 
-/// Characters allowed in a `shortcode_naked_string` token. Mirrors the
-/// regex `[A-Za-z0-9_.~:/?#\]@!$%&()+,;-]|\[` from grammar.js. Whitespace,
-/// `>`, `<`, `{`, `}`, `'`, `"`, `\`, `*`, `=`, `^`, `|` are deliberately
-/// excluded.
+/// Characters allowed unquoted in a shortcode argument by the *writer*.
+///
+/// Mirrors the blocklist in grammar.js (`shortcode_naked_string`) with two
+/// deliberate narrowings, both in the safe direction — the writer quotes more
+/// than the parser strictly requires:
+///
+/// - `|` is excluded. The grammar accepts it, but this function has no
+///   positional context, and a bare `|` emitted inside a pipe-table cell
+///   splits the row on re-parse. The motivating repro is a table row.
+/// - Whitespace is tested with `is_ascii_whitespace`, matching the grammar's
+///   ASCII-only `[^ \t\n\r…]`. Non-ASCII whitespace is content, not
+///   whitespace, per claude-notes/plans/2026-04-30-unicode-whitespace-handling.md.
+///
+/// Non-ASCII is otherwise ordinary content. This was formerly an ASCII
+/// allowlist copied from RFC 3986's URI repertoire, which made every
+/// non-ASCII character — and `* ^ |` — a fatal parse error
+/// (bd-shortcode-escaped-gt-fatal-2u79bqp1,
+/// bd-shortcode-naked-value-nonascii-47fzbmow).
+///
+/// Note the grammar is not the only acceptor: for letter-initial values the
+/// external scanner token (`scanner.c:2159`, charset `[A-Za-z0-9_%.-]`) decides
+/// first. It is strictly narrower, so quoting decisions made here remain valid.
 fn is_shortcode_naked_char(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || matches!(
-            c,
-            '_' | '.'
-                | '~'
-                | ':'
-                | '/'
-                | '?'
-                | '#'
-                | ']'
-                | '@'
-                | '!'
-                | '$'
-                | '%'
-                | '&'
-                | '('
-                | ')'
-                | '+'
-                | ','
-                | ';'
-                | '-'
-                | '['
-        )
+    !c.is_ascii_whitespace() && !matches!(c, '<' | '>' | '{' | '}' | '=' | '\\' | '|')
+}
+
+/// Characters allowed as the *first* character of a naked token. The grammar
+/// additionally forbids a leading quote there, since it would open a quoted
+/// string.
+fn is_shortcode_naked_first_char(c: char) -> bool {
+    is_shortcode_naked_char(c) && !matches!(c, '\'' | '"')
 }
 
 /// Mirrors the `shortcode_number` regex
@@ -2222,7 +2694,7 @@ fn shortcode_string_looks_like_number(s: &str) -> bool {
 
 #[cfg(test)]
 mod smart_typography_writer_tests {
-    use super::{escape_markdown, line_is_dash_only_hazard};
+    use super::{LineStartEscapes, escape_markdown, line_is_dash_only_hazard};
     use crate::pandoc::inline::{Inline, Space, Str};
     use quarto_source_map::SourceInfo;
 
@@ -2243,23 +2715,53 @@ mod smart_typography_writer_tests {
     fn canonicalizes_unicode_smart_chars_unescaped() {
         // Unicode smart chars become their ASCII spelling, emitted UNescaped so
         // the reader re-converts them.
-        assert_eq!(escape_markdown("\u{2014}", false), "---"); // em → ---
-        assert_eq!(escape_markdown("\u{2013}", false), "--"); // en → --
-        assert_eq!(escape_markdown("\u{2026}", false), "..."); // … → ...
-        assert_eq!(escape_markdown("a\u{2014}b\u{2026}c", false), "a---b...c");
+        assert_eq!(
+            escape_markdown("\u{2014}", false, LineStartEscapes::Always),
+            "---"
+        ); // em → ---
+        assert_eq!(
+            escape_markdown("\u{2013}", false, LineStartEscapes::Always),
+            "--"
+        ); // en → --
+        assert_eq!(
+            escape_markdown("\u{2026}", false, LineStartEscapes::Always),
+            "..."
+        ); // … → ...
+        assert_eq!(
+            escape_markdown("a\u{2014}b\u{2026}c", false, LineStartEscapes::Always),
+            "a---b...c"
+        );
         // ’ between alnums is kept as ', elsewhere escaped.
-        assert_eq!(escape_markdown("don\u{2019}t", false), "don't");
+        assert_eq!(
+            escape_markdown("don\u{2019}t", false, LineStartEscapes::Always),
+            "don't"
+        );
     }
 
     #[test]
     fn escapes_literal_dash_and_dot_runs() {
         // Literal ASCII runs the reader would smart-convert must be escaped so
         // they stay literal (e.g. from escaped input `a\-\-b`).
-        assert_eq!(escape_markdown("a--b", false), "a\\-\\-b");
-        assert_eq!(escape_markdown("a---b", false), "a\\-\\-\\-b");
-        assert_eq!(escape_markdown("a-b", false), "a-b"); // lone hyphen inert
-        assert_eq!(escape_markdown("x...", false), "x\\.\\.\\.");
-        assert_eq!(escape_markdown("x..", false), "x.."); // two dots inert
+        assert_eq!(
+            escape_markdown("a--b", false, LineStartEscapes::Always),
+            "a\\-\\-b"
+        );
+        assert_eq!(
+            escape_markdown("a---b", false, LineStartEscapes::Always),
+            "a\\-\\-\\-b"
+        );
+        assert_eq!(
+            escape_markdown("a-b", false, LineStartEscapes::Always),
+            "a-b"
+        ); // lone hyphen inert
+        assert_eq!(
+            escape_markdown("x...", false, LineStartEscapes::Always),
+            "x\\.\\.\\."
+        );
+        assert_eq!(
+            escape_markdown("x..", false, LineStartEscapes::Always),
+            "x.."
+        ); // two dots inert
     }
 
     #[test]
@@ -2316,10 +2818,41 @@ mod shortcode_writer_tests {
     fn delimiter_chars_must_be_quoted() {
         assert!(shortcode_string_needs_quoting(">closing"));
         assert!(shortcode_string_needs_quoting("a>b"));
+        assert!(shortcode_string_needs_quoting("a<b"));
         assert!(shortcode_string_needs_quoting("{a}"));
-        assert!(shortcode_string_needs_quoting("a\"b"));
-        assert!(shortcode_string_needs_quoting("a'b"));
         assert!(shortcode_string_needs_quoting("a=b"));
+    }
+
+    #[test]
+    fn non_ascii_does_not_need_quoting() {
+        // Mirrors the widened grammar: non-ASCII is ordinary content.
+        assert!(!shortcode_string_needs_quoting("Command-\u{2192}"));
+        assert!(!shortcode_string_needs_quoting("\u{e9}"));
+        assert!(!shortcode_string_needs_quoting("\u{65e5}\u{672c}\u{8a9e}"));
+        assert!(!shortcode_string_needs_quoting("\u{2318}"));
+    }
+
+    #[test]
+    fn widened_punctuation_does_not_need_quoting() {
+        assert!(!shortcode_string_needs_quoting("*"));
+        assert!(!shortcode_string_needs_quoting("^"));
+    }
+
+    #[test]
+    fn pipe_still_needs_quoting_despite_the_grammar_accepting_it() {
+        // The grammar accepts a bare `|`, but the writer has no positional
+        // context and would emit it inside a pipe-table cell, splitting the
+        // row on re-parse. Quoting is always safe.
+        assert!(shortcode_string_needs_quoting("|"));
+        assert!(shortcode_string_needs_quoting("a|b"));
+    }
+
+    #[test]
+    fn leading_quote_needs_quoting_interior_does_not() {
+        // The grammar forbids a naked token from *starting* with a quote.
+        assert!(shortcode_string_needs_quoting("'leading"));
+        assert!(shortcode_string_needs_quoting("\"leading"));
+        assert!(!shortcode_string_needs_quoting("don't"));
     }
 
     #[test]
@@ -2351,9 +2884,7 @@ fn write_insert(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[++ ")?;
-    for inline in &insert.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&insert.content, buf, ctx, false)?;
     write!(buf, "]")?;
     if !is_empty_attr(&insert.attr) {
         write_attr(&insert.attr, buf, ctx)?;
@@ -2366,9 +2897,7 @@ fn write_delete(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[-- ")?;
-    for inline in &delete.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&delete.content, buf, ctx, false)?;
     write!(buf, "]")?;
     if !is_empty_attr(&delete.attr) {
         write_attr(&delete.attr, buf, ctx)?;
@@ -2381,9 +2910,7 @@ fn write_highlight(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[!! ")?;
-    for inline in &highlight.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&highlight.content, buf, ctx, false)?;
     write!(buf, "]")?;
     if !is_empty_attr(&highlight.attr) {
         write_attr(&highlight.attr, buf, ctx)?;
@@ -2396,12 +2923,54 @@ fn write_editcomment(
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
     write!(buf, "[>> ")?;
-    for inline in &comment.content {
-        write_inline(inline, buf, ctx)?;
-    }
+    write_inline_run(&comment.content, buf, ctx, false)?;
     write!(buf, "]")?;
     if !is_empty_attr(&comment.attr) {
         write_attr(&comment.attr, buf, ctx)?;
+    }
+    Ok(())
+}
+
+/// A writer that remembers the last byte written through it.
+struct LastByteWriter<'a> {
+    inner: &'a mut dyn std::io::Write,
+    last: Option<u8>,
+}
+
+impl std::io::Write for LastByteWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(bytes)?;
+        if n > 0 {
+            self.last = Some(bytes[n - 1]);
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Write the inlines of one container (or one line of a paragraph), telling
+/// each `Str` whether a word boundary follows it.
+///
+/// `ends_at_boundary` says what follows the *last* inline: true at the end of
+/// a line, false inside a container, where the closing delimiter comes next.
+fn write_inline_run(
+    inlines: &[Inline],
+    buf: &mut dyn std::io::Write,
+    ctx: &mut QmdWriterContext,
+    ends_at_boundary: bool,
+) -> std::io::Result<()> {
+    for (i, inline) in inlines.iter().enumerate() {
+        ctx.next_is_boundary = match inlines.get(i + 1) {
+            Some(next) => matches!(
+                next,
+                Inline::Space(_) | Inline::SoftBreak(_) | Inline::LineBreak(_)
+            ),
+            None => ends_at_boundary,
+        };
+        write_inline(inline, buf, ctx)?;
     }
     Ok(())
 }
@@ -2411,6 +2980,11 @@ fn write_inline(
     buf: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    let mut tracked = LastByteWriter {
+        inner: buf,
+        last: None,
+    };
+    let buf: &mut dyn std::io::Write = &mut tracked;
     // Before dispatch: most inline kinds open with a non-alphanumeric byte
     // (delimiter, bracket, backtick, ...), so any inlines nested inside
     // them begin with a non-alphanumeric byte-stream context. Reset
@@ -2423,6 +2997,14 @@ fn write_inline(
         crate::pandoc::Inline::Str(_) | crate::pandoc::Inline::Custom(_)
     ) {
         ctx.prev_emitted_alnum = false;
+        // Nor does one begin a line: the opener comes first. A break inside the
+        // inline sets the flag again for what follows it.
+        if !matches!(
+            inline,
+            crate::pandoc::Inline::SoftBreak(_) | crate::pandoc::Inline::LineBreak(_)
+        ) {
+            ctx.at_line_start = false;
+        }
     }
 
     let result = match inline {
@@ -2430,7 +3012,7 @@ fn write_inline(
         crate::pandoc::Inline::Highlight(node) => write_highlight(node, buf, ctx),
         crate::pandoc::Inline::Delete(node) => write_delete(node, buf, ctx),
         crate::pandoc::Inline::Insert(node) => write_insert(node, buf, ctx),
-        crate::pandoc::Inline::Shortcode(node) => write_shortcode(node, buf, ctx),
+        crate::pandoc::Inline::Shortcode(node) => write_shortcode(node, buf),
         crate::pandoc::Inline::Attr(node) => write_attr(&node.attr, buf, ctx),
         crate::pandoc::Inline::NoteReference(node) => write_notereference(node, buf, ctx),
         crate::pandoc::Inline::Note(node) => write_note(node, buf, ctx),
@@ -2459,18 +3041,34 @@ fn write_inline(
         }
     };
 
+    if let Some(byte) = tracked.last {
+        ctx.last_byte = Some(byte);
+    }
+
     // After dispatch: refresh `prev_emitted_alnum` to reflect the byte
     // this inline most recently emitted.
     match inline {
         crate::pandoc::Inline::Str(s) => {
             ctx.prev_emitted_alnum = s.text.chars().last().is_some_and(|c| c.is_alphanumeric());
+            // A `Str` body normally holds no newline (the reader emits
+            // SoftBreak nodes instead), but honour one if it does.
+            ctx.at_line_start = s.text.ends_with('\n');
         }
         crate::pandoc::Inline::Custom(_) => {
             // No bytes emitted; preserve prior state.
         }
+        // Both break kinds end their output with a newline, so whatever
+        // follows them begins a line.
+        crate::pandoc::Inline::SoftBreak(_) | crate::pandoc::Inline::LineBreak(_) => {
+            ctx.prev_emitted_alnum = false;
+            ctx.at_line_start = true;
+        }
         // Every other inline kind closes with a non-alphanumeric byte
         // (delimiter, bracket, backtick, newline, space, ...).
-        _ => ctx.prev_emitted_alnum = false,
+        _ => {
+            ctx.prev_emitted_alnum = false;
+            ctx.at_line_start = false;
+        }
     }
 
     result
@@ -2481,11 +3079,33 @@ fn write_block(
     buf: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    // Two bullet lists in a row re-read as one list unless their markers
+    // differ (`*` then `-`), and the AST has nowhere to keep a marker, so the
+    // block loop's previous sibling decides. A container takes the value on
+    // entry and so leaves `None` for its own first child.
+    let prev_marker = ctx.prev_bullet_marker.take();
+    if matches!(block, Block::BulletList(_)) {
+        ctx.bullet_marker = if prev_marker == Some('*') { '-' } else { '*' };
+    }
+    let marker = ctx.bullet_marker;
+    let result = write_block_inner(block, buf, ctx);
+    ctx.prev_bullet_marker = matches!(block, Block::BulletList(_)).then_some(marker);
+    result
+}
+
+fn write_block_inner(
+    block: &crate::pandoc::Block,
+    buf: &mut dyn std::io::Write,
+    ctx: &mut QmdWriterContext,
+) -> std::io::Result<()> {
     // Every block starts on its own line, so the reader's byte-stream
     // context resets here too. Clear any alphanumeric carry-over from
     // the previous block so a `Str`-leading `'` at the head of this
-    // block is escaped correctly.
+    // block is escaped correctly. The same goes for the line-start flag and the
+    // last byte: a block's inlines begin a line only when its writer says so.
     ctx.prev_emitted_alnum = false;
+    ctx.at_line_start = false;
+    ctx.last_byte = None;
 
     match block {
         Block::Plain(plain) => {
@@ -2594,9 +3214,8 @@ fn write_prose_line(
     if hazard {
         ctx.suppress_dash_canonicalization = true;
     }
-    for inline in line {
-        write_inline(inline, buf, ctx)?;
-    }
+    // A line's inlines end at a break or the end of the block: a boundary.
+    write_inline_run(line, buf, ctx, true)?;
     ctx.suppress_dash_canonicalization = false;
     Ok(())
 }
@@ -2606,6 +3225,8 @@ pub fn write_paragraph(
     buf: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    // A paragraph's first line begins a line, in a list item or block quote too.
+    ctx.at_line_start = true;
     write_prose_inlines(&para.content, buf, ctx)?;
     writeln!(buf)?;
     Ok(())
@@ -2616,6 +3237,8 @@ pub fn write_plain(
     buf: &mut dyn std::io::Write,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    // A paragraph's first line begins a line, in a list item or block quote too.
+    ctx.at_line_start = true;
     write_prose_inlines(&plain.content, buf, ctx)?;
     writeln!(buf)?;
     Ok(())
@@ -2704,6 +3327,48 @@ pub fn write_inlines<T: std::io::Write>(
     Ok(())
 }
 
+/// Write a sequence of inlines as a fragment embedded *inside* a line of
+/// surrounding text.
+///
+/// Like [`write_inlines`], but for output that will be spliced into a larger
+/// line rather than stand as a document of its own — quoting a bracket label
+/// back to the author inside a diagnostic message, for instance.
+///
+/// The difference is escaping. `#` and `>` are markdown-special only at the
+/// start of a line; [`write_inlines`] cannot know where in a line its output
+/// will land, so it escapes them everywhere, turning `[#7380](url)` into
+/// `[\#7380](url)`. This entry point tracks line position and escapes them
+/// only where a reader would really see a heading or a blockquote — so a
+/// fragment round-trips to the author's own spelling, and a `#` that follows
+/// a SoftBreak inside the run is still escaped. Every other escape is
+/// identical between the two.
+///
+/// Introduced for `Q-2-45`/`Q-2-46`/`Q-2-49`, whose messages quote the
+/// offending source and print a remedy the author is expected to copy
+/// (bd-q249-message-drops-inline-content-pacg3qeu).
+pub fn write_inlines_fragment<T: std::io::Write>(
+    inlines: &[crate::pandoc::Inline],
+    buf: &mut T,
+) -> Result<(), Vec<quarto_error_reporting::DiagnosticMessage>> {
+    let mut ctx = QmdWriterContext::new();
+    ctx.inline_fragment = true;
+    ctx.at_line_start = false;
+    for inline in inlines {
+        if let Err(e) = write_inline(inline, buf, &mut ctx) {
+            return Err(vec![
+                quarto_error_reporting::DiagnosticMessageBuilder::error("IO error during write")
+                    .with_code("Q-3-1")
+                    .problem(format!("Failed to write inline: {}", e))
+                    .build(),
+            ]);
+        }
+    }
+    if !ctx.errors.is_empty() {
+        return Err(ctx.errors);
+    }
+    Ok(())
+}
+
 /// Write metadata (YAML front matter) to the given buffer.
 ///
 /// This is a public wrapper around `write_config_value_meta`, intended for use
@@ -2759,6 +3424,8 @@ fn write_impl<T: std::io::Write>(
     buf: &mut T,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<()> {
+    let prepared = super::qmd_prepass::prepare(pandoc);
+    let pandoc = &*prepared;
     // Phase 5: Write ConfigValue directly without MetaValueWithSourceInfo conversion
     let mut need_newline = write_config_value_meta(&pandoc.meta, buf, ctx)?;
     for block in &pandoc.blocks {
@@ -2812,6 +3479,8 @@ fn write_impl_tracked(
     buf: &mut Vec<u8>,
     ctx: &mut QmdWriterContext,
 ) -> std::io::Result<quarto_source_map::SourceInfo> {
+    let prepared = super::qmd_prepass::prepare(pandoc);
+    let pandoc = &*prepared;
     let mut pieces: Vec<(quarto_source_map::SourceInfo, usize)> = Vec::new();
 
     // Track YAML frontmatter as a single piece
@@ -2834,4 +3503,236 @@ fn write_impl_tracked(
     }
 
     Ok(quarto_source_map::SourceInfo::concat(pieces))
+}
+
+#[cfg(test)]
+mod inline_fragment_escaping_tests {
+    //! `#` and `>` are markdown-special only at the start of a line. The
+    //! whole-document writer has no line-position context and so escapes
+    //! them everywhere; the fragment entry point tracks position and
+    //! escapes them only where a reader would actually see a heading or a
+    //! blockquote. See `write_inlines_fragment`.
+
+    use super::write_inlines_fragment;
+
+    /// Parse `source` as a document and render its first block's inlines
+    /// back as an embedded fragment.
+    fn fragment(source: &str) -> String {
+        let mut sink = std::io::sink();
+        let (ast, _ctx, _warnings) =
+            crate::readers::qmd::read(source.as_bytes(), false, "t.qmd", &mut sink, true, None)
+                .expect("fixture must parse");
+        let inlines = match &ast.blocks[0] {
+            crate::pandoc::Block::Paragraph(p) => &p.content,
+            crate::pandoc::Block::Plain(p) => &p.content,
+            other => panic!("fixture must be a paragraph, got {other:?}"),
+        };
+        let mut buf = Vec::new();
+        write_inlines_fragment(inlines, &mut buf).expect("fragment must write");
+        String::from_utf8(buf).expect("fragment must be utf-8")
+    }
+
+    /// The same inlines through the whole-document entry point, which must
+    /// keep escaping conservatively.
+    fn whole_document(source: &str) -> String {
+        let mut sink = std::io::sink();
+        let (ast, _ctx, _warnings) =
+            crate::readers::qmd::read(source.as_bytes(), false, "t.qmd", &mut sink, true, None)
+                .expect("fixture must parse");
+        let inlines = match &ast.blocks[0] {
+            crate::pandoc::Block::Paragraph(p) => &p.content,
+            crate::pandoc::Block::Plain(p) => &p.content,
+            other => panic!("fixture must be a paragraph, got {other:?}"),
+        };
+        let mut buf = Vec::new();
+        super::write_inlines(inlines, &mut buf).expect("inlines must write");
+        String::from_utf8(buf).expect("output must be utf-8")
+    }
+
+    #[test]
+    fn hash_mid_line_is_not_escaped() {
+        assert_eq!(fragment("issue #1234 here\n"), "issue #1234 here");
+    }
+
+    #[test]
+    fn hash_opening_the_fragment_is_not_escaped() {
+        // A fragment is embedded *inside* a line, so its first byte is
+        // never the first byte of a line.
+        assert_eq!(fragment("#1234\n"), "#1234");
+    }
+
+    #[test]
+    fn angle_bracket_mid_line_is_not_escaped() {
+        assert_eq!(fragment("a > b\n"), "a > b");
+    }
+
+    #[test]
+    fn a_link_keeps_its_hash_unescaped() {
+        assert_eq!(
+            fragment("[#7380](https://example.com/7380)\n"),
+            "[#7380](https://example.com/7380)"
+        );
+    }
+
+    /// The escape is dropped only for the two line-start-only characters.
+    /// Everything else in the escape table is special mid-line too.
+    #[test]
+    fn other_escapes_are_unaffected() {
+        assert_eq!(fragment("a\\*b\\_c\\[d\\]e\n"), "a\\*b\\_c\\[d\\]e");
+    }
+
+    /// After a soft break the fragment really is at the start of a line, so
+    /// a leading `#` would be read as a heading and must stay escaped.
+    #[test]
+    fn hash_after_a_soft_break_is_still_escaped() {
+        assert_eq!(fragment("a\n\\#b\n"), "a\n\\#b");
+    }
+
+    /// The whole-document entry point is unchanged: it still has no
+    /// line-position context and still escapes conservatively.
+    #[test]
+    fn whole_document_writer_still_escapes_hash_everywhere() {
+        assert_eq!(whole_document("issue #1234 here\n"), "issue \\#1234 here");
+        assert_eq!(
+            whole_document("[#7380](https://example.com/7380)\n"),
+            "[\\#7380](https://example.com/7380)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod format_character_writer_tests {
+    //! Unicode format characters (category `Cf`) are invisible in source, and
+    //! most of them were rejected by the qmd grammar's prose regexes before
+    //! bd-wuiu1of7 (GH #672). The writer re-encodes them as character
+    //! references so the emitted qmd is readable and robust.
+    use super::{LineStartEscapes, escape_markdown};
+
+    fn esc(text: &str) -> String {
+        escape_markdown(text, false, LineStartEscapes::Always)
+    }
+
+    #[test]
+    fn named_entities_for_format_characters_with_a_whatwg_name() {
+        assert_eq!(esc("a\u{200B}b"), "a&ZeroWidthSpace;b");
+        assert_eq!(esc("hy\u{00AD}phen"), "hy&shy;phen");
+        assert_eq!(esc("\u{200E}"), "&lrm;");
+        assert_eq!(esc("\u{200F}"), "&rlm;");
+        assert_eq!(esc("\u{2060}"), "&NoBreak;");
+        assert_eq!(esc("f\u{2061}x"), "f&ApplyFunction;x");
+        assert_eq!(esc("x\u{2062}y"), "x&InvisibleTimes;y");
+        assert_eq!(esc("y\u{2063}z"), "y&InvisibleComma;z");
+    }
+
+    #[test]
+    fn numeric_references_for_format_characters_without_a_name() {
+        assert_eq!(esc("z\u{2064}w"), "z&#x2064;w"); // invisible plus
+        assert_eq!(esc("a\u{FEFF}b"), "a&#xFEFF;b"); // zero width no-break space
+        assert_eq!(esc("a\u{202A}b\u{202C}c"), "a&#x202A;b&#x202C;c"); // bidi embedding
+        assert_eq!(esc("a\u{2066}b\u{2069}c"), "a&#x2066;b&#x2069;c"); // bidi isolate
+        assert_eq!(esc("a\u{061C}b"), "a&#x61C;b"); // Arabic letter mark
+        assert_eq!(esc("a\u{E0001}b"), "a&#xE0001;b"); // tag character
+    }
+
+    #[test]
+    fn join_controls_stay_raw() {
+        // ZWNJ / ZWJ already parse (bd-96fswwce) and are legitimate content in
+        // Persian/Indic text and emoji sequences; an entity would be noise.
+        assert_eq!(esc("ab\u{200C}cd"), "ab\u{200C}cd");
+        assert_eq!(esc("ab\u{200D}cd"), "ab\u{200D}cd");
+        assert_eq!(
+            esc("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+        );
+    }
+
+    #[test]
+    fn other_non_ascii_text_stays_raw() {
+        // Letters, marks, symbols and Unicode whitespace all parse raw today
+        // and must not be touched.
+        assert_eq!(esc("caf\u{00E9}"), "caf\u{00E9}");
+        assert_eq!(esc("cafe\u{0301}"), "cafe\u{0301}");
+        assert_eq!(esc("a\u{00A0}b"), "a\u{00A0}b");
+        assert_eq!(esc("a\u{2009}b"), "a\u{2009}b");
+        assert_eq!(esc("\u{0915}\u{093E}"), "\u{0915}\u{093E}");
+        assert_eq!(esc("\u{00A9}"), "\u{00A9}");
+    }
+
+    #[test]
+    fn mixed_source_spellings_collapse_to_the_preferred_name() {
+        // `&af;`, `&ApplyFunction;` and a raw U+2061 all decode to the same
+        // Str, so the writer cannot tell them apart — the preferred name wins
+        // for every occurrence (Pandoc's markdown writer is lossy the same way).
+        assert_eq!(
+            esc("a\u{2061}b \u{2061}c"),
+            "a&ApplyFunction;b &ApplyFunction;c"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ampersand_escape_writer_tests {
+    //! A literal `&` that begins something the reader would lex as an
+    //! `entity_reference` or `numeric_character_reference` must be written as
+    //! `\&`, or `Str "&copy;"` (from `\&copy;` in source) re-reads as `©`
+    //! (bd-i18zoy4n). Pandoc's markdown writer escapes the same way.
+    use super::{LineStartEscapes, escape_markdown};
+
+    fn esc(text: &str) -> String {
+        escape_markdown(text, false, LineStartEscapes::Always)
+    }
+
+    /// Inline mode, mid-line: `#` is only heading syntax at line start, so it
+    /// stays raw here and the numeric-reference expectations show the `&`
+    /// escape on its own.
+    fn esc_inline(text: &str) -> String {
+        escape_markdown(
+            text,
+            false,
+            LineStartEscapes::WhereMeaningful { starts_line: false },
+        )
+    }
+
+    #[test]
+    fn escapes_ampersand_that_starts_a_named_reference() {
+        assert_eq!(esc("&copy;"), "\\&copy;");
+        assert_eq!(esc("a&nbsp;b"), "a\\&nbsp;b");
+        assert_eq!(esc("&ZeroWidthSpace;"), "\\&ZeroWidthSpace;");
+        assert_eq!(esc("&AMP;"), "\\&AMP;"); // legacy name, semicolon-terminated
+    }
+
+    #[test]
+    fn escapes_ampersand_that_starts_a_numeric_reference() {
+        assert_eq!(esc_inline("&#34;"), "\\&#34;");
+        assert_eq!(esc_inline("&#x200B;"), "\\&#x200B;");
+        assert_eq!(esc_inline("&#X41;"), "\\&#X41;");
+        assert_eq!(esc_inline("&#1114111;"), "\\&#1114111;"); // 7 decimal digits
+        assert_eq!(esc_inline("&#x10FFFF;"), "\\&#x10FFFF;"); // 6 hex digits
+        // Block mode escapes every `#` as well (pre-existing behaviour); the
+        // reader folds `\&\#34;` back to the same `Str "&#34;"`.
+        assert_eq!(esc("&#34;"), "\\&\\#34;");
+    }
+
+    #[test]
+    fn leaves_ampersands_that_are_not_references() {
+        assert_eq!(esc("AT&T"), "AT&T");
+        assert_eq!(esc("a & b"), "a & b");
+        assert_eq!(esc("&"), "&");
+        assert_eq!(esc("a&"), "a&");
+        assert_eq!(esc("&;"), "&;");
+        assert_eq!(esc("&amp"), "&amp"); // no terminating semicolon
+        assert_eq!(esc("&AM;"), "&AM;"); // not a WHATWG name (bd-v8qc9zyc)
+        assert_eq!(esc_inline("&#;"), "&#;");
+        assert_eq!(esc_inline("&#x;"), "&#x;");
+        assert_eq!(esc_inline("&#12345678;"), "&#12345678;"); // 8 digits: not lexed
+        assert_eq!(esc_inline("&#x1234567;"), "&#x1234567;"); // 7 hex digits: not lexed
+        assert_eq!(esc_inline("&#1a;"), "&#1a;");
+    }
+
+    #[test]
+    fn a_literal_reference_and_its_decoded_char_stay_distinct() {
+        // The whole point: these two Strs must not produce the same bytes.
+        assert_ne!(esc("&ZeroWidthSpace;"), esc("\u{200B}"));
+        assert_ne!(esc("&copy;"), esc("\u{00A9}"));
+    }
 }

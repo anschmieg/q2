@@ -1,8 +1,11 @@
-# Hub-Client Project Management Refactor and Create New Project Implementation
+---
+title: 'Hub-Client Project Management Refactor and Create New Project Implementation'
+date: 2026-01-12
+description: 'Refactors the hub-client project selector so existing projects are connected rather than created, and adds genuine project creation by porting `quarto create project` templates from TypeScript Quarto to Rust, usable natively and in WASM.'
+status: in-progress
+---
 
 **Epic ID**: k-1omt
-**Created**: 2026-01-12
-**Status**: In Progress
 
 ## Progress Summary
 
@@ -484,7 +487,7 @@ project/
 |------|--------|------------|
 | deno_core compile time | Build slowdown | Feature-flag, compile only when needed |
 | deno_core doesn't work out | Rework needed | Implementation-agnostic trait API allows swapping; don't leak deno_core types |
-| WASM binary size increase | Slower initial load | EJS is small (~50KB), acceptable |
+| WASM binary size increase | Slower initial load | EJS is small (\~50KB), acceptable |
 | EJS security in browser | Code injection | Use only built-in templates, no user input |
 | Complex async flow | Implementation bugs | Thorough testing, simple MVP first |
 | Architecture issues found late | Wasted effort | Interstitial test gate validates design before EJS work |

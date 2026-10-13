@@ -1,7 +1,12 @@
-# k-246: Schema Inheritance Implementation Plan
+---
+title: 'k-246: Schema Inheritance Implementation Plan'
+date: 2025-10-27
+description: 'Implements quarto-cli''s `super` field for object schemas, so a derived schema inherits and merges properties, required fields and additional-property rules from base schemas, with eager references resolved later.'
+braid:
+  strand: k-246
+  priority: P2
+---
 
-**Created**: 2025-10-27
-**Issue**: k-246 - Implement schema inheritance (super/baseSchema)
 **Estimated Time**: 3-4 hours
 **Priority**: P2 (Medium - needed before P2/P3 patterns are fully usable)
 
@@ -56,7 +61,7 @@ When `baseSchema` is provided:
 6. **Merge additionalProperties**: Use `allOf` to combine all additionalProperties schemas
 7. **Merge propertyNames**: Use `anyOf` if multiple base schemas have propertyNames
 8. **Merge closed**: Derived is closed if ANY base is closed OR derived specifies closed
-9. **Remove $id**: Base schema $ids are not propagated to avoid duplicate IDs
+9. **Remove \$id**: Base schema \$ids are not propagated to avoid duplicate IDs
 
 ### How `super` is Parsed (from-yaml.ts:407-413)
 
@@ -1112,7 +1117,7 @@ SchemaError::InvalidStructure {
 3. **No cycle detection**: Circular inheritance will cause infinite loops
    - Future enhancement: Add visited set to detect cycles
 
-4. **No $id propagation**: Base schema $ids are stripped
+4. **No \$id propagation**: Base schema \$ids are stripped
    - Matches quarto-cli behavior
 
 ## Future Enhancements

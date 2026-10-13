@@ -353,6 +353,132 @@ fn unimplemented_choice_says_so() {
     assert!(!tmp.path().join("mypaper").exists());
 }
 
+// ====================================================================
+// Hub-only choices are invisible to the CLI (bd-d147nkqx)
+// ====================================================================
+//
+// The registry in `quarto-project-create` tags each choice with the
+// surfaces it is offered on. The CLI must neither list nor accept a
+// choice that is hub-only — through any of its front doors.
+
+/// The registry's implemented hub-only choices, derived rather than
+/// hardcoded so adding or replacing hub-only templates needs no edit
+/// here (bd-d147nkqx shipped the placeholder; bd-3fwtdhil added the
+/// four seeded examples).
+fn hub_only_choices() -> Vec<quarto_project_create::ProjectChoice> {
+    use quarto_project_create::{Surface, available_choices};
+    let hub_only: Vec<_> = available_choices()
+        .into_iter()
+        .filter(|c| c.implemented && !c.available_on(Surface::Cli))
+        .collect();
+    assert!(
+        !hub_only.is_empty(),
+        "expected at least one hub-only choice"
+    );
+    hub_only
+}
+
+#[test]
+fn hub_only_choice_is_rejected_on_cli_with_hub_message() {
+    for choice in hub_only_choices() {
+        let tmp = TempDir::new().unwrap();
+        let out = run_q2_create(tmp.path(), &["project", &choice.id, "d"]);
+        assert!(!out.status.success(), "choice: {}", choice.id);
+        let stderr = stderr_str(&out);
+        assert!(stderr.contains(&choice.id), "stderr: {stderr}");
+        assert!(stderr.contains("Quarto Hub"), "stderr: {stderr}");
+        // Distinct from the unimplemented wording: this choice *is*
+        // implemented, just not offered here.
+        assert!(!stderr.contains("not yet implemented"), "stderr: {stderr}");
+        assert!(!tmp.path().join("d").exists());
+    }
+}
+
+#[test]
+fn hub_only_colon_form_is_rejected_on_cli_with_hub_message() {
+    for choice in hub_only_choices() {
+        let tmp = TempDir::new().unwrap();
+        let colon = choice.target.to_id_string();
+        assert!(
+            colon.contains(':'),
+            "hub-only target must use a template: {colon}"
+        );
+        let out = run_q2_create(tmp.path(), &["project", &colon, "d"]);
+        assert!(!out.status.success(), "colon form: {colon}");
+        let stderr = stderr_str(&out);
+        assert!(stderr.contains(&colon), "stderr: {stderr}");
+        assert!(stderr.contains("Quarto Hub"), "stderr: {stderr}");
+        assert!(!tmp.path().join("d").exists());
+    }
+}
+
+#[test]
+fn valid_choices_summary_omits_hub_only_choice() {
+    let tmp = TempDir::new().unwrap();
+    let out = run_q2_create(tmp.path(), &["project", "frobnicate", "d"]);
+    assert!(!out.status.success());
+    let stderr = stderr_str(&out);
+    assert!(stderr.contains("Valid project types"), "stderr: {stderr}");
+    for choice in hub_only_choices() {
+        assert!(!stderr.contains(&choice.id), "stderr: {stderr}");
+    }
+}
+
+#[test]
+fn list_omits_hub_only_choice_in_json_and_text() {
+    let tmp = TempDir::new().unwrap();
+    let choices = hub_only_choices();
+
+    let out = run_q2_create(tmp.path(), &["--list", "--json"]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let listing = parse_single_json(&stdout_str(&out));
+    let ids: Vec<&str> = listing["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["type"] == "project")
+        .unwrap()["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"blog"), "ids: {ids:?}");
+    for choice in &choices {
+        assert!(!ids.contains(&choice.id.as_str()), "ids: {ids:?}");
+    }
+
+    let out = run_q2_create(tmp.path(), &["--list"]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    for choice in &choices {
+        assert!(!stdout.contains(&choice.id), "stdout: {stdout}");
+    }
+}
+
+#[test]
+fn json_hub_only_choice_errors_with_json_diagnostic() {
+    for choice in hub_only_choices() {
+        let tmp = TempDir::new().unwrap();
+        let directive = format!(
+            r#"{{"artifact":"project","directory":"d","choice":"{}","title":"T"}}"#,
+            choice.id
+        );
+        let out = run_q2_create_stdin(tmp.path(), &["--json"], &directive);
+        assert!(!out.status.success(), "choice: {}", choice.id);
+        assert_eq!(stdout_str(&out).trim(), "");
+        let diags = stderr_json_lines(&stderr_str(&out));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.to_string().contains(&choice.id) && d.to_string().contains("Quarto Hub")),
+            "expected JSON diagnostic naming the hub-only choice; stderr: {}",
+            stderr_str(&out)
+        );
+        assert!(!tmp.path().join("d").exists());
+    }
+}
+
 #[test]
 fn colon_form_routes_through_template_parser() {
     let tmp = TempDir::new().unwrap();
@@ -657,7 +783,12 @@ fn list_json_emits_registry_with_implemented_flags() {
     assert_eq!(by_id("website")["implemented"], true);
     assert_eq!(by_id("default")["implemented"], true);
     assert_eq!(by_id("blog")["implemented"], true);
+    assert_eq!(by_id("presentation")["implemented"], true);
     assert_eq!(by_id("manuscript")["implemented"], false);
+    // Every CLI choice carries its hierarchical path (bd-q33ylfxf).
+    for c in choices {
+        assert_eq!(c["path"], serde_json::json!(["Templates"]), "{}", c["id"]);
+    }
 }
 
 #[test]
@@ -668,6 +799,58 @@ fn list_human_output_names_choices() {
     let stdout = stdout_str(&out);
     assert!(stdout.contains("website"), "stdout: {stdout}");
     assert!(stdout.contains("default"), "stdout: {stdout}");
+    assert!(stdout.contains("presentation"), "stdout: {stdout}");
+}
+
+#[test]
+fn list_human_output_groups_choices_by_path() {
+    // bd-q33ylfxf: entries are indented under their path group, so the
+    // group label precedes every choice in it.
+    let tmp = TempDir::new().unwrap();
+    let out = run_q2_create(tmp.path(), &["--list"]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    let group = stdout.find("  Templates").expect("group label line");
+    for id in ["default", "website", "blog", "presentation"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(id))
+            .unwrap_or_else(|| panic!("no line for {id} in {stdout}"));
+        assert!(
+            line.starts_with("    "),
+            "{id} must be indented under its group: {line:?}"
+        );
+        assert!(
+            stdout.find(line).unwrap() > group,
+            "{id} must follow the group label"
+        );
+    }
+    // The CLI never shows the hub's Examples group.
+    assert!(!stdout.contains("Examples"), "stdout: {stdout}");
+}
+
+#[test]
+fn create_project_presentation_writes_a_titled_deck() {
+    let tmp = TempDir::new().unwrap();
+    let out = run_q2_create(
+        tmp.path(),
+        &["project", "presentation", "deck", "Team Update"],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}\nstdout: {}",
+        stderr_str(&out),
+        stdout_str(&out)
+    );
+    let dir = tmp.path().join("deck");
+    let index = std::fs::read_to_string(dir.join("index.qmd")).unwrap();
+    assert!(
+        index.contains("title: \"Team Update\""),
+        "index.qmd: {index}"
+    );
+    assert!(index.contains("revealjs"), "index.qmd: {index}");
+    let yml = std::fs::read_to_string(dir.join("_quarto.yml")).unwrap();
+    assert!(yml.contains("title: \"Team Update\""), "_quarto.yml: {yml}");
 }
 
 // ====================================================================

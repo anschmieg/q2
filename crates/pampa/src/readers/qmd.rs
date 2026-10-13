@@ -20,9 +20,19 @@ use std::io::Write;
 use tree_sitter::LogType;
 use tree_sitter_qmd::MarkdownParser;
 
-fn print_whole_tree<T: Write>(cursor: &mut tree_sitter_qmd::MarkdownCursor, buf: &mut T) {
+/// Write the tree-sitter concrete syntax tree of `input_bytes` to `buf`: one
+/// line per node, indented two spaces per level.
+///
+/// This is a debugging aid (`pampa -v`), so it parses the input itself rather
+/// than being part of [`read`]: every node is visited and formatted, which is
+/// far too expensive to do on each parse only to discard the text
+/// (bd-khect2gq).
+pub fn dump_concrete_tree<T: Write>(input_bytes: &[u8], buf: &mut T) {
+    let tree = MarkdownParser::default()
+        .parse(input_bytes, None)
+        .expect("Failed to parse input");
     let mut depth = 0;
-    traversals::topdown_traverse_concrete_tree(cursor, &mut |node, phase| {
+    traversals::topdown_traverse_concrete_tree(&mut tree.walk(), &mut |node, phase| {
         if phase == traversals::TraversePhase::Enter {
             writeln!(buf, "{}{}: {:?}", "  ".repeat(depth), node.kind(), node).unwrap();
             depth += 1;
@@ -148,26 +158,20 @@ pub fn read<T: Write>(
                     prune_diagnostics_by_error_nodes(diagnostics, &error_nodes, &outer_nodes);
             }
 
+            if let Some(parent) = &context.parent_source_info {
+                reroot_diagnostics_into_parent(&mut diagnostics, parent);
+            }
             return Err(diagnostics);
         }
     }
 
-    let depth = crate::utils::concrete_tree_depth::concrete_tree_depth(&tree);
-    // this is here mostly to prevent our fuzzer from blowing the stack
-    // with a deeply nested document
-    if depth > 100 {
-        let diagnostic = quarto_error_reporting::generic_error!(format!(
-            "The input document is too deeply nested (max depth: {} > 100).",
-            depth
-        ));
-        return Err(vec![diagnostic]);
-    }
+    // Documents nested too deeply to process safely are rejected by
+    // `treesitter_to_pandoc` (see `MAX_CONCRETE_TREE_DEPTH`).
 
     // Note: We no longer need to check parse_is_good(&tree) here because
     // the log_observer.had_errors() check above already catches parse errors
     // and produces better formatted diagnostics via produce_diagnostic_messages.
     // The old parse_is_good check was causing duplicate error messages.
-    print_whole_tree(&mut tree.walk(), &mut output_stream);
 
     // Create diagnostic collector and convert to Pandoc AST
     let mut error_collector = DiagnosticCollector::new();
@@ -255,4 +259,136 @@ pub fn read<T: Write>(
     let warnings = error_collector.into_diagnostics();
 
     Ok((result, context, warnings))
+}
+
+/// Reroot Err-path diagnostic spans through `parent`.
+///
+/// `produce_diagnostic_messages` and the pruning/widening passes after it
+/// do their offset arithmetic in the raw-input-bytes domain, against this
+/// parse's own `FileId(0)`. Under a recursive parse of an embedded string
+/// (config values, `!md` metadata, Lua-filter config values) those are
+/// offsets *into the string*; returning them unmapped hands the caller
+/// spans against the wrong file. Rebuild each span as a substring of the
+/// parent — the same rerooting `range_to_source_info_with_context`
+/// applies on the Ok path.
+fn reroot_diagnostics_into_parent(
+    diagnostics: &mut [quarto_error_reporting::DiagnosticMessage],
+    parent: &quarto_source_map::SourceInfo,
+) {
+    let reroot = |location: &mut Option<quarto_source_map::SourceInfo>| {
+        if let Some(loc) = location
+            && let Some((_file_id, start, end)) = loc.resolve_byte_range()
+        {
+            *loc = quarto_source_map::SourceInfo::substring(parent.clone(), start, end);
+        }
+    };
+    for diagnostic in diagnostics {
+        reroot(&mut diagnostic.location);
+        for detail in &mut diagnostic.details {
+            reroot(&mut detail.location);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Err-path diagnostics must reroot through `parent_source_info`
+    /// exactly like Ok-path spans do
+    /// (bd-q120-masks-config-md-diagnostic-a039r80t): a recursive
+    /// parse of an embedded string (config values, `!md` metadata,
+    /// Lua-filter config values) that *fails* must not hand back
+    /// spans at raw offsets-into-the-string against the throwaway
+    /// `<metadata>` context's FileId(0).
+    #[test]
+    fn err_path_diagnostics_reroot_through_parent_source_info() {
+        use quarto_source_map::FileId;
+        let text = "![logo](images/logo.svg){width=\"65px\" .light-content}\n";
+        let parent = quarto_source_map::SourceInfo::original(FileId(3), 50, 50 + text.len());
+        let mut sink = std::io::sink();
+        let err = super::read(
+            text.as_bytes(),
+            false,
+            "<metadata>",
+            &mut sink,
+            true,
+            Some(parent),
+        )
+        .expect_err("kv-before-class must fail to parse");
+        assert!(!err.is_empty());
+        for diag in &err {
+            let loc = diag
+                .location
+                .as_ref()
+                .expect("Err-path diagnostic must carry a location");
+            let (fid, start, end) = loc.resolve_byte_range().expect("location must resolve");
+            assert_eq!(
+                fid, 3,
+                "Err-path spans must reroot into the parent's file, got {:#?}",
+                diag
+            );
+            assert!(start >= 50 && end <= 50 + text.len());
+            for det in &diag.details {
+                if let Some(l) = &det.location {
+                    let (f, ds, de) = l.resolve_byte_range().expect("detail must resolve");
+                    assert_eq!(f, 3, "detail spans must reroot too, got {:#?}", diag);
+                    assert!(ds >= 50 && de <= 50 + text.len());
+                }
+            }
+        }
+    }
+
+    /// Plan 7b's `document.rs`/`section.rs`/`fenced_div_block.rs` fix: the
+    /// YAML front-matter `RawBlock`'s `source_info` must reroot through
+    /// `parent_source_info` too — found via `q2 render` on a real spin-
+    /// converted `.R` file with malformed front matter, whose ariadne
+    /// snippet named the CONVERTED buffer's synthetic `"<path (converted by
+    /// knitr)>"` label instead of the original file.
+    ///
+    /// This specifically exercises a **`Concat`** parent (what percent/spin
+    /// actually produce), not the `Original`/`Substring` parent every
+    /// pre-existing reroot test above used — `resolve_byte_range()` returns
+    /// `None` for a `Substring` over `Concat` (by design, see
+    /// `quarto_source_map::SourceInfo::resolve_byte_range`'s doc comment),
+    /// which is exactly the gap that let the bug through: every existing
+    /// test happened to use a shape `resolve_byte_range` still handles.
+    /// `root_file_id()` (what the ariadne renderer actually calls) is the
+    /// right check here.
+    ///
+    /// Named revert: restore any of the three call sites to
+    /// `SourceInfo::from_range(context.current_file_id(), range)` (or
+    /// `fenced_div_block.rs`'s literal `FileId(0)`) → `root_file_id()`
+    /// returns `Some(FileId(0))` (the throwaway `<converted>` context's own
+    /// file) instead of `Some(FileId(7))` → RED.
+    #[test]
+    fn yaml_frontmatter_source_info_reroots_through_concat_parent() {
+        use quarto_source_map::{FileId, SourceInfo};
+
+        let text = "---\ntitle: hello\n---\n\nbody text\n";
+        // A `Concat` parent whose single piece maps the whole converted
+        // text back to FileId(7) — the shape a content processor's
+        // `Converted.source_info` actually has.
+        let parent = SourceInfo::concat(vec![(
+            SourceInfo::original(FileId(7), 100, 100 + text.len()),
+            text.len(),
+        )]);
+        let mut sink = std::io::sink();
+        let (pandoc, _ctx, warnings) = super::read(
+            text.as_bytes(),
+            false,
+            "<converted>",
+            &mut sink,
+            true,
+            Some(parent),
+        )
+        .expect("well-formed YAML front matter must parse");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:#?}");
+
+        assert_eq!(
+            pandoc.meta.source_info.root_file_id(),
+            Some(FileId(7)),
+            "front-matter metadata's source_info must root to the parent \
+             file (FileId(7)), not the throwaway local context; got {:#?}",
+            pandoc.meta.source_info
+        );
+    }
 }

@@ -1,7 +1,10 @@
-# Auth failure: distinguishable reasons and audit coverage
+---
+title: 'Auth failure: distinguishable reasons and audit coverage'
+date: 2026-07-30
+description: 'Replaces the one sign-in failure message that hides eleven causes with distinct coarse reasons, and closes audit-log gaps so CSRF failures and stale-login cases can be diagnosed.'
+status: done  # implemented 2026-07-30 on `braid/bd-htis60s7-auth-error-reasons`.
+---
 
-**Status:** implemented 2026-07-30 on `braid/bd-htis60s7-auth-error-reasons`.
-**Date:** 2026-07-30.
 **Follows:** `claude-notes/plans/2026-07-27-auth-current-flow-hardening.md`
 (item H2, shipped in `807fd96c`, PR #427) and
 `claude-notes/plans/2026-07-06-hub-server-minted-sliding-sessions.md` (C0–C7).
@@ -277,7 +280,7 @@ Tests first:
 
 Then implement:
 
-- [x] `tracing::warn!` in `resolve_session_secret`'s generate-and-persist
+- [x] `tracing::warn!` in `resolve_session_secret`\'s generate-and-persist
   branch (`crates/quarto-hub/src/storage.rs:247-253`; fn at `:236`), stating
   that the secret is now pinned to this data directory and that
   **multi-instance deployments must set `QUARTO_HUB_SESSION_SECRET`**. The
@@ -373,7 +376,7 @@ record of this leg showed the superseded sentence, so it was re-measured
 rather than edited. The `0` line is an added check — the old copy is absent,
 so no bundle carries both. The build's PWA leg reported **166 precache
 entries, 67138 KiB**, against the 63 MB recorded in
-`2026-07-30-hub-client-sw-precache-and-update.md`'s Measurements block.
+`2026-07-30-hub-client-sw-precache-and-update.md`\'s Measurements block.
 
 Note the default `npm run build` **omits** these strings entirely, and that
 is correct: `AUTH_ENABLED = !!import.meta.env.VITE_GOOGLE_CLIENT_ID`, so

@@ -1,6 +1,12 @@
-# InlineSplice silently drops header attribute changes
+---
+title: 'InlineSplice silently drops header attribute changes'
+date: 2026-02-11
+description: 'Fixes the incremental writer''s inline splice path silently dropping changed header attributes such as classes and key-value pairs, by falling back to a full header rewrite when those attributes differ.'
+braid:
+  strand: bd-rcdo
+  priority: P1
+---
 
-**Beads issue:** `bd-rcdo`
 **Parent plan:** `claude-notes/plans/2026-02-07-incremental-writer.md` (Phase 5: Inline Splicing)
 
 ## Bug Report
@@ -23,7 +29,7 @@ The new attributes (e.g., `status="todo"`) are silently lost.
 
 ## Root Cause
 
-The `coarsen` function in `incremental.rs` (line ~139) decides whether to use
+The `coarsen` function in `incremental.rs` (line \~139) decides whether to use
 InlineSplice for `RecurseIntoContainer` blocks. The decision checks:
 
 1. Does the block have an inline plan? (Yes — Header is an inline-content block)
@@ -33,7 +39,7 @@ InlineSplice for `RecurseIntoContainer` blocks. The decision checks:
 It does NOT check whether the block's attributes changed. When only attributes
 change, all three checks pass, and InlineSplice is used.
 
-`assemble_inline_splice` (line ~533) then:
+`assemble_inline_splice` (line \~533) then:
 - Computes `block_span` from the **original** block's source info
 - Extracts `prefix` = bytes before first inline (e.g., `## `)
 - Extracts `suffix` = bytes after last inline (e.g., ` {.feature created="2026-02-10"}\n`)

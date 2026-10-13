@@ -1,8 +1,12 @@
-# Disambiguation Bugs Analysis
-
-**Date:** 2025-11-29
-**Beads Issue:** k-427
-**Status:** IMPLEMENTED - Both bugs fixed, 14 new tests passing
+---
+title: 'Disambiguation Bugs Analysis'
+date: 2025-11-29
+description: 'Identifies two bugs in `quarto-citeproc` ambiguity detection: grouping by author names hides identical renderings, and year-suffix assignment ignores whether earlier disambiguation methods already resolved the ambiguity.'
+status: done  # IMPLEMENTED - Both bugs fixed, 14 new tests passing
+braid:
+  strand: k-427
+  priority: P4
+---
 
 ## Executive Summary
 
@@ -74,8 +78,8 @@ getAmbiguities =
 Test: `disambiguate_AddNamesSuccess`
 
 **Input:**
-- ITEM-1: authors = [Smith, Brown, Jones], year = 1980
-- ITEM-2: authors = [Smith, Beefheart, Jones], year = 1980
+- ITEM-1: authors = `[Smith, Brown, Jones]`, year = 1980
+- ITEM-2: authors = `[Smith, Beefheart, Jones]`, year = 1980
 
 **With et-al-min=3, et-al-use-first=1:**
 - Both render as "Smith et al. (1980)" - **should be detected as ambiguous!**
@@ -259,7 +263,7 @@ Note: `find_year_suffix_ambiguities` function can be removed or kept for other p
 2. Remove the name-based pre-grouping
 3. Test with `disambiguate_AddNamesSuccess` and `AndreaEg*` tests
 
-**Expected impact:** ~10-15 tests fixed
+**Expected impact:** \~10-15 tests fixed
 
 ### Phase 2: Fix Bug 2
 
@@ -267,7 +271,7 @@ Note: `find_year_suffix_ambiguities` function can be removed or kept for other p
 2. Use `ambiguities` variable instead of `find_year_suffix_ambiguities`
 3. Test with `YearSuffixMacroSameYear*` tests
 
-**Expected impact:** ~3-5 tests fixed
+**Expected impact:** \~3-5 tests fixed
 
 ### Phase 3: Cleanup and Edge Cases
 

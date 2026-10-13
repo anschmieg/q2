@@ -1,0 +1,732 @@
+//! Bridge: `quarto_brand`'s [`ResolvedBrand`] into the `brand`
+//! `QUARTO_FILTER_PARAMS` shape `typst-brand-yaml.lua` and
+//! `filters/modules/brand/brand.lua` (both already vendored) expect.
+//!
+//! Q1's own shape is `Brand.processedData`
+//! (`external-sources/quarto-cli/src/core/brand/brand.ts:44-53,72-162`):
+//! `{ color: {<name>: <resolved css>}, typography: {<slot>: <raw
+//! options>}, logo: {small?, medium?, large?, images: {}} }`, wrapped
+//! per mode as `{ light: {...}, dark: {...} }` — the wire shape
+//! `param('brand')` reads, then indexes by `brand-mode`
+//! (`typst-brand-yaml.lua:61-63`).
+//!
+//! Colors are pre-resolved to final CSS values ([`Brand::resolve_color`])
+//! because Q1's `processData` resolves them eagerly. Typography stays
+//! **raw** (color fields keep the brand color *name*, not a resolved
+//! CSS value) because `modules/brand/brand.lua`'s `get_typography`
+//! (`:29-55`) does that resolution itself, per read, via `get_color`.
+//!
+//! One thing Q2's [`quarto_brand::SplitBrand`] does differently from
+//! Q1's `splitUnifiedBrand`: logo entries are deliberately **not**
+//! split per mode (see `quarto_brand::split` module docs) — a
+//! `{light:, dark:}` logo pair survives into both the light and dark
+//! `Brand` halves as the same [`LogoEntry::LightDark`]. Picking the
+//! right side per mode is therefore this bridge's job, not something
+//! it can inherit from the split.
+
+use std::path::Path;
+
+use quarto_brand::{Brand, BrandLogoResource, LogoEntry, ResolvedBrand};
+use serde_json::{Map, Value, json};
+
+/// Build the `brand` filter param from the light/dark halves of a
+/// resolved, split brand.
+///
+/// Returns `None` when neither mode has a brand configured, matching
+/// Q1's `param('brand')` being simply absent for a document with no
+/// `brand:` key — callers should omit the `"brand"` key from the
+/// filter-params blob entirely in that case, not insert `null`
+/// (`typst-brand-yaml.lua`'s `brand and brand[brandMode]` guard treats
+/// either the same, but omitting matches every other optional key in
+/// this builder).
+pub fn build_brand_param(
+    light: Option<&ResolvedBrand>,
+    dark: Option<&ResolvedBrand>,
+    project_dir: &Path,
+) -> Option<Value> {
+    if light.is_none() && dark.is_none() {
+        return None;
+    }
+    let mut obj = Map::new();
+    if let Some(rb) = light {
+        obj.insert(
+            "light".to_string(),
+            processed_data(rb, "light", project_dir),
+        );
+    }
+    if let Some(rb) = dark {
+        obj.insert("dark".to_string(), processed_data(rb, "dark", project_dir));
+    }
+    Some(Value::Object(obj))
+}
+
+/// One mode's `{ processedData: { color, typography, logo } }`.
+fn processed_data(resolved: &ResolvedBrand, mode: &str, project_dir: &Path) -> Value {
+    let brand = &resolved.brand;
+    let prefix = resolved.path_prefix_relative_to(project_dir);
+
+    json!({
+        "processedData": {
+            "color": color_map(brand),
+            "typography": typography_map(brand),
+            "logo": logo_map(brand, mode, &prefix),
+        }
+    })
+}
+
+/// `color: { <palette-key-or-slot-name>: <resolved css value> }` — Q1's
+/// `processData`'s two loops (`brand.ts:73-82`) collapsed into one,
+/// mirroring `quarto_sass::brand_layer::color_layer`'s same two loops.
+fn color_map(brand: &Brand) -> Value {
+    let mut colors = Map::new();
+    if let Some(bc) = brand.color.as_ref() {
+        if let Some(palette) = bc.palette.as_ref() {
+            for key in palette.keys() {
+                if let Ok(resolved) = brand.resolve_color(key) {
+                    colors.insert(key.clone(), json!(resolved));
+                }
+            }
+        }
+        for (name, _) in bc.named_colors() {
+            if let Ok(resolved) = brand.resolve_color(name) {
+                colors.insert(name.to_string(), json!(resolved));
+            }
+        }
+    }
+    Value::Object(colors)
+}
+
+/// `typography: { <slot>: <raw BrandTypographyOptions> }` — one entry
+/// per slot that resolves to something, `monospace-inline`/
+/// `monospace-block` pre-merged with the generic `monospace` slot
+/// (Q1's `{ ...monospace, ...monospaceInline }` spread, `brand.ts:126-142`,
+/// already implemented by [`Brand::effective_monospace_inline`] /
+/// [`Brand::effective_monospace_block`]).
+fn typography_map(brand: &Brand) -> Value {
+    let mut out = Map::new();
+    let slots: [(&str, Option<quarto_brand::BrandTypographyOptions>); 6] = [
+        ("base", brand.font_slot("base").cloned()),
+        ("headings", brand.font_slot("headings").cloned()),
+        ("link", brand.font_slot("link").cloned()),
+        ("monospace", brand.font_slot("monospace").cloned()),
+        ("monospace-inline", brand.effective_monospace_inline()),
+        ("monospace-block", brand.effective_monospace_block()),
+    ];
+    for (key, opts) in slots {
+        if let Some(opts) = opts {
+            out.insert(
+                key.to_string(),
+                serde_json::to_value(opts).unwrap_or(Value::Null),
+            );
+        }
+    }
+    Value::Object(out)
+}
+
+/// `logo: { small?, medium?, large?, images: {} }`, each resource's
+/// `path` rewritten relative to `project_dir` (Q1's `resolvePath`,
+/// `brand.ts:247-265`), and a `{light:, dark:}` pair resolved down to
+/// `mode`'s side (see the module docs — Q2's split deliberately leaves
+/// this to the bridge rather than the split itself).
+fn logo_map(brand: &Brand, mode: &str, prefix: &Path) -> Value {
+    let mut out = Map::new();
+    for (key, entry) in [
+        ("small", brand.logo("small")),
+        ("medium", brand.logo("medium")),
+        ("large", brand.logo("large")),
+    ] {
+        if let Some(resource) = entry.and_then(|e| resource_for_mode(e, mode)) {
+            let resource = brand.resolve_named_logo(resource);
+            out.insert(
+                key.to_string(),
+                resource_json(&resource.with_path_relative_to(prefix)),
+            );
+        }
+    }
+    let mut images = Map::new();
+    if let Some(image_map) = brand.logo.as_ref().and_then(|l| l.images.as_ref()) {
+        for (name, resource) in image_map {
+            images.insert(
+                name.clone(),
+                resource_json(&resource.with_path_relative_to(prefix)),
+            );
+        }
+    }
+    out.insert("images".to_string(), Value::Object(images));
+    Value::Object(out)
+}
+
+/// The local files a compiled `.typ` reads for `resolved`: `source: file`
+/// brand fonts and every logo image, resolved against the brand's own
+/// directory (the project root for an inline brand). External URLs are not
+/// files. Pandoc never reads them; only a PDF compile does (R4).
+pub fn brand_asset_files(resolved: &ResolvedBrand, project_dir: &Path) -> Vec<std::path::PathBuf> {
+    let base = resolved.dir.as_deref().unwrap_or(project_dir);
+    let mut rels: Vec<String> = Vec::new();
+    if let Some(typography) = resolved.brand.typography.as_ref() {
+        for font in &typography.fonts {
+            if let quarto_brand::BrandFont::File(file_font) = font {
+                rels.extend(file_font.files.iter().map(|f| f.path().to_string()));
+            }
+        }
+    }
+    if let Some(logo) = resolved.brand.logo.as_ref() {
+        let entries = [&logo.small, &logo.medium, &logo.large];
+        for entry in entries.into_iter().flatten() {
+            match entry {
+                LogoEntry::Single(r) => rels.push(r.path().to_string()),
+                LogoEntry::LightDark { light, dark } => {
+                    rels.extend(
+                        light
+                            .iter()
+                            .chain(dark.iter())
+                            .map(|r| r.path().to_string()),
+                    );
+                }
+            }
+        }
+        if let Some(images) = logo.images.as_ref() {
+            rels.extend(images.values().map(|r| r.path().to_string()));
+        }
+    }
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for rel in rels {
+        if quarto_util::is_external_url(&rel) {
+            continue;
+        }
+        let path = match rel.strip_prefix('/') {
+            Some(rooted) => project_dir.join(rooted),
+            None => base.join(&rel),
+        };
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Picks `mode`'s side of a logo entry. A [`LogoEntry::Single`] serves
+/// both modes identically; a missing side of a
+/// [`LogoEntry::LightDark`] pair yields `None` for that mode (Q1
+/// parity — no light/dark fallback, `brand.ts:624-628`'s `splitLogo`
+/// destructures each side independently with no default).
+fn resource_for_mode<'a>(entry: &'a LogoEntry, mode: &str) -> Option<&'a BrandLogoResource> {
+    match entry {
+        LogoEntry::Single(r) => Some(r),
+        LogoEntry::LightDark { light, dark } => {
+            if mode == "dark" {
+                dark.as_ref()
+            } else {
+                light.as_ref()
+            }
+        }
+    }
+}
+
+/// `{ path: <string>, alt: <string>? }` — `alt` omitted (not `null`)
+/// when absent. Pandoc's Lua JSON bridge represents a JSON `null` as a
+/// sentinel object, not Lua `nil`; `typst-brand-yaml.lua`'s
+/// `quote_string(image.alt)` would stringify that sentinel into
+/// literal garbage if the key were present with a `null` value, so
+/// omission is the only safe encoding of "no alt text" here.
+fn resource_json(resource: &BrandLogoResource) -> Value {
+    let mut obj = Map::new();
+    obj.insert("path".to_string(), json!(resource.path()));
+    if let Some(alt) = resource.alt() {
+        obj.insert("alt".to_string(), json!(alt));
+    }
+    Value::Object(obj)
+}
+
+/// Resolves the `logo` filter param — the page-background logo layout
+/// `typst-brand-yaml.lua`'s `Meta` handler reads via `param('logo')`
+/// (`typst-brand-yaml.lua:269-341`).
+///
+/// Mirrors Q1's `fillLogoPaths`/`resolveLogo`
+/// (`core/brand/brand.ts:307-404,475-...`), narrowed to what the vendored
+/// Lua filter actually needs: that filter does no brand-image lookup of
+/// its own (its `logoOptions` loop just translates whatever `path` is
+/// already in `foundLogo`), so this function is the only place that
+/// picks a brand logo size and injects its path.
+///
+/// The document's own `logo:` metadata can be a flat spec (applies to
+/// both light and dark), a `{light:, dark:}` pair, or absent entirely —
+/// in which case a document that names no logo at all still gets one
+/// synthesized here from the brand's first configured size (`small` >
+/// `medium` > `large`, Q1's own `sizeOrder`), so a bare `brand: {logo:
+/// ...}` document (no document-level `logo:` key, e.g. `online-logo.qmd`)
+/// still gets a page-background logo — matching Q1's `!spec` branch of
+/// `resolveLogo`.
+///
+/// `brand_param` is the JSON already built by [`build_brand_param`] — this
+/// function reads path values back out of it rather than re-resolving
+/// the brand, keyed per side by that side's own mode (the light logo
+/// default comes from `brand_param["light"]`, the dark logo default
+/// from `brand_param["dark"]`) — not by whichever mode the document
+/// ultimately renders under, since a document can name distinct
+/// `logo: {light:, dark:}` layouts and still wants each side's
+/// unspecified `path` filled from that same side's brand data. Paths
+/// pulled from there get a leading `/` added when they're neither
+/// external nor already rooted, matching Q1's
+/// `brandWithAbsoluteLogoPaths` — a step that function applies *only*
+/// for this filter param, not for the `brand-logo` dict `logo_map`
+/// above also feeds (that one stays project-relative, without the
+/// leading slash, which is why this can't just reuse `logo_map`'s
+/// output verbatim).
+pub fn build_logo_param(
+    meta: &quarto_pandoc_types::ConfigValue,
+    brand_param: Option<&Value>,
+) -> Option<Value> {
+    const SIZE_ORDER: [&str; 3] = ["small", "medium", "large"];
+    const LAYOUT_KEYS: [&str; 8] = [
+        "path",
+        "location",
+        "width",
+        "padding",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+    ];
+
+    let logo_meta = meta.get("logo");
+    let is_light_dark_spec =
+        logo_meta.is_some_and(|v| v.get("light").is_some() || v.get("dark").is_some());
+
+    let brand_logo_path = |mode: &str, size: &str| -> Option<String> {
+        let raw = brand_param?
+            .get(mode)?
+            .get("processedData")?
+            .get("logo")?
+            .get(size)?
+            .get("path")?
+            .as_str()?;
+        Some(
+            if quarto_util::is_external_url(raw) || raw.starts_with('/') {
+                raw.to_string()
+            } else {
+                format!("/{raw}")
+            },
+        )
+    };
+    let default_brand_path = |mode: &str| SIZE_ORDER.iter().find_map(|s| brand_logo_path(mode, s));
+
+    let build_mode = |mode: &str| -> Option<Value> {
+        let spec = match logo_meta {
+            None => None,
+            Some(v) if is_light_dark_spec => v.get(mode),
+            Some(v) => Some(v),
+        };
+        let mut obj = Map::new();
+        for key in LAYOUT_KEYS {
+            if let Some(v) = spec
+                .and_then(|s| s.get(key))
+                .and_then(|v| v.as_plain_text())
+            {
+                obj.insert(key.to_string(), Value::String(v));
+            }
+        }
+        if !obj.contains_key("path")
+            && let Some(path) = default_brand_path(mode)
+        {
+            obj.insert("path".to_string(), Value::String(path));
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    };
+
+    let light = build_mode("light");
+    let dark = build_mode("dark");
+    if light.is_none() && dark.is_none() {
+        return None;
+    }
+    // Q1's `resolveLogo`: an unset side falls back to the other side
+    // rather than being left absent, so `logo[brandMode]` still finds
+    // something when only one side names a logo.
+    let light = light.or_else(|| dark.clone());
+    let dark = dark.or_else(|| light.clone());
+    let mut out = Map::new();
+    if let Some(l) = light {
+        out.insert("light".to_string(), l);
+    }
+    if let Some(d) = dark {
+        out.insert("dark".to_string(), d);
+    }
+    Some(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quarto_brand::UnifiedBrand;
+    use std::path::PathBuf;
+
+    /// Parse a single-mode `Brand` directly from a YAML fixture (no
+    /// light/dark pairs) via the unified parser + split, taking the
+    /// light half — sufficient for tests that don't exercise
+    /// light/dark divergence.
+    fn brand_from_yaml(yaml: &str) -> Brand {
+        let unified = UnifiedBrand::from_yaml_str(yaml).expect("valid brand yaml");
+        unified.split().light
+    }
+
+    fn resolved(brand: Brand, brand_dir: &str) -> ResolvedBrand {
+        ResolvedBrand::new(brand, Some(PathBuf::from(brand_dir)))
+    }
+
+    /// T1: palette keys and named theme-color slots both resolve to
+    /// final CSS values through the palette-aliasing chain — matching
+    /// Q1's `processData` two-loop color construction.
+    ///
+    /// Revert hunk: reverting `color_map` to only walk `named_colors()`
+    /// (dropping the palette loop) makes the `brand-blue` assertion RED.
+    #[test]
+    fn test_color_map_resolves_palette_and_named_slots() {
+        let brand = brand_from_yaml(
+            r##"
+color:
+  palette:
+    brand-blue: "#1234ff"
+  primary: brand-blue
+  background: white
+"##,
+        );
+        let colors = color_map(&brand);
+        assert_eq!(colors["brand-blue"], json!("#1234ff"));
+        assert_eq!(colors["primary"], json!("#1234ff"));
+        assert_eq!(colors["background"], json!("white"));
+    }
+
+    /// T2: `monospace-inline` merges the generic `monospace` slot's
+    /// `family` with its own `size`, and `color`/`background-color`
+    /// stay as raw brand-color references (not pre-resolved) — the
+    /// resolution Q1 defers to `get_typography` at read time.
+    ///
+    /// Revert hunk: swapping `effective_monospace_inline()` for a bare
+    /// `font_slot("monospace-inline")` makes the `family` assertion RED
+    /// (the merge is what pulls `family` in from `monospace`).
+    #[test]
+    fn test_typography_merges_monospace_and_keeps_colors_raw() {
+        let brand = brand_from_yaml(
+            r#"
+color:
+  primary: blue
+typography:
+  monospace:
+    family: Fira Code
+    color: primary
+  monospace-inline:
+    size: 0.9em
+"#,
+        );
+        let typography = typography_map(&brand);
+        let inline = &typography["monospace-inline"];
+        assert_eq!(inline["family"], json!("Fira Code"));
+        assert_eq!(inline["size"], json!("0.9em"));
+        assert_eq!(
+            inline["color"],
+            json!("primary"),
+            "color must stay a raw brand-color reference, not a resolved css value"
+        );
+    }
+
+    /// T3: a logo path is rewritten relative to `project_dir` (brand
+    /// file lives in `brand/`, so `brand/logo.png` — Q1's
+    /// `resolvePath`), and a `{light:, dark:}` pair resolves to the
+    /// requested mode's side only.
+    ///
+    /// Revert hunk: hardcoding `resource_for_mode` to always take the
+    /// `light` side makes the dark-mode assertion RED.
+    #[test]
+    fn test_logo_map_resolves_paths_and_picks_mode() {
+        let brand = brand_from_yaml(
+            r#"
+logo:
+  small:
+    light: light.png
+    dark: dark.png
+  images:
+    foo: images/bar.png
+"#,
+        );
+        let prefix = PathBuf::from("brand");
+
+        let light = logo_map(&brand, "light", &prefix);
+        assert_eq!(light["small"]["path"], json!("brand/light.png"));
+
+        let dark = logo_map(&brand, "dark", &prefix);
+        assert_eq!(dark["small"]["path"], json!("brand/dark.png"));
+
+        assert_eq!(
+            light["images"]["foo"]["path"],
+            json!("brand/images/bar.png")
+        );
+    }
+
+    /// P8 orange-book: `medium: test-logo` names an entry under
+    /// `logo.images`, not a literal path — Q1's `getLogoResource`
+    /// precedence (checked against `images` first, falls back to a
+    /// literal path only when no match). Before this fix, `logo_map`
+    /// emitted `medium.path == "test-logo"` verbatim, which the
+    /// vendored template then tried to open as a file and failed.
+    ///
+    /// Revert hunk: removing the `resolve_named_logo` call in
+    /// `logo_map` makes this RED (`medium.path` reverts to the bare
+    /// name instead of the resolved image path).
+    #[test]
+    fn test_logo_map_resolves_named_size_against_images() {
+        let brand = brand_from_yaml(
+            r#"
+logo:
+  medium: test-logo
+  images:
+    test-logo:
+      path: logo.svg
+      alt: "Test Logo"
+"#,
+        );
+        let prefix = PathBuf::from("");
+
+        let light = logo_map(&brand, "light", &prefix);
+        assert_eq!(light["medium"]["path"], json!("logo.svg"));
+        assert_eq!(light["medium"]["alt"], json!("Test Logo"));
+    }
+
+    /// An explicit `{path, alt}` value under `small`/`medium`/`large`
+    /// is never treated as an `images` name reference, even if its
+    /// path string happens to collide with an image name.
+    #[test]
+    fn test_logo_map_explicit_resource_not_treated_as_name_reference() {
+        let brand = brand_from_yaml(
+            r#"
+logo:
+  medium:
+    path: test-logo
+    alt: "Literal path"
+  images:
+    test-logo:
+      path: logo.svg
+      alt: "Test Logo"
+"#,
+        );
+        let prefix = PathBuf::from("");
+
+        let light = logo_map(&brand, "light", &prefix);
+        assert_eq!(light["medium"]["path"], json!("test-logo"));
+        assert_eq!(light["medium"]["alt"], json!("Literal path"));
+    }
+
+    /// T4: no brand configured on either side yields no `"brand"` key
+    /// at all, not a `null`.
+    ///
+    /// Revert hunk: removing the early-return guard makes this RED
+    /// (would return `Some(Value::Object({}))` instead of `None`).
+    #[test]
+    fn test_build_brand_param_absent_when_no_brand() {
+        assert!(build_brand_param(None, None, Path::new("/project")).is_none());
+    }
+
+    /// T5: the top-level wrapper keys are exactly `light`/`dark`,
+    /// matching `param('brand')[brandMode]`'s indexing.
+    ///
+    /// Revert hunk: renaming either wrapper key makes this RED.
+    #[test]
+    fn test_build_brand_param_wraps_light_and_dark_keys() {
+        let light = resolved(
+            brand_from_yaml("color:\n  primary: blue\n"),
+            "project/brand",
+        );
+        let dark = resolved(
+            brand_from_yaml("color:\n  primary: navy\n"),
+            "project/brand",
+        );
+        let param = build_brand_param(Some(&light), Some(&dark), Path::new("project")).unwrap();
+        assert_eq!(
+            param["light"]["processedData"]["color"]["primary"],
+            json!("blue")
+        );
+        assert_eq!(
+            param["dark"]["processedData"]["color"]["primary"],
+            json!("navy")
+        );
+    }
+
+    // ── build_logo_param ──────────────────────────────────────────
+
+    fn cv_s(v: &str) -> quarto_pandoc_types::ConfigValue {
+        quarto_pandoc_types::ConfigValue::new_string(v, quarto_source_map::SourceInfo::for_test())
+    }
+
+    fn cv_map(
+        entries: Vec<(&str, quarto_pandoc_types::ConfigValue)>,
+    ) -> quarto_pandoc_types::ConfigValue {
+        use quarto_pandoc_types::config_value::ConfigMapEntry;
+        quarto_pandoc_types::ConfigValue::new_map(
+            entries
+                .into_iter()
+                .map(|(k, v)| ConfigMapEntry {
+                    key: k.to_string(),
+                    key_source: quarto_source_map::SourceInfo::for_test(),
+                    value: v,
+                })
+                .collect(),
+            quarto_source_map::SourceInfo::for_test(),
+        )
+    }
+
+    /// A brand param with the same `large` logo path on both sides —
+    /// the common case once a real dark half is always resolved (an
+    /// all-plain brand's split halves are equal, per
+    /// [`quarto_brand::SplitBrand`]'s contract).
+    fn brand_param_with_large_logo(path: &str) -> Value {
+        brand_param_with_large_logo_per_mode(path, path)
+    }
+
+    /// A brand param with **distinct** `large` logo paths per mode —
+    /// exercises that [`build_logo_param`]'s brand-path fallback reads
+    /// each side's own mode rather than always `"light"`.
+    fn brand_param_with_large_logo_per_mode(light_path: &str, dark_path: &str) -> Value {
+        json!({
+            "light": {
+                "processedData": {
+                    "logo": {
+                        "large": { "path": light_path }
+                    }
+                }
+            },
+            "dark": {
+                "processedData": {
+                    "logo": {
+                        "large": { "path": dark_path }
+                    }
+                }
+            }
+        })
+    }
+
+    /// No document `logo:` key and no brand logo at all: nothing to
+    /// surface, `param('logo')` stays absent.
+    #[test]
+    fn test_build_logo_param_absent_without_doc_or_brand_logo() {
+        let meta = cv_map(vec![]);
+        assert!(build_logo_param(&meta, None).is_none());
+    }
+
+    /// No document `logo:` key, but the brand names one (`online-logo.qmd`
+    /// style): synthesize `{path}` for both modes from the brand's logo,
+    /// with a leading `/` added since the path isn't external or rooted.
+    #[test]
+    fn test_build_logo_param_synthesizes_from_brand_when_doc_logo_absent() {
+        let meta = cv_map(vec![]);
+        let brand_param = brand_param_with_large_logo("quarto/quarto.png");
+        let logo = build_logo_param(&meta, Some(&brand_param)).unwrap();
+        assert_eq!(logo["light"]["path"], json!("/quarto/quarto.png"));
+        assert_eq!(logo["dark"]["path"], json!("/quarto/quarto.png"));
+    }
+
+    /// An external brand logo URL is left untouched — no leading `/`
+    /// prepended, matching `BrandLogoResource::with_path_relative_to`'s
+    /// own external-URL passthrough.
+    #[test]
+    fn test_build_logo_param_leaves_external_brand_path_untouched() {
+        let meta = cv_map(vec![]);
+        let brand_param = brand_param_with_large_logo("https://quarto.org/quarto.png");
+        let logo = build_logo_param(&meta, Some(&brand_param)).unwrap();
+        assert_eq!(
+            logo["light"]["path"],
+            json!("https://quarto.org/quarto.png")
+        );
+    }
+
+    /// A flat (non-light/dark) `logo:` spec applies to both modes
+    /// (`directional-padding.qmd` style): layout keys pass through
+    /// verbatim (unit conversion is the Lua filter's job), and a missing
+    /// `path` still gets filled in from the brand.
+    #[test]
+    fn test_build_logo_param_flat_spec_applies_to_both_modes() {
+        let meta = cv_map(vec![(
+            "logo",
+            cv_map(vec![
+                ("location", cv_s("center-middle")),
+                ("padding-top", cv_s("30px")),
+                ("width", cv_s("180px")),
+            ]),
+        )]);
+        let brand_param = brand_param_with_large_logo("quarto/quarto.png");
+        let logo = build_logo_param(&meta, Some(&brand_param)).unwrap();
+        for mode in ["light", "dark"] {
+            assert_eq!(logo[mode]["location"], json!("center-middle"));
+            assert_eq!(logo[mode]["padding-top"], json!("30px"));
+            assert_eq!(logo[mode]["width"], json!("180px"));
+            assert_eq!(logo[mode]["path"], json!("/quarto/quarto.png"));
+        }
+    }
+
+    /// bd-67i2z57f: when the brand's light and dark halves name
+    /// different logo images, a document `logo:` spec that leaves
+    /// `path` unset gets each side's default filled from *that side's
+    /// own* brand data — not always the light side's.
+    ///
+    /// Revert hunk: reverting `default_brand_path` to always read
+    /// `brand_param["light"]` makes the dark-path assertion RED
+    /// (it would equal the light path instead).
+    #[test]
+    fn test_build_logo_param_light_dark_spec_defaults_from_matching_brand_side() {
+        let meta = cv_map(vec![(
+            "logo",
+            cv_map(vec![
+                ("light", cv_map(vec![("location", cv_s("left-top"))])),
+                ("dark", cv_map(vec![("location", cv_s("right-bottom"))])),
+            ]),
+        )]);
+        let brand_param =
+            brand_param_with_large_logo_per_mode("light-quarto.png", "dark-quarto.png");
+        let logo = build_logo_param(&meta, Some(&brand_param)).unwrap();
+        assert_eq!(logo["light"]["path"], json!("/light-quarto.png"));
+        assert_eq!(logo["dark"]["path"], json!("/dark-quarto.png"));
+    }
+
+    /// A `{light:, dark:}` document spec (`light-dark-variants.qmd` style)
+    /// picks each mode's own sub-object rather than sharing one flat spec.
+    #[test]
+    fn test_build_logo_param_light_dark_spec_picks_each_side() {
+        let meta = cv_map(vec![(
+            "logo",
+            cv_map(vec![
+                ("light", cv_map(vec![("location", cv_s("left-top"))])),
+                ("dark", cv_map(vec![("location", cv_s("right-bottom"))])),
+            ]),
+        )]);
+        let logo = build_logo_param(&meta, None).unwrap();
+        assert_eq!(logo["light"]["location"], json!("left-top"));
+        assert_eq!(logo["dark"]["location"], json!("right-bottom"));
+    }
+
+    /// An explicit document `path` wins over the brand's own logo — the
+    /// brand lookup only fills in a *missing* path.
+    #[test]
+    fn test_build_logo_param_explicit_doc_path_wins_over_brand() {
+        let meta = cv_map(vec![("logo", cv_map(vec![("path", cv_s("doc-logo.png"))]))]);
+        let brand_param = brand_param_with_large_logo("quarto/quarto.png");
+        let logo = build_logo_param(&meta, Some(&brand_param)).unwrap();
+        assert_eq!(logo["light"]["path"], json!("doc-logo.png"));
+    }
+
+    /// Q1 parity: when only one side of a `{light:, dark:}` doc spec is
+    /// set, the other side falls back to it rather than staying absent.
+    #[test]
+    fn test_build_logo_param_light_dark_falls_back_to_other_side() {
+        let meta = cv_map(vec![(
+            "logo",
+            cv_map(vec![(
+                "light",
+                cv_map(vec![("location", cv_s("left-top"))]),
+            )]),
+        )]);
+        let logo = build_logo_param(&meta, None).unwrap();
+        assert_eq!(logo["dark"]["location"], json!("left-top"));
+    }
+}

@@ -1,7 +1,10 @@
-# Project Resources: user- and engine-declared additional files
+---
+title: 'Project Resources: user- and engine-declared additional files'
+date: 2026-05-03
+description: 'Adds a way for authors, Lua filters and engines to declare extra files that should be copied into the output directory and included in `quarto publish` deployments, beyond what the render pipeline produces.'
+status: draft  # Draft v2 — design questions resolved with the user 2026-05-03.
+---
 
-**Date:** 2026-05-03
-**Status:** Draft v2 — design questions resolved with the user 2026-05-03.
 **Do not start implementation until the user gives the go-ahead.**
 
 ## Goal
@@ -359,7 +362,7 @@ alongside the code that supports them in their respective phases.
 - [x] End-to-end fixture: project with `_quarto.yml` declaring
       `resources: ["data/*.csv", "extras/notes.txt"]`, plus a
       document with `resources: [include.html]`. Run `quarto
-      render`, assert files land in `_site/` at expected locations.
+      render`, assert files land in `\_site/` at expected locations.
       *(Implemented as `project_resources_literal_paths_copy_to_output_dir`,
       `project_resources_glob_expansion`,
       `project_resources_single_scalar`,

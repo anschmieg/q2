@@ -68,14 +68,26 @@ function proxyRequest(req, res) {
 
   const proxyReq = http.request(options, (proxyRes) => {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.on('error', () => res.destroy());
     proxyRes.pipe(res);
   });
 
   proxyReq.on('error', (err) => {
     console.error(`Proxy error: ${err.message}`);
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     res.writeHead(502);
     res.end('Bad Gateway');
   });
+
+  // Client went away mid-request: drop the upstream request too.
+  res.on('close', () => {
+    if (!res.writableFinished) proxyReq.destroy();
+  });
+  req.on('error', () => proxyReq.destroy());
+  res.on('error', () => proxyReq.destroy());
 
   req.pipe(proxyReq);
 }
@@ -115,12 +127,23 @@ function handleUpgrade(req, socket, head) {
     socket.write('\r\n');
     proxySocket.write(proxyHead);
     proxySocket.pipe(socket).pipe(proxySocket);
+
+    // A reset on either side (e.g. a browser tab dying) must tear down only
+    // this connection pair. Without handlers, the 'error' event is thrown and
+    // takes the whole proxy process down.
+    socket.on('error', () => proxySocket.destroy());
+    proxySocket.on('error', () => socket.destroy());
+    socket.on('close', () => proxySocket.destroy());
+    proxySocket.on('close', () => socket.destroy());
   });
 
   proxyReq.on('error', (err) => {
     console.error(`WebSocket proxy error: ${err.message}`);
     socket.end();
   });
+
+  // The client can reset before the hub answers the upgrade.
+  socket.on('error', () => proxyReq.destroy());
 
   proxyReq.end();
 }
@@ -133,10 +156,13 @@ const server = http.createServer((req, res) => {
   }
 
   // Serve static files
-  let filePath = path.join(DIST_DIR, req.url === '/' ? 'index.html' : req.url);
+  // Route on the path alone: a query string (the pdf.js viewer is opened as `viewer.html?file=...`)
+  // is not part of the file name and would otherwise miss the file and fall through to index.html.
+  const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  let filePath = path.join(DIST_DIR, pathname === '/' ? 'index.html' : pathname);
 
   // Handle SPA routing - if file doesn't exist and not an asset, serve index.html
-  if (!fs.existsSync(filePath) && !req.url.startsWith('/assets/')) {
+  if (!fs.existsSync(filePath) && !pathname.startsWith('/assets/')) {
     filePath = path.join(DIST_DIR, 'index.html');
   }
 

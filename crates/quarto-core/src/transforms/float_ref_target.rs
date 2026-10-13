@@ -17,7 +17,7 @@
 //!
 //! ## Recognized input shapes
 //!
-//! Per plan 1.2, four author-facing shapes collapse to the same canonical
+//! Per plan 1.2, five author-facing shapes collapse to the same canonical
 //! node:
 //!
 //! 1. `Div(#<ref>-..)` containing arbitrary content plus an optional
@@ -31,6 +31,14 @@
 //!    custom node's slots.
 //! 4. `Div(#tbl-..) > Table` — standard table crossref. The Table's own
 //!    caption becomes the target's caption; the Table stays as content.
+//! 5. `CodeBlock(#lst-.. lst-cap=..)` — the attribute-form listing (fenced
+//!    code block whose id classifies as `lst` and which carries an
+//!    `lst-cap` attribute; see `classify_codeblock`). Q1's
+//!    `parsefiguredivs.lua` handles this shape in Lua, but converting it
+//!    here — before crossref indexing — is what makes `@lst-..` in-text
+//!    references resolve; the Lua filters run after the index is built.
+//!    The cell-option form (`#| label:` / `#| lst-cap:`) is desugared
+//!    earlier by `codeblock_shorthand` into shape 1 and needs no arm here.
 //!
 //! A fifth shape, engine-emitted figure divs, matches shape (3) or (1)
 //! post-engine and is therefore handled by the same code paths.
@@ -52,7 +60,19 @@
 //!   - `"content"`: [`Slot::Blocks`] — the body blocks (image, table,
 //!     whatever). Empty is allowed.
 //!   - `"caption_long"`: [`Slot::Blocks`] — present iff the original shape
-//!     had a caption. Contains the caption blocks verbatim.
+//!     had a caption. Its **first block is always a `Plain`**: a caption
+//!     authored as a trailing paragraph (div form, `#| fig-cap` cells)
+//!     arrives as a `Paragraph` and is canonicalized here, while
+//!     Pandoc-native `Figure` / `Table` captions are `Plain` already. One
+//!     shape for every float form means every consumer (the crossref
+//!     renderer's prefix step, the index, the HTML writer's `<figcaption>`)
+//!     behaves identically regardless of how the float was written — and
+//!     the writer emits bare inlines inside `<figcaption>`, as Q1 does.
+//!     Any trailing blocks are kept as authored. Consumers must still accept
+//!     a leading `Paragraph` defensively: Lua filters and the JSON reader can
+//!     hand the pipeline either. (bd-n3sark9b; Q1's own IR is *not*
+//!     canonical — its div-form caption stays a `Para` — so this is a
+//!     deliberate, documented divergence for filter authors: bd-t0qt409i.)
 //!   - `"caption_short"`: [`Slot::Inlines`] — present iff the original
 //!     shape carried a short caption (e.g. Figure.caption.short or a
 //!     `fig-scap` attribute). Not yet populated in Phase 1; a later task
@@ -61,9 +81,12 @@
 //! `plain_data.order` is *not* set here — the [`CrossrefIndexTransform`]
 //! fills it during the crossref phase.
 
+use pampa::pandoc::meta::parse_config_string_as_markdown;
+use quarto_error_reporting::DiagnosticMessage;
 use quarto_pandoc_types::attr::{Attr, AttrSourceInfo};
-use quarto_pandoc_types::block::{Block, Blocks, Div, Figure, Paragraph};
+use quarto_pandoc_types::block::{Block, Blocks, CodeBlock, Div, Figure, Plain};
 use quarto_pandoc_types::custom::{CustomNode, Slot};
+use quarto_pandoc_types::inline::{Inline, Inlines, Str};
 use quarto_pandoc_types::pandoc::Pandoc;
 use serde_json::json;
 
@@ -105,22 +128,30 @@ impl AstTransform for FloatRefTargetSugarTransform {
         let Some(registry) = ctx.ref_type_registry.as_ref() else {
             return Ok(());
         };
-        transform_blocks(&mut ast.blocks, registry);
+        transform_blocks(&mut ast.blocks, registry, &mut ctx.diagnostics);
         Ok(())
     }
 }
 
 /// Walk a block list, sugaring float-ref targets in place.
-fn transform_blocks(blocks: &mut Vec<Block>, reg: &RefTypeRegistry) {
+fn transform_blocks(
+    blocks: &mut Vec<Block>,
+    reg: &RefTypeRegistry,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) {
     for block in blocks.iter_mut() {
-        transform_block(block, reg);
+        transform_block(block, reg, diagnostics);
     }
 }
 
 /// Walk one block: first recurse into children, then check this node itself
 /// for crossref-target shape. Bottom-up order matters for nested crossref
 /// targets (a figure inside a larger document region).
-fn transform_block(block: &mut Block, reg: &RefTypeRegistry) {
+fn transform_block(
+    block: &mut Block,
+    reg: &RefTypeRegistry,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) {
     // Desugar the bare-table caption form into the canonical float Div first,
     // so the uniform `Block::Div` classifier below handles it exactly like the
     // `::: {#tbl-…}` authoring form (bd-4ly7ne01).
@@ -128,33 +159,33 @@ fn transform_block(block: &mut Block, reg: &RefTypeRegistry) {
 
     // Recurse into children first.
     match block {
-        Block::BlockQuote(bq) => transform_blocks(&mut bq.content, reg),
+        Block::BlockQuote(bq) => transform_blocks(&mut bq.content, reg, diagnostics),
         Block::OrderedList(ol) => {
             for item in &mut ol.content {
-                transform_blocks(item, reg);
+                transform_blocks(item, reg, diagnostics);
             }
         }
         Block::BulletList(bl) => {
             for item in &mut bl.content {
-                transform_blocks(item, reg);
+                transform_blocks(item, reg, diagnostics);
             }
         }
         Block::DefinitionList(dl) => {
             for (_term, defs) in &mut dl.content {
                 for def in defs {
-                    transform_blocks(def, reg);
+                    transform_blocks(def, reg, diagnostics);
                 }
             }
         }
-        Block::Figure(fig) => transform_blocks(&mut fig.content, reg),
-        Block::Div(div) => transform_blocks(&mut div.content, reg),
+        Block::Figure(fig) => transform_blocks(&mut fig.content, reg, diagnostics),
+        Block::Div(div) => transform_blocks(&mut div.content, reg, diagnostics),
         Block::Custom(custom) => {
             // Crossref targets can nest inside other custom nodes
             // (e.g. a figure inside a callout). Recurse through slots.
             for (_name, slot) in &mut custom.slots {
                 match slot {
-                    Slot::Block(b) => transform_block(b, reg),
-                    Slot::Blocks(bs) => transform_blocks(bs, reg),
+                    Slot::Block(b) => transform_block(b, reg, diagnostics),
+                    Slot::Blocks(bs) => transform_blocks(bs, reg, diagnostics),
                     _ => {}
                 }
             }
@@ -198,6 +229,22 @@ fn transform_block(block: &mut Block, reg: &RefTypeRegistry) {
                 def,
             )
         }),
+        Block::CodeBlock(cb) => classify_codeblock(cb, reg).map(|(def, caption_value)| {
+            convert_codeblock(
+                std::mem::replace(
+                    cb,
+                    CodeBlock {
+                        attr: empty_attr(),
+                        text: String::new(),
+                        source_info: cb.source_info.clone(),
+                        attr_source: AttrSourceInfo::empty(),
+                    },
+                ),
+                def,
+                caption_value,
+                diagnostics,
+            )
+        }),
         _ => None,
     };
 
@@ -208,10 +255,20 @@ fn transform_block(block: &mut Block, reg: &RefTypeRegistry) {
 
 /// Classify a Div's attributes: if its id is a crossref target, return the
 /// matching [`RefTypeDef`].
+///
+/// A div carrying the `section` class is never a float target: that's the
+/// wrapper `SectionizeTransform` puts around every section, and the `sec`
+/// prefix match on it was accidental — it produced bottom-up,
+/// caption-stealing `@sec-` registration (book-projects P0, Amendment A).
+/// Section headers are registered by `CrossrefIndexTransform` directly.
+/// Bare `::: {#sec-x}` divs *without* the class keep the float path.
 fn classify_div<'r>(
     attr: &Attr,
     reg: &'r RefTypeRegistry,
 ) -> Option<&'r crate::crossref::RefTypeDef> {
+    if attr.1.iter().any(|c| c == "section") {
+        return None;
+    }
     let id = attr.0.as_str();
     reg.classify_cite_id(id)
 }
@@ -224,6 +281,92 @@ fn classify_fig<'r>(
 ) -> Option<&'r crate::crossref::RefTypeDef> {
     let id = attr.0.as_str();
     reg.classify_cite_id(id)
+}
+
+/// Classify a CodeBlock for the *attribute-form* listing sugar — Q1's
+/// `parsefiguredivs.lua` `CodeBlock` handler. The id must classify as the
+/// `lst` ref-type and an `lst-cap` attribute must be present; only then is
+/// the code block a float. Returns the ref-type def and the caption value.
+///
+/// (The cell-option form — `#| label:` / `#| lst-cap:` — is desugared
+/// earlier by `codeblock_shorthand` into a wrapper Div and arrives here as
+/// shape 1; this arm is the only handler for the `{#lst-… lst-cap=…}`
+/// attribute form. Before it existed, attribute-form listings were converted
+/// only by the vendored Lua filters, which run *after* crossref indexing, so
+/// `@lst-…` in-text references never resolved.)
+fn classify_codeblock<'r>(
+    cb: &CodeBlock,
+    reg: &'r RefTypeRegistry,
+) -> Option<(&'r crate::crossref::RefTypeDef, String)> {
+    let def = reg.classify_cite_id(&cb.attr.0)?;
+    if def.ref_type != "lst" {
+        return None;
+    }
+    let caption = cb.attr.2.get("lst-cap")?.clone();
+    Some((def, caption))
+}
+
+/// Convert an attribute-form listing CodeBlock into a FloatRefTarget,
+/// mirroring Q1's `parsefiguredivs.lua` `CodeBlock` handler: the id moves
+/// onto the float node (classes and any remaining attributes ride along),
+/// the inner code block keeps its classes/attributes but loses the id so
+/// nothing matches it again downstream, `lst-cap` is consumed off both, and
+/// the caption value is parsed as markdown (`string_to_quarto_ast_blocks`).
+fn convert_codeblock(
+    cb: CodeBlock,
+    def: &crate::crossref::RefTypeDef,
+    caption_value: String,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> CustomNode {
+    let source_info = cb.source_info.clone();
+
+    let mut attr = cb.attr.clone();
+    let identifier = attr.0.clone();
+    attr.2.remove("lst-cap");
+
+    let mut inner = cb;
+    inner.attr.0 = String::new();
+    inner.attr.2.remove("lst-cap");
+
+    let inlines = match parse_config_string_as_markdown(&caption_value, &source_info, diagnostics) {
+        quarto_pandoc_types::ConfigValueKind::PandocInlines(inlines) => inlines,
+        quarto_pandoc_types::ConfigValueKind::PandocBlocks(blocks) => blocks
+            .into_iter()
+            .find_map(|b| match b {
+                Block::Paragraph(p) => Some(p.content),
+                Block::Plain(p) => Some(p.content),
+                _ => None,
+            })
+            .unwrap_or_else(|| literal_caption_inlines(&caption_value, &source_info)),
+        _ => literal_caption_inlines(&caption_value, &source_info),
+    };
+
+    let mut node = CustomNode::new(FLOAT_REF_TARGET, attr, source_info);
+    node.plain_data = json!({
+        "ref_type":   def.ref_type,
+        "kind":       def.kind,
+        "identifier": identifier,
+    });
+    node.slots.insert(
+        "content".into(),
+        Slot::Blocks(vec![Block::CodeBlock(inner)]),
+    );
+    node.slots.insert(
+        "caption_long".into(),
+        Slot::Blocks(vec![Block::Plain(Plain {
+            content: inlines,
+            source_info: node.source_info.clone(),
+        })]),
+    );
+    node
+}
+
+/// Fallback caption inlines: the caption text, verbatim.
+fn literal_caption_inlines(text: &str, source_info: &quarto_source_map::SourceInfo) -> Inlines {
+    vec![Inline::Str(Str {
+        text: text.to_string(),
+        source_info: source_info.clone(),
+    })]
 }
 
 fn empty_attr() -> Attr {
@@ -277,6 +420,209 @@ fn maybe_wrap_bare_table_into_div(block: &mut Block, reg: &RefTypeRegistry) {
     }
 }
 
+/// Canonicalize a float caption to the slot contract documented in the
+/// module doc: a leading `Paragraph` becomes a `Plain` with the same inlines
+/// and source info; any other leading block, and every trailing block, is
+/// left untouched.
+fn canonicalize_caption(mut caption: Blocks) -> Blocks {
+    if matches!(caption.first(), Some(Block::Paragraph(_))) {
+        let Block::Paragraph(para) = caption.remove(0) else {
+            unreachable!("matched Paragraph above");
+        };
+        caption.insert(
+            0,
+            Block::Plain(Plain {
+                content: para.content,
+                source_info: para.source_info,
+            }),
+        );
+    }
+    caption
+}
+
+/// Recursively clear any block or inline attribute id equal to
+/// `identifier`, wherever it occurs inside `blocks`.
+///
+/// `label_reinject` (bd-2lxj10z0) hands an engine (knitr) the crossref
+/// label it would otherwise never see, so the engine can derive the
+/// right output filename (`fig-cars-1.svg`, not `unnamed-chunk-1-1.svg`).
+/// But an engine that receives a label may also emit its *own*
+/// already-labeled output for that chunk — e.g. knitr's rendered
+/// markdown for a `#| fig-cap` chunk attaches the label directly to the
+/// image it emits (`![](fig-cars-1.svg){#fig-cars}`), nested inside the
+/// engine's own output-wrapper divs. `quarto_ast_reconcile::reconcile`
+/// then slots that whole subtree into this Div/Figure's content in place
+/// of the plain pre-engine `CodeBlock`, so the identifier this
+/// `FloatRefTarget` is about to claim can already be sitting on a block
+/// or inline several levels down in `content` — confirmed by rendering
+/// `crates/quarto/tests/smoke-all/typst/orange-book/chapter1.qmd`'s
+/// `fig-cars` chunk and inspecting the reconciled AST: the leaked id
+/// landed on an `Image` nested two `Div`s deep. Left in place, the Typst
+/// writer emits `<fig-cars>` a second time there and Typst rejects the
+/// document for a duplicate label. Since crossref identifiers are unique
+/// document-wide, any match found here — anywhere in `content` — can only
+/// be this leaked echo, never an unrelated element that legitimately
+/// shares the id.
+fn clear_matching_id(blocks: &mut Blocks, identifier: &str) {
+    clear_blocks(blocks, identifier);
+}
+
+/// Clear `identifier` from a list of blocks, splicing away any nested
+/// `Custom(FloatRefTarget)` echo entirely rather than just blanking its id.
+///
+/// A leaked echo that is itself wrapped in a Div/Figure carrying the same
+/// crossref id (the table/figure case, as opposed to the bare-`Image` case)
+/// gets independently classified and promoted to `Custom(FloatRefTarget)` by
+/// this transform's bottom-up walk *before* the ancestor claiming the same
+/// id is processed. By the time [`clear_matching_id`] runs on the ancestor's
+/// content, blanking the echo's `attr.0` is not enough: Lua's
+/// `crossref_mark_subfloats()` (`crossref/preprocess.lua`) matches nested
+/// floats by *custom-node type*, not by identifier, so a stray
+/// `Custom(FloatRefTarget)` — id or no id — still gets counted as a subfloat
+/// and routes the parent through Typst's subfloat/`#note(quarto_super(...))`
+/// path instead of the plain single-float `#notefigure(...)` path. Splicing
+/// the echo's own `content` slot in its place removes the duplicate float
+/// entirely, matching what a single, correctly-labeled float should look
+/// like.
+fn clear_blocks(blocks: &mut Blocks, identifier: &str) {
+    let mut i = 0;
+    while i < blocks.len() {
+        let is_leaked_float_echo = matches!(
+            &blocks[i],
+            Block::Custom(c) if c.attr.0 == identifier && c.type_name == FLOAT_REF_TARGET
+        );
+        if is_leaked_float_echo {
+            let Block::Custom(custom) = blocks.remove(i) else {
+                unreachable!()
+            };
+            let mut replacement = custom
+                .slots
+                .into_iter()
+                .find_map(|(name, slot)| match (name.as_str(), slot) {
+                    ("content", Slot::Blocks(bs)) => Some(bs),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            clear_blocks(&mut replacement, identifier);
+            let n = replacement.len();
+            blocks.splice(i..i, replacement);
+            i += n;
+            continue;
+        }
+        clear_block(&mut blocks[i], identifier);
+        i += 1;
+    }
+}
+
+/// Clear `identifier` from a single block (and recurse into its children).
+/// Used both by [`clear_blocks`] for non-echo elements and for slot shapes
+/// (`Slot::Block`) that hold exactly one block and so can't be spliced.
+fn clear_block(block: &mut Block, identifier: &str) {
+    fn clear_inlines(inlines: &mut [Inline], identifier: &str) {
+        for inline in inlines {
+            match inline {
+                Inline::Span(s) => {
+                    if s.attr.0 == identifier {
+                        s.attr.0 = String::new();
+                    }
+                    clear_inlines(&mut s.content, identifier);
+                }
+                Inline::Link(l) => {
+                    if l.attr.0 == identifier {
+                        l.attr.0 = String::new();
+                    }
+                    clear_inlines(&mut l.content, identifier);
+                }
+                Inline::Image(i) => {
+                    if i.attr.0 == identifier {
+                        i.attr.0 = String::new();
+                    }
+                    clear_inlines(&mut i.content, identifier);
+                }
+                Inline::Emph(e) => clear_inlines(&mut e.content, identifier),
+                Inline::Underline(u) => clear_inlines(&mut u.content, identifier),
+                Inline::Strong(s) => clear_inlines(&mut s.content, identifier),
+                Inline::Strikeout(s) => clear_inlines(&mut s.content, identifier),
+                Inline::Superscript(s) => clear_inlines(&mut s.content, identifier),
+                Inline::Subscript(s) => clear_inlines(&mut s.content, identifier),
+                Inline::SmallCaps(s) => clear_inlines(&mut s.content, identifier),
+                Inline::Quoted(q) => clear_inlines(&mut q.content, identifier),
+                Inline::Note(n) => clear_blocks(&mut n.content, identifier),
+                _ => {}
+            }
+        }
+    }
+    match block {
+        Block::Div(d) => {
+            if d.attr.0 == identifier {
+                d.attr.0 = String::new();
+            }
+            clear_blocks(&mut d.content, identifier);
+        }
+        Block::Figure(f) => {
+            if f.attr.0 == identifier {
+                f.attr.0 = String::new();
+            }
+            clear_blocks(&mut f.content, identifier);
+            if let Some(long) = &mut f.caption.long {
+                clear_blocks(long, identifier);
+            }
+        }
+        Block::CodeBlock(cb) if cb.attr.0 == identifier => {
+            cb.attr.0 = String::new();
+        }
+        Block::BlockQuote(bq) => clear_blocks(&mut bq.content, identifier),
+        Block::OrderedList(ol) => {
+            for item in &mut ol.content {
+                clear_blocks(item, identifier);
+            }
+        }
+        Block::BulletList(bl) => {
+            for item in &mut bl.content {
+                clear_blocks(item, identifier);
+            }
+        }
+        Block::DefinitionList(dl) => {
+            for (term, defs) in &mut dl.content {
+                clear_inlines(term, identifier);
+                for def in defs {
+                    clear_blocks(def, identifier);
+                }
+            }
+        }
+        Block::Paragraph(p) => clear_inlines(&mut p.content, identifier),
+        Block::Plain(p) => clear_inlines(&mut p.content, identifier),
+        Block::Header(h) => {
+            if h.attr.0 == identifier {
+                h.attr.0 = String::new();
+            }
+            clear_inlines(&mut h.content, identifier);
+        }
+        Block::LineBlock(lb) => {
+            for line in &mut lb.content {
+                clear_inlines(line, identifier);
+            }
+        }
+        Block::Table(t) if t.attr.0 == identifier => {
+            t.attr.0 = String::new();
+        }
+        Block::Custom(c) => {
+            if c.attr.0 == identifier {
+                c.attr.0 = String::new();
+            }
+            for (_name, slot) in c.slots.iter_mut() {
+                match slot {
+                    Slot::Block(b) => clear_block(b, identifier),
+                    Slot::Blocks(bs) => clear_blocks(bs, identifier),
+                    Slot::Inline(i) => clear_inlines(std::slice::from_mut(&mut **i), identifier),
+                    Slot::Inlines(is) => clear_inlines(is, identifier),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Convert a `Div` that we already know is a crossref target into a
 /// FloatRefTarget custom node.
 ///
@@ -290,13 +636,19 @@ fn maybe_wrap_bare_table_into_div(block: &mut Block, reg: &RefTypeRegistry) {
 /// - Otherwise, the last `Paragraph` becomes the caption (Q1 convention),
 ///   and the remaining blocks become content. Divs with no trailing para
 ///   still produce a target — just with no caption.
+///
+/// Whichever shape applies, [`clear_matching_id`] then scrubs the chosen
+/// `content` of this identifier wherever it recurs — see that function's
+/// doc comment for why an engine-executed chunk can hand back its own
+/// label buried inside the content it's about to become.
 fn convert_div(div: Div, def: &crate::crossref::RefTypeDef) -> CustomNode {
     let source_info = div.source_info.clone();
     let attr = div.attr.clone();
     let identifier = attr.0.clone();
 
     let mut content_blocks = div.content;
-    let (content, caption_long, caption_short) = match content_blocks.as_slice() {
+
+    let (mut content, caption_long, caption_short) = match content_blocks.as_slice() {
         [Block::Figure(_)] => {
             // Flatten Div > Figure. Move Figure's content/caption up.
             let Block::Figure(fig) = content_blocks.remove(0) else {
@@ -307,41 +659,46 @@ fn convert_div(div: Div, def: &crate::crossref::RefTypeDef) -> CustomNode {
             (fig.content, caption_long, caption_short)
         }
         [Block::Table(_)] => {
-            // Table keeps its own caption for rendering convenience, but we
-            // also surface the caption on the target so resolvers can use
-            // it as link text.
-            let Block::Table(table) = content_blocks.remove(0) else {
+            // Surface the table's caption onto the target (numbered
+            // rendering, resolver link text), then clear the Table's own
+            // copy — matching Q1, which does the same at parse time
+            // (`quarto-pre/parsefiguredivs.lua`: `table.caption =
+            // pandoc.Caption{}` at L280, `el.caption.long =
+            // pandoc.Blocks({})` at L544).
+            //
+            // This must happen here, at construction time, not only in
+            // `crossref_render.rs`'s later HTML-DOM elision: the
+            // `Bucket::B4` classification means `crossref-render` does
+            // not survive to the Pandoc cut at all, so a docx/pptx
+            // render's FloatRefTarget content reaches the vendored Lua
+            // filters with whatever caption state it had *here* —
+            // uncleared, it duplicated the caption in the rendered docx
+            // (once via the Table's own native caption, once via the
+            // Lua filter's numbered rendering). Measured via `cargo run
+            // --bin q2 -- render <table-with-caption> --to docx`, which
+            // produced two "My Caption" paragraphs in the output
+            // `word/document.xml`.
+            let Block::Table(mut table) = content_blocks.remove(0) else {
                 unreachable!()
             };
             let caption_long = table.caption.long.clone().unwrap_or_default();
             let caption_short = table.caption.short.clone();
+            table.caption.long = None;
+            table.caption.short = None;
             (vec![Block::Table(table)], caption_long, caption_short)
         }
         _ => {
-            // General case: last Paragraph becomes caption.
-            let caption = match content_blocks.last() {
-                Some(Block::Paragraph(_)) => {
-                    let last = content_blocks.pop().unwrap();
-                    let Block::Paragraph(para) = last else {
-                        unreachable!()
-                    };
-                    Some(para)
-                }
-                _ => None,
+            // General case: last Paragraph becomes caption (Q1's
+            // `refCaptionFromDiv`). It is canonicalized to Plain when the
+            // slot is filled below.
+            let long = match content_blocks.last() {
+                Some(Block::Paragraph(_)) => vec![content_blocks.pop().unwrap()],
+                _ => Vec::new(),
             };
-            let (content, long) = match caption {
-                Some(para) => {
-                    let para_block = Block::Paragraph(Paragraph {
-                        content: para.content,
-                        source_info: para.source_info,
-                    });
-                    (content_blocks, vec![para_block])
-                }
-                None => (content_blocks, Vec::new()),
-            };
-            (content, long, None)
+            (content_blocks, long, None)
         }
     };
+    clear_matching_id(&mut content, &identifier);
 
     let mut node = CustomNode::new(FLOAT_REF_TARGET, attr, source_info);
     node.plain_data = json!({
@@ -351,8 +708,10 @@ fn convert_div(div: Div, def: &crate::crossref::RefTypeDef) -> CustomNode {
     });
     node.slots.insert("content".into(), Slot::Blocks(content));
     if !caption_long.is_empty() {
-        node.slots
-            .insert("caption_long".into(), Slot::Blocks(caption_long));
+        node.slots.insert(
+            "caption_long".into(),
+            Slot::Blocks(canonicalize_caption(caption_long)),
+        );
     }
     if let Some(short) = caption_short
         && !short.is_empty()
@@ -363,14 +722,57 @@ fn convert_div(div: Div, def: &crate::crossref::RefTypeDef) -> CustomNode {
     node
 }
 
+/// Attribute keys that stay on the inner `Image` rather than being copied up
+/// onto the enclosing float's `Attr`: they affect how the image itself is
+/// sized, not how the float is placed/classified. Mirrors Q1's
+/// `parsefiguredivs.lua` `attributes_to_not_merge = {"width", "height"}`.
+const IMAGE_ATTRS_NOT_MERGED_TO_FLOAT: &[&str] = &["width", "height"];
+
+/// Pandoc's markdown reader, when it auto-promotes a solo captioned image
+/// (`![cap](src){#fig-x .column-margin key=val}`) into a native `Figure`
+/// block, puts only the identifier on the `Figure`'s own `Attr` — classes
+/// and non-geometry attributes (e.g. `.column-margin`, `cap-location=…`)
+/// stay on the inner `Image`. Verified directly: `echo '![CAP](x.svg){#fig-x
+/// .column-margin width=100%}' | pandoc -f markdown -t json` emits
+/// `Figure`'s attr as `["fig-x", [], []]` and the `Image`'s as `["",
+/// ["column-margin"], [["width","100%"]]]`.
+///
+/// Without this merge, every float classifier that inspects the
+/// FloatRefTarget's own classes/attributes (margin placement, cap-location)
+/// silently sees none of them for this authoring shape — the bug behind
+/// missing `#notefigure(...)` emission for plain `![cap](src){.column-margin}`
+/// figures. Mirrors Q1's `parsefiguredivs.lua` `Figure` handler, which does
+/// the same merge (despite its own stale comment claiming classes aren't
+/// merged — the code there inserts them regardless).
+fn merge_image_attrs_into_figure_attr(attr: &mut Attr, content: &Blocks) {
+    let [Block::Plain(plain)] = content.as_slice() else {
+        return;
+    };
+    let [Inline::Image(image)] = plain.content.as_slice() else {
+        return;
+    };
+    for class in &image.attr.1 {
+        if !attr.1.contains(class) {
+            attr.1.push(class.clone());
+        }
+    }
+    for (key, value) in image.attr.2.iter() {
+        if !IMAGE_ATTRS_NOT_MERGED_TO_FLOAT.contains(&key.as_str()) {
+            attr.2.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+}
+
 /// Convert a `Figure` that we already know is a crossref target (its id
 /// matches a registered ref-type) into a FloatRefTarget custom node.
 fn convert_figure(fig: Figure, def: &crate::crossref::RefTypeDef) -> CustomNode {
     let source_info = fig.source_info.clone();
-    let attr = fig.attr.clone();
+    let mut attr = fig.attr.clone();
     let identifier = attr.0.clone();
 
-    let content: Blocks = fig.content;
+    let mut content: Blocks = fig.content;
+    merge_image_attrs_into_figure_attr(&mut attr, &content);
+    clear_matching_id(&mut content, &identifier);
     let caption_long = fig.caption.long.unwrap_or_default();
     let caption_short = fig.caption.short;
 
@@ -382,8 +784,10 @@ fn convert_figure(fig: Figure, def: &crate::crossref::RefTypeDef) -> CustomNode 
     });
     node.slots.insert("content".into(), Slot::Blocks(content));
     if !caption_long.is_empty() {
-        node.slots
-            .insert("caption_long".into(), Slot::Blocks(caption_long));
+        node.slots.insert(
+            "caption_long".into(),
+            Slot::Blocks(canonicalize_caption(caption_long)),
+        );
     }
     if let Some(short) = caption_short
         && !short.is_empty()
@@ -399,10 +803,10 @@ mod tests {
     use super::*;
     use crate::crossref::crossref_target_view;
     use hashlink::LinkedHashMap;
-    use quarto_pandoc_types::attr::AttrSourceInfo;
-    use quarto_pandoc_types::block::{CodeBlock, Div, Figure, Paragraph};
+    use quarto_pandoc_types::attr::{AttrSourceInfo, TargetSourceInfo};
+    use quarto_pandoc_types::block::{CodeBlock, Div, Figure, Paragraph, Plain};
     use quarto_pandoc_types::caption::Caption;
-    use quarto_pandoc_types::inline::{Inline, Str};
+    use quarto_pandoc_types::inline::{Image, Inline, Str};
     use quarto_source_map::{FileId, SourceInfo};
 
     fn si() -> SourceInfo {
@@ -427,6 +831,28 @@ mod tests {
         })
     }
 
+    fn image_figure_content(classes: Vec<&str>, attributes: Vec<(&str, &str)>) -> Block {
+        let mut attrs = LinkedHashMap::new();
+        for (k, v) in attributes {
+            attrs.insert(k.to_string(), v.to_string());
+        }
+        Block::Plain(Plain {
+            content: vec![Inline::Image(Image {
+                attr: (
+                    String::new(),
+                    classes.into_iter().map(String::from).collect(),
+                    attrs,
+                ),
+                content: vec![str_inline("cap")],
+                target: ("img.svg".to_string(), String::new()),
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+                target_source: TargetSourceInfo::empty(),
+            })],
+            source_info: si(),
+        })
+    }
+
     fn code(lang: &str, body: &str) -> Block {
         Block::CodeBlock(CodeBlock {
             attr: (String::new(), vec![lang.into()], LinkedHashMap::new()),
@@ -438,7 +864,8 @@ mod tests {
 
     fn run_transform(blocks: Vec<Block>, reg: &RefTypeRegistry) -> Vec<Block> {
         let mut blocks = blocks;
-        transform_blocks(&mut blocks, reg);
+        let mut diagnostics = Vec::new();
+        transform_blocks(&mut blocks, reg, &mut diagnostics);
         blocks
     }
 
@@ -469,15 +896,153 @@ mod tests {
         assert_eq!(content.len(), 1);
         assert!(matches!(content[0], Block::CodeBlock(_)));
 
-        // Caption long: the paragraph.
+        // Caption long: the trailing paragraph, canonicalized to `Plain`
+        // (bd-n3sark9b — every float form presents the same caption shape).
         let Slot::Blocks(cap) = node.slots.get("caption_long").unwrap() else {
             panic!("caption_long slot not a Blocks");
         };
         assert_eq!(cap.len(), 1);
         match &cap[0] {
-            Block::Paragraph(p) => assert_eq!(p.content.len(), 1),
-            other => panic!("caption first block should be Paragraph, got {:?}", other),
+            Block::Plain(p) => {
+                assert_eq!(p.content.len(), 1);
+                assert!(matches!(&p.content[0], Inline::Str(s) if s.text == "Hello, world."));
+            }
+            other => panic!("caption first block should be Plain, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn section_div_is_not_sugared() {
+        // Book-projects P0 (Amendment A): a `Div#sec-*.section` — the wrapper
+        // SectionizeTransform puts around every section — is not a float.
+        // The `sec` prefix match on sectionized divs was accidental and
+        // produced bottom-up, caption-stealing registration; section headers
+        // are registered by CrossrefIndexTransform directly instead.
+        let reg = RefTypeRegistry::builtin();
+        let div = Block::Div(Div {
+            attr: (
+                "sec-x".to_string(),
+                vec!["section".to_string(), "level1".to_string()],
+                LinkedHashMap::new(),
+            ),
+            content: vec![para("body")],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![div], &reg);
+        let Block::Div(d) = &out[0] else {
+            panic!("section div must stay a Div, got {:?}", out[0]);
+        };
+        assert_eq!(d.attr.0, "sec-x");
+        assert!(d.attr.1.contains(&"section".to_string()));
+    }
+
+    #[test]
+    fn floats_inside_section_divs_still_sugar() {
+        // Excluding `.section` divs must not shield their contents: a figure
+        // div nested inside a section is still a crossref target.
+        let reg = RefTypeRegistry::builtin();
+        let div = Block::Div(Div {
+            attr: (
+                "sec-x".to_string(),
+                vec!["section".to_string()],
+                LinkedHashMap::new(),
+            ),
+            content: vec![Block::Div(Div {
+                attr: attr_id("fig-inner"),
+                content: vec![code("python", "1+1"), para("Inner cap")],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            })],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![div], &reg);
+        let Block::Div(section) = &out[0] else {
+            panic!("section div must stay a Div, got {:?}", out[0]);
+        };
+        let view =
+            crossref_target_view(&section.content[0]).expect("inner figure is a float target");
+        assert_eq!(view.identifier, "fig-inner");
+        assert_eq!(view.ref_type, "fig");
+    }
+
+    #[test]
+    fn bare_sec_div_without_section_class_still_sugars() {
+        // Conservative scope: a bare `::: {#sec-x}` div *without* the
+        // `section` class keeps today's float-path behavior. Q1's treatment
+        // of that shape is its own question, not P0's.
+        let reg = RefTypeRegistry::builtin();
+        let div = Block::Div(Div {
+            attr: attr_id("sec-x"),
+            content: vec![para("body")],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![div], &reg);
+        let view = crossref_target_view(&out[0]).expect("bare sec div is a target");
+        assert_eq!(view.ref_type, "sec");
+    }
+
+    /// Assert the target's `caption_long` starts with a `Plain` whose first
+    /// inline is `Str(text)`.
+    fn assert_plain_caption(node: &CustomNode, text: &str) {
+        let Slot::Blocks(cap) = node.slots.get("caption_long").expect("caption_long slot") else {
+            panic!("caption_long slot not a Blocks");
+        };
+        match cap.first() {
+            Some(Block::Plain(p)) => {
+                assert!(
+                    matches!(&p.content[0], Inline::Str(s) if s.text == text),
+                    "caption inlines: {:?}",
+                    p.content
+                );
+            }
+            other => panic!("caption first block should be Plain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn div_over_table_with_paragraph_caption_canonicalizes_to_plain() {
+        // A Table whose caption.long starts with a Paragraph (possible from
+        // Lua filters or the JSON reader; Pandoc itself emits Plain).
+        use quarto_pandoc_types::table::{Table, TableFoot, TableHead};
+        let reg = RefTypeRegistry::builtin();
+        let table = Block::Table(Table {
+            attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+            caption: Caption {
+                short: None,
+                long: Some(vec![para("Numbers")]),
+                source_info: si(),
+            },
+            colspec: vec![],
+            head: TableHead {
+                attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+                rows: vec![],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            },
+            bodies: vec![],
+            foot: TableFoot {
+                attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+                rows: vec![],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            },
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let div = Block::Div(Div {
+            attr: attr_id("tbl-nums"),
+            content: vec![table],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![div], &reg);
+        let Block::Custom(node) = &out[0] else {
+            panic!("expected custom node");
+        };
+        assert_plain_caption(node, "Numbers");
     }
 
     #[test]
@@ -517,10 +1082,134 @@ mod tests {
         let Block::Custom(node) = &out[0] else {
             panic!();
         };
-        assert!(matches!(
-            node.slots.get("caption_long"),
-            Some(Slot::Blocks(b)) if b.len() == 1
-        ));
+        // A Paragraph caption on a native Figure is canonicalized to Plain too.
+        assert_plain_caption(node, "Caption from Figure.");
+    }
+
+    /// Pandoc's markdown reader puts `.column-margin` and other non-geometry
+    /// attributes from `![cap](src){#fig-x .column-margin key=val}` on the
+    /// inner `Image`, not on the `Figure` itself (verified directly against
+    /// `pandoc -f markdown -t json`). Without merging them up, the
+    /// FloatRefTarget ends up with no classes/attributes at all, and every
+    /// downstream margin/cap-location classifier (which inspects the
+    /// float's own `Attr`) silently treats it as a plain, non-margin float —
+    /// the bug behind missing `#notefigure(...)` emission for this authoring
+    /// shape (P5 Group 2).
+    #[test]
+    fn figure_image_classes_and_attributes_merge_onto_float() {
+        let reg = RefTypeRegistry::builtin();
+        let fig = Block::Figure(Figure {
+            attr: attr_id("fig-margin"),
+            caption: Caption {
+                short: None,
+                long: Some(vec![para("MARGIN-FIG-CAP")]),
+                source_info: si(),
+            },
+            content: vec![image_figure_content(
+                vec!["column-margin"],
+                vec![("width", "100%"), ("cap-location", "margin")],
+            )],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![fig], &reg);
+        let Block::Custom(node) = &out[0] else {
+            panic!("expected FloatRefTarget");
+        };
+        assert!(
+            node.attr.1.contains(&"column-margin".to_string()),
+            "expected .column-margin to be merged onto the float's classes, got {:?}",
+            node.attr.1
+        );
+        assert_eq!(
+            node.attr.2.get("cap-location").map(String::as_str),
+            Some("margin"),
+            "expected cap-location to be merged onto the float's attributes"
+        );
+        assert_eq!(
+            node.attr.2.get("width"),
+            None,
+            "width/height must stay on the Image, not be duplicated onto the float"
+        );
+    }
+
+    /// A `Div(#tbl-..) > Table` float must surface the Table's caption
+    /// onto the target *and* clear the Table's own copy — otherwise a
+    /// docx/pptx render duplicates it, since `crossref-render`
+    /// (`Bucket::B4`) never runs for the Pandoc-tail and can't elide it
+    /// downstream the way it does for the HTML float DOM. Measured via
+    /// `cargo run --bin q2 -- render <table-with-caption> --to docx`,
+    /// which produced two "My Caption" paragraphs in the output
+    /// `word/document.xml` before this fix.
+    #[test]
+    fn div_over_table_clears_the_tables_own_caption() {
+        use quarto_pandoc_types::table::{Table, TableBody, TableFoot, TableHead};
+        let table = Block::Table(Table {
+            attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+            caption: Caption {
+                short: None,
+                long: Some(vec![para("My Caption")]),
+                source_info: si(),
+            },
+            colspec: vec![],
+            head: TableHead {
+                attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+                rows: vec![],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            },
+            bodies: vec![TableBody {
+                attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+                rowhead_columns: 0,
+                head: vec![],
+                body: vec![],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            }],
+            foot: TableFoot {
+                attr: (String::new(), Vec::new(), LinkedHashMap::new()),
+                rows: vec![],
+                source_info: si(),
+                attr_source: AttrSourceInfo::empty(),
+            },
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let reg = RefTypeRegistry::builtin();
+        let div = Block::Div(Div {
+            attr: attr_id("tbl-one"),
+            content: vec![table],
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![div], &reg);
+        let Block::Custom(node) = &out[0] else {
+            panic!("expected custom node");
+        };
+
+        // The target's own caption still carries the text (unchanged
+        // behavior — resolvers/numbering still need it).
+        let Slot::Blocks(cap) = node.slots.get("caption_long").unwrap() else {
+            panic!("caption_long slot not a Blocks");
+        };
+        assert!(
+            format!("{cap:?}").contains("My Caption"),
+            "target's caption_long should carry the text: {cap:?}"
+        );
+
+        // ...but the Table inside "content" must no longer carry it.
+        let Slot::Blocks(content) = node.slots.get("content").unwrap() else {
+            panic!("content slot not a Blocks");
+        };
+        let Block::Table(t) = &content[0] else {
+            panic!("expected the table in content");
+        };
+        assert!(
+            t.caption.long.as_ref().is_none_or(|b| b.is_empty()),
+            "the table's own caption must be cleared once surfaced onto the target, \
+             else a docx/pptx render duplicates it: {:?}",
+            t.caption.long
+        );
     }
 
     #[test]
@@ -555,7 +1244,8 @@ mod tests {
         };
         assert_eq!(content.len(), 1);
         assert!(matches!(&content[0], Block::Paragraph(p) if p.content.len() == 1));
-        assert!(node.slots.get("caption_long").is_some());
+        // The inner Figure's Paragraph caption is canonicalized to Plain.
+        assert_plain_caption(node, "inner cap");
     }
 
     #[test]
@@ -625,5 +1315,120 @@ mod tests {
         let view = crossref_target_view(&out[0]).expect("is a target");
         assert_eq!(view.ref_type, "dia");
         assert_eq!(view.kind, "Diagram");
+    }
+
+    /// Q1's `parsefiguredivs.lua` `CodeBlock` handler: a fenced code block
+    /// whose id classifies as `lst` and which carries an `lst-cap` attribute
+    /// is a float — the id moves onto the float node, the inner code block
+    /// loses it, and `lst-cap` becomes the caption. Before the transform
+    /// handled this shape, only the cell-option form (`#| label:` /
+    /// `#| lst-cap:`) was indexed, so `@lst-*` in-text references never
+    /// resolved (P3 torture-test finding).
+    #[test]
+    fn attribute_form_listing_code_block_sugars_to_float_ref_target() {
+        let reg = RefTypeRegistry::builtin();
+        let mut kvs = LinkedHashMap::new();
+        kvs.insert("lst-cap".to_string(), "Hello World in Python".to_string());
+        let cb = Block::CodeBlock(CodeBlock {
+            attr: ("lst-hello".to_string(), vec!["python".to_string()], kvs),
+            text: "def hello():\n    print(\"Hello, World!\")\n".to_string(),
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![cb], &reg);
+        let Block::Custom(node) = &out[0] else {
+            panic!(
+                "attribute-form listing code block must sugar to a float target, got {:?}",
+                out[0]
+            );
+        };
+        let view = crossref_target_view(&out[0]).expect("is a float-ref target");
+        assert_eq!(view.identifier, "lst-hello");
+        assert_eq!(view.ref_type, "lst");
+        assert_eq!(view.kind, "Listing");
+
+        // The id moved off the inner code block (Q1: the code block keeps
+        // its classes and attributes but loses the identifier).
+        let Slot::Blocks(content) = node.slots.get("content").unwrap() else {
+            panic!("content slot not a Blocks");
+        };
+        let Block::CodeBlock(inner) = &content[0] else {
+            panic!("expected the code block in content, got {:?}", content[0]);
+        };
+        assert_eq!(inner.attr.0, "", "inner code block loses its id");
+        assert_eq!(inner.attr.1, vec!["python".to_string()]);
+        assert!(
+            !inner.attr.2.contains_key("lst-cap"),
+            "lst-cap is consumed into the caption"
+        );
+
+        // The node's own attr preserves classes but not the consumed key.
+        assert_eq!(node.attr.0, "lst-hello");
+        assert_eq!(node.attr.1, vec!["python".to_string()]);
+        assert!(!node.attr.2.contains_key("lst-cap"));
+
+        // Caption: the lst-cap value, parsed as markdown, canonicalized
+        // to a leading Plain like every other float form. The parse splits
+        // words into separate Str/Space inlines — reconstruct to compare.
+        let Slot::Blocks(cap) = node.slots.get("caption_long").unwrap() else {
+            panic!("caption_long slot not a Blocks");
+        };
+        let Block::Plain(p) = &cap[0] else {
+            panic!("caption first block should be Plain, got {:?}", cap[0]);
+        };
+        let joined: String = p
+            .content
+            .iter()
+            .map(|i| match i {
+                Inline::Str(s) => s.text.clone(),
+                Inline::Space(_) => " ".to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            joined, "Hello World in Python",
+            "caption inlines: {:?}",
+            p.content
+        );
+    }
+
+    /// Q1: `if caption == nil then return nil end` — a bare `#lst-*` id
+    /// without an `lst-cap` attribute stays an ordinary code block.
+    #[test]
+    fn code_block_without_lst_cap_is_not_sugared() {
+        let reg = RefTypeRegistry::builtin();
+        let cb = Block::CodeBlock(CodeBlock {
+            attr: attr_id("lst-nocap"),
+            text: "1 + 1\n".to_string(),
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![cb], &reg);
+        assert!(
+            matches!(&out[0], Block::CodeBlock(_)),
+            "a #lst-* code block without lst-cap must stay a code block, got {:?}",
+            out[0]
+        );
+    }
+
+    /// Q1 fidelity: only `lst` — a `#fig-*` id on a code block is not a
+    /// float even with a `fig-cap` attribute present.
+    #[test]
+    fn non_lst_code_block_with_cap_attribute_is_not_sugared() {
+        let reg = RefTypeRegistry::builtin();
+        let mut kvs = LinkedHashMap::new();
+        kvs.insert("fig-cap".to_string(), "Not a float".to_string());
+        let cb = Block::CodeBlock(CodeBlock {
+            attr: ("fig-cb".to_string(), vec!["python".to_string()], kvs),
+            text: "1\n".to_string(),
+            source_info: si(),
+            attr_source: AttrSourceInfo::empty(),
+        });
+        let out = run_transform(vec![cb], &reg);
+        assert!(
+            matches!(&out[0], Block::CodeBlock(_)),
+            "a #fig-* code block must not sugar, got {:?}",
+            out[0]
+        );
     }
 }

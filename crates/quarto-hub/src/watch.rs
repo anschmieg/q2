@@ -1,8 +1,8 @@
 //! Filesystem watching for continuous sync
 //!
-//! This module provides filesystem watching capabilities to detect when .qmd files
-//! are modified on disk, enabling real-time synchronization between the filesystem
-//! and automerge documents.
+//! This module provides filesystem watching capabilities to detect when source
+//! files (`.qmd`, `.md`) are modified on disk, enabling real-time
+//! synchronization between the filesystem and automerge documents.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,16 +30,19 @@ pub enum WatchEvent {
 /// Which kinds of files the watcher should surface events for.
 ///
 /// The two modes correspond to the two consumers of the hub today:
-/// `quarto hub` (a long-lived sync server, which historically only
-/// observed `.qmd` content) and `q2 preview` (which needs config,
-/// metadata, custom-component, and asset edits to trigger re-render).
+/// `quarto hub` (a long-lived sync server, which only observes source
+/// content) and `q2 preview` (which needs config, metadata,
+/// custom-component, and asset edits to trigger re-render).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WatchFilter {
-    /// Legacy hub behaviour: only `.qmd` files surface events.
+    /// Hub default: only source files (`.qmd`, `.md`) surface events.
+    /// (`.md` joined `.qmd` with bd-6d2wj4zp D10 — sync and watch are
+    /// extension-based; render-list membership is decided at render
+    /// time, not here.)
     #[default]
-    QmdOnly,
+    SourcesOnly,
     /// Broadened filter for `q2 preview`. Accepts, in addition to
-    /// `.qmd`:
+    /// source files:
     ///   - `_quarto.yml` / `_quarto.yaml` (project config)
     ///   - `_metadata.yml` / `_metadata.yaml` (section config)
     ///   - `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp` (media)
@@ -47,14 +50,22 @@ pub enum WatchFilter {
     /// `_extensions/**` is intentionally *not* expanded yet — see
     /// `claude-notes/plans/2026-05-13-q2-preview-phase-b.md` Q-B1.
     PreviewBroad,
+    /// Every path surfaces. For consumers that classify changes
+    /// themselves against state the watcher cannot see — `q2 preview
+    /// --static` (bd-sl79jjiq) decides "ignore / subset / full" from the
+    /// last render's inputs and outputs, so filtering here would only
+    /// hide the events it needs. The generated-directory exclusions
+    /// (`_site/`, `.quarto/`, `*_files/`) live in its policy, not here.
+    All,
 }
 
 impl WatchFilter {
     /// Returns true if `path` should surface as a [`WatchEvent::Modified`].
     pub fn accepts(self, path: &Path) -> bool {
         match self {
-            Self::QmdOnly => is_qmd_file(path),
+            Self::SourcesOnly => is_source_file(path),
             Self::PreviewBroad => is_preview_relevant(path),
+            Self::All => true,
         }
     }
 }
@@ -240,10 +251,10 @@ impl FileWatcher {
     }
 }
 
-/// Check if a path is a .qmd file.
-fn is_qmd_file(path: &Path) -> bool {
+/// Check if a path is a source file (`.qmd` or `.md`).
+fn is_source_file(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("qmd"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("qmd") || ext.eq_ignore_ascii_case("md"))
 }
 
 /// Check if a path matches the [`WatchFilter::PreviewBroad`] allow-list.
@@ -253,7 +264,7 @@ fn is_qmd_file(path: &Path) -> bool {
 /// and makes it tolerant of nested project layouts (e.g. a sub-section
 /// `posts/_metadata.yml`).
 fn is_preview_relevant(path: &Path) -> bool {
-    if is_qmd_file(path) {
+    if is_source_file(path) {
         return true;
     }
 
@@ -292,24 +303,39 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_is_qmd_file() {
-        assert!(is_qmd_file(Path::new("test.qmd")));
-        assert!(is_qmd_file(Path::new("test.QMD")));
-        assert!(is_qmd_file(Path::new("/path/to/file.qmd")));
-        assert!(!is_qmd_file(Path::new("test.md")));
-        assert!(!is_qmd_file(Path::new("test.txt")));
-        assert!(!is_qmd_file(Path::new("test")));
+    fn test_is_source_file() {
+        assert!(is_source_file(Path::new("test.qmd")));
+        assert!(is_source_file(Path::new("test.QMD")));
+        assert!(is_source_file(Path::new("/path/to/file.qmd")));
+        // bd-6d2wj4zp Phase 5 (D10): .md is a source file.
+        assert!(is_source_file(Path::new("test.md")));
+        assert!(is_source_file(Path::new("test.MD")));
+        assert!(!is_source_file(Path::new("test.txt")));
+        assert!(!is_source_file(Path::new("test")));
+    }
+
+    /// bd-6d2wj4zp Phase 5 (D10): `.md` is a source file for watching,
+    /// symmetric with the sync layer — both filters must surface `.md`
+    /// edits so a rendered `.md` page live-updates in the preview and
+    /// stays in sync on the hub. (Whether a given `.md` triggers a
+    /// re-render is dep-filtered downstream in the SPA, not here.)
+    #[test]
+    fn test_filters_accept_md_as_source() {
+        assert!(WatchFilter::SourcesOnly.accepts(Path::new("doc.md")));
+        assert!(WatchFilter::SourcesOnly.accepts(Path::new("doc.MD")));
+        assert!(WatchFilter::PreviewBroad.accepts(Path::new("doc.md")));
+        assert!(WatchFilter::PreviewBroad.accepts(Path::new("posts/README.md")));
     }
 
     #[test]
-    fn test_watch_filter_qmd_only() {
-        let f = WatchFilter::QmdOnly;
+    fn test_watch_filter_sources_only() {
+        let f = WatchFilter::SourcesOnly;
         assert!(f.accepts(Path::new("doc.qmd")));
         assert!(f.accepts(Path::new("doc.QMD")));
+        assert!(f.accepts(Path::new("doc.md")));
         assert!(!f.accepts(Path::new("_quarto.yml")));
         assert!(!f.accepts(Path::new("image.png")));
         assert!(!f.accepts(Path::new("Component.tsx")));
-        assert!(!f.accepts(Path::new("doc.md")));
     }
 
     #[test]
@@ -352,8 +378,8 @@ mod tests {
     fn test_watch_filter_preview_broad_rejects() {
         let f = WatchFilter::PreviewBroad;
 
-        // Random non-matching files.
-        assert!(!f.accepts(Path::new("README.md")));
+        // Random non-matching files. (README.md moved to the accepts
+        // side with bd-6d2wj4zp D10 — .md is a source file now.)
         assert!(!f.accepts(Path::new("notes.txt")));
         assert!(!f.accepts(Path::new("data.csv")));
 
@@ -399,7 +425,7 @@ mod tests {
             &temp_path,
             WatchConfig {
                 debounce_ms: 100,
-                filter: WatchFilter::QmdOnly,
+                filter: WatchFilter::SourcesOnly,
                 single_file: None,
                 single_file_deps: Vec::new(),
             },
@@ -422,7 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watcher_ignores_non_qmd_files() {
+    async fn test_watcher_ignores_non_source_files() {
         let temp = TempDir::new().unwrap();
         // Canonicalize to handle macOS /var -> /private/var symlinks
         let temp_path = temp.path().canonicalize().unwrap();
@@ -439,7 +465,7 @@ mod tests {
             &temp_path,
             WatchConfig {
                 debounce_ms: 100,
-                filter: WatchFilter::QmdOnly,
+                filter: WatchFilter::SourcesOnly,
                 single_file: None,
                 single_file_deps: Vec::new(),
             },
@@ -499,11 +525,11 @@ mod tests {
         }
     }
 
-    /// QmdOnly watcher must *not* surface a `_quarto.yml` edit. This
+    /// SourcesOnly watcher must *not* surface a `_quarto.yml` edit. This
     /// guards against an accidental future broadening of the default
     /// filter that would change hub semantics.
     #[tokio::test]
-    async fn test_watcher_qmd_only_ignores_quarto_yml() {
+    async fn test_watcher_sources_only_ignores_quarto_yml() {
         let temp = TempDir::new().unwrap();
         let temp_path = temp.path().canonicalize().unwrap();
         let yml_path = temp_path.join("_quarto.yml");
@@ -517,7 +543,7 @@ mod tests {
             &temp_path,
             WatchConfig {
                 debounce_ms: 100,
-                filter: WatchFilter::QmdOnly,
+                filter: WatchFilter::SourcesOnly,
                 single_file: None,
                 single_file_deps: Vec::new(),
             },
@@ -619,5 +645,35 @@ mod tests {
             Ok(None) => panic!("Watcher stopped unexpectedly"),
             Err(_) => panic!("Timeout waiting for included-dep change event"),
         }
+    }
+}
+
+#[cfg(test)]
+mod all_filter_tests {
+    use super::*;
+
+    /// `q2 preview --static` classifies changes itself (its policy needs
+    /// the last render's snapshot), so its watcher must surface every
+    /// path and filter nothing.
+    #[test]
+    fn all_filter_accepts_every_path() {
+        for p in [
+            "a.qmd",
+            "_quarto.yml",
+            "img.png",
+            "styles.scss",
+            "_extensions/x/filter.lua",
+            "data.csv",
+            "no-extension",
+            "_site/index.html",
+        ] {
+            assert!(WatchFilter::All.accepts(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn narrower_filters_still_reject_what_all_accepts() {
+        assert!(!WatchFilter::SourcesOnly.accepts(Path::new("data.csv")));
+        assert!(!WatchFilter::PreviewBroad.accepts(Path::new("data.csv")));
     }
 }

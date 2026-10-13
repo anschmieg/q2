@@ -1,4 +1,8 @@
-# Plan: Fix JSON Serialization Ordering with Typed Structs
+---
+title: 'Plan: Fix JSON Serialization Ordering with Typed Structs'
+date: 2026-01-12
+description: 'Restores alphabetical key order in the pampa JSON writer, which became insertion order when `deno_core` enabled the `preserve_order` feature of `serde_json`, by using typed structs whose field declaration order fixes the output.'
+---
 
 **STATUS: COMPLETED**
 
@@ -6,7 +10,7 @@
 
 The `unit_test_snapshots_json` test in the `pampa` crate is failing because JSON field ordering changed from alphabetical to insertion order.
 
-**Root Cause**: Commit `3f138f7` added `deno_core`, which enables `serde_json`'s `preserve_order` feature workspace-wide. This changed `serde_json::Map` from `BTreeMap` (alphabetical) to `IndexMap` (insertion order).
+**Root Cause**: Commit `3f138f7` added `deno_core`, which enables `serde_json`\'s `preserve_order` feature workspace-wide. This changed `serde_json::Map` from `BTreeMap` (alphabetical) to `IndexMap` (insertion order).
 
 **Before**: `{"c":"This","s":0,"t":"Str"}` (alphabetical)
 **After**: `{"t":"Str","c":"This","s":0}` (insertion order)

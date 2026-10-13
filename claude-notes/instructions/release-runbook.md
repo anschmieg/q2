@@ -11,13 +11,14 @@ discover.
 
 ## What a release produces
 
-A GitHub Release at tag `vX.Y.Z` with, for five platforms
+A GitHub Release at tag `vX.Y.Z` with, for six platforms
 (`linux_amd64`, `linux_arm64`, `darwin_amd64`, `darwin_arm64`,
-`windows_amd64`):
+`windows_amd64`, `windows_arm64`):
 
 - `q2-<version>-<platform>.tar.gz` (`.zip` on Windows) — just the `q2`
-  binary; the hub MCP server, preview SPA, and trace viewer are all
-  embedded in it via `include_dir!`.
+  binary; the hub MCP server, preview SPA, trace viewer, and the docs
+  site's llms.txt mirror (`q2 docs llms`) are all embedded in it via
+  `include_dir!`.
 - `q2-<version>-<platform>.tar.gz.sha256` — checksum.
 - `q2-<version>-<platform>.tar.gz.minisig` — Ed25519 signature
   (Unix only; the Windows `.zip` is checksum-only, matching `install.ps1`).
@@ -88,16 +89,27 @@ git tag exactly equals `[workspace.package].version` in the root
 cargo xtask switch-task <strand>           # or: git switch -c release/vX.Y.Z main
 # edit root Cargo.toml: [workspace.package] version = "X.Y.Z"
 cargo update --workspace                    # rewrites Cargo.lock workspace versions only
-git diff Cargo.lock | grep -E '^[+-]version' | grep -v 'OLD\|NEW'   # sanity: no surprise bumps
+cargo update --manifest-path crates/wasm-quarto-hub-client/Cargo.toml --workspace   # SECOND lockfile, see below
+git diff '**/Cargo.lock' | grep -E '^[+-]version' | grep -v 'OLD\|NEW'   # sanity: no surprise bumps
 cargo build --bin q2 --locked && ./target/debug/q2 --version        # must print "q2 (quarto 2) X.Y.Z"
 ```
 
 `cargo update --workspace` (not a full `cargo update`) touches only the
-workspace members' own version entries — external deps stay pinned. The
+workspace members\' own version entries — external deps stay pinned. The
 `--locked` build is the real check: CI builds with `--locked`, so the
 lockfile must already be in sync or every build leg fails.
 
-Commit (Cargo.toml + Cargo.lock), push, open a PR, get it merged. A
+**There are two lockfiles.** `crates/wasm-quarto-hub-client/` declares
+its own `[workspace]` so cargo does not traverse up into the monorepo,
+which means it carries a *separate* `Cargo.lock` recording the versions
+of every path dependency it pulls from `crates/`. A root
+`cargo update --workspace` does not touch it. Miss it and nothing fails
+loudly — the WASM build simply rewrites the file, so the next person to
+run `cargo xtask verify` (without `--skip-hub-build`) finds \~17 lines of
+unrequested churn in their working tree. The v0.17.0 bump missed it;
+v0.15.0 and v0.16.0 did not. Both locks should appear in the bump commit.
+
+Commit (Cargo.toml + both Cargo.lock files), push, open a PR, get it merged. A
 version bump is small but still goes through a PR — `main` is gated
 (CI clippy gate, bd-3zst4hwy).
 
@@ -111,7 +123,7 @@ the new version, or it just breaks again next cadence (bd-yomgkxoc).
 
 ### 3. Tag the merged commit and push
 
-After the bump PR is merged, tag `origin/main`'s new HEAD:
+After the bump PR is merged, tag `origin/main`\'s new HEAD:
 
 ```bash
 git switch main && git pull --ff-only
@@ -136,15 +148,37 @@ gh run list --repo quarto-dev/q2 --workflow=release.yml --limit 1
 gh run watch <run-id> --repo quarto-dev/q2     # or watch in the Actions UI
 ```
 
-Job graph: `preflight` → `web-payloads` (WASM → preview SPA + trace
-viewer, built once) → `build` matrix (5 platforms, each builds the
-per-target MCP bundle then the binary, then a **verify gate**) →
-`release` (combines checksums, signs every `.tar.gz`, publishes).
+Job graph: `preflight` → **`release-pipeline.yml`** (a reusable
+`workflow_call` workflow, shared with the Nightly — see § Nightlies):
+`check-inputs` → `web-payloads` (WASM → preview SPA + trace viewer + the
+`q2 docs llms` docs embed, built once) → `build` matrix (5 platforms,
+each builds the per-target MCP bundle then the binary, then a **verify
+gate**) → `release` (combines checksums, signs every `.tar.gz`,
+publishes). In the Actions UI the pipeline's jobs appear nested under
+the `Release pipeline` job of the `Release` run.
+
+`workflow_dispatch` also takes a `publish` checkbox; untick it for a
+**dry run** that builds, verifies and signs an existing tag and uploads
+the would-be release as a `release-set` artifact without creating or
+touching any release. That is how to test changes to the pipeline
+itself from a branch (`gh workflow run release.yml --ref <branch> -f
+tag=vX.Y.Z -f publish=false`).
 
 The per-target verify gate is the anti-stale-embed guard: it fails the
 leg unless `q2 mcp --launcher-info` reports a real (non-placeholder)
-bundle, all three hub defaults as `bundled`, and a keyring addon for
-each platform in that leg's `KEYRING_PLATFORMS`.
+bundle, all three hub defaults as `bundled`, a keyring addon for each
+platform in that leg's `KEYRING_PLATFORMS`, and `q2 docs llms
+--embed-info` reports `source: real` at exactly this tag's commit. A
+`(dirty)` marker on that commit is a **warning**, not a failure — the
+docs still came from this commit, but something modified tracked files
+during the `web-payloads` job and is worth a look.
+
+The docs embed is staged in `web-payloads` (`cargo xtask
+build-agents-docs`), not per-leg: it is target-independent, and a
+cross-compiled leg could not run the `q2` that renders the docs
+anyway. Its `commit:` is captured *before* the render, so it records
+the sources the docs were built from rather than the render's own
+byproducts.
 
 ### 5. If a leg fails: fix, merge, re-tag
 
@@ -158,7 +192,7 @@ git tag -a vX.Y.Z -m "q2 vX.Y.Z" && git push origin vX.Y.Z
 ```
 
 Re-pushing the tag re-fires the workflow from the new commit. The
-`release` job only publishes when **all five** legs succeed, so a
+`release` job only publishes when **all six** legs succeed, so a
 partial run leaves no half-published release.
 
 ### 6. Verify the published release
@@ -186,24 +220,79 @@ quarto-hub.com (`connect_project` + `read_file`) and spot-check the
 `darwin_amd64` artifact runs under Rosetta with both darwin keyring
 addons. See bd-c6l13j79's plan (Phase 4 record) for a worked example.
 
-**The first release after the musl switch (bd-dofxhzaj) deserves one
-extra check**, because CI proves the binary runs on the *runner*, not on
-the distros the switch is for. Download the published linux artifact and
-run it somewhere with no glibc:
-
-```bash
-docker run --rm -v "$PWD:/w" -w /w alpine:latest /w/q2 --version
-```
-
-Anything that dynamically links libc fails there instantly. Once a
-release has passed this, later ones inherit the confidence — it is a
-one-time check on the switch, not per-release ceremony.
+**You do not need to check the linux binaries against a glibc-less
+distro by hand** — CI does it every release (bd-3b47pxmm). Each musl leg
+runs its freshly built binary inside `alpine:latest` (which has musl and
+no glibc at all) and asserts `--version`, in the `Assert the binary needs
+no glibc (Alpine)` step, *before* anything is packaged or published.
+Each leg runs its own arch's container natively, so both `linux_amd64`
+and `linux_arm64` are covered — which a hand-run on an Apple Silicon
+laptop never was. If that step ever goes red, the release stops with
+nothing shipped.
 
 ### 7. Close out
 
 Update the release strand, note the release URL, and (if the release
 introduced user-facing changes) make sure the README install snippet
 still matches.
+
+## Nightlies (bd-p4ljdp2e)
+
+`.github/workflows/nightly.yml` runs every night at 08:00 UTC and, **only
+if `main` has unreleased changes**, builds it through the same
+`release-pipeline.yml` and publishes the result as the rolling **`nightly`
+prerelease**. Nothing here changes the release procedure above; this
+section is what to know when the two interact.
+
+- **What "unreleased" means.** `scripts/nightly-gate.sh` skips iff `main`\'s
+  HEAD is exactly the newest `v*` tag (you just released) or exactly the
+  current `nightly` tag (last night already built it). Any other HEAD
+  builds — a docs-only commit included. A skipped night is one small
+  runner for a few seconds.
+- **The version.** `<next minor>-nightly.<YYYYMMDD>` — with `0.32.0` on
+  `main`, tonight's nightly is `0.33.0-nightly.20260919`. It sorts above
+  the release it contains (so `quarto-required: ">=0.32.0"` accepts it)
+  and below the real `0.33.0`. It is injected at build time via
+  `QUARTO_VERSION_OVERRIDE` (`quarto-util/src/version.rs`); `Cargo.toml`
+  and both lockfiles are untouched and `--locked` still holds. **One
+  string everywhere:** `q2 --version`, the asset filenames, the release
+  title, the HTML `generator` tag, the project cache key, and the verify
+  gate all use it. If you ever add another place that reports "the
+  Quarto version", read it from `quarto_util::cli_version()`, not
+  `CARGO_PKG_VERSION`.
+- **Rolling tag.** Each nightly deletes the previous `nightly` release and
+  tag and recreates both at the built commit. `git fetch --tags` will
+  report the tag as moved; that is expected. Only the latest nightly's
+  assets exist.
+- **Stable installs are unaffected.** `releases/latest` never returns a
+  prerelease. Nightlies install with `install.sh --nightly` /
+  `install.ps1 -Nightly` (README has the one-liners); the installers
+  resolve the `nightly` release by tag and pick the platform asset by
+  name. Same signing key.
+- **It is also the installers\' only CI.** After publishing, the
+  `install-smoke` job runs both README one-liners on linux, macOS and
+  Windows against the fresh nightly and asserts `q2 --version`. A red
+  `install-smoke` with a green pipeline means the installers or the
+  release-notes contract regressed, not the build. The smoke steps pass
+  the job's `GH_TOKEN` so the installers\' API lookup is not subject to
+  the shared-runner anonymous rate limit, and the installers retry the
+  lookup through the seconds right after the release is replaced
+  (bd-n9yh30c8). The installer's error names the HTTP status: a 403
+  means rate limiting, a 404 or "lists no … archive" after all retries
+  means the release really is missing or incomplete.
+- **A red nightly is a signal.** The pipeline gates are the release
+  gates; a nightly failure means the next release would fail the same
+  way. Fix it before tagging. Failure emails go to whoever last
+  committed `nightly.yml`.
+- **Forcing / dry-running.** `gh workflow run nightly.yml -f force=true`
+  builds a released HEAD (e.g. to reissue a nightly after a pipeline
+  fix); `-f publish=false` builds, verifies and signs without touching
+  the `nightly` release. From a branch (`--ref <branch>`), the gate
+  evaluates that branch's HEAD, which is how to test pipeline changes
+  before they reach `main`.
+- **Cache interplay is a bonus.** The pipeline's `rust-cache` keys are
+  shared, and caches saved on `main` are readable by tag runs, so a
+  nightly the night before a release keeps the release's caches warm.
 
 ## Gotchas (learned the hard way in the v0.1.0 dry-run)
 
@@ -218,13 +307,21 @@ still matches.
   no glibc floor, Alpine works with no `gcompat` shim. **There is no gnu
   artifact** — anyone who needs a dynamically-linked build uses
   `install.sh --from-source`. Both legs build *natively*, so
-  `musl-tools`' `musl-gcc` is the right compiler on each runner; the
+  `musl-tools`\' `musl-gcc` is the right compiler on each runner; the
   `Install musl-tools` step is gated `if: contains(matrix.target,
   'musl')`. History worth knowing: musl was originally blocked by
   `rusty_v8` (via `deno_core` → `quarto-system-runtime`), which shipped
   no musl prebuilts — both musl legs 404'd at the v8 download in the
   v0.1.0 dry-run, which is why the matrix was gnu from PR #280 until
   bd-dofxhzaj. That dependency was removed in bd-3e3sam51.
+- **Windows ships two native builds**: `windows_amd64`
+  (`x86_64-pc-windows-msvc` on `windows-latest`) and `windows_arm64`
+  (`aarch64-pc-windows-msvc` on `windows-11-arm`). The ARM64 leg builds
+  natively for the same reason `linux_arm64` does: an x64 host cannot
+  execute an ARM64 binary, and the verify steps run it. `install.ps1`
+  picks the asset from the OS architecture and falls back to
+  `windows_amd64` (which ARM64 Windows runs under emulation) for releases
+  that predate the ARM64 asset (bd-windows-arm64-nightly-xms5p652).
 - **Because the binaries are static, the runner image no longer sets a
   compatibility floor.** The old `ubuntu-22.04` pin existed *only* to
   keep the glibc requirement low; with musl it bought nothing, so the
@@ -234,7 +331,7 @@ still matches.
   particular `aws-lc-sys` — long feared to be the hard part — is a
   non-issue at v0.40.0: it ships pregenerated bindings for both musl
   triples, so there is **no `bindgen` step and no `libclang`
-  requirement**, and it compiled in ~17 s per leg in the bd-dofxhzaj
+  requirement**, and it compiled in \~17 s per leg in the bd-dofxhzaj
   spike (run 30375857883). If a future `aws-lc-sys` bump ever *does*
   start wanting cmake or libclang, that is a real regression worth
   pinning rather than papering over with extra apt packages.
@@ -243,7 +340,15 @@ still matches.
   staticness check must accept **both** spellings — matching one passes
   on one arch and fails on the other. (`ldd` says *not a dynamic
   executable* on both, but exits non-zero, so it cannot be used as a
-  bare assertion either.)
+  bare assertion either.) This gotcha has a live consumer: the `Assert
+  the binary needs no glibc (Alpine)` step in `release.yml` greps for
+  both spellings. Don't "tidy" it down to one.
+- **Staticness is a *default*, not a pin.** `crt-static` comes from the
+  `*-unknown-linux-musl` targets, so a stray `RUSTFLAGS`, cargo config,
+  or build-script link flag could turn the linux artifacts dynamic while
+  every other gate stays green — they'd still run fine on the runner.
+  The Alpine step is what catches that; it is a real gate, not ceremony
+  (bd-3b47pxmm).
 - **Signing happens in the `release` job, not the build matrix.** The
   secret key is touched by exactly one job, which signs the exact bytes
   being published — and the macOS/Windows build runners have no
@@ -260,16 +365,53 @@ still matches.
   cargo resolves the dated nightly in `rust-toolchain.toml`; the
   workflow runs `rustup target add <target>` to bridge that, or builds
   die with `E0463: can't find crate for core/std`.
-- **The version string's last token is the bare version.** Preflight
-  and `install.sh` parse `${output##* }`. `q2 --version` prints
-  `q2 (quarto 2) X.Y.Z`; anything appended to that string must keep the
-  version last (guarded by `crates/quarto/tests/integration/version_cli.rs`).
+- **The version string's last token is the bare version.** The
+  pipeline's verify gate and `install.sh` parse `${output##* }`. `q2
+  --version` prints `q2 (quarto 2) X.Y.Z` (or `X.Y.Z-nightly.YYYYMMDD`
+  for a nightly, see § Nightlies); anything appended to that string must
+  keep the version last (guarded by
+  `crates/quarto/tests/integration/version_cli.rs`). Never export
+  `QUARTO_VERSION_OVERRIDE` empty: `option_env!` sees `Some("")` and the
+  compile-time check fails the build (the pipeline guards this with
+  `[ -n ]`, not a plain `env:` entry).
+- **The docs embed needs `docs/examples/` staged, and only the xtask does it.**
+  `docs/_quarto.yml` declares the gitignored `docs/examples/` tree (output of
+  `cargo xtask stage-doc-examples`) as a project resource, and `q2 render`
+  fails hard on a missing declared resource. A dev checkout usually has the
+  tree lying around from some earlier run, so `cargo xtask build-agents-docs`
+  passes locally and nobody notices; the release runner is a fresh clone. The
+  first v0.27.0 run (32809606624) died in `web-payloads` on exactly this —
+  the docs-embed step was new in that release (bd-hwop1zii landed after
+  v0.26.0) and had never run on a clean checkout. `build-agents-docs` now
+  stages the examples itself before rendering; if you ever move that render
+  elsewhere, carry the staging with it. To reproduce the fresh-clone
+  condition locally: `mv docs/examples /tmp/` and rerun the xtask.
+  The same run then exposed a second fresh-machine assumption: the docs
+  render must not need an *optional runtime*. `docs/guides/authoring/figures.qmd`
+  shows cells with Quarto 1's ```` ```{{python}} ```` escape, and the engine
+  resolver was treating those as real `{python}` cells — fine on a laptop
+  with Jupyter, a hard "runtime is not available" error on the runner
+  (bd-3tq5u8vm, fixed in `engine_cell_lang`). If the docs render ever
+  fails only on CI, check the runner for a runtime it lacks before
+  installing one: the docs should render with nothing but `q2`.
+- **Pin the embedded TS-extension-build jsr specifiers before shipping.**
+  `resources/extension-build/deno.json` (the shipped tier-4 config `q2
+  build-ts-extension` embeds via `include_str!` for installed binaries —
+  see `crates/quarto/src/commands/build_ts_extension.rs`) currently
+  imports unpinned `jsr:@quarto/api` / `jsr:@quarto/types`. Once those
+  packages are published to JSR, pin them to a version
+  (`jsr:@quarto/api@^X.Y`) as part of cutting a release, so installed
+  binaries resolve a stable, tested API surface instead of latest.
 
 ## Files involved
 
 | Path | Role |
 |------|------|
-| `.github/workflows/release.yml` | the workflow |
+| `.github/workflows/release.yml` | the release trigger + preflight; calls the pipeline |
+| `.github/workflows/release-pipeline.yml` | the reusable build/verify/sign/publish pipeline (both channels) |
+| `.github/workflows/nightly.yml` | the nightly trigger + gate + install smoke; calls the pipeline |
+| `scripts/nightly-gate.sh` | "does main have unreleased changes?" + the nightly version |
+| `crates/quarto/tests/integration/nightly_gate.rs` | tests for the gate script |
 | `Cargo.toml` `[workspace.package].version` | source of truth for the version |
 | `install.sh` / `install.ps1` | installers; pinned `MINISIGN_PUBKEY` |
 | `crates/quarto/tests/integration/bootstrap_sh.rs` | offline installer tests |

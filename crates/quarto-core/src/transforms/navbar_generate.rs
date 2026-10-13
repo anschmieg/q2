@@ -79,6 +79,28 @@ impl AstTransform for NavbarGenerateTransform {
             return Ok(());
         };
 
+        // Dark-mode toggle: emitted whenever the format has a dark
+        // theme variant (bd-0pic6 A4). Derived from the THEME config,
+        // not `navbar:` YAML — same trigger as Q1's
+        // `formatDarkMode(format) !== undefined` navbar/sidebar
+        // darkToggle. Parse errors mean the theme stage will fail the
+        // render anyway; treat as "no toggle" here.
+        // The pair decision recorded by CompileThemeCssStage
+        // (`rendered.theme.dark-is-default`) is the source of truth —
+        // it includes dark variants synthesized from unified-brand
+        // content, which the config re-parse below cannot see. The
+        // re-derivation stays as a fallback for pipelines that skip
+        // the theme stage.
+        let recorded_pair = ast
+            .meta
+            .get("rendered")
+            .and_then(|v| v.get("theme"))
+            .and_then(|v| v.get("dark-is-default"))
+            .is_some();
+        navbar.dark_mode_toggle = recorded_pair
+            || quarto_sass::ThemeConfig::from_config_value(&ast.meta)
+                .is_ok_and(|c| c.dark.is_some());
+
         // bd-qor9a — resolve each href against the YAML file it was
         // authored in. Frontmatter-rooted hrefs become project-root-
         // relative; `_quarto.yml`-rooted ones (the common case for
@@ -93,6 +115,23 @@ impl AstTransform for NavbarGenerateTransform {
                     source_context,
                     &ctx.project.dir,
                 );
+            }
+            // Same treatment for the logo paths themselves (Case A of
+            // bd-root-relative-paths-design-fc5pvkcv): a logo authored
+            // in a doc's frontmatter or a directory `_metadata.yml`
+            // resolves against the authoring file's directory;
+            // `_quarto.yml`-rooted values degrade to project-root-
+            // relative unchanged. Each light/dark variant resolves
+            // against its own authoring scalar's source.
+            if let Some(logo) = navbar.logo.as_mut() {
+                for variant in [&mut logo.light, &mut logo.dark] {
+                    variant.path = resolve_metadata_path(
+                        &variant.path,
+                        &variant.source,
+                        source_context,
+                        &ctx.project.dir,
+                    );
+                }
             }
         }
 
@@ -156,6 +195,8 @@ mod tests {
             is_single_file: true,
             files: vec![DocumentInfo::from_path("/project/doc.qmd")],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         }
     }
 
@@ -188,7 +229,7 @@ mod tests {
             source_path: PathBuf::from(source),
             output_href: output_href.to_string(),
             format_id: "html".to_string(),
-            title: Some(title.to_string()),
+            title: Some(crate::document_profile::text(title)),
             ..DocumentProfile::default()
         }
     }
@@ -212,6 +253,8 @@ mod tests {
             is_single_file: index.is_none(),
             files: vec![DocumentInfo::from_path(format!("/project/{}", page))],
             output_dir: PathBuf::from("/project/_site"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path(format!("/project/{}", page));
         let format = Format::html();

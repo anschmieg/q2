@@ -1,7 +1,12 @@
-# Citation-Label Implementation Plan
+---
+title: 'Citation-Label Implementation Plan'
+date: 2025-11-29
+description: 'Plans a `citation-label` variable for Harvard-style citations that builds labels like `Doe65` from author family names and the two-digit year, computed on demand unless the reference supplies one.'
+braid:
+  strand: k-454
+  priority: P2
+---
 
-**Date**: 2025-11-29
-**Issue**: k-454
 **Author**: Claude (with user guidance)
 
 ## Overview
@@ -333,6 +338,6 @@ Enable the 5 CSL conformance tests:
 
 ## Estimated Complexity
 
-- **Low-Medium**: ~100-150 lines of new code
+- **Low-Medium**: \~100-150 lines of new code
 - **Risk**: Low - isolated feature with clear specification
 - **Dependencies**: None - uses existing infrastructure

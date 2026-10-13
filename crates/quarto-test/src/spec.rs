@@ -13,8 +13,10 @@ use anyhow::{Context, Result};
 use serde_yaml::Value;
 
 use crate::assertions::{
-    Assertion, EnsureCssRegexMatches, EnsureFileRegexMatches, EnsureHtmlElements, FileExists,
-    FolderExists, NoErrors, NoErrorsOrWarnings, PathDoesNotExist, PrintsMessage, ShouldError,
+    Assertion, EnsureCssRegexMatches, EnsureFileRegexMatches, EnsureHtmlElements,
+    EnsurePdfMetadata, EnsurePdfRegexMatches, EnsurePdfTextPositions, EnsureTypstFileRegexMatches,
+    FileExists, FolderExists, NoErrors, NoErrorsOrWarnings, PathDoesNotExist,
+    PdfMetadataExpectation, PrintsMessage, ShouldError,
 };
 
 /// Configuration for when/whether to run tests.
@@ -34,6 +36,16 @@ pub struct RunConfig {
     /// runners that can (Playwright) run them. The TS WASM unit test's
     /// `format !== 'html'` filter handles q2-debug skipping orthogonally.
     pub requires_js: bool,
+    /// Execution engines whose runtime this fixture needs (e.g.
+    /// `["jupyter"]`). Mirrors `requires_js` for engine runtimes: a
+    /// fixture that names a `{python}` cell resolves `jupyter` as the
+    /// owning engine, and under the resolution-driven execution model a
+    /// registered-but-unavailable owner is a **loud** render error
+    /// (P2-12). On a machine without that runtime installed the fixture
+    /// is skipped, not failed. The availability check lives in the
+    /// runner (it needs an `EngineRegistry`); see
+    /// `runner::required_engine_unavailable`.
+    pub requires: Vec<String>,
 }
 
 impl RunConfig {
@@ -65,6 +77,10 @@ impl RunConfig {
 
             if let Some(req) = map.get("requires_js") {
                 config.requires_js = req.as_bool().unwrap_or(false);
+            }
+
+            if let Some(req) = map.get("requires") {
+                config.requires = parse_string_or_array(req).unwrap_or_default();
             }
         }
 
@@ -116,6 +132,12 @@ pub struct TestSpec {
     pub check_warnings: bool,
     /// Whether render failure is expected (shouldError).
     pub expects_error: bool,
+    /// `dom-parity: true` — opt this format into the preview ↔ render DOM
+    /// parity runner (`hub-client/src/services/smokeAllParity.wasm.test.tsx`).
+    /// The native runner ignores it; the field exists so all four
+    /// smoke-all runners share one DSL grammar. Plan:
+    /// claude-notes/plans/2026-08-24-preview-render-dom-parity-harness.md
+    pub dom_parity: bool,
 }
 
 /// Parse test specifications from document YAML metadata.
@@ -167,6 +189,7 @@ fn parse_format_spec(format: &str, value: &Value, _input_path: &Path) -> Result<
     let mut assertions: Vec<Box<dyn Assertion>> = Vec::new();
     let mut check_warnings = true;
     let mut expects_error = false;
+    let mut dom_parity = false;
 
     if let Some(map) = value.as_mapping() {
         for (key, assertion_value) in map {
@@ -179,6 +202,29 @@ fn parse_format_spec(format: &str, value: &Value, _input_path: &Path) -> Result<
                 }
                 "ensureFileRegexMatches" => {
                     let assertion = parse_ensure_file_regex_matches(assertion_value)?;
+                    assertions.push(Box::new(assertion));
+                }
+                "ensureTypstFileRegexMatches" => {
+                    let assertion = parse_regex_assertion(
+                        assertion_value,
+                        "ensureTypstFileRegexMatches",
+                        EnsureTypstFileRegexMatches::new,
+                    )?;
+                    assertions.push(Box::new(assertion));
+                }
+                "ensurePdfRegexMatches" => {
+                    let assertion = parse_regex_assertion(
+                        assertion_value,
+                        "ensurePdfRegexMatches",
+                        EnsurePdfRegexMatches::new,
+                    )?;
+                    assertions.push(Box::new(assertion));
+                }
+                "ensurePdfTextPositions" => {
+                    assertions.push(Box::new(EnsurePdfTextPositions::new(assertion_value)?));
+                }
+                "ensurePdfMetadata" => {
+                    let assertion = parse_ensure_pdf_metadata(assertion_value)?;
                     assertions.push(Box::new(assertion));
                 }
                 "ensureCssRegexMatches" => {
@@ -235,6 +281,11 @@ fn parse_format_spec(format: &str, value: &Value, _input_path: &Path) -> Result<
                         .to_string();
                     assertions.push(Box::new(FolderExists::new(path)));
                 }
+                "dom-parity" => {
+                    dom_parity = assertion_value
+                        .as_bool()
+                        .context("dom-parity must be a boolean")?;
+                }
                 other => {
                     anyhow::bail!("Unknown assertion type: '{}' in format '{}'", other, format);
                 }
@@ -247,6 +298,7 @@ fn parse_format_spec(format: &str, value: &Value, _input_path: &Path) -> Result<
         assertions,
         check_warnings,
         expects_error,
+        dom_parity,
     })
 }
 
@@ -289,14 +341,88 @@ fn parse_file_exists(value: &Value, assertions: &mut Vec<Box<dyn Assertion>>) ->
     Ok(())
 }
 
+/// Parse `ensurePdfMetadata` assertion.
+///
+/// ```yaml
+/// ensurePdfMetadata:
+///   title: "Test Document"
+///   author: "Alice Smith"
+///   keywords:
+///     - quarto
+///     - typst
+///   creator: "Typst"
+/// ```
+///
+/// Each specified field is checked as a case-insensitive substring match
+/// against the corresponding PDF Info dictionary field; `keywords` may be a
+/// single string or an array, and every entry must be present.
+fn parse_ensure_pdf_metadata(value: &Value) -> Result<EnsurePdfMetadata> {
+    let map = value
+        .as_mapping()
+        .context("ensurePdfMetadata must be a mapping")?;
+
+    let mut expected = PdfMetadataExpectation::default();
+
+    for (key, field_value) in map {
+        let key_str = key
+            .as_str()
+            .context("ensurePdfMetadata key must be a string")?;
+
+        match key_str {
+            "title" => {
+                expected.title = Some(
+                    field_value
+                        .as_str()
+                        .context("ensurePdfMetadata.title must be a string")?
+                        .to_string(),
+                );
+            }
+            "author" => {
+                expected.author = Some(
+                    field_value
+                        .as_str()
+                        .context("ensurePdfMetadata.author must be a string")?
+                        .to_string(),
+                );
+            }
+            "creator" => {
+                expected.creator = Some(
+                    field_value
+                        .as_str()
+                        .context("ensurePdfMetadata.creator must be a string")?
+                        .to_string(),
+                );
+            }
+            "keywords" => {
+                expected.keywords = parse_string_or_array(field_value)
+                    .context("ensurePdfMetadata.keywords must be a string or array of strings")?;
+            }
+            other => {
+                anyhow::bail!(
+                    "Unknown ensurePdfMetadata key: '{}' (expected 'title', 'author', 'keywords', or 'creator')",
+                    other
+                );
+            }
+        }
+    }
+
+    Ok(EnsurePdfMetadata::new(expected))
+}
+
 /// Parse `ensureCssRegexMatches` assertion.
 ///
 /// Same format as `ensureFileRegexMatches` but checks linked CSS files
 /// instead of the output HTML.
 fn parse_ensure_css_regex_matches(value: &Value) -> Result<EnsureCssRegexMatches> {
+    let (matches, no_matches) = parse_pattern_pair(value, "ensureCssRegexMatches")?;
+    EnsureCssRegexMatches::new(matches, no_matches)
+}
+
+/// Parse regex assertion values using the shared two-array format.
+fn parse_pattern_pair(value: &Value, name: &str) -> Result<(Vec<String>, Vec<String>)> {
     let arr = value
         .as_sequence()
-        .context("ensureCssRegexMatches must be an array")?;
+        .with_context(|| format!("{name} must be an array"))?;
 
     let matches = if !arr.is_empty() {
         parse_pattern_array(&arr[0])?
@@ -310,7 +436,16 @@ fn parse_ensure_css_regex_matches(value: &Value) -> Result<EnsureCssRegexMatches
         vec![]
     };
 
-    EnsureCssRegexMatches::new(matches, no_matches)
+    Ok((matches, no_matches))
+}
+
+fn parse_regex_assertion<T>(
+    value: &Value,
+    name: &str,
+    create: impl FnOnce(Vec<String>, Vec<String>) -> Result<T>,
+) -> Result<T> {
+    let (matches, no_matches) = parse_pattern_pair(value, name)?;
+    create(matches, no_matches)
 }
 
 /// Parse `ensureFileRegexMatches` assertion.
@@ -322,22 +457,7 @@ fn parse_ensure_css_regex_matches(value: &Value) -> Result<EnsureCssRegexMatches
 ///   - ["noMatch1", "noMatch2"]  # must NOT match (optional)
 /// ```
 fn parse_ensure_file_regex_matches(value: &Value) -> Result<EnsureFileRegexMatches> {
-    let arr = value
-        .as_sequence()
-        .context("ensureFileRegexMatches must be an array")?;
-
-    let matches = if !arr.is_empty() {
-        parse_pattern_array(&arr[0])?
-    } else {
-        vec![]
-    };
-
-    let no_matches = if arr.len() > 1 {
-        parse_pattern_array(&arr[1])?
-    } else {
-        vec![]
-    };
-
+    let (matches, no_matches) = parse_pattern_pair(value, "ensureFileRegexMatches")?;
     EnsureFileRegexMatches::new(matches, no_matches)
 }
 
@@ -485,6 +605,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_run_config_requires_scalar() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            requires: jupyter
+            "#,
+        )
+        .unwrap();
+
+        let config = RunConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(config.requires, vec!["jupyter".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_run_config_requires_array() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            requires: [jupyter, knitr]
+            "#,
+        )
+        .unwrap();
+
+        let config = RunConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(
+            config.requires,
+            vec!["jupyter".to_string(), "knitr".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_run_config_requires_default_empty() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            skip: false
+            "#,
+        )
+        .unwrap();
+
+        let config = RunConfig::from_yaml(&yaml).unwrap();
+        assert!(config.requires.is_empty());
+    }
+
+    #[test]
     fn test_parse_run_config_os() {
         let yaml: Value = serde_yaml::from_str(
             r#"
@@ -535,6 +697,199 @@ mod tests {
             "Expected error about unknown assertion, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_typst_and_pdf_regex_assertions_parse_and_compose_with_run_skip() {
+        let yaml: Value = serde_yaml::from_str(
+            r##"
+            _quarto:
+              tests:
+                run:
+                  skip: "chapter is covered by the book render"
+                typst:
+                  ensureTypstFileRegexMatches:
+                    - ["#figure", "#set page"]
+                    - ["#forbidden"]
+                  ensurePdfRegexMatches:
+                    - ["Chapter One"]
+                    - ["Forbidden text"]
+            "##,
+        )
+        .unwrap();
+
+        let (run_config, specs) =
+            parse_test_specs(&yaml, std::path::Path::new("chapters/chapter-one.qmd")).unwrap();
+
+        let run_config = run_config.expect("run configuration should be parsed");
+        assert_eq!(
+            run_config.should_skip(),
+            Some("chapter is covered by the book render".to_string())
+        );
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].format, "typst");
+        assert_eq!(specs[0].assertions.len(), 2);
+        assert_eq!(specs[0].assertions[0].name(), "ensureTypstFileRegexMatches");
+        assert_eq!(specs[0].assertions[1].name(), "ensurePdfRegexMatches");
+    }
+
+    #[test]
+    fn test_ensure_pdf_metadata_parsed() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                typst:
+                  ensurePdfMetadata:
+                    title: "Test Document"
+                    author: "Alice Smith"
+                    keywords:
+                      - quarto
+                      - typst
+                      - testing
+                    creator: "Typst"
+            "#,
+        )
+        .unwrap();
+
+        let (_run_config, specs) =
+            parse_test_specs(&yaml, std::path::Path::new("doc.qmd")).unwrap();
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].assertions.len(), 1);
+        assert_eq!(specs[0].assertions[0].name(), "ensurePdfMetadata");
+    }
+
+    #[test]
+    fn test_ensure_pdf_metadata_rejects_unknown_key() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                typst:
+                  ensurePdfMetadata:
+                    subject: "Not supported yet"
+            "#,
+        )
+        .unwrap();
+
+        let err = parse_test_specs(&yaml, std::path::Path::new("doc.qmd")).unwrap_err();
+        assert!(format!("{err:#}").contains("Unknown ensurePdfMetadata key"));
+    }
+
+    #[test]
+    fn extension_format_key_is_preserved_for_typst_assertions() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                orange-book-typst:
+                  ensureTypstFileRegexMatches:
+                    - ["LOCAL-OVERRIDE-MARKER"]
+            "#,
+        )
+        .unwrap();
+
+        let (_, specs) = parse_test_specs(&yaml, std::path::Path::new("index.qmd")).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].format, "orange-book-typst");
+        assert_eq!(specs[0].assertions.len(), 1);
+        assert_eq!(specs[0].assertions[0].name(), "ensureTypstFileRegexMatches");
+    }
+
+    #[test]
+    fn test_pdf_text_positions_parses_both_assertion_arrays_and_ignored_page() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                typst:
+                  ensurePdfTextPositions:
+                    -
+                      - subject: { text: "MAIN", role: P, edge: left, granularity: Div }
+                        relation: rightOf
+                        object: { text: "NOTE", role: P, page: 1 }
+                        page: 1
+                    -
+                      - subject: "DECORATION"
+                        relation: below
+                        object: { role: Page, page: 1 }
+            "#,
+        )
+        .unwrap();
+        let (_, specs) = parse_test_specs(&yaml, std::path::Path::new("fixture.qmd")).unwrap();
+        assert_eq!(specs[0].assertions.len(), 1);
+        assert_eq!(specs[0].assertions[0].name(), "ensurePdfTextPositions");
+
+        let without_negative: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                typst:
+                  ensurePdfTextPositions:
+                    -
+                      - subject: { text: "X", role: P }
+                        relation: above
+                        object: { text: "Y", role: P }
+            "#,
+        )
+        .unwrap();
+        let (_, specs2) =
+            parse_test_specs(&without_negative, std::path::Path::new("fixture.qmd")).unwrap();
+        assert_eq!(specs2[0].assertions.len(), 1);
+    }
+
+    #[test]
+    fn test_dom_parity_key_is_accepted_and_recorded() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                html:
+                  noErrors: true
+                  dom-parity: true
+            "#,
+        )
+        .unwrap();
+
+        let (_run, specs) = parse_test_specs(&yaml, std::path::Path::new("test.qmd")).unwrap();
+        let html = specs
+            .iter()
+            .find(|s| s.format == "html")
+            .expect("html spec");
+        assert!(html.dom_parity, "dom-parity: true must be recorded");
+        // Only noErrors produced an assertion; dom-parity is not one.
+        assert_eq!(html.assertions.len(), 1);
+    }
+
+    #[test]
+    fn test_dom_parity_defaults_false_and_rejects_non_bool() {
+        let yaml: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                html:
+                  noErrors: true
+            "#,
+        )
+        .unwrap();
+        let (_run, specs) = parse_test_specs(&yaml, std::path::Path::new("test.qmd")).unwrap();
+        assert!(!specs[0].dom_parity);
+
+        let bad: Value = serde_yaml::from_str(
+            r#"
+            _quarto:
+              tests:
+                html:
+                  dom-parity: "yes"
+            "#,
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            parse_test_specs(&bad, std::path::Path::new("test.qmd")).unwrap_err()
+        );
+        assert!(err.contains("dom-parity must be a boolean"), "got: {err}");
     }
 
     #[test]

@@ -1,6 +1,11 @@
-# Hub: Optional Local Project Watching
-
-**Beads issue**: `bd-3aga`
+---
+title: 'Hub: Optional Local Project Watching'
+date: 2026-03-03
+description: 'Makes local project watching optional in the hub server so it can run as a standalone sync server with its own data directory, and adds a `--no-project` flag to `quarto hub`.'
+braid:
+  strand: bd-3aga
+  priority: P1
+---
 
 ## Overview
 
@@ -92,7 +97,7 @@ When `hub` runs without a project, it needs a place to store:
 - `sync-state.json` — not needed (no filesystem to sync with)
 
 The `--data-dir` flag controls this. A sensible default would be platform-specific
-(XDG on Linux, ~/Library/Application Support on macOS), but for simplicity we
+(XDG on Linux, \~/Library/Application Support on macOS), but for simplicity we
 can start with requiring it explicitly in standalone mode and add defaults later.
 
 ### What "sync-only" means

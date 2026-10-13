@@ -3,7 +3,7 @@
 - **GitHub**: https://github.com/quarto-dev/q2/issues/173
 - **Reporter**: @rundel (Colin Rundel), 2026-05-11
 - **Triage date**: 2026-05-11
-- **Worktree**: `.worktrees/issue-173` (branch `issue-173`, based on `main` @ `37f78170`)
+- **Worktree**: `.worktrees/issue-173` (branch `issue-173`, based on `main` \@ `37f78170`)
 - **Beads issue**: bd-v1qc
 - **Scope**: the fenced-code-block round-trip bug only. The three quarto-web links in the issue body are example sites of the same bug; they will be fixed by the same change and don't need separate triage.
 
@@ -143,6 +143,6 @@ ls crates/pampa/tests/roundtrip_tests/qmd-json-qmd/ | grep -i -E 'code|fence'
 ## Cross-references
 
 - `crates/pampa/src/writers/qmd.rs:628-634` — the buggy conditional.
-- `crates/pampa/CLAUDE.md` — TDD round-trip workflow that the fix should follow.
+- `crates/pampa/AGENTS.md` — TDD round-trip workflow that the fix should follow.
 - `claude-notes/research/commonmark-spec/` (on `main`) — CommonMark spec lookup scaffolding produced during this triage (index, examples-index, and two helper scripts).
 - `external-sources/commonmark/spec.txt:1934-2359` — Fenced code blocks section consulted for the AST-shape question.

@@ -18,6 +18,25 @@ On Windows (PowerShell):
 irm https://raw.githubusercontent.com/quarto-dev/q2/main/install.ps1 | iex
 ```
 
+**Nightly builds** — `main` as of last night, for trying what is not released yet:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quarto-dev/q2/main/install.sh | bash -s -- --nightly
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/quarto-dev/q2/main/install.ps1))) -Nightly
+```
+
+A nightly is built whenever `main` has changes no release has shipped,
+reports a version like `0.33.0-nightly.20260919` (`q2 --version`), and
+replaces the previous nightly: the `nightly` tag moves daily and only the
+latest one is downloadable. Nightlies are signed with the same key as
+releases. The nightly lookup reads the GitHub API, which allows 60
+anonymous requests per hour per IP address; on a shared network or CI
+runner, set `GH_TOKEN` (or `GITHUB_TOKEN`) to a GitHub token to lift
+that limit.
+
 The installer downloads the release archive for your platform, verifies
 its SHA-256 checksum **and** its Ed25519 signature ([minisign](https://jedisct1.github.io/minisign/),
 required — `brew install minisign` / `apt install minisign`), and

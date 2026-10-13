@@ -34,7 +34,7 @@
 //! [`ProjectPipeline`]: crate::project::orchestrator::ProjectPipeline
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -215,6 +215,27 @@ pub trait Pass2Renderer {
     ) -> Option<&crate::project_resources::DocumentResourceReport> {
         None
     }
+
+    /// Book-projects P4: install the per-chapter seed map
+    /// (chapter number + appendix flag, keyed by input path) computed
+    /// from `pre_render`'s `BookRenderItem` list. Called by the
+    /// orchestrator between `pre_render` and Pass 2. Default: no-op —
+    /// only the native [`RenderToFileRenderer`] carries book state, so
+    /// the WASM/preview renderers need no changes for book support.
+    fn install_book_chapter_seeds(
+        &mut self,
+        _seeds: std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
+    ) {
+    }
+
+    /// Book-projects P5: the CLI `--to` value the renderer merges into
+    /// each document's format resolution. The multi-file-HTML
+    /// orchestrator branch re-uses it so non-item project files render
+    /// with the same per-doc format resolution as Pass 2 itself.
+    /// Default: `None` (renderers without a forced format).
+    fn format_override(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -243,6 +264,19 @@ pub struct RenderToFileRenderer<'a> {
     /// `format:` declarations win. Set via
     /// `ProjectPipeline::with_format_override`.
     pub format_override: Option<String>,
+    /// Per-chapter seeds for book projects (book-projects P4), keyed by
+    /// each chapter's input path. Book orchestration computes the map
+    /// once from P1's `BookRenderItem` list and installs it here; the
+    /// batch free functions look up each document's seed and, when one
+    /// exists, pass a cloned-and-overridden options value into
+    /// `render_document_to_file`. Empty for every non-book project —
+    /// the shared options reference flows through unchanged.
+    ///
+    /// This state lives on the concrete renderer; the [`Pass2Renderer`]
+    /// trait carries only a defaulted no-op installer
+    /// (`install_book_chapter_seeds`), so the WASM/preview renderers
+    /// need no changes for book support.
+    pub chapter_seeds: std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -254,6 +288,7 @@ impl<'a> RenderToFileRenderer<'a> {
         Self {
             options,
             format_override: None,
+            chapter_seeds: std::collections::HashMap::new(),
         }
     }
 }
@@ -273,6 +308,21 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
         runtime: Arc<dyn SystemRuntime>,
         project_artifacts: &mut ArtifactStore,
     ) -> Result<Self::Output> {
+        // Book mode (P4): a seed for this path rides a cloned options
+        // value; the common non-book path passes the shared reference
+        // unchanged (no clone).
+        let owned;
+        let doc_options = match self.chapter_seeds.get(&doc_info.input) {
+            Some(seed) => {
+                owned = {
+                    let mut o = self.options.clone();
+                    o.chapter_seed = Some(*seed);
+                    o
+                };
+                &owned
+            }
+            None => self.options,
+        };
         // `render_document_to_file` is sync (it calls
         // `pollster::block_on` internally for the head pipeline);
         // we run it inside an `async fn` so callers can `await` the
@@ -280,7 +330,7 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
         crate::render_to_file::render_document_to_file(
             &doc_info.input,
             format_str,
-            self.options,
+            doc_options,
             Some(project),
             runtime,
             Some(index),
@@ -316,6 +366,7 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
         if workers <= 1 || docs.len() <= 1 {
             return render_batch_serial(
                 self.options,
+                &self.chapter_seeds,
                 docs,
                 format_str,
                 project,
@@ -328,6 +379,7 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
         }
         render_batch_parallel(
             self.options,
+            &self.chapter_seeds,
             docs,
             format_str,
             project,
@@ -357,6 +409,17 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
     ) -> Option<&crate::project_resources::DocumentResourceReport> {
         Some(&output.resource_report)
     }
+
+    fn install_book_chapter_seeds(
+        &mut self,
+        seeds: std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
+    ) {
+        self.chapter_seeds = seeds;
+    }
+
+    fn format_override(&self) -> Option<&str> {
+        self.format_override.as_deref()
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -373,6 +436,7 @@ impl<'a> Pass2Renderer for RenderToFileRenderer<'a> {
 #[allow(clippy::too_many_arguments)]
 fn render_batch_serial(
     options: &crate::render_to_file::RenderToFileOptions,
+    chapter_seeds: &std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
     docs: &[&DocumentInfo],
     format_str: &str,
     project: &ProjectContext,
@@ -390,10 +454,25 @@ fn render_batch_serial(
     let mut outputs = Vec::with_capacity(docs.len());
     let mut failures = Vec::new();
     for doc in docs {
+        // Book mode (P4): a seed for this path rides a cloned options
+        // value; the common non-book path passes the shared reference
+        // unchanged (no clone).
+        let owned;
+        let doc_options = match chapter_seeds.get(&doc.input) {
+            Some(seed) => {
+                owned = {
+                    let mut o = options.clone();
+                    o.chapter_seed = Some(*seed);
+                    o
+                };
+                &owned
+            }
+            None => options,
+        };
         match crate::render_to_file::render_document_to_file(
             &doc.input,
             format_str,
-            options,
+            doc_options,
             Some(project),
             runtime.clone(),
             Some(index.clone()),
@@ -431,6 +510,7 @@ fn render_batch_serial(
 #[allow(clippy::too_many_arguments)]
 fn render_batch_parallel(
     options: &crate::render_to_file::RenderToFileOptions,
+    chapter_seeds: &std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
     docs: &[&DocumentInfo],
     format_str: &str,
     project: &ProjectContext,
@@ -470,6 +550,7 @@ fn render_batch_parallel(
         Err(_) => {
             return render_batch_serial(
                 options,
+                chapter_seeds,
                 docs,
                 format_str,
                 project,
@@ -495,12 +576,27 @@ fn render_batch_parallel(
                 // Record this worker thread for the `perf.pass2`
                 // threads_used gauge.
                 crate::project::orchestrator::pass2_threads_record();
+                // Book mode (P4): a seed for this path rides a cloned
+                // options value; the common non-book path passes the
+                // shared reference unchanged (no clone).
+                let owned;
+                let doc_options = match chapter_seeds.get(&doc.input) {
+                    Some(seed) => {
+                        owned = {
+                            let mut o = options.clone();
+                            o.chapter_seed = Some(*seed);
+                            o
+                        };
+                        &owned
+                    }
+                    None => options,
+                };
                 let mut doc_store = ArtifactStore::new();
                 let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::render_to_file::render_document_to_file(
                         &doc.input,
                         format_str,
-                        options,
+                        doc_options,
                         Some(project),
                         runtime.clone(),
                         Some(index.clone()),
@@ -546,11 +642,7 @@ fn render_batch_parallel(
                     Ok(_) => outputs.push(*result),
                     Err(e) => failures.push(file_failure_from_error(
                         doc.input.clone(),
-                        crate::error::QuartoError::other(format!(
-                            "Project-scoped artifact merge failed for {}: {}",
-                            doc.input.display(),
-                            e
-                        )),
+                        crate::artifact_flush::merge_conflict_to_error(&doc.input, &e),
                     )),
                 }
             }
@@ -641,6 +733,16 @@ pub struct WasmPassTwoOutput {
     /// website-merge and default-project-flush paths. `None` if
     /// no theme artifact was produced.
     pub theme_fingerprint: Option<String>,
+    /// The active page's Pass-1 [`DocumentProfile`], taken from the
+    /// per-page `RenderContext` after the render (where `run_pipeline`
+    /// bridged it from the `UnwrapProfileStage` stash; bd-0rsk07il).
+    /// The WASM response builder reads the comment summary (and any
+    /// other profile data) from here. `None` only if the pipeline
+    /// stopped before the unwrap stage — not the case for either
+    /// Pass-2 renderer.
+    ///
+    /// [`DocumentProfile`]: crate::document_profile::DocumentProfile
+    pub document_profile: Option<crate::document_profile::DocumentProfile>,
 }
 
 impl WasmPassTwoOutput {
@@ -905,6 +1007,7 @@ impl Pass2Renderer for RenderToHtmlRenderer {
             payload: Pass2Payload::Html(render_output.html),
             diagnostics: render_output.diagnostics,
             source_context: render_output.source_context,
+            document_profile: ctx.document_profile,
             page_artifacts: ctx.artifacts,
             theme_fingerprint,
         })
@@ -977,6 +1080,15 @@ pub struct RenderToPreviewAstRenderer {
     /// *inside* [`Self::render`] so direct ctx-side install isn't
     /// possible from the WASM call site.
     attribution_json: Option<String>,
+    /// Per-chapter seeds for book projects (book-projects P8), keyed by
+    /// each chapter's input path. Installed by the orchestrator via
+    /// [`Self::install_book_chapter_seeds`] between `pre_render` and
+    /// Pass 2 — mirrors [`RenderToFileRenderer::chapter_seeds`], the
+    /// P4 native precedent this field is modeled on. Empty for every
+    /// non-book project and for a book preview's `ActivePage` render
+    /// when the active page isn't a seeded chapter (unnumbered/divider
+    /// items get no seed map entry).
+    chapter_seeds: std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
 }
 
 impl RenderToPreviewAstRenderer {
@@ -988,6 +1100,7 @@ impl RenderToPreviewAstRenderer {
             vfs_url_root: None,
             attribution_json: None,
             captures: Vec::new(),
+            chapter_seeds: std::collections::HashMap::new(),
         }
     }
 
@@ -1082,6 +1195,40 @@ impl Pass2Renderer for RenderToPreviewAstRenderer {
             RenderContext::new(project, doc_info, format, &binaries).with_options(options);
         ctx.project_index = Some(index);
         ctx.resource_resolver = Some(resolver.clone());
+        // Book mode (P8): a seed for this path was installed by the
+        // orchestrator via `install_book_chapter_seeds` between
+        // `pre_render` and Pass 2 (mirrors `RenderToFileRenderer::render`'s
+        // P4 handling, minus the options-clone — q2-preview builds its
+        // `RenderContext` directly, so the seed lands on `ctx` itself).
+        if let Some(seed) = self.chapter_seeds.get(&doc_info.input) {
+            ctx.chapter_seed = Some(*seed);
+        }
+        // Book mode (P8): give this preview an approximate, cross-chapter-
+        // aware crossref resolution by sweeping every sibling chapter
+        // pre-engine (`StaticProjectAnalyzer`) and populating the same
+        // `RenderContext` field P5's real (post-engine) aggregation would —
+        // `CrossChapterCrossrefResolveTransform` (registered unconditionally
+        // in the shared pipeline) consumes it unmodified. `None` for every
+        // non-book project (the field stays `None`, matching today's
+        // behavior exactly). Diagnostics from the sweep (unreadable
+        // sibling, duplicate id across chapters) are merged into this
+        // page's own diagnostics below — `ctx.diagnostics` isn't bridged
+        // into the pipeline this renderer drives, so they're collected here
+        // instead and merged into `preview_output.diagnostics` once it
+        // exists.
+        let mut static_sweep_diagnostics = Vec::new();
+        if let Some(items) = &project.book_render_items {
+            let (registry, sweep_diagnostics) =
+                crate::project::book::analyze_book_project_statically(
+                    &project.dir,
+                    items,
+                    &self.chapter_seeds,
+                    runtime.clone(),
+                )
+                .await;
+            ctx.cross_chapter_crossref_registry = Some(Arc::new(registry));
+            static_sweep_diagnostics = sweep_diagnostics;
+        }
         // Install the pre-built attribution provider when the renderer
         // was configured with a transport JSON payload. JSON parse +
         // interning is lazy inside `build()`, so this is cheap and
@@ -1110,6 +1257,7 @@ impl Pass2Renderer for RenderToPreviewAstRenderer {
             self.captures.clone(),
         )
         .await?;
+        preview_output.diagnostics.extend(static_sweep_diagnostics);
 
         // Drain Project-scoped artifacts. Same routing as
         // `RenderToHtmlRenderer`, via the shared
@@ -1189,6 +1337,7 @@ impl Pass2Renderer for RenderToPreviewAstRenderer {
             payload: Pass2Payload::AstJson(preview_output.ast_json),
             diagnostics: preview_output.diagnostics,
             source_context: preview_output.source_context,
+            document_profile: ctx.document_profile,
             page_artifacts: ctx.artifacts,
             theme_fingerprint,
         })
@@ -1210,5 +1359,164 @@ impl Pass2Renderer for RenderToPreviewAstRenderer {
         // using this resolver, so the iframe sees URLs that resolve
         // to the matching VFS path.
         self.build_resolver()
+    }
+
+    fn install_book_chapter_seeds(
+        &mut self,
+        seeds: std::collections::HashMap<PathBuf, crate::render::ChapterSeed>,
+    ) {
+        self.chapter_seeds = seeds;
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Pandoc-request impl: builds the `PandocRequest` the browser hands to
+// pandoc.wasm (R7), instead of rendering HTML.
+// ───────────────────────────────────────────────────────────────────
+
+/// What one page's Pass-2 produced under [`RenderToPandocRequestRenderer`].
+///
+/// Not a [`Pass2Payload`] variant: the wasm response tail's exhaustive match
+/// on the payload builds a JSON `RenderResponse`, which cannot carry the
+/// request's `Uint8Array`s.
+#[derive(Debug)]
+pub struct PandocRequestPassTwoOutput {
+    /// Source `.qmd` path (as the orchestrator received it).
+    pub source_path: PathBuf,
+    /// The request (absent when the page has errors), its diagnostics and
+    /// source context, and the count of cells shown as source.
+    pub outcome: crate::pandoc_request::render::PandocRequestOutcome,
+    /// The page's Pass-1 profile, bridged onto the context by `run_pipeline`.
+    pub document_profile: Option<crate::document_profile::DocumentProfile>,
+}
+
+/// In-memory Pass-2 renderer for pandoc.wasm downloads of a project page.
+///
+/// `Pass2Renderer::render` has no room for the request's options, so they
+/// are fields set by the constructor.
+pub struct RenderToPandocRequestRenderer {
+    prepare_options: crate::pandoc_request::PrepareOptions,
+    captures: Vec<quarto_trace::EngineCapture>,
+    attribution: Option<Arc<dyn crate::attribution::AttributionSourceProvider>>,
+}
+
+impl RenderToPandocRequestRenderer {
+    pub fn new(
+        prepare_options: crate::pandoc_request::PrepareOptions,
+        captures: Vec<quarto_trace::EngineCapture>,
+    ) -> Self {
+        Self {
+            prepare_options,
+            captures,
+            attribution: None,
+        }
+    }
+
+    /// Authorship data for the page this renderer renders (the active page).
+    pub fn with_attribution(
+        mut self,
+        attribution: Option<Arc<dyn crate::attribution::AttributionSourceProvider>>,
+    ) -> Self {
+        self.attribution = attribution;
+        self
+    }
+}
+
+#[async_trait(?Send)]
+impl Pass2Renderer for RenderToPandocRequestRenderer {
+    type Output = PandocRequestPassTwoOutput;
+
+    async fn render(
+        &mut self,
+        doc_info: &DocumentInfo,
+        format: &Format,
+        _format_str: &str,
+        project: &ProjectContext,
+        index: Arc<ProjectIndex>,
+        runtime: Arc<dyn SystemRuntime>,
+        _project_artifacts: &mut ArtifactStore,
+    ) -> Result<Self::Output> {
+        use crate::render::{BinaryDependencies, RenderContext, RenderOptions};
+
+        let input_bytes = runtime.file_read(&doc_info.input).map_err(|e| {
+            crate::error::QuartoError::other(format!(
+                "Failed to read {} for Pass-2 render: {}",
+                doc_info.input.display(),
+                e
+            ))
+        })?;
+
+        // Where native would put the output, but rooted at the project
+        // directory whatever `output-dir` says. Nothing is written: the path
+        // only anchors the resolver, which relativizes image targets and
+        // links to the page. Mirroring the source layout under the project
+        // directory leaves them relative to the source file, the one thing
+        // pandoc can resolve here (its working directory is `/` in the
+        // browser, and the request's resource path is the document's
+        // directory), and it cannot collide with a real `output-dir`.
+        let rel = doc_info
+            .input
+            .strip_prefix(&project.dir)
+            .unwrap_or(&doc_info.input);
+        let output_path = project
+            .dir
+            .join(rel)
+            .with_extension(&format.output_extension);
+        let doc = doc_info.clone().with_output(output_path.clone());
+        let stem = doc_info
+            .input
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let resolver = ResourceResolverContext::website(
+            &project.dir,
+            &output_path,
+            super::orchestrator::project_type_for(project).lib_dir(),
+            stem,
+        );
+
+        let binaries = BinaryDependencies::new();
+        let mut ctx =
+            RenderContext::new(project, &doc, format, &binaries).with_options(RenderOptions {
+                verbose: false,
+                execute: false,
+                use_freeze: false,
+                output_path: Some(output_path),
+            });
+        ctx.project_index = Some(index);
+        ctx.resource_resolver = Some(resolver);
+        ctx.prepare_options = Some(self.prepare_options.clone());
+        ctx.attribution_provider = self.attribution.clone();
+
+        let source_name = doc_info.input.to_string_lossy().to_string();
+        let outcome = crate::pandoc_request::render::build_request_in_context(
+            &mut ctx,
+            &input_bytes,
+            &source_name,
+            runtime,
+            self.captures.clone(),
+            self.prepare_options.typst_available_fonts.clone(),
+        )
+        .await;
+        Ok(PandocRequestPassTwoOutput {
+            source_path: doc_info.input.clone(),
+            outcome,
+            document_profile: ctx.document_profile,
+        })
+    }
+
+    fn output_path(_output: &Self::Output) -> Option<&Path> {
+        None
+    }
+
+    fn build_project_resolver(
+        &self,
+        project: &ProjectContext,
+        lib_dir: &str,
+    ) -> ResourceResolverContext {
+        // Only a non-HTML format reaches this renderer, so no
+        // project-level hook consumes the resolver; it names the project
+        // root, as the per-page one does.
+        ResourceResolverContext::project_root(&project.dir, lib_dir)
     }
 }

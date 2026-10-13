@@ -1,12 +1,18 @@
-# Fix bd-ddaqjb91 — s0-list-item-surfaces crash: defensive `CommentBlock` + honest test stub
+---
+title: 'Fix bd-ddaqjb91 — s0-list-item-surfaces crash: defensive `CommentBlock` + honest test stub'
+date: 2026-07-30
+description: 'Guards `CommentBlock` against a malformed `resolveSource` result that crashed list item tests, corrects the stale test stub that produced it, and adds type-checking for test files so such drift gets caught.'
+braid:
+  strand: bd-ddaqjb91
+  priority: P1
+---
 
-**Strand:** bd-ddaqjb91 (bug, P1)
 **Discovered:** 2026-07-30, while landing the #442 sidecar-stripping fix (`c33c40bd`).
 **Broken since:** `a6fc44b8` (Comments v1, PR #441) on `main`.
 
 ## Overview
 
-`ts-packages/preview-renderer`'s integration suite fails on main:
+`ts-packages/preview-renderer`\'s integration suite fails on main:
 `s0-list-item-surfaces.integration.test.tsx` has 18/23 tests failing. All 18
 share a single crash:
 
@@ -27,7 +33,7 @@ TypeError: Cannot read properties of undefined (reading 't')
    `sameCommentableKind()` **without checking that `sourceNode` exists**
    (`CommentBlock.tsx:205-216`).
 
-2. **The s0 test harness's `resolveSource` stub predates `ResolvedSource`'s
+2. **The s0 test harness's `resolveSource` stub predates `ResolvedSource`\'s
    current shape** (`s0-list-item-surfaces.integration.test.tsx:80-89`). It
    returns `{ reachabilityClass: 'Reachable', sourceEntry, sourceIndex: null }`:
    - missing `sourceNode` (required by the interface, crashes CommentBlock);
@@ -102,7 +108,7 @@ assertion changes needed. This bounds the fix to the two defects below.
       fails with `TS2322: '"Reachable"' is not assignable to
       'ReachabilityClass'` (plus the pool-tuple errors); reverted.
 - [x] Extended to `preview-runtime` (same tsconfig + script + verify leg).
-      Surfaced real drift there too: `MockSyncClient`'s interface was
+      Surfaced real drift there too: `MockSyncClient`\'s interface was
       missing `applyEditorOperations` (impl had it), and the handler mocks
       were untyped. Fixed; 74/74 tests still pass.
 

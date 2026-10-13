@@ -3,7 +3,7 @@ import type { Ref } from 'react';
 import { vfsReadFile } from '@quarto/preview-runtime';
 import { DEFAULT_CSS_ARTIFACT_PATH } from '../types/artifactPaths';
 import { buildAssetManifest, type ManifestCacheEntry } from '../q2-preview/assetWalker';
-import { scrollIframeToLine, getIframeScrollRatio } from './scrollSyncDom';
+import { scrollIframeToLine, getIframeScrollRatio, lineForClickTarget } from './scrollSyncDom';
 
 /**
  * Imperative scroll-sync handle, parallel to `MorphIframeHandle`. The
@@ -137,8 +137,17 @@ interface Q2PreviewIframeProps {
   scrollHandleRef?: Ref<Q2PreviewIframeHandle>;
   /** Called when the preview iframe is scrolled (preview→editor sync). */
   onScroll?: () => void;
-  /** Called when the preview iframe is clicked (preview→editor sync). */
-  onClick?: () => void;
+  /**
+   * Called with the resolved source line when a capture-phase `pointerup`
+   * on the iframe document resolves one via `lineForClickTarget`
+   * (preview→editor click sync). Not called at all when the click doesn't
+   * resolve a line (see `lineForClickTarget`'s null cases). The second
+   * argument, `hostY`, is the clicked block's top edge in HOST-PAGE
+   * coordinates (see the `pointerup` handler below) — used by
+   * `useScrollSync.revealEditorLine` to align that source line to the same
+   * on-screen y, not just reveal it (2026-08-22 click-align-editor-y plan).
+   */
+  onClickAtLine?: (line: number, hostY?: number) => void;
   /**
    * Called after the iframe commits a new AST (`AST_RENDERED`), so the host
    * can re-run editor→preview scroll sync against the fresh `data-loc` DOM.
@@ -186,7 +195,7 @@ export function Q2PreviewIframe({
   onSlideChange,
   scrollHandleRef,
   onScroll,
-  onClick,
+  onClickAtLine,
   onAstRendered,
 }: Q2PreviewIframeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -215,6 +224,15 @@ export function Q2PreviewIframe({
   // app re-renders its body via React on each UPDATE_AST but never reloads
   // the iframe, so the contentWindow/document — and these listeners —
   // persist across edits.
+  //
+  // The click side listens for `pointerup` in the CAPTURE phase, not
+  // `click` in the bubble phase. q2-preview's block-edit activation also
+  // fires on `pointerup` (bubble phase) and replaces the clicked element's
+  // subtree with `#q2-active-edit-region` — Chromium then dispatches no
+  // `click` at all, because the `pointerup` target was detached from the
+  // document during the event. Capture-phase `pointerup` runs before that
+  // bubble-phase activation handler, while the target is still attached and
+  // its nearest `[data-loc]` ancestor is still resolvable.
   useEffect(() => {
     if (!iframeReady) return;
     const iframe = iframeRef.current;
@@ -223,15 +241,32 @@ export function Q2PreviewIframe({
     if (!win || !doc) return;
 
     const handleScroll = () => onScroll?.();
-    const handleClick = () => onClick?.();
+    const handlePointerUp = (e: Event) => {
+      const line = lineForClickTarget(e.target);
+      if (line === null) return;
+      // Report the clicked block's top edge in HOST-PAGE coordinates, so
+      // the editor can align that line to the same on-screen y as the
+      // preview's editing pane (decision A2, 2026-08-22 plan): the block's
+      // rect is in the IFRAME's viewport, so the iframe element's own top
+      // in the host page has to be added. The edit region doesn't exist yet
+      // at capture-phase pointerup — it replaces the clicked block in
+      // place, so the block's top *is* the pane's top.
+      const target = e.target as { closest?: Element['closest'] } | null;
+      const block = target?.closest?.('[data-loc]');
+      const blockTop = block?.getBoundingClientRect().top;
+      const iframeTop = iframe?.getBoundingClientRect().top;
+      const hostY =
+        blockTop !== undefined && iframeTop !== undefined ? blockTop + iframeTop : undefined;
+      onClickAtLine?.(line, hostY);
+    };
 
     win.addEventListener('scroll', handleScroll, { passive: true });
-    doc.addEventListener('click', handleClick);
+    doc.addEventListener('pointerup', handlePointerUp, true);
     return () => {
       win.removeEventListener('scroll', handleScroll);
-      doc.removeEventListener('click', handleClick);
+      doc.removeEventListener('pointerup', handlePointerUp, true);
     };
-  }, [iframeReady, onScroll, onClick]);
+  }, [iframeReady, onScroll, onClickAtLine]);
 
   // Track the last fingerprint we posted and the current outstanding
   // blob URL so we can dedupe re-sends and revoke replaced URLs.
@@ -246,10 +281,18 @@ export function Q2PreviewIframe({
   // cache is drained on unmount.
   const assetCacheRef = useRef<Map<string, ManifestCacheEntry>>(new Map());
 
+  // Bumped every time the cleanup effect below (re)mounts. That effect
+  // revokes and clears the asset cache on cleanup, but a `useMemo` result
+  // survives StrictMode's simulated unmount/remount, so without this the
+  // manifest would keep pointing at revoked blob URLs. Depending on it
+  // re-runs the walker against the now-empty cache.
+  const [assetCacheEpoch, setAssetCacheEpoch] = useState(0);
+
   // Cleanup any outstanding blob URL on unmount. Drains both the theme
   // URL and the asset cache.
   useEffect(() => {
     const assetCache = assetCacheRef.current;
+    setAssetCacheEpoch((n) => n + 1);
     return () => {
       if (currentThemeBlobUrlRef.current) {
         URL.revokeObjectURL(currentThemeBlobUrlRef.current);
@@ -269,7 +312,7 @@ export function Q2PreviewIframe({
   // image content changes between renders.
   const assetManifest = useMemo(
     () => buildAssetManifest(astJson, currentFilePath, assetCacheRef.current).manifest,
-    [astJson, currentFilePath],
+    [astJson, currentFilePath, assetCacheEpoch],
   );
 
   // Handle messages from the iframe

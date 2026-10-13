@@ -1,6 +1,12 @@
-# IndexedDB Schema Versioning and Migration System
+---
+title: 'IndexedDB Schema Versioning and Migration System'
+date: 2025-12-28
+description: 'Adds explicit schema version tracking and an ordered, idempotent migration system to the hub-client IndexedDB store, separating structural upgrades from async data transformations so existing project data survives future schema changes.'
+braid:
+  strand: k-ifux
+  priority: P1
+---
 
-**Beads Issue:** `k-ifux` - Implement IndexedDB schema versioning and migration system
 **Related:** `k-evpj` - Presence features (requires user identity storage)
 
 ## Problem Statement
@@ -433,7 +439,7 @@ When users with existing `quarto-hub` IndexedDB visit the updated app:
 
 ## Success Criteria
 
-1. Existing users' project lists preserved after update
+1. Existing users\' project lists preserved after update
 2. New userSettings store created and initialized
 3. Migration errors handled gracefully with recovery path
 4. Schema version tracked and queryable

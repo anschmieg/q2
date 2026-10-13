@@ -142,6 +142,13 @@ export interface SyncClientCallbacks {
   onCapturesChange?: (captures: Record<string, CaptureRef>) => void;
 
   /**
+   * Called when the set of explicitly created folders changes (optional,
+   * V3+). Provides the full list of folder paths. Folders implied by file
+   * paths are not included — the consumer merges the two.
+   */
+  onFoldersChange?: (folders: string[]) => void;
+
+  /**
    * Called when connection state changes (optional).
    */
   onConnectionChange?: (connected: boolean) => void;
@@ -373,6 +380,16 @@ export interface CreateBinaryFileResult {
   path: string;
   /** Whether the file was deduplicated (same hash as existing file) */
   deduplicated: boolean;
+}
+
+/**
+ * Result of `createFileIfAbsent`. `docId` is set only when the file was created.
+ */
+export interface CreateFileIfAbsentResult {
+  /** False when the path was already in the index and nothing was written. */
+  created: boolean;
+  /** The new document's ID, when `created`. */
+  docId?: string;
 }
 
 /**

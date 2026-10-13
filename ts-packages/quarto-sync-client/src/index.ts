@@ -40,6 +40,7 @@ export type {
   CaptureRef,
   ConnectOptions,
   CreateBinaryFileResult,
+  CreateFileIfAbsentResult,
   CreateProjectOptions,
   CreateProjectResult,
   DisconnectOptions,
@@ -66,6 +67,7 @@ export type {
   StrandedFileDiagnostic,
   DocInventoryEntry,
   NetworkAdapterWrapper,
+  ConnectionInfo,
 } from './client.js';
 
 // Injectable diagnostic-log sink (bd-sl4o01y0): stdio hosts (hub-mcp)
@@ -97,12 +99,28 @@ export type {
 // bd-10deu8h4).
 export { MemoryStorageAdapter } from './storage-adapter.js';
 
+// Coarse last-activity timestamps for the connection-status dialog.
+export {
+  getSyncActivity,
+  getDocSyncActivity,
+  getDocSyncActivityWithPersisted,
+  getDocRemoteChange,
+  getConnectionLog,
+} from './sync-activity.js';
+export type {
+  SyncActivity,
+  DocSyncActivity,
+  SyncMessageSummary,
+  RemoteChangeSummary,
+  ConnectionEvent,
+} from './sync-activity.js';
+
 // Export utilities
 export { computeSHA256 } from './hash.js';
-export { exportProjectAsZip } from './export-zip.js';
+export { exportProjectAsZip, exportFolderAsZip } from './export-zip.js';
 export { parseProjectZip } from './import-zip.js';
 export { projectFolderName } from './project-folder-name.js';
 
 // Export replay API
 export { createReplaySession } from './replay.js';
-export type { ReplaySession, ChangeMetadata } from './replay.js';
+export type { ReplaySession, ReplayStepMetadata } from './replay.js';

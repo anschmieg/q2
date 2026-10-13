@@ -1,4 +1,8 @@
 .sidebar-sections {
+  /* Header height = the button's natural size (8px padding × 2 + a 13px
+     line of 11px text), fixed so sticky folder headers inside FILES can
+     offset themselves below it exactly. */
+  --sidebar-section-header-height: 29px;
   width: 220px;
   min-width: 180px;
   max-width: 300px;
@@ -8,6 +12,15 @@
   flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Narrow windows (Phase 4): lower the width floor so the sidebar plus
+   the pane strips fit a 320px window without clipping; rows and section
+   labels already truncate. Phase 5 owns the designed drawer layout. */
+@media (max-width: 480px) {
+  .sidebar-sections {
+    min-width: 120px;
+  }
 }
 
 .sidebar-section {
@@ -20,26 +33,56 @@
   border-bottom: none;
 }
 
+.sidebar-section-header-row {
+  position: sticky;
+  top: 0;
+  /* Above the sticky folder headers (--z-raised) inside FILES. */
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: stretch;
+  height: var(--sidebar-section-header-height);
+  box-sizing: border-box;
+  background: var(--sidebar-section-bg);
+}
+
 .section-header {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: 0 12px;
+  line-height: 13px;
   background: var(--sidebar-section-bg);
   border: none;
   border-radius: 0;
-  color: var(--editor-text-dim);
+  color: var(--sidebar-section-text);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s;
+  transition: background-color var(--duration-fast) var(--ease-out);
   user-select: none;
+}
+
+/* Section content fades/rises in on expand — a mount animation (expand
+   re-renders the region). Collapse unmounts immediately: no exit
+   animation without JS height measurement, and height transitions are
+   layout motion, which the motion principle forbids. */
+.section-content {
+  animation: qh-rise-in var(--duration-fast) var(--ease-out);
 }
 
 .section-header:hover {
   background: var(--sidebar-section-hover);
+}
+
+/* WCAG 2.4.7: visible keyboard focus — inset so the ring isn't clipped
+   by the sidebar's overflow. */
+.section-header:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .section-chevron {
@@ -51,9 +94,6 @@
 
 .section-label {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .section-content {
@@ -68,9 +108,10 @@
   pointer-events: none;
 }
 
-/* When FILES section is expanded, let it take available space */
+/* When FILES section is expanded, let it take available space. No
+   overflow clipping: it would become the scrollport for the sticky
+   folder headers inside (see FileSidebar.css). */
 .sidebar-section.expanded:first-child .section-content {
   flex: 1;
   min-height: 150px;
-  overflow: hidden;
 }

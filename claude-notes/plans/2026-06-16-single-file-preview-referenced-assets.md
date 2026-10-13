@@ -1,6 +1,12 @@
-# Single-file `q2 preview`: resolve sibling assets the deck references
-
-**Strand:** bd-kpuweafo · **Found:** 2026-06-16 (follow-up to bd-y259zb57 / bd-ggvq1j68)
+---
+title: 'Single-file `q2 preview`: resolve sibling assets the deck references'
+date: 2026-06-16
+description: 'Makes `q2 preview` on a standalone `.qmd` sync the sibling images it references into the preview''s virtual filesystem, without walking the whole directory, so images render as they do in project mode.'
+braid:
+  strand: bd-kpuweafo  # follow-up to bd-y259zb57 / bd-ggvq1j68; found 2026-06-16
+  priority: P2
+  labels: [preview, revealjs]
+---
 
 ## Problem
 
@@ -46,7 +52,7 @@ injected via `HubConfig`, synced by `reconcile_files_with_index`).
       (8 literal sites) — resolved at the mapping point instead.
 - [x] **D. quarto-hub — sync them.** `ProjectFiles::with_binary_files(...)`; the
       single-file branch in `context.rs` appends `config.single_file_assets` to
-      `binary_files`, so `reconcile_files_with_index`'s binary loop syncs them.
+      `binary_files`, so `reconcile_files_with_index`\'s binary loop syncs them.
       Test: `test_single_file_with_binary_files_adds_referenced_assets`.
 - [x] **E. E2E.** `q2 preview page.qmd` (no `_quarto.yml`) with sibling
       `./sibling-image.png`: before = broken (`naturalWidth 0`, raw HTTP url →

@@ -74,6 +74,92 @@ fn parse_policy_str(s: &str) -> EnginePolicy {
     }
 }
 
+/// Quarto 1's `project: preview:` keys (its schema's `project-preview`
+/// object), read as defaults for `q2 preview --static`; the CLI flags
+/// override them (bd-sl79jjiq Phase 4). `None` means "not set".
+///
+/// `timeout` and `serve` are Q1 keys this mode does not implement;
+/// they are listed in [`Self::unsupported`] so the driver can warn
+/// once instead of silently ignoring a project's configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StaticPreviewDefaults {
+    pub port: Option<u16>,
+    pub host: Option<String>,
+    pub browser: Option<bool>,
+    pub watch_inputs: Option<bool>,
+    pub navigate: Option<bool>,
+    /// Q1 keys present in the block that `--static` ignores, in the
+    /// order they appear.
+    pub unsupported: Vec<String>,
+}
+
+/// A boolean from YAML `true`/`false` or the plain text of one (the
+/// front-matter path stores bare scalars as inlines).
+fn bool_lenient(value: &ConfigValue) -> Option<bool> {
+    value.as_bool().or_else(
+        || match value.as_plain_text()?.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" => Some(true),
+            "false" | "no" | "off" => Some(false),
+            _ => None,
+        },
+    )
+}
+
+/// Read `project.preview.*` from resolved metadata. Missing or
+/// unparseable values are `None`, never an error.
+pub fn read_static_preview_defaults(meta: &ConfigValue) -> StaticPreviewDefaults {
+    let Some(block) = meta.get_path(&["project", "preview"]) else {
+        return StaticPreviewDefaults::default();
+    };
+    let port = block
+        .get("port")
+        .and_then(ConfigValue::as_int_lenient)
+        .and_then(|p| u16::try_from(p).ok());
+    let host = block
+        .get("host")
+        .and_then(ConfigValue::as_plain_text)
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    let browser = block.get("browser").and_then(bool_lenient);
+    let watch_inputs = block.get("watch-inputs").and_then(bool_lenient);
+    let navigate = block.get("navigate").and_then(bool_lenient);
+    let unsupported = block
+        .as_map_entries()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|e| e.key.as_str())
+                .filter(|k| matches!(*k, "timeout" | "serve"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    StaticPreviewDefaults {
+        port,
+        host,
+        browser,
+        watch_inputs,
+        navigate,
+        unsupported,
+    }
+}
+
+/// [`read_static_preview_defaults`] against the project rooted at
+/// `project_root` (`_quarto.yml` and its overlays). No project, or no
+/// config: all `None`.
+pub fn read_static_preview_defaults_from_project(
+    project_root: &std::path::Path,
+    runtime: &dyn SystemRuntime,
+) -> StaticPreviewDefaults {
+    let Ok(project) = quarto_core::project::ProjectContext::discover(project_root, runtime) else {
+        return StaticPreviewDefaults::default();
+    };
+    let Some(meta) = project.config.metadata.as_ref() else {
+        return StaticPreviewDefaults::default();
+    };
+    read_static_preview_defaults(meta)
+}
+
 /// Read the engine policy from the project's `_quarto.yml` (if any).
 ///
 /// Discovers the project context rooted at `project_root` using
@@ -143,6 +229,7 @@ pub fn resolve_project_resource_html(
         root,
         root,
         patterns,
+        runtime,
         || ResourceOrigin::ProjectMetadata,
         ResourceScope::Project,
     ) else {
@@ -202,6 +289,7 @@ pub fn resolve_project_resource_files(
         root,
         root,
         patterns,
+        runtime,
         || ResourceOrigin::ProjectMetadata,
         ResourceScope::Project,
     ) else {
@@ -223,8 +311,11 @@ pub fn resolve_project_resource_files(
 /// *inside* them.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SingleFileDeps {
-    /// Included `.qmd` files (project-root-relative). Synced as **text**, kept
-    /// out of `qmd_files` so they are invisible VFS-only dependencies.
+    /// Text dependencies (project-root-relative), synced as **text** without
+    /// surfacing in the render list: included `.qmd` files, plus declared
+    /// `render-components:` `.tsx` overrides (GH #402 / bd-ue80chl0). The
+    /// field name predates the `.tsx` addition; both ride the same
+    /// `single_file_text_deps` channel into discovery's `text_dep_files`.
     pub qmd_files: Vec<std::path::PathBuf>,
     /// Referenced image assets (project-root-relative). Synced as **binary**.
     pub binary_files: Vec<std::path::PathBuf>,
@@ -262,8 +353,8 @@ pub fn resolve_single_file_deps(
 
     use quarto_core::project::{DocumentInfo, ProjectContext};
     use quarto_core::stage::{
-        IncludeExpansionStage, LoadedSource, ParseDocumentStage, PipelineData, PipelineStage,
-        StageContext,
+        LoadedSource, ParseDocumentStage, PipelineData, PipelineStage, StageContext,
+        expand_document_includes,
     };
 
     let abs_deck = project_root.join(single_file_rel);
@@ -291,22 +382,26 @@ pub fn resolve_single_file_deps(
     // tokio runtime (the same pattern `quarto-preview` uses elsewhere). Include
     // expansion reads included files through `ctx.runtime` (the native FS).
     let parse = ParseDocumentStage;
-    let expand = IncludeExpansionStage::new();
-    let expanded = pollster::block_on(async {
-        let parsed = parse
-            .run(
-                PipelineData::LoadedSource(LoadedSource::new(abs_deck.clone(), source)),
-                &mut ctx,
-            )
-            .await?;
-        expand.run(parsed, &mut ctx).await
-    });
-    let Ok(PipelineData::DocumentAst(doc)) = expanded else {
+    let parsed = pollster::block_on(parse.run(
+        PipelineData::LoadedSource(LoadedSource::new(abs_deck.clone(), source)),
+        &mut ctx,
+    ));
+    let Ok(PipelineData::DocumentAst(mut doc)) = parsed else {
         return SingleFileDeps::default();
     };
 
-    let canonical_root = project_root
-        .canonicalize()
+    // An include that cannot supply its content fails the *render*
+    // (bd-include-parse-failure-dropped-u4rdjxru) but must not empty the
+    // *watch set*: a broken include is precisely when the author is
+    // editing the included file, and dropping it here would mean the fix
+    // never re-triggers a render. `expand_document_includes` populates
+    // `recorded_includes` for every file the walk touched either way, so
+    // the failure is deliberately ignored.
+    let _ = expand_document_includes(&mut doc, &mut ctx);
+
+    // Spelled through the shared function: `expand_patterns` below checks
+    // containment against runtime-canonical matches.
+    let canonical_root = quarto_system_runtime::canonicalize(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf());
 
     // Re-express a canonical absolute path as project-root-relative, keeping
@@ -326,7 +421,7 @@ pub fn resolve_single_file_deps(
     let mut qmd_files: Vec<PathBuf> = Vec::new();
     let mut seen_qmd = std::collections::HashSet::new();
     for entry in &doc.recorded_includes {
-        let Ok(canon) = entry.path.canonicalize() else {
+        let Ok(canon) = quarto_system_runtime::canonicalize(&entry.path) else {
             continue;
         };
         if let Some(rel) = to_in_tree_rel(canon)
@@ -350,7 +445,9 @@ pub fn resolve_single_file_deps(
         if !quarto_hub::resource::is_binary_extension(ext) {
             continue;
         }
-        let Ok(canon) = project_root.join(deck_dir).join(&url).canonicalize() else {
+        let Ok(canon) =
+            quarto_system_runtime::canonicalize(&project_root.join(deck_dir).join(&url))
+        else {
             continue;
         };
         if let Some(rel) = to_in_tree_rel(canon)
@@ -387,6 +484,7 @@ pub fn resolve_single_file_deps(
                 &canonical_root,
                 &anchor,
                 &patterns,
+                runtime.as_ref(),
                 || ResourceOrigin::DocumentMetadata {
                     source: abs_deck.clone(),
                 },
@@ -400,6 +498,51 @@ pub fn resolve_single_file_deps(
                         binary_files.push(rel);
                     }
                 }
+            }
+        }
+    }
+
+    // `render-components:` TSX overrides (GH #402 / bd-ue80chl0 Phase 3).
+    // Project-mode preview syncs `.tsx` via hub discovery's dir walk;
+    // single-file mode has no walk, so the declared entries must join the
+    // closure here or the SPA's parent half has nothing to read — exactly
+    // the silent hub-client/CLI divergence GH #402 is about. Entries
+    // resolve like the TS side's `resolveComponentPath`: relative to the
+    // declaring document's directory; a leading `/` means the (synthetic,
+    // deck-dir) project root, never the filesystem root — see
+    // `claude-notes/designs/path-resolution-model.md`. Missing, escaping,
+    // and non-`.tsx` entries are dropped fail-soft: the SPA surfaces a
+    // missing component as a render warning; the closure just declines to
+    // sync it. They land in `qmd_files` (the text-dep channel) so they
+    // sync as text AND enroll in the watcher (`all_files()`), matching
+    // project mode's live `.tsx` editing.
+    if let Some(arr) = doc
+        .ast
+        .meta
+        .get("render-components")
+        .and_then(|v| v.as_array())
+    {
+        for entry in arr {
+            let Some(raw) = entry.as_plain_text() else {
+                continue;
+            };
+            let is_tsx = Path::new(&raw)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("tsx"));
+            if !is_tsx {
+                continue;
+            }
+            let joined = match raw.strip_prefix('/') {
+                Some(rest) => project_root.join(rest),
+                None => project_root.join(deck_dir).join(&raw),
+            };
+            let Ok(canon) = quarto_system_runtime::canonicalize(&joined) else {
+                continue;
+            };
+            if let Some(rel) = to_in_tree_rel(canon)
+                && seen_qmd.insert(rel.clone())
+            {
+                qmd_files.push(rel);
             }
         }
     }
@@ -562,6 +705,101 @@ mod tests {
         assert_eq!(
             deps.qmd_files,
             vec![std::path::PathBuf::from("sub/part.qmd")]
+        );
+    }
+
+    /// `render-components:` TSX entries are part of the single-file closure
+    /// (GH #402 / bd-ue80chl0 Phase 3): they sync as **text** deps so the
+    /// SPA's parent half can read + transpile them, and they enroll in the
+    /// watcher. Relative entries anchor at the deck dir; a leading `/` means
+    /// the (synthetic, deck-dir) project root — never the filesystem root
+    /// (path-resolution contract, `path-resolution-model.md`).
+    #[test]
+    fn single_file_deps_render_components_tsx() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("components")).unwrap();
+        std::fs::write(root.join("overrides.tsx"), "export const Para = 1;\n").unwrap();
+        std::fs::write(
+            root.join("components/extra.tsx"),
+            "export const Callout = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("main.qmd"),
+            "---\ntitle: T\nrender-components:\n  - overrides.tsx\n  - /components/extra.tsx\n---\n\n# Hi\n",
+        )
+        .unwrap();
+
+        let deps = resolve_single_file_deps(root, std::path::Path::new("main.qmd"), native_arc());
+        assert_eq!(
+            deps.qmd_files,
+            vec![
+                std::path::PathBuf::from("components/extra.tsx"),
+                std::path::PathBuf::from("overrides.tsx"),
+            ],
+            "render-components TSX must sync as text deps (sorted); got {:?}",
+            deps.qmd_files,
+        );
+    }
+
+    /// Missing, escaping (`../`), and non-`.tsx` `render-components` entries
+    /// are dropped without error — same fail-soft posture as includes/images.
+    /// The parent half reports the missing file as a render warning; the
+    /// closure just declines to sync it.
+    #[test]
+    fn single_file_deps_render_components_drops_missing_escaping_and_non_tsx() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        // A real file OUTSIDE the deck dir that must NOT be pulled in.
+        std::fs::write(root.join("secret.tsx"), "export const X = 1;\n").unwrap();
+        let deck_dir = root.join("deck");
+        std::fs::create_dir(&deck_dir).unwrap();
+        std::fs::write(deck_dir.join("notes.txt"), "not a component\n").unwrap();
+        std::fs::write(
+            deck_dir.join("main.qmd"),
+            "---\ntitle: T\nrender-components:\n  - missing.tsx\n  - ../secret.tsx\n  - notes.txt\n---\n\n# Hi\n",
+        )
+        .unwrap();
+
+        let deps =
+            resolve_single_file_deps(&deck_dir, std::path::Path::new("main.qmd"), native_arc());
+        assert!(
+            deps.qmd_files.is_empty(),
+            "missing/escaping/non-tsx entries must all be dropped; got {:?}",
+            deps.qmd_files,
+        );
+    }
+
+    /// A document whose include cannot be resolved still yields its other
+    /// dependencies. The render fails in that state
+    /// (bd-include-parse-failure-dropped-u4rdjxru), but the watch set is
+    /// what lets the author's fix re-trigger a render — emptying it would
+    /// strand the preview on the broken version.
+    #[test]
+    fn single_file_deps_survive_an_unresolvable_include() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("good.qmd"), "![pic](logo.png)\n").unwrap();
+        std::fs::write(root.join("logo.png"), b"\x89PNG\r\n").unwrap();
+        std::fs::write(
+            root.join("main.qmd"),
+            "{{< include good.qmd >}}\n\n{{< include gone.qmd >}}\n",
+        )
+        .unwrap();
+
+        let deps = resolve_single_file_deps(root, std::path::Path::new("main.qmd"), native_arc());
+        assert_eq!(
+            deps.qmd_files,
+            vec![std::path::PathBuf::from("good.qmd")],
+            "the resolvable include must still be watched; got {:?}",
+            deps.qmd_files,
+        );
+        assert_eq!(
+            deps.binary_files,
+            vec![std::path::PathBuf::from("logo.png")],
+            "deps reached through the resolvable include must survive too; got {:?}",
+            deps.binary_files,
         );
     }
 
@@ -846,5 +1084,85 @@ mod tests {
             .find(|(r, _)| r == "examples/d/slides_files/revealjs/reveal.js")
             .unwrap();
         assert_eq!(std::fs::read_to_string(&js.1).unwrap(), "/*js*/");
+    }
+}
+
+/// Phase 4 of `q2 preview --static` (bd-sl79jjiq): Quarto 1's
+/// `project: preview:` keys as defaults the CLI flags override.
+#[cfg(test)]
+mod static_preview_defaults_tests {
+    use super::*;
+
+    use quarto_pandoc_types::ConfigMapEntry;
+    use quarto_source_map::{By, SourceInfo};
+
+    fn map(entries: Vec<(&str, ConfigValue)>) -> ConfigValue {
+        let si = SourceInfo::generated(By::programmatic_config());
+        ConfigValue::new_map(
+            entries
+                .into_iter()
+                .map(|(key, value)| ConfigMapEntry {
+                    key: key.to_string(),
+                    key_source: si.clone(),
+                    value,
+                })
+                .collect(),
+            si,
+        )
+    }
+
+    /// `project: { preview: { <key>: <value>, … } }` with string
+    /// scalars, which is how bare front-matter values arrive.
+    fn meta(pairs: &[(&str, &str)]) -> ConfigValue {
+        let preview = map(pairs
+            .iter()
+            .map(|(k, v)| (*k, ConfigValue::from_path(&[], v)))
+            .collect());
+        map(vec![("project", map(vec![("preview", preview)]))])
+    }
+
+    #[test]
+    fn absent_block_yields_all_none_and_nothing_ignored() {
+        let d = read_static_preview_defaults(&ConfigValue::from_path(&["title"], "t"));
+        assert_eq!(d, StaticPreviewDefaults::default());
+        assert!(d.unsupported.is_empty());
+    }
+
+    #[test]
+    fn every_supported_key_is_read() {
+        let d = read_static_preview_defaults(&meta(&[
+            ("port", "4321"),
+            ("host", "0.0.0.0"),
+            ("browser", "false"),
+            ("watch-inputs", "false"),
+            ("navigate", "false"),
+        ]));
+        assert_eq!(d.port, Some(4321));
+        assert_eq!(d.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(d.browser, Some(false));
+        assert_eq!(d.watch_inputs, Some(false));
+        assert_eq!(d.navigate, Some(false));
+        assert!(d.unsupported.is_empty());
+    }
+
+    #[test]
+    fn unsupported_q1_keys_are_reported_by_name() {
+        let d = read_static_preview_defaults(&meta(&[("timeout", "300"), ("port", "1")]));
+        assert_eq!(d.unsupported, vec!["timeout".to_string()]);
+        let serve = map(vec![("cmd", ConfigValue::from_path(&[], "npm run dev"))]);
+        let preview = map(vec![
+            ("port", ConfigValue::from_path(&[], "1")),
+            ("serve", serve),
+        ]);
+        let m = map(vec![("project", map(vec![("preview", preview)]))]);
+        let d = read_static_preview_defaults(&m);
+        assert_eq!(d.unsupported, vec!["serve".to_string()]);
+    }
+
+    #[test]
+    fn unparseable_values_are_ignored_not_fatal() {
+        let d = read_static_preview_defaults(&meta(&[("port", "lots"), ("browser", "maybe")]));
+        assert_eq!(d.port, None);
+        assert_eq!(d.browser, None);
     }
 }

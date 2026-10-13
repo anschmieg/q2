@@ -1431,12 +1431,105 @@ fn roundtrip_inline_comment() {
 }
 
 /// Standard writer round-trip: comment in blockquote.
+///
+/// This one cannot use [`assert_roundtrip`], which demands the rewritten text
+/// re-parse *structurally equal* to the new AST. A comment followed by prose on
+/// the next line is one paragraph, and the reader splits it into a `RawBlock`
+/// plus a `Plain` (bd-block-html-adjacent-markdown-unparsed-0qnjuwuy). The
+/// writer separates blocks with a blank line, so the `Plain` re-reads as a
+/// `Paragraph` — a canonicalization, in the same family as the table and
+/// definition-list rewrites documented in `writers/qmd.rs`.
+///
+/// Preserving the `Plain` would mean writing the two blocks tight, which
+/// requires knowing they came from one paragraph. The AST does not record that,
+/// and the rule that guessed it merged blocks that were never one paragraph —
+/// it pulled a following `<script>` into the preceding text and its contents
+/// were then parsed as markdown. So this asserts what actually holds: the
+/// comment stays in block position, the prose stays parsed, and the shape is
+/// stable from the first rewrite onward.
 #[test]
 fn roundtrip_comment_in_blockquote() {
-    assert_roundtrip(
-        "> <!-- comment -->\n> Some text.\n",
-        "> <!-- comment -->\n> Changed text.\n",
+    use pampa::pandoc::Block;
+
+    let original_qmd = "> <!-- comment -->\n> Some text.\n";
+    let new_qmd = "> <!-- comment -->\n> Changed text.\n";
+
+    let original_ast = parse_qmd(original_qmd);
+    let new_ast = parse_qmd(new_qmd);
+    let plan = compute_reconciliation(&original_ast, &new_ast);
+    let result =
+        writers::incremental::incremental_write(original_qmd, &original_ast, &new_ast, &plan)
+            .expect("incremental_write failed");
+
+    let quoted = match &parse_qmd(&result).blocks[0] {
+        Block::BlockQuote(q) => q.content.clone(),
+        other => panic!("expected a BlockQuote, got {:?}", other),
+    };
+    match &quoted[0] {
+        Block::RawBlock(r) => assert_eq!(r.text, "<!-- comment -->"),
+        other => panic!("the comment must stay in block position, got {:?}", other),
+    }
+    let text = match &quoted[1] {
+        Block::Plain(p) => &p.content,
+        Block::Paragraph(p) => &p.content,
+        other => panic!("expected the prose as its own block, got {:?}", other),
+    };
+    assert!(
+        format!("{:?}", text).contains("Changed"),
+        "the edit should be present: {:?}",
+        text
     );
+
+    // A second pass over the rewritten text must not move again.
+    let stable_ast = parse_qmd(&result);
+    let stable_plan = compute_reconciliation(&stable_ast, &stable_ast);
+    let stable =
+        writers::incremental::incremental_write(&result, &stable_ast, &stable_ast, &stable_plan)
+            .expect("incremental_write failed");
+    assert_eq!(stable, result, "the rewrite should reach a fixed point");
+}
+
+/// Incremental round-trip of a split at the *top level*.
+///
+/// `roundtrip_comment_in_blockquote` covers a split inside a container; this is
+/// the bare case. Same contract: the tags stay in block position, the interior
+/// stays parsed, and the shape is stable once rewritten.
+#[test]
+fn roundtrip_tight_div_at_top_level() {
+    use pampa::pandoc::Block;
+
+    let original_qmd = "<div class=\"note\">\ntext with `code`\n</div>\n";
+    let new_qmd = "<div class=\"note\">\nchanged with `code`\n</div>\n";
+
+    let original_ast = parse_qmd(original_qmd);
+    let new_ast = parse_qmd(new_qmd);
+    let plan = compute_reconciliation(&original_ast, &new_ast);
+    let result =
+        writers::incremental::incremental_write(original_qmd, &original_ast, &new_ast, &plan)
+            .expect("incremental_write failed");
+
+    let blocks = parse_qmd(&result).blocks;
+    match &blocks[0] {
+        Block::RawBlock(r) => assert_eq!(r.text, "<div class=\"note\">"),
+        other => panic!("the open tag must stay in block position, got {:?}", other),
+    }
+    match blocks.last() {
+        Some(Block::RawBlock(r)) => assert_eq!(r.text, "</div>"),
+        other => panic!("the close tag must stay in block position, got {:?}", other),
+    }
+    let interior = format!("{:?}", &blocks[1]);
+    assert!(
+        interior.contains("Code") && interior.contains("changed"),
+        "the edited interior should still be parsed markdown: {}",
+        interior
+    );
+
+    let stable_ast = parse_qmd(&result);
+    let stable_plan = compute_reconciliation(&stable_ast, &stable_ast);
+    let stable =
+        writers::incremental::incremental_write(&result, &stable_ast, &stable_ast, &stable_plan)
+            .expect("incremental_write failed");
+    assert_eq!(stable, result, "the rewrite should reach a fixed point");
 }
 
 // --- Phase 4: Edge case tests ---
@@ -1750,5 +1843,145 @@ fn incremental_write_never_panics_on_pampa_corpus() {
     assert!(
         scanned > 0,
         "scanned no qmd files — corpus enumeration broken"
+    );
+}
+
+// =============================================================================
+// bd-f6h40a9r: foreign-file / no-preimage provenance must never be sliced
+// out of `original_qmd`
+//
+// An inline (or block) whose `source_info` resolves into a DIFFERENT file —
+// the include-expansion shape — has no preimage in the target file.
+// `preimage_in` correctly returns `None` for it, but the assembly code used
+// to fall back to raw `start_offset()..end_offset()`, slicing `original_qmd`
+// at the *foreign file's* offsets: wrong bytes copied into the output when
+// the range fits, a panic when it doesn't. The correct degradation is a
+// whole-block Rewrite (re-serialization), which the coarsen layer already
+// supports via `assemble_inline_splice`'s `Ok(None)`.
+// =============================================================================
+
+/// Point `si` at a foreign file (simulating an include-spliced node).
+fn foreign_si(start: usize, end: usize) -> quarto_source_map::SourceInfo {
+    quarto_source_map::SourceInfo::original(quarto_source_map::FileId(7), start, end)
+}
+
+#[test]
+fn foreign_mid_inline_is_not_sliced_from_original() {
+    // `bbb` is a middle inline (edge inlines are already guarded), kept by
+    // the plan; its doctored span 0..3 lands in-range in original_qmd,
+    // where the bytes are "aaa" — the buggy fallback copies those.
+    let original_qmd = "aaa bbb ccc\n";
+    let mut orig = parse_qmd(original_qmd);
+    let new = parse_qmd("aaa bbb ddd\n");
+
+    if let pampa::pandoc::Block::Paragraph(p) = &mut orig.blocks[0] {
+        *p.content[2].source_info_mut() = foreign_si(0, 3);
+    } else {
+        panic!("expected paragraph");
+    }
+
+    let plan = compute_reconciliation(&orig, &new);
+    let out = writers::incremental::incremental_write(original_qmd, &orig, &new, &plan)
+        .expect("incremental_write failed");
+
+    assert!(
+        out.contains("aaa bbb ddd"),
+        "kept inline must contribute its own content, got: {out:?}"
+    );
+    assert!(
+        !out.contains("aaa aaa"),
+        "foreign offsets must not be sliced out of original_qmd, got: {out:?}"
+    );
+}
+
+#[test]
+fn foreign_mid_inline_out_of_range_does_not_panic() {
+    // Same shape, but the foreign span exceeds original_qmd — the buggy
+    // fallback panics on the out-of-range slice.
+    let original_qmd = "aaa bbb ccc\n";
+    let mut orig = parse_qmd(original_qmd);
+    let new = parse_qmd("aaa bbb ddd\n");
+
+    if let pampa::pandoc::Block::Paragraph(p) = &mut orig.blocks[0] {
+        *p.content[2].source_info_mut() = foreign_si(5000, 5010);
+    } else {
+        panic!("expected paragraph");
+    }
+
+    let plan = compute_reconciliation(&orig, &new);
+    let out = writers::incremental::incremental_write(original_qmd, &orig, &new, &plan)
+        .expect("incremental_write failed");
+    assert!(out.contains("bbb"), "kept inline content survives: {out:?}");
+}
+
+#[test]
+fn foreign_container_inline_is_not_sliced_from_original() {
+    // The recursed-container path derived opening/closing delimiters from
+    // raw offsets with no file check at all.
+    let original_qmd = "pre *bold text* post\n";
+    let mut orig = parse_qmd(original_qmd);
+    let new = parse_qmd("pre *bold texts* post\n");
+
+    if let pampa::pandoc::Block::Paragraph(p) = &mut orig.blocks[0] {
+        // content: Str(pre) Space Emph[...] Space Str(post)
+        *p.content[2].source_info_mut() = foreign_si(0, 4);
+    } else {
+        panic!("expected paragraph");
+    }
+
+    let plan = compute_reconciliation(&orig, &new);
+    let out = writers::incremental::incremental_write(original_qmd, &orig, &new, &plan)
+        .expect("incremental_write failed");
+    assert!(
+        out.contains("*bold texts*"),
+        "container content must be assembled from the right bytes, got: {out:?}"
+    );
+}
+
+#[test]
+fn foreign_kept_block_is_not_sliced_from_original() {
+    // Block-level Verbatim entries have the same exposure: a kept block
+    // whose provenance is a foreign file must be re-serialized, not sliced
+    // out of original_qmd at the foreign offsets.
+    let original_qmd = "first para\n\nsecond para\n";
+    let mut orig = parse_qmd(original_qmd);
+    let new = parse_qmd("first edited\n\nsecond para\n");
+
+    *orig.blocks[1].source_info_mut() = foreign_si(0, 5);
+
+    let plan = compute_reconciliation(&orig, &new);
+    let out = writers::incremental::incremental_write(original_qmd, &orig, &new, &plan)
+        .expect("incremental_write failed");
+    assert!(
+        out.contains("second para"),
+        "kept block must contribute its own content, got: {out:?}"
+    );
+    assert!(
+        !out.contains("first\n"),
+        "foreign offsets must not be sliced out of original_qmd, got: {out:?}"
+    );
+}
+
+// =============================================================================
+// bd-205v6 sibling audit: container non-child identity must not be inherited
+// across a type-only inline match. Quoted's quote_type lives in the
+// verbatim-spliced delimiters, so a quote-type edit must force UseAfter
+// (re-serialization), not RecurseIntoContainer (stale delimiter bytes).
+// =============================================================================
+
+#[test]
+fn quoted_quote_type_change_survives_incremental_write() {
+    // "anchor" keeps one hash-identical sibling inline so the paragraph
+    // recurses (block phase 2 has_kept_inlines) instead of being wholly
+    // replaced — the path where identity inheritance can occur.
+    let original_qmd = "anchor \"hello\"\n";
+    let new_qmd = "anchor 'hello'\n";
+    let new_ast = parse_qmd(new_qmd);
+    let out = incremental_write_via_json_roundtrip(original_qmd, &new_ast);
+    let reparsed = parse_qmd(&out);
+    let expected = parse_qmd(new_qmd);
+    assert!(
+        quarto_ast_reconcile::structural_eq_blocks(&reparsed.blocks, &expected.blocks),
+        "quote-type edit must survive the incremental write; got: {out:?}"
     );
 }

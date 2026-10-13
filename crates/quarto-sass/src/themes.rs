@@ -361,10 +361,6 @@ pub struct ThemeContext<'a> {
     /// [`ThemeConfig::resolve`]. When `None` and a `ThemeSpec::Brand`
     /// is encountered, [`process_theme_specs`] returns an error.
     brand: Option<&'a quarto_brand::Brand>,
-
-    /// Directory containing the brand file (for resolving font URLs
-    /// in `@font-face` blocks).
-    brand_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ThemeContext<'_> {
@@ -374,7 +370,6 @@ impl std::fmt::Debug for ThemeContext<'_> {
             .field("load_paths", &self.load_paths)
             .field("runtime", &"<SystemRuntime>")
             .field("brand", &self.brand.is_some())
-            .field("brand_dir", &self.brand_dir)
             .finish()
     }
 }
@@ -395,7 +390,6 @@ impl<'a> ThemeContext<'a> {
             load_paths: Vec::new(),
             runtime,
             brand: None,
-            brand_dir: None,
         }
     }
 
@@ -416,30 +410,22 @@ impl<'a> ThemeContext<'a> {
             load_paths,
             runtime,
             brand: None,
-            brand_dir: None,
         }
     }
 
-    /// Builder-style: attach a resolved brand and its directory.
+    /// Builder-style: attach a resolved brand.
     ///
-    /// `brand_dir` is the directory containing the source `_brand.yml`
-    /// (used to resolve relative font-file paths in `@font-face`
-    /// blocks). For inline brand blocks with no source file, pass the
-    /// document directory.
-    pub fn with_brand(mut self, brand: &'a quarto_brand::Brand, brand_dir: PathBuf) -> Self {
+    /// Font-file *locations* are the theme stage's concern (it reads
+    /// and publishes them from the brand directory); the SCSS side
+    /// only needs the brand content.
+    pub fn with_brand(mut self, brand: &'a quarto_brand::Brand) -> Self {
         self.brand = Some(brand);
-        self.brand_dir = Some(brand_dir);
         self
     }
 
     /// The resolved brand, if any.
     pub fn brand(&self) -> Option<&'a quarto_brand::Brand> {
         self.brand
-    }
-
-    /// The brand-file directory, if a brand is attached.
-    pub fn brand_dir(&self) -> Option<&Path> {
-        self.brand_dir.as_deref()
     }
 
     /// Get the document directory.
@@ -464,14 +450,23 @@ impl<'a> ThemeContext<'a> {
 
     /// Resolve a potentially relative path against the document directory.
     ///
-    /// - Absolute paths are returned as-is.
+    /// - Absolute paths are used as-is.
     /// - Relative paths are resolved relative to the document directory.
+    ///
+    /// The result is lexically normalized (`.` and `..` collapsed, no
+    /// filesystem access), so every document-relative spelling the
+    /// metadata merge produces for one theme file (`theme.scss`,
+    /// `../theme.scss`, `../../theme.scss`, …) resolves to the same
+    /// path. That path is the file's identity downstream: the
+    /// compiled-SCSS cache key, the `@import` load path, and the path
+    /// diagnostics print (bd-79c4do6g).
     pub fn resolve_path(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+        let joined = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.document_dir.join(path)
-        }
+        };
+        quarto_util::normalize_lexically(&joined)
     }
 }
 
@@ -586,6 +581,7 @@ pub fn load_custom_theme(
     if !exists {
         return Err(SassError::CustomThemeNotFound {
             path: resolved_path,
+            location: None,
         });
     }
 
@@ -601,6 +597,7 @@ pub fn load_custom_theme(
         match e {
             SassError::NoBoundaryMarkers { .. } => SassError::InvalidScssFile {
                 path: resolved_path.clone(),
+                location: None,
             },
             other => other,
         }
@@ -773,14 +770,11 @@ pub fn process_theme_specs(
                             .to_string(),
                         location: None,
                     })?;
-                // Path prefix for @font-face URLs: brand_dir relative
-                // to the document_dir (matches Q1's
-                // `relative(projectDir, brandDir)`).
-                let prefix = match context.brand_dir() {
-                    Some(bd) => pathdiff_from_to(context.document_dir(), bd),
-                    None => PathBuf::new(),
-                };
-                let brand_layers = crate::brand_layer::brand_to_layers(brand, &prefix)?;
+                // `@font-face` URLs are the constant `fonts/<name>`
+                // (published beside the theme CSS by the theme stage),
+                // so the layers do not depend on the document's
+                // location — one compiled theme serves every page.
+                let brand_layers = crate::brand_layer::brand_to_layers(brand)?;
                 layers.extend(brand_layers);
             }
         }
@@ -835,47 +829,6 @@ pub fn resolve_theme(name: &str) -> Result<(BuiltInTheme, SassLayer), SassError>
     let theme: BuiltInTheme = name.parse()?;
     let layer = load_theme_layer(theme)?;
     Ok((theme, layer))
-}
-
-/// Compute `to` expressed relative to `from`, used for `@font-face`
-/// URLs in brand-derived SCSS. If the paths share no common prefix
-/// (different roots), we fall back to `to` as-is — the browser will
-/// resolve it from the served HTML's location.
-///
-/// This is a deliberately simple implementation that handles the
-/// common case where both paths are relative to the same project
-/// root or both absolute and share a common ancestor.
-fn pathdiff_from_to(from: &Path, to: &Path) -> PathBuf {
-    use std::path::Component;
-
-    let from_components: Vec<_> = from.components().collect();
-    let to_components: Vec<_> = to.components().collect();
-
-    // Find common prefix length.
-    let common = from_components
-        .iter()
-        .zip(to_components.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-
-    // Skip components that are equivalent to current-dir.
-    let from_remaining = &from_components[common..];
-    let to_remaining = &to_components[common..];
-
-    let mut result = PathBuf::new();
-    for _ in from_remaining
-        .iter()
-        .filter(|c| !matches!(c, Component::CurDir))
-    {
-        result.push("..");
-    }
-    for c in to_remaining {
-        result.push(c.as_os_str());
-    }
-    if result.as_os_str().is_empty() {
-        return PathBuf::new();
-    }
-    result
 }
 
 #[cfg(test)]
@@ -1074,6 +1027,51 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("/abs/path/theme.scss"));
     }
 
+    /// bd-79c4do6g: the document-relative spelling of a theme path
+    /// (`../../theme.scss` from `a/b/`, `../theme.scss` from `a/`,
+    /// `theme.scss` from the root) must resolve to one path, because
+    /// it feeds the sass cache key, the `@import` load path and every
+    /// diagnostic. Normalization is lexical (no filesystem access).
+    #[test]
+    fn test_theme_context_resolve_path_normalizes_parent_dirs() {
+        let root = ThemeContext::native(PathBuf::from("/project"));
+        let depth1 = ThemeContext::native(PathBuf::from("/project/a"));
+        let depth2 = ThemeContext::native(PathBuf::from("/project/a/b"));
+        let expected = PathBuf::from("/project/theme.scss");
+        assert_eq!(root.resolve_path(Path::new("theme.scss")), expected);
+        assert_eq!(depth1.resolve_path(Path::new("../theme.scss")), expected);
+        assert_eq!(depth2.resolve_path(Path::new("../../theme.scss")), expected);
+        assert_eq!(root.resolve_path(Path::new("./theme.scss")), expected);
+        assert_eq!(depth1.resolve_path(Path::new("./../theme.scss")), expected);
+    }
+
+    /// `q2 render` hands the stage a *project-relative* document dir
+    /// (`admin/appendix/cli`), so normalization must work on relative
+    /// bases too — and must not invent components when `..` climbs
+    /// above the base.
+    #[test]
+    fn test_theme_context_resolve_path_normalizes_relative_base() {
+        let depth2 = ThemeContext::native(PathBuf::from("a/b"));
+        assert_eq!(
+            depth2.resolve_path(Path::new("../../theme.scss")),
+            PathBuf::from("theme.scss")
+        );
+        assert_eq!(
+            depth2.resolve_path(Path::new("../../../theme.scss")),
+            PathBuf::from("../theme.scss")
+        );
+        let dot = ThemeContext::native(PathBuf::from("."));
+        assert_eq!(
+            dot.resolve_path(Path::new("sub/../theme.scss")),
+            PathBuf::from("theme.scss")
+        );
+        // Absolute inputs are normalized too.
+        assert_eq!(
+            dot.resolve_path(Path::new("/x/y/../theme.scss")),
+            PathBuf::from("/x/theme.scss")
+        );
+    }
+
     #[test]
     fn test_theme_context_add_load_path() {
         let mut context = ThemeContext::native(PathBuf::from("/doc"));
@@ -1109,7 +1107,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(SassError::CustomThemeNotFound { path }) => {
+            Err(SassError::CustomThemeNotFound { path, .. }) => {
                 assert!(path.ends_with("missing.scss"));
             }
             _ => panic!("Expected CustomThemeNotFound error"),
@@ -1127,7 +1125,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(SassError::InvalidScssFile { path }) => {
+            Err(SassError::InvalidScssFile { path, .. }) => {
                 assert!(path.ends_with("no_boundaries.scss"));
             }
             _ => panic!("Expected InvalidScssFile error"),

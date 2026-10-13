@@ -39,13 +39,13 @@ use quarto_core::project::render_scripts;
 use quarto_core::{Format, ProjectContext, QuartoError, RenderToFileOptions};
 use quarto_error_reporting::{
     CoalescedDiagnostic, DiagnosticMessage, DiagnosticMessageBuilder, JsonDiagnostic,
-    JsonPass1Failure, diagnostic_to_json, with_source_file,
+    JsonPass1Failure, TextRenderOptions, diagnostic_to_json_with_options, with_source_file,
 };
 use quarto_source_map::SourceContext;
 use quarto_system_runtime::{NativeRuntime, SystemRuntime};
 
 /// Arguments for the render command.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RenderArgs {
     /// Input paths (zero or more). Each is a `.qmd` file, a
     /// directory, or (after the shell has expanded it) the result of
@@ -78,8 +78,8 @@ pub struct RenderArgs {
     pub attribution: Option<AttributionMode>,
     /// Emit diagnostics as NDJSON on stderr instead of human-readable
     /// ariadne text (bd-iey8o). Each emitted line carries a `$schema`
-    /// field; the schema docs live in
-    /// `crates/quarto-error-reporting/schemas/`. Exit codes are
+    /// field; the schema docs live in the `schemas/` directory of the
+    /// external `quarto-error-reporting` crate. Exit codes are
     /// unchanged.
     pub json_errors: bool,
     /// Stop rendering as soon as the first per-document error occurs
@@ -101,6 +101,26 @@ pub struct RenderArgs {
     /// Skip the project's `pre-render` / `post-render` scripts
     /// (bd-w348iu63). The render itself is unaffected.
     pub no_render_scripts: bool,
+    /// `--profile` values (comma-separated or repeated). Non-empty
+    /// replaces `QUARTO_PROFILE` entirely; empty means "not given"
+    /// (bd-fu16z22k). See
+    /// [`quarto_core::project::project_profile::cli_selection`].
+    pub profile: Vec<String>,
+    /// Which documents may execute code (bd-sl79jjiq). `q2 render`
+    /// always uses the default (`All`); `q2 preview --static` narrows
+    /// it to the pages being viewed. Not a CLI flag.
+    pub execution_policy: quarto_core::engine::ExecutionPolicy,
+}
+
+impl RenderArgs {
+    /// Whether non-diagnostic console output is suppressed: progress
+    /// lines, engine progress, and render-script chatter. `--quiet`
+    /// asks for that directly; `--json-errors` implies it, because its
+    /// stderr is reserved for NDJSON a consumer must be able to parse
+    /// line by line (bd-gnw9asuo).
+    pub fn console_quiet(&self) -> bool {
+        self.quiet || self.json_errors
+    }
 }
 
 /// What to render after argument classification.
@@ -151,9 +171,29 @@ pub enum DispatchError {
     /// A directory or glob argument expanded to zero renderable files
     /// after the project's render list is applied.
     NoRenderableMatches { path: PathBuf },
-    /// Project discovery failed for unrelated reasons (parse error in
-    /// `_quarto.yml`, I/O error, etc.).
+    /// Project discovery failed with a structured parse diagnostic
+    /// (e.g. an invalid `_quarto.yml`, or Q-5-17 unknown
+    /// `project.type`). Kept structured (bd-y56u1gl7) so the text
+    /// path can print the rendered diagnostic bare and the
+    /// `--json-errors` path can emit the real per-diagnostic codes
+    /// and locations instead of a stringified Q-7-8 envelope.
+    DiscoverParse(quarto_core::ParseError),
+    /// Project discovery failed for unrelated, unstructured reasons
+    /// (I/O error, etc.).
     Discover(String),
+}
+
+/// Convert a discovery-stage [`QuartoError`] into a
+/// [`DispatchError`], preserving structured diagnostics
+/// (bd-y56u1gl7). Used at the `ProjectContext::discover` call
+/// sites; runtime-level errors (`path_exists`, `canonicalize`,
+/// `is_dir`) are not `QuartoError`s and keep the plain
+/// `Discover(String)` mapping.
+fn discover_error(e: QuartoError) -> DispatchError {
+    match e {
+        QuartoError::Parse(pe) => DispatchError::DiscoverParse(pe),
+        other => DispatchError::Discover(other.to_string()),
+    }
 }
 
 impl std::fmt::Display for DispatchError {
@@ -181,21 +221,39 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::NotInRenderList { path, project_dir } => write!(
                 f,
-                "{} is excluded from the render list of project {} \
-                 (check `project.render` in `_quarto.yml` and the \
-                 underscore/hidden file conventions).",
+                "{} is excluded from the render list of project {} ({}).",
                 path.display(),
-                project_dir.display()
+                project_dir.display(),
+                render_list_exclusion_hint(path),
             ),
             DispatchError::NoRenderableMatches { path } => {
-                write!(f, "No renderable `.qmd` files matched: {}", path.display())
+                write!(f, "No renderable source files matched: {}", path.display())
             }
+            // The rendered ParseError is self-describing (it opens
+            // with its own `Error: [Q-N-M]` header) — no prefix.
+            DispatchError::DiscoverParse(pe) => write!(f, "{pe}"),
             DispatchError::Discover(msg) => write!(f, "Project discovery failed: {msg}"),
         }
     }
 }
 
 impl std::error::Error for DispatchError {}
+
+/// Why is this input outside the render list, and what should the
+/// user do about it? For `.md` inputs the overwhelmingly likely
+/// cause is the opt-in policy (bd-6d2wj4zp) — `.md` renders only
+/// when a `project.render` pattern matches it — so the generic
+/// underscore/hidden advice would mislead. Shared by the
+/// [`DispatchError`] `Display` impl and the `Q-7-6` diagnostic.
+fn render_list_exclusion_hint(path: &std::path::Path) -> &'static str {
+    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+        "`.md` files render only when matched by a `project.render` pattern \
+         such as `\"**/*.md\"` in `_quarto.yml`"
+    } else {
+        "check `project.render` in `_quarto.yml` and the underscore/hidden \
+         file conventions"
+    }
+}
 
 /// Classify CLI input strings into a [`RenderTarget`].
 ///
@@ -210,9 +268,10 @@ pub fn classify_inputs(
     inputs: &[String],
     cwd: &Path,
     runtime: &dyn SystemRuntime,
+    profile_selection: Option<&[String]>,
 ) -> std::result::Result<RenderTarget, DispatchError> {
     if inputs.is_empty() {
-        return classify_no_inputs(cwd, runtime);
+        return classify_no_inputs(cwd, runtime, profile_selection);
     }
 
     // Step 1: canonicalize each input and verify it exists.
@@ -239,8 +298,8 @@ pub fn classify_inputs(
     let mut shared_project: Option<PathBuf> = None;
     let mut any_outside_project = false;
     for r in &resolved {
-        let ctx = ProjectContext::discover(r, runtime)
-            .map_err(|e| DispatchError::Discover(e.to_string()))?;
+        let ctx = ProjectContext::discover_with_profile(r, runtime, profile_selection)
+            .map_err(discover_error)?;
         // `is_single_file` only fires for *file* inputs with no
         // surrounding `_quarto.yml`. A *directory* input never trips
         // it, even when no config exists — so we re-check the
@@ -276,9 +335,12 @@ pub fn classify_inputs(
         if resolved.len() > 1 {
             return Err(DispatchError::MultiArgNonProject);
         }
-        // Single arg outside any project: must be a `.qmd` file
-        // (single-doc fallthrough). Directories outside any project
-        // are not a meaningful render target — we error.
+        // Single arg outside any project: a renderable source file
+        // (`.qmd` or `.md` — bd-6d2wj4zp) as the single-doc
+        // fallthrough. Directories outside any project are not a
+        // meaningful render target — we error. Note the extension is
+        // not checked here: any file becomes a SingleDoc, and
+        // non-source files fail downstream at parse.
         let only = &resolved[0];
         let is_dir = runtime
             .is_dir(only)
@@ -295,8 +357,8 @@ pub fn classify_inputs(
     // Re-discover from the project root to get the full
     // render-list-filtered file list. (Per-input `discover` only fills
     // `files` with that one input.)
-    let project = ProjectContext::discover(&project_dir, runtime)
-        .map_err(|e| DispatchError::Discover(e.to_string()))?;
+    let project = ProjectContext::discover_with_profile(&project_dir, runtime, profile_selection)
+        .map_err(discover_error)?;
     let project_files: Vec<PathBuf> = project.files.iter().map(|f| f.input.clone()).collect();
 
     // Step 3: expand each input into the set of project files it
@@ -364,6 +426,7 @@ pub fn classify_inputs(
 fn classify_no_inputs(
     cwd: &Path,
     runtime: &dyn SystemRuntime,
+    profile_selection: Option<&[String]>,
 ) -> std::result::Result<RenderTarget, DispatchError> {
     let cwd_canon = runtime
         .canonicalize(cwd)
@@ -381,8 +444,8 @@ fn classify_no_inputs(
         return Err(DispatchError::NoInputAndNoProject(cwd_canon));
     };
 
-    let project = ProjectContext::discover(&project_root, runtime)
-        .map_err(|e| DispatchError::Discover(e.to_string()))?;
+    let project = ProjectContext::discover_with_profile(&project_root, runtime, profile_selection)
+        .map_err(discover_error)?;
     Ok(RenderTarget::FullProject {
         project_dir: project.dir,
     })
@@ -397,7 +460,7 @@ fn classify_no_inputs(
 /// (parsing-free, `path_exists`-only). `classify_no_inputs` uses it
 /// to gate the expensive directory walk that `ProjectContext::discover`
 /// would otherwise perform on a project-less cwd.
-fn find_project_root_upward(
+pub(crate) fn find_project_root_upward(
     start: &Path,
     runtime: &dyn SystemRuntime,
 ) -> std::result::Result<Option<PathBuf>, DispatchError> {
@@ -607,13 +670,249 @@ fn load_replay_captures(cli_replay: Option<&str>) -> Result<Vec<quarto_trace::En
 }
 
 /// Execute the render command.
+/// Everything `q2 render` decides once the pipeline finishes, minus the
+/// decision to exit the process (bd-sl79jjiq Phase 1).
+///
+/// [`execute`] turns a report into stderr output and an exit code;
+/// `q2 preview --static` keeps the report, serves `output_dir`, and
+/// calls [`render_once`] again on every change. The split is what lets
+/// one process render repeatedly: nothing on the [`render_once`] path
+/// calls `std::process::exit`.
+// Consumed by `preview_static` from Phase 3 of the plan on; until then
+// only `execute` and the tests read it.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct RenderReport {
+    /// What was rendered: a single document, a whole project, or a
+    /// subset of one.
+    pub target: RenderTarget,
+    /// The project root (the input's directory for a single document).
+    pub project_dir: PathBuf,
+    /// Where outputs landed — a static server's root.
+    pub output_dir: PathBuf,
+    /// The format string the render resolved to (`"html"`,
+    /// `"revealjs"`, …).
+    pub format_str: String,
+    /// Number of inputs the project pipeline considered (the "M" in
+    /// "Rendered N of M"). `None` for a single-document render, which
+    /// prints no such line.
+    pub total_files: Option<usize>,
+    /// Every input the project considers (its render-list-filtered
+    /// file list), whether or not this render touched it. A
+    /// single-document render lists just the document.
+    pub inputs: Vec<PathBuf>,
+    /// The orchestrator's summary: outputs, failures, diagnostics.
+    pub summary: quarto_core::project::orchestrator::ProjectRenderSummary,
+    /// Config files whose bytes restore config-anchored source
+    /// snippets at print time (`_quarto.yml`, profiles, extension
+    /// manifests). See [`attach_config_source`].
+    pub config_sources: Vec<PathBuf>,
+    /// What [`should_exit_nonzero`] said, after `--strict` promotion.
+    pub exit_nonzero: bool,
+}
+
+#[allow(dead_code)]
+impl RenderReport {
+    /// `(input, output)` pairs for every page that rendered, in
+    /// `project.files` order.
+    pub fn outputs(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.summary
+            .outputs
+            .iter()
+            .map(|o| (o.input_path.clone(), o.output_path.clone()))
+            .collect()
+    }
+
+    /// Inputs that failed Pass 1 or Pass 2 (no output written for them).
+    pub fn failed_inputs(&self) -> Vec<PathBuf> {
+        self.summary
+            .pass1_failures
+            .iter()
+            .chain(self.summary.pass2_failures.iter())
+            .map(|f| f.input.clone())
+            .collect()
+    }
+
+    /// Error / warning totals across the whole render (bd-ooleh).
+    pub fn diagnostic_counts(&self) -> DiagnosticCounts {
+        self.summary.diagnostic_counts()
+    }
+
+    /// Inputs that resolved to a code-executing engine but rendered
+    /// with their cells inert because the `ExecutionPolicy` excluded
+    /// them (bd-sl79jjiq Phase 3b).
+    pub fn unexecuted_inputs(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.summary
+            .outputs
+            .iter()
+            .filter(|o| o.render_output.execution_skipped)
+            .map(|o| o.input_path.clone())
+            .collect()
+    }
+
+    /// The diagnostics exactly as `q2 render` prints them (per-page
+    /// diagnostics included, i.e. the non-`--quiet` form). With
+    /// `color: false` the text carries no ANSI escapes and no OSC 8
+    /// hyperlinks, for consumers that are not a terminal.
+    pub fn diagnostics_text(&self, color: bool) -> String {
+        format_render_diagnostics_text(&self.summary, false, &self.config_sources, color)
+    }
+}
+
+/// `q2 render` would have stopped before rendering (or, for
+/// [`Self::Scripts`], while running a render script). Each variant maps
+/// to exactly the message and exit code [`execute`] produced before the
+/// [`render_once`] split.
+#[derive(Debug)]
+pub enum RenderAbort {
+    /// Input classification failed (`Q-7-N`, or a config parse error
+    /// discovered while locating the project).
+    Dispatch(DispatchError),
+    /// The pipeline itself returned a parse error (a broken
+    /// `_quarto.yml` read during the render, say). `input` is the
+    /// document for a single-document render, `None` for a project.
+    Parse {
+        error: quarto_core::ParseError,
+        input: Option<PathBuf>,
+    },
+    /// A `pre-render` / `post-render` script failed or made a
+    /// forbidden config mutation.
+    Scripts(quarto_core::ParseError),
+    /// Anything else (unsupported format, unreadable replay trace,
+    /// project discovery failure, an orchestrator error).
+    Other(anyhow::Error),
+}
+
+impl RenderAbort {
+    /// What `q2 render` prints for this abort in text mode. Parse
+    /// diagnostics carry their own `Error: [Q-N-M]` header; the rest
+    /// get the `Error:` prefix `main` would have added.
+    pub fn user_message(&self) -> String {
+        match self {
+            RenderAbort::Dispatch(DispatchError::DiscoverParse(pe)) => pe.to_string(),
+            RenderAbort::Dispatch(e) => format!("Error: {e}"),
+            RenderAbort::Parse { error, .. } => error.to_string(),
+            RenderAbort::Scripts(pe) => pe.to_string(),
+            RenderAbort::Other(e) => format!("Error: {e:#}"),
+        }
+    }
+}
+
+/// The CLI's handling of a [`RenderAbort`], unchanged from before the
+/// [`render_once`] split: the structured cases print themselves (text
+/// or `--json-errors`) and exit 1; the rest come back as the error for
+/// `main` to print. `q2 preview --static` uses it for its boot render,
+/// which fails exactly the way `q2 render` would.
+pub(crate) fn exit_with_abort(abort: RenderAbort, args: &RenderArgs) -> anyhow::Error {
+    match abort {
+        RenderAbort::Dispatch(e) => {
+            // Under --json-errors, surface the structured DispatchError
+            // as a JsonDiagnostic on stderr before exiting so machine
+            // consumers can discriminate by code (Q-7-2..8).
+            if args.json_errors {
+                emit_dispatch_error_json(&e);
+                std::process::exit(1);
+            }
+            // A structured parse diagnostic prints bare — it carries
+            // its own `Error: [Q-N-M]` header and source snippet.
+            // Routing it through anyhow would stack a second
+            // `Error:` prefix on top (bd-y56u1gl7). Mirrors the
+            // `RenderAbort::Parse` arm below.
+            if let DispatchError::DiscoverParse(pe) = &e {
+                eprintln!("{pe}");
+                std::process::exit(1);
+            }
+            anyhow::anyhow!("{}", e)
+        }
+        RenderAbort::Parse { error, input } => {
+            if args.json_errors {
+                emit_parse_error_json(&error, input.as_deref());
+            } else {
+                eprintln!("{}", error);
+            }
+            std::process::exit(1);
+        }
+        RenderAbort::Scripts(parse_error) => exit_with_parse_error(parse_error, args),
+        RenderAbort::Other(e) => e,
+    }
+}
+
 pub fn execute(args: RenderArgs) -> Result<()> {
+    let mut present = |report: &RenderReport| present_report(report, &args);
+    match render_once(&args, &mut present) {
+        Ok(report) => {
+            if report.exit_nonzero {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Err(abort) => Err(exit_with_abort(abort, &args)),
+    }
+}
+
+/// The terminal presentation of a finished render: diagnostics (text
+/// or `--json-errors`), then the "Rendered N of M" line or the bare
+/// counts clause. Runs from inside [`render_once`], after the pipeline
+/// and before post-render scripts, so stderr ordering is unchanged
+/// from before the split.
+pub(crate) fn present_report(report: &RenderReport, args: &RenderArgs) {
+    print_render_diagnostics(&report.summary, args, &report.config_sources);
+    match report.total_files {
+        Some(total_files) => {
+            let rendered = report.summary.outputs.len();
+            if let Some(mut line) =
+                render_summary_line(false, total_files, rendered, &report.output_dir)
+            {
+                // bd-ooleh: augment the existing summary line with the total
+                // error/warning counts when there is something to report.
+                // Suppressed under `--json-errors` (machine consumers tally for
+                // themselves); the clean-run case drops the clause entirely.
+                if !args.json_errors
+                    && let Some(clause) =
+                        format_counts_clause(&report.diagnostic_counts(), stderr_use_color())
+                {
+                    line = format!("{line} — {clause}");
+                }
+                quarto_util::user_status!(args.console_quiet(), "{}", line);
+            }
+        }
+        None => {
+            // bd-ooleh: a single-file render has no "Rendered N of M" line to
+            // augment, so the error/warning counts get their own line — printed
+            // only when there is something to report (clean runs stay silent)
+            // and never under the machine-readable `--json-errors` path.
+            if !args.json_errors
+                && let Some(clause) =
+                    format_counts_clause(&report.diagnostic_counts(), stderr_use_color())
+            {
+                quarto_util::user_status!(args.console_quiet(), "{}", clause);
+            }
+        }
+    }
+}
+
+/// Render once, in process, and return what happened.
+///
+/// This is `execute` without the exit codes: every early exit of the
+/// old command is a [`RenderAbort`] variant, and every completed render
+/// — clean, warnings, or per-page failures — is an `Ok` report. The
+/// `present` callback runs exactly once, with the finished report,
+/// after the pipeline and *before* post-render scripts; `execute`
+/// prints from there so the terminal output keeps its old ordering,
+/// and `q2 preview --static` records the report for the browser.
+///
+/// Progress lines (`Rendering project: …`) still print through
+/// `user_status!` as the render runs; `--quiet` or `--json-errors` silences them.
+pub fn render_once(
+    args: &RenderArgs,
+    present: &mut dyn FnMut(&RenderReport),
+) -> std::result::Result<RenderReport, RenderAbort> {
     // Create the system runtime
     let runtime = NativeRuntime::new();
 
-    let cwd = runtime
-        .cwd()
-        .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+    let cwd = runtime.cwd().map_err(|e| {
+        RenderAbort::Other(anyhow::anyhow!("Failed to get current directory: {}", e))
+    })?;
 
     // Determine the target format. An explicit `--to` always wins; otherwise
     // resolve from the document's front-matter `format:` (matching Quarto 1,
@@ -625,84 +924,145 @@ pub fn execute(args: RenderArgs) -> Result<()> {
         Some(to) => to.to_string(),
         None => detect_single_input_format(&args.inputs).unwrap_or_else(|| "html".to_string()),
     };
-    let format = resolve_format(&format_str)?;
+    let format = resolve_format(&format_str).map_err(RenderAbort::Other)?;
 
-    // Native formats (HTML, revealjs) render in-process; non-native formats
-    // still need Pandoc and are not yet supported.
-    if !format.identifier.is_native() {
-        anyhow::bail!(
-            "Format '{}' is not yet supported. Only HTML and revealjs are available in this version.",
-            format.identifier
-        );
+    // P7-foundation Task 1/3 (design doc §14): relaxing the format gate
+    // below removes the only existing signal that a multi-format
+    // `format:` declaration silently reduces to one rendered format.
+    // Emit the replacement warning at the same site that made the
+    // reduction, before the gate below decides whether to bail.
+    // Only a single-input render can trip it, so that input is the
+    // file it is about.
+    let single_input = match args.inputs.as_slice() {
+        [only] => Some(Path::new(only)),
+        _ => None,
+    };
+    for diagnostic in
+        multi_format_warning_diagnostics(&args.inputs, args.to.as_deref(), &format_str)
+    {
+        emit_cli_diagnostic(&diagnostic, args, &SourceContext::new(), single_input);
     }
 
-    // Classify inputs into a render target. Under --json-errors,
-    // surface the structured DispatchError as a JsonDiagnostic on
-    // stderr before exiting so machine consumers can discriminate
-    // by code (Q-7-2..8).
-    let target = match classify_inputs(&args.inputs, &cwd, &runtime) {
-        Ok(t) => t,
-        Err(e) => {
-            if args.json_errors {
-                emit_dispatch_error_json(&e);
-                std::process::exit(1);
-            }
-            return Err(anyhow::anyhow!("{}", e));
-        }
-    };
+    // Native formats (HTML, revealjs) render in-process. Every
+    // pandoc-hybrid format (`FormatIdentifier::is_pandoc_hybrid`) routes
+    // through Pandoc via `render_qmd_to_pandoc`. Only non-hybrid,
+    // non-native formats (Pdf for now — the latex/beamer epic owns it —
+    // and future enum additions that have not yet gained a
+    // `pandoc_writer_name_for` arm) are refused here.
+    if !format.identifier.is_native() && !format.identifier.is_pandoc_hybrid() {
+        return Err(RenderAbort::Other(anyhow::anyhow!(
+            "Format '{}' is not yet supported.",
+            format.identifier
+        )));
+    }
+
+    // Classify inputs into a render target.
+    let target = classify_inputs(
+        &args.inputs,
+        &cwd,
+        &runtime,
+        quarto_core::project::project_profile::cli_selection(&args.profile),
+    )
+    .map_err(RenderAbort::Dispatch)?;
 
     // bd-45yw: load replay capture if --replay <path> or
     // QUARTO_REPLAY=<path> is set. Hard-fail on read errors and on
     // traces missing engine_capture so investigators don't waste
     // time on a silently-degraded replay.
-    let replay_captures = load_replay_captures(args.replay.as_deref())?;
+    let replay_captures =
+        load_replay_captures(args.replay.as_deref()).map_err(RenderAbort::Other)?;
 
     // Set up render options
     let options = RenderToFileOptions {
         output_path: args.output.as_ref().map(PathBuf::from),
         output_dir: args.output_dir.as_ref().map(PathBuf::from),
-        quiet: args.quiet,
+        quiet: args.console_quiet(),
         replay_captures,
         engine_registry_override: None,
+        execution_policy: args.execution_policy.clone(),
         // Phase 3c: CLI override-only for v1 (YAML reading is deferred
         // until project YAML schema work; the resolver matrix is still
         // exercised end-to-end by Phase 0 test #9b).
         attribution: args.attribution,
+        chapter_seed: None,
+        source_override: None,
     };
 
     match target {
-        RenderTarget::SingleDoc(input) => execute_single_doc(input, &args, &options, format),
-        RenderTarget::FullProject { project_dir } => {
-            execute_project(project_dir, None, &args, &options, format, &format_str)
-        }
-        RenderTarget::Subset {
+        RenderTarget::SingleDoc(input) => render_single_doc(input, args, &options, format, present),
+        RenderTarget::FullProject { project_dir } => render_project(
             project_dir,
-            targets,
-        } => execute_project(
-            project_dir,
-            Some(targets),
-            &args,
+            None,
+            args,
             &options,
             format,
             &format_str,
+            present,
+        ),
+        RenderTarget::Subset {
+            project_dir,
+            targets,
+        } => render_project(
+            project_dir,
+            Some(targets),
+            args,
+            &options,
+            format,
+            &format_str,
+            present,
         ),
     }
 }
 
-fn execute_single_doc(
+/// `-v` echo of the resolved project-profile activation set with
+/// per-profile provenance (bd-fu16z22k). Deliberately absent from
+/// normal output (Q1 parity: profiles are never announced); shows at
+/// `-v` because `verbose_to_filter(1)` enables `quarto=info`.
+fn echo_active_profiles(project: &ProjectContext) {
+    let active = &project.config.active_config_profiles;
+    if active.is_empty() {
+        return;
+    }
+    let described: Vec<String> = active
+        .iter()
+        .map(|p| format!("{} (from {})", p.name, p.source.describe()))
+        .collect();
+    tracing::info!("active project profiles: {}", described.join(", "));
+}
+
+fn render_single_doc(
     input: PathBuf,
     args: &RenderArgs,
     options: &RenderToFileOptions,
     format: Format,
-) -> Result<()> {
+    present: &mut dyn FnMut(&RenderReport),
+) -> std::result::Result<RenderReport, RenderAbort> {
     let runtime_arc: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
-    let mut project = ProjectContext::discover(&input, runtime_arc.as_ref())
-        .context("Failed to discover project context")?;
+    let mut project = ProjectContext::discover_with_profile(
+        &input,
+        runtime_arc.as_ref(),
+        quarto_core::project::project_profile::cli_selection(&args.profile),
+    )
+    .context("Failed to discover project context")
+    .map_err(RenderAbort::Other)?;
+    echo_active_profiles(&project);
     // Captured before the pipeline mutably borrows `project`; used to
-    // restore config-anchored source snippets at print time.
+    // restore config-anchored source snippets at print time. Manifests
+    // included: merged values can anchor in an extension's
+    // `_extension.yml` (bd-r64mj1aa).
     let config_path = project.config.config_path.clone();
+    let config_sources: Vec<PathBuf> = config_path
+        .iter()
+        .cloned()
+        .chain(project.config.profile_config_paths.iter().cloned())
+        .chain(project.config.extension_manifest_paths.iter().cloned())
+        .collect();
 
-    quarto_util::user_status!(args.quiet, "Rendering single file: {}", input.display());
+    quarto_util::user_status!(
+        args.console_quiet(),
+        "Rendering single file: {}",
+        input.display()
+    );
 
     let project_type = project_type_for(&project);
     let format_str = format.identifier.to_string();
@@ -717,49 +1077,54 @@ fn execute_single_doc(
     .with_format_override(args.to.clone())
     .with_fail_fast(args.fail_fast);
 
-    let mut summary = match pollster::block_on(pipeline.run()) {
+    // bd-hxhnnlzs: keep Jupyter kernels warm across the whole pipeline
+    // run. Scoped to the `block_on` (not the surrounding function)
+    // because callers may `std::process::exit` afterwards, which skips
+    // destructors — the scope must close before any exit.
+    let run_result = {
+        let _kernel_scope = quarto_core::engine::jupyter::kernel_scope();
+        pollster::block_on(pipeline.run_with_book_support())
+    };
+    let mut summary = match run_result {
         Ok(s) => s,
         Err(QuartoError::Parse(parse_error)) => {
-            if args.json_errors {
-                emit_parse_error_json(&parse_error, Some(&input));
-            } else {
-                eprintln!("{}", parse_error);
-            }
-            std::process::exit(1);
+            return Err(RenderAbort::Parse {
+                error: parse_error,
+                input: Some(input),
+            });
         }
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+        Err(e) => return Err(RenderAbort::Other(anyhow::anyhow!("{}", e))),
     };
 
     if args.strict {
         summary.promote_warnings_to_errors();
     }
+    let exit_nonzero = should_exit_nonzero(&summary, args.strict);
 
-    print_render_diagnostics(&summary, args, config_path.as_deref());
-
-    // bd-ooleh: a single-file render has no "Rendered N of M" line to
-    // augment, so the error/warning counts get their own line — printed
-    // only when there is something to report (clean runs stay silent)
-    // and never under the machine-readable `--json-errors` path.
-    if !args.json_errors
-        && let Some(clause) = format_counts_clause(&summary.diagnostic_counts(), stderr_use_color())
-    {
-        quarto_util::user_status!(args.quiet, "{}", clause);
-    }
-
-    if should_exit_nonzero(&summary, args.strict) {
-        std::process::exit(1);
-    }
-    Ok(())
+    let report = RenderReport {
+        target: RenderTarget::SingleDoc(input.clone()),
+        project_dir: project.dir.clone(),
+        output_dir: project.output_dir.clone(),
+        format_str,
+        total_files: None,
+        inputs: vec![input],
+        summary,
+        config_sources,
+        exit_nonzero,
+    };
+    present(&report);
+    Ok(report)
 }
 
-fn execute_project(
+fn render_project(
     project_dir: PathBuf,
     targets: Option<Vec<PathBuf>>,
     args: &RenderArgs,
     options: &RenderToFileOptions,
     format: Format,
     format_str: &str,
-) -> Result<()> {
+    present: &mut dyn FnMut(&RenderReport),
+) -> std::result::Result<RenderReport, RenderAbort> {
     // Build a runtime with cache_dir wired up — same as the pre-Phase-8
     // single-file vs project shape decision.
     let runtime_arc: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::with_cache_dir(
@@ -767,20 +1132,60 @@ fn execute_project(
     ));
 
     if args.clean_cache {
-        run_clean_cache(runtime_arc.as_ref(), &project_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+        run_clean_cache(runtime_arc.as_ref(), &project_dir)
+            .map_err(|e| RenderAbort::Other(anyhow::anyhow!("{e}")))?;
     }
 
-    let mut project = ProjectContext::discover(&project_dir, runtime_arc.as_ref())
-        .context("Failed to discover project context")?;
+    let mut project = ProjectContext::discover_with_profile(
+        &project_dir,
+        runtime_arc.as_ref(),
+        quarto_core::project::project_profile::cli_selection(&args.profile),
+    )
+    .context("Failed to discover project context")
+    .map_err(RenderAbort::Other)?;
+    echo_active_profiles(&project);
     // Captured before the pipeline mutably borrows `project`; used to
-    // restore config-anchored source snippets at print time.
+    // restore config-anchored source snippets at print time. Manifests
+    // included: merged values can anchor in an extension's
+    // `_extension.yml` (bd-r64mj1aa).
     let config_path = project.config.config_path.clone();
+    let config_sources: Vec<PathBuf> = config_path
+        .iter()
+        .cloned()
+        .chain(project.config.profile_config_paths.iter().cloned())
+        .chain(project.config.extension_manifest_paths.iter().cloned())
+        .collect();
 
     // bd-w348iu63: warn about the likely `pre_render` / `post_render`
     // misspellings (Q2 has no schema layer; unknown keys are
-    // otherwise silently ignored).
-    for diagnostic in render_scripts::underscore_typo_diagnostics(&project.config) {
-        eprintln!("{}", diagnostic.to_text(None));
+    // otherwise silently ignored). bd-ad7i1pc6: also warn when the
+    // project kind (book/manuscript) renders with default behavior,
+    // and surface config-parse diagnostics (ambiguous / incomplete
+    // project-type extensions) once per run.
+    let config_ctx = config_source_context(&config_sources).unwrap_or_default();
+    for diagnostic in render_scripts::underscore_typo_diagnostics(&project.config)
+        .into_iter()
+        .chain(quarto_core::project::project_kind_diagnostics(
+            &project.config,
+        ))
+        .chain(project.config.config_diagnostics.iter().cloned())
+    {
+        // `emit_cli_diagnostic` guards both forms. The text form passes
+        // `None` as its `SourceContext`, which never reaches a renderer,
+        // so its byte-slicing path is unreachable today: in the locked
+        // `quarto-error-reporting` 0.2.2, `to_text_with_renderer`
+        // (`diagnostic.rs:442`) gates the excerpt renderer on
+        // `(has_any_location, Some(ctx))` (`:460-481`) and falls through
+        // to the structured-text branch (`:486`) when `ctx` is `None`.
+        // The `--json-errors` form does bind `config_ctx` (so a located
+        // diagnostic gets coordinates and names its config file), and
+        // its pre-rendered snippet is a real slicing site.
+        emit_cli_diagnostic(
+            &diagnostic,
+            args,
+            &config_ctx,
+            project.config.config_path.as_deref(),
+        );
     }
 
     // bd-w348iu63: run `project.pre-render` scripts, then re-discover
@@ -789,47 +1194,68 @@ fn execute_project(
     // forbidden (Q1-compatible mutation guard).
     let run_scripts = !args.no_render_scripts;
     let render_all = targets.is_none();
+    let target = match &targets {
+        None => RenderTarget::FullProject {
+            project_dir: project_dir.clone(),
+        },
+        Some(t) => RenderTarget::Subset {
+            project_dir: project_dir.clone(),
+            targets: t.clone(),
+        },
+    };
     if run_scripts && !project.config.pre_render_scripts.is_empty() {
         let input_files = match targets.as_deref() {
             Some(t) => paths_relative_to(t.iter(), &project.dir),
             None => paths_relative_to(project.files.iter().map(|f| &f.input), &project.dir),
         };
+        let script_env = quarto_core::project::environment::subprocess_env_for_project(
+            runtime_arc.as_ref(),
+            &project,
+        );
         let ctx = render_scripts::RenderScriptsContext {
             project_dir: &project.dir,
             output_dir: &project.output_dir,
             config_path: project.config.config_path.as_deref(),
+            extension_manifest_paths: &project.config.extension_manifest_paths,
+            profile_config_paths: &project.config.profile_config_paths,
+            quarto_profile: quarto_core::project::project_profile::quarto_profile_env_value(
+                &project.config.active_config_profiles,
+            ),
             render_all,
-            quiet: args.quiet,
+            quiet: args.console_quiet(),
             file_count: input_files.len(),
+            project_env: &script_env,
         };
-        if let Err(parse_error) = render_scripts::run_render_scripts(
+        render_scripts::run_render_scripts(
             render_scripts::ScriptPhase::PreRender,
             &project.config.pre_render_scripts,
             &ctx,
             &input_files,
-        ) {
-            exit_with_parse_error(parse_error, args);
-        }
+        )
+        .map_err(RenderAbort::Scripts)?;
 
-        let re_project = ProjectContext::discover(&project_dir, runtime_arc.as_ref())
-            .context("Failed to re-discover project context after pre-render scripts")?;
-        if let Err(parse_error) =
-            render_scripts::check_forbidden_mutations(&project.config, &re_project.config)
-        {
-            exit_with_parse_error(parse_error, args);
-        }
+        let re_project = ProjectContext::discover_with_profile(
+            &project_dir,
+            runtime_arc.as_ref(),
+            quarto_core::project::project_profile::cli_selection(&args.profile),
+        )
+        .context("Failed to re-discover project context after pre-render scripts")
+        .map_err(RenderAbort::Other)?;
+        render_scripts::check_forbidden_mutations(&project.config, &re_project.config)
+            .map_err(RenderAbort::Scripts)?;
         project = re_project;
     }
 
     quarto_util::user_status!(
-        args.quiet,
+        args.console_quiet(),
         "Rendering project: {} (type: {})",
         project.dir.display(),
-        project.project_kind().as_str()
+        project.project_type_label()
     );
 
     let project_type = project_type_for(&project);
     let total_files = project.files.len();
+    let inputs: Vec<PathBuf> = project.files.iter().map(|f| f.input.clone()).collect();
 
     let mut pipeline = ProjectPipeline::new(
         &mut project,
@@ -847,42 +1273,45 @@ fn execute_project(
         pipeline = pipeline.with_mode(RenderMode::Subset(set));
     }
 
-    let mut summary = match pollster::block_on(pipeline.run()) {
+    // bd-hxhnnlzs: one kernel scope for the whole project render, so
+    // documents sharing a (kernel, dir) session key reuse one warm
+    // kernel. Scoped to the `block_on` because callers may
+    // `std::process::exit` afterwards, which skips destructors.
+    let run_result = {
+        let _kernel_scope = quarto_core::engine::jupyter::kernel_scope();
+        pollster::block_on(pipeline.run_with_book_support())
+    };
+    let mut summary = match run_result {
         Ok(s) => s,
         Err(QuartoError::Parse(parse_error)) => {
-            if args.json_errors {
-                emit_parse_error_json(&parse_error, None);
-            } else {
-                eprintln!("{}", parse_error);
-            }
-            std::process::exit(1);
+            return Err(RenderAbort::Parse {
+                error: parse_error,
+                input: None,
+            });
         }
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+        Err(e) => return Err(RenderAbort::Other(anyhow::anyhow!("{}", e))),
     };
 
     if args.strict {
         summary.promote_warnings_to_errors();
     }
+    let exit_nonzero = should_exit_nonzero(&summary, args.strict);
 
-    print_render_diagnostics(&summary, args, config_path.as_deref());
+    let report = RenderReport {
+        target,
+        project_dir: project.dir.clone(),
+        output_dir: project.output_dir.clone(),
+        format_str: format_str.to_string(),
+        total_files: Some(total_files),
+        inputs,
+        summary,
+        config_sources,
+        exit_nonzero,
+    };
+    present(&report);
 
-    let rendered = summary.outputs.len();
-    if let Some(mut line) = render_summary_line(false, total_files, rendered, &project.output_dir) {
-        // bd-ooleh: augment the existing summary line with the total
-        // error/warning counts when there is something to report.
-        // Suppressed under `--json-errors` (machine consumers tally for
-        // themselves); the clean-run case drops the clause entirely.
-        if !args.json_errors
-            && let Some(clause) =
-                format_counts_clause(&summary.diagnostic_counts(), stderr_use_color())
-        {
-            line = format!("{line} — {clause}");
-        }
-        quarto_util::user_status!(args.quiet, "{}", line);
-    }
-
-    if should_exit_nonzero(&summary, args.strict) {
-        std::process::exit(1);
+    if report.exit_nonzero {
+        return Ok(report);
     }
 
     // bd-w348iu63: run `project.post-render` scripts at the very end,
@@ -891,26 +1320,37 @@ fn execute_project(
     // `QUARTO_PROJECT_OUTPUT_FILES` lists what the pipeline really
     // produced — fixing Q1's stale-env wart.
     if run_scripts && !project.config.post_render_scripts.is_empty() {
-        let output_files =
-            paths_relative_to(summary.outputs.iter().map(|o| &o.output_path), &project.dir);
+        let output_files = paths_relative_to(
+            report.summary.outputs.iter().map(|o| &o.output_path),
+            &project.dir,
+        );
+        let script_env = quarto_core::project::environment::subprocess_env_for_project(
+            runtime_arc.as_ref(),
+            &project,
+        );
         let ctx = render_scripts::RenderScriptsContext {
             project_dir: &project.dir,
             output_dir: &project.output_dir,
             config_path: project.config.config_path.as_deref(),
+            extension_manifest_paths: &project.config.extension_manifest_paths,
+            profile_config_paths: &project.config.profile_config_paths,
+            quarto_profile: quarto_core::project::project_profile::quarto_profile_env_value(
+                &project.config.active_config_profiles,
+            ),
             render_all,
-            quiet: args.quiet,
+            quiet: args.console_quiet(),
             file_count: total_files,
+            project_env: &script_env,
         };
-        if let Err(parse_error) = render_scripts::run_render_scripts(
+        render_scripts::run_render_scripts(
             render_scripts::ScriptPhase::PostRender,
             &project.config.post_render_scripts,
             &ctx,
             &output_files,
-        ) {
-            exit_with_parse_error(parse_error, args);
-        }
+        )
+        .map_err(RenderAbort::Scripts)?;
     }
-    Ok(())
+    Ok(report)
 }
 
 /// Make each path relative to `base` (paths already relative, or
@@ -974,12 +1414,23 @@ fn should_exit_nonzero<O: quarto_core::project::orchestrator::OutputDiagnostics>
 fn print_render_diagnostics(
     summary: &quarto_core::project::orchestrator::ProjectRenderSummary,
     args: &RenderArgs,
-    config_path: Option<&Path>,
+    config_sources: &[PathBuf],
 ) {
     if args.json_errors {
-        print_render_diagnostics_json(summary);
+        print_render_diagnostics_json(summary, config_sources);
     } else {
-        print_render_diagnostics_text(summary, args.quiet, config_path);
+        eprint!(
+            "{}",
+            format_render_diagnostics_text(summary, args.quiet, config_sources, true)
+        );
+        // Per-file output line stays on `tracing::info!` (opt-in via
+        // `-v`); enumerating every file is too noisy for a large
+        // site, and the post-render summary covers the common case.
+        if !args.quiet {
+            for result in &summary.outputs {
+                info!("Output: {}", result.output_path.display());
+            }
+        }
     }
 
     // bd-c5u2g: emit per-process engine-discovery counters when
@@ -990,6 +1441,10 @@ fn print_render_diagnostics(
     quarto_core::project::orchestrator::print_pass1_stats_if_enabled();
     // bd-3gj56: pass-2 docs / threads_used / wall_ms gauge.
     quarto_core::project::orchestrator::print_pass2_stats_if_enabled();
+    // Plan 6 Phase 5: pass-1 engine-resolution lifted/fell_through gauge.
+    quarto_core::project::orchestrator::print_pass1_engine_resolution_stats_if_enabled();
+    // bd-fq44dlnm: SCSS cache hits / grass compiles gauge.
+    quarto_core::stage::stages::print_sass_stats_if_enabled();
 }
 
 /// Text path: the existing ariadne-formatted output. Kept verbatim
@@ -1005,51 +1460,278 @@ fn print_render_diagnostics(
 /// the config's content under that id so the snippet renders. Any
 /// failure (no config, hash mismatch, unreadable file) leaves the
 /// group unchanged — span-less render, exactly as before.
-fn attach_config_source(group: &mut CoalescedDiagnostic, config_path: Option<&Path>) {
-    use quarto_source_map::FileId;
+/// A [`SourceContext`] holding the project's `_quarto.yml`, so
+/// project-level diagnostics anchored in it (a `project.render`
+/// pattern that matched nothing, say) render an Ariadne snippet
+/// instead of a bare byte offset.
+///
+/// The FileId is the one `quarto_yaml::parse_file` derived by hashing
+/// the config path, which is what the diagnostics' `SourceInfo`
+/// carries — the same trick [`attach_config_source`] plays for
+/// coalesced per-page diagnostics.
+fn config_source_context(candidates: &[PathBuf]) -> Option<SourceContext> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut ctx = SourceContext::new();
+    let mut registered = false;
+    for path in candidates {
+        registered |= quarto_core::config_sources::register_config_source(&mut ctx, path);
+    }
+    registered.then_some(ctx)
+}
 
-    let Some(config_path) = config_path else {
-        return;
-    };
+/// Diagnostic code of the per-page "brand file not referenced" warning,
+/// which the summary prints once (bd-yl1bpj82).
+const UNREFERENCED_BRAND_CODE: &str = "Q-5-37";
+
+/// Split the per-page Q-5-37 diagnostics out of `entries` and collapse
+/// them into one group (representative = the first, affected files = every
+/// page that carried one), reusing the coalescer's "Affected files:" tail.
+/// Returns the remaining entries untouched. `None` when no page warned.
+fn collapse_unreferenced_brand<I>(
+    entries: I,
+) -> (
+    Option<CoalescedDiagnostic>,
+    Vec<(PathBuf, DiagnosticMessage, Option<SourceContext>)>,
+)
+where
+    I: IntoIterator<Item = (PathBuf, DiagnosticMessage, Option<SourceContext>)>,
+{
+    let (brand, rest): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|(_, d, _)| d.code.as_deref() == Some(UNREFERENCED_BRAND_CODE));
+    let group = brand
+        .first()
+        .map(|(_, representative, _)| CoalescedDiagnostic {
+            representative: representative.clone(),
+            source_context: None,
+            affected_files: brand.iter().map(|(p, _, _)| p.clone()).collect(),
+        });
+    (group, rest)
+}
+
+fn attach_config_source(group: &mut CoalescedDiagnostic, candidates: &[PathBuf]) {
     let Some(loc) = group.representative.location.as_ref() else {
         return;
     };
-    let Some((fid, _, _)) = loc.resolve_byte_range() else {
-        return;
-    };
-    if group
-        .source_context
-        .as_ref()
-        .is_some_and(|c| c.get_file(FileId(fid)).is_some())
-    {
-        return;
-    }
-    // `parse_config` hashed `config_path.to_string_lossy()`; only a
-    // diagnostic actually anchored in this config file matches.
-    let config_str = config_path.to_string_lossy();
-    if quarto_yaml::file_id_for_filename(&config_str) != FileId(fid) {
-        return;
-    }
-    let Ok(content) = std::fs::read_to_string(config_path) else {
-        return;
-    };
-    group
-        .source_context
-        .get_or_insert_with(SourceContext::new)
-        .add_file_with_id(FileId(fid), config_str.into_owned(), Some(content));
+    // Candidate-matched: only the file whose re-derived FileId equals
+    // the diagnostic's resolved id gets registered (bind_config_source
+    // no-ops when the group's own context already resolves the id, and
+    // never binds a non-match). Candidates cover `_quarto.yml` plus
+    // every discovered extension manifest (bd-r64mj1aa).
+    let ctx = group.source_context.get_or_insert_with(SourceContext::new);
+    quarto_core::config_sources::bind_config_source(
+        ctx,
+        loc,
+        candidates.iter().map(PathBuf::as_path),
+    );
 }
 
-fn print_render_diagnostics_text(
+// ====================================================================
+// Panic boundary around per-diagnostic rendering (Task E1,
+// bd-ariadne-config-span-char-boundary-panic-rkqmhzrg Phase 5)
+//
+// The panic this hardens against is not reachable today — Phases
+// 1-4 of the epic already floor the bad source offsets that used to
+// reach `quarto-error-reporting`'s renderers, and that crate now
+// clamps to char boundaries itself. This section hardens the
+// *class*: a diagnostic render that aborts an already-successful
+// render (and discards every diagnostic queued behind it) is
+// disproportionate however a bad offset might arise in the future.
+// ====================================================================
+
+/// Test-only fault-injection seam for [`render_diagnostic_guarded`].
+///
+/// Armed by setting `QUARTO_FAULT_INJECT_DIAGNOSTIC_RENDER=<N>`
+/// (0-based): the Nth diagnostic rendered through
+/// `render_diagnostic_guarded` in this process panics deliberately,
+/// so tests can exercise the `catch_unwind` boundary without a real
+/// bad source offset.
+///
+/// `cfg(debug_assertions)`-gated so arming it is structurally
+/// impossible in a release build: the function — and every call to
+/// it, since the call sites are gated the same way — does not exist
+/// in that build. This is not a runtime check that could be left
+/// armed by accident; the code is absent.
+#[cfg(debug_assertions)]
+static FAULT_INJECT_DIAGNOSTIC_RENDER_COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+fn fault_inject_diagnostic_render(code: Option<&str>) {
+    let Ok(raw) = std::env::var("QUARTO_FAULT_INJECT_DIAGNOSTIC_RENDER") else {
+        return;
+    };
+    let Ok(target) = raw.parse::<usize>() else {
+        return;
+    };
+    let seen =
+        FAULT_INJECT_DIAGNOSTIC_RENDER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if seen == target {
+        panic!(
+            "fault injection: QUARTO_FAULT_INJECT_DIAGNOSTIC_RENDER={target} (diagnostic {})",
+            code.unwrap_or("<unknown>")
+        );
+    }
+}
+
+/// Render one diagnostic inside a panic boundary.
+///
+/// A diagnostic render (ariadne text, or JSON conversion under
+/// `--json-errors`) runs after the render it describes has already
+/// completed and its output already written — see the call sites in
+/// `execute_single_doc` / `execute_project`, both of which call
+/// `print_render_diagnostics` after the pipeline run and before
+/// `should_exit_nonzero`. A panic while rendering *one* diagnostic
+/// must not abort that already-successful render, nor discard every
+/// diagnostic queued behind it.
+///
+/// Wraps exactly the render call passed in `render` — never any
+/// surrounding mutation (e.g. [`attach_config_source`]'s `&mut`
+/// binding, which callers run *before* calling this) — matching the
+/// `catch_unwind(AssertUnwindSafe(..))` prior art in
+/// `pass2_renderer.rs` / `orchestrator.rs`. Unlike that prior art, no
+/// `AssertUnwindSafe` is needed here: every closure passed in only
+/// borrows `&CoalescedDiagnostic` / `&DiagnosticMessage` /
+/// `&SourceContext`, none of which carry interior mutability, so
+/// they satisfy `UnwindSafe` on their own (verified by this function
+/// compiling with an explicit, non-asserted `UnwindSafe` bound).
+///
+/// On a caught panic the diagnostic is dropped and a loud "internal
+/// error rendering diagnostic `<code>`" line takes its place on
+/// stderr — surfaced, not swallowed, but survivable. (The default
+/// panic hook also prints its own `thread '...' panicked at ...`
+/// line first; that is left in place, not suppressed.)
+fn render_diagnostic_guarded<T>(
+    code: Option<&str>,
+    render: impl FnOnce() -> T + std::panic::UnwindSafe,
+) -> Option<T> {
+    match std::panic::catch_unwind(move || {
+        #[cfg(debug_assertions)]
+        fault_inject_diagnostic_render(code);
+        render()
+    }) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            eprintln!(
+                "internal error rendering diagnostic {}",
+                code.unwrap_or("<unknown>")
+            );
+            None
+        }
+    }
+}
+
+/// The path to name in a `while rendering <file>` line for a failed page,
+/// or `None` when the rendered diagnostic already names it.
+///
+/// bd-render-failure-unattributed-yxe0v7th. A failed page is rendered by
+/// [`CoalescedDiagnostic::to_text`], which names files *only* through the
+/// diagnostic's own span — and deliberately omits the `Affected files:` tail
+/// for singleton groups. So a page can die without the transcript containing
+/// its name anywhere. Two ways that happens:
+///
+/// - **The span does not resolve.** Either the diagnostic carries no location
+///   (an engine execution failure — `Error: Execution failed in knitr: R
+///   process failed`), or it is bound to a buffer whose length it exceeds. The
+///   ariadne renderer bails, *and* `to_text`'s `at <file>:<row>:<col>` fallback
+///   is skipped along with it, leaving a bare title and problem statement.
+/// - **The span resolves to a different file.** Engine-output parse errors
+///   legitimately point into `<stem>.<engine>.rmarkdown`, not the `.qmd` the
+///   author wrote. The frame is correct and worth showing, but on its own it
+///   never tells the author which page to open.
+///
+/// Returns `None` for the ordinary case — a span resolving to the page being
+/// rendered — so well-attributed output stays byte-identical. Also `None` for
+/// multi-file groups, which already list their pages in the `Affected files:`
+/// tail.
+///
+/// The resolution performed here mirrors `render_ariadne_source_context`:
+/// root file id, then `map_offset(0, ctx)` (a *relative* offset — 0 is the
+/// start of the span). If that pair succeeds, a frame renders; if it fails,
+/// nothing does.
+fn failure_attribution_line(group: &quarto_error_reporting::CoalescedDiagnostic) -> Option<String> {
+    // A multi-file group prints an `Affected files:` tail already.
+    if group.affected_files.len() != 1 {
+        return None;
+    }
+    let input = group.affected_files.first()?;
+
+    // Mirror `to_text_with_renderer`'s choice of location: the main one, else
+    // the first located detail.
+    let location = group.representative.location.as_ref().or_else(|| {
+        group
+            .representative
+            .details
+            .iter()
+            .find_map(|d| d.location.as_ref())
+    });
+
+    let named = location
+        .zip(group.source_context.as_ref())
+        .and_then(|(loc, ctx)| {
+            // Both must succeed for a frame to render.
+            loc.map_offset(0, ctx)?;
+            let file = ctx.get_file(loc.root_file_id()?)?;
+            Some(file.path.clone())
+        });
+
+    // Compare on forward-slashed strings, not raw `Path`s. Registered paths
+    // reach the source context in mixed conventions — the engine intermediate
+    // is normalized through `quarto_util::to_forward_slashes`, while
+    // `FileFailure.input` is a native `PathBuf`. On Windows a raw comparison
+    // would never match, so every ordinary parse error would sprout a
+    // redundant attribution line there and nowhere else.
+    let input_key = quarto_util::to_forward_slashes(input);
+    match named {
+        // The frame names the very page that failed — nothing to add.
+        Some(path) if path.replace('\\', "/") == input_key => None,
+        // Resolves elsewhere (an engine intermediate), or not at all.
+        _ => Some(input.display().to_string()),
+    }
+}
+
+/// The text form of a render's diagnostics: what `q2 render` prints
+/// on stderr (`color: true`), or the same content rendered with no ANSI
+/// color and no OSC 8 hyperlinks (`color: false`). One function,
+/// so the terminal and `q2 preview --static`'s browser overlay cannot
+/// drift apart (bd-sl79jjiq Phase 1).
+///
+/// Kept verbatim from before bd-iey8o apart from returning a `String`;
+/// the perf-stats emission lives one level up in
+/// [`print_render_diagnostics`].
+/// bd-mg3ckvp7 Phase 4: a config-anchored diagnostic (e.g. a Q-13-2
+/// navbar miss) carries a location whose FileId is quarto_yaml's hash
+/// of the config path, but per-document `SourceContext`s never
+/// register that file — so the ariadne snippet silently dropped and
+/// the warning named no source at all. Best-effort repair at print
+/// time: when the group's location doesn't resolve in its carried
+/// context and the FileId matches the project config file, register
+/// the config's content under that id so the snippet renders. Any
+/// failure (no config, hash mismatch, unreadable file) leaves the
+/// group unchanged — span-less render, exactly as before.
+fn format_render_diagnostics_text(
     summary: &quarto_core::project::orchestrator::ProjectRenderSummary,
     quiet: bool,
-    config_path: Option<&Path>,
-) {
+    config_sources: &[PathBuf],
+    color: bool,
+) -> String {
+    // The no-color form also drops hyperlinks: it is for the browser
+    // overlay, where OSC 8 sequences are just noise.
+    let opts = TextRenderOptions::default().color(color).hyperlinks(color);
+    let mut out = String::new();
+    let mut line = |text: &str| {
+        out.push_str(text);
+        out.push('\n');
+    };
+
     for failure in &summary.pass1_failures {
-        eprintln!(
+        line(&format!(
             "warning: profile-pass skipped {}: {}",
             failure.input.display(),
-            failure.error
-        );
+            failure_error_text(failure, &opts)
+        ));
     }
     // bd-9hlja: coalesce pass2_failures whose structured diagnostics
     // share a source location, so a single bad key in _quarto.yml
@@ -1077,14 +1759,35 @@ fn print_render_diagnostics_text(
                     .map(move |d| (f.input.clone(), d.clone(), f.source_context.clone()))
             });
         for group in coalesce_by_source(entries) {
-            eprintln!("{}", group.to_text());
+            let code = group.representative.code.as_deref();
+            if let Some(text) =
+                render_diagnostic_guarded(code, || group.to_text_with_options(&opts))
+            {
+                // bd-render-failure-unattributed-yxe0v7th: guarantee the
+                // failing page is named even when the diagnostic's own span
+                // cannot do it (or names an engine intermediate instead).
+                if let Some(path) = failure_attribution_line(&group) {
+                    line(&format!("error: while rendering {}", path));
+                }
+                line(&text);
+            }
         }
         for failure in legacy_failures {
-            eprintln!("error: {}: {}", failure.input.display(), failure.error);
+            line(&format!(
+                "error: {}: {}",
+                failure.input.display(),
+                failure_error_text(failure, &opts)
+            ));
         }
     }
+    let project_ctx = config_source_context(config_sources);
     for diagnostic in &summary.project_diagnostics {
-        eprintln!("{}", diagnostic.to_text(None));
+        let code = diagnostic.code.as_deref();
+        if let Some(text) = render_diagnostic_guarded(code, || {
+            diagnostic.to_text_with_options(project_ctx.as_ref(), &opts)
+        }) {
+            line(&text);
+        }
     }
 
     // bd-mg3ckvp7: per-page diagnostics from *successful* renders go
@@ -1106,16 +1809,20 @@ fn print_render_diagnostics_text(
                 )
             })
         });
-        for mut group in coalesce_by_source(entries) {
-            attach_config_source(&mut group, config_path);
-            eprintln!("{}", group.to_text());
-        }
-
-        // Per-file output line stays on `tracing::info!` (opt-in via
-        // `-v`); enumerating every file is too noisy for a large
-        // site, and the post-render summary covers the common case.
-        for result in &summary.outputs {
-            info!("Output: {}", result.output_path.display());
+        // Q-5-37 (unreferenced brand file) is emitted once per page but
+        // is one project-wide problem with no source span, so the
+        // location coalescer would print it once per page.
+        let (brand_group, entries) = collapse_unreferenced_brand(entries);
+        let mut groups = coalesce_by_source(entries);
+        groups.extend(brand_group);
+        for mut group in groups {
+            attach_config_source(&mut group, config_sources);
+            let code = group.representative.code.as_deref();
+            if let Some(text) =
+                render_diagnostic_guarded(code, || group.to_text_with_options(&opts))
+            {
+                line(&text);
+            }
         }
     }
 
@@ -1125,32 +1832,108 @@ fn print_render_diagnostics_text(
     // programmatic caller passing `--fail-fast` already knows the
     // semantics).
     if summary.stopped_early {
-        eprintln!("note: stopped at first error (--fail-fast); remaining files not checked");
+        line("note: stopped at first error (--fail-fast); remaining files not checked");
     }
+
+    out
+}
+
+/// Remove terminal escape sequences: CSI (`ESC [ … <final byte>`, the
+/// SGR color codes) and OSC (`ESC ] … BEL` or `ESC ] … ESC \`, the OSC 8
+/// hyperlinks). Any other two-byte escape is dropped with its
+/// introducer. Text outside escapes is untouched.
+pub(crate) fn strip_ansi_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // Parameter and intermediate bytes run 0x20..=0x3F; the
+                // sequence ends at the first byte in 0x40..=0x7E.
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut prev_was_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (prev_was_esc && c == '\\') {
+                        break;
+                    }
+                    prev_was_esc = c == '\x1b';
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    out
 }
 
 /// Resolve format string to Format (without metadata)
-fn resolve_format(format_str: &str) -> Result<Format> {
+pub(crate) fn resolve_format(format_str: &str) -> Result<Format> {
     Format::from_format_string(format_str).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// When `--to` is absent, detect the target format from a single `.qmd`
-/// input's front-matter `format:` key. Returns `None` for project renders
-/// (multiple inputs or a directory) — per-file format inside a project is a
-/// later phase. Best-effort: any read/parse failure yields `None` (caller
-/// falls back to `"html"`).
-fn detect_single_input_format(inputs: &[String]) -> Option<String> {
+/// Read a single `.qmd`/`.md` input's content for front-matter format
+/// detection. Returns `None` for project renders (multiple inputs or a
+/// directory) — per-file format inside a project is a later phase.
+/// Best-effort: any read failure yields `None`.
+fn read_single_input_content(inputs: &[String]) -> Option<String> {
     if inputs.len() != 1 {
         return None;
     }
     let path = std::path::Path::new(&inputs[0]);
-    if path.extension().and_then(|e| e.to_str()) != Some("qmd") || !path.is_file() {
+    // `.md` inputs read front matter exactly like `.qmd`
+    // (bd-6d2wj4zp S3/S4) — without this, a `.md` declaring a
+    // non-native format slips past the early "not yet supported"
+    // refusal below and renders HTML into a mismatched output file.
+    if !matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("qmd" | "md")
+    ) || !path.is_file()
+    {
         return None;
     }
-    let content = std::fs::read_to_string(path).ok()?;
-    // Shared with the project pipeline's per-document format resolution so the
-    // single-file and project paths agree on how `format:` is read.
+    std::fs::read_to_string(path).ok()
+}
+
+/// When `--to` is absent, detect the target format from a single input's
+/// front-matter `format:` key. Best-effort: any parse failure yields
+/// `None` (caller falls back to `"html"`).
+///
+/// Shared with the project pipeline's per-document format resolution so
+/// the single-file and project paths agree on how `format:` is read.
+pub(crate) fn detect_single_input_format(inputs: &[String]) -> Option<String> {
+    let content = read_single_input_content(inputs)?;
     quarto_core::format::format_key_from_frontmatter(&content)
+}
+
+/// P7-foundation Task 1/3 (design doc §14): when a single input's
+/// front-matter `format:` declares more than one key but only `used_key`
+/// is actually rendered, emit the `Q-18-*` warning naming which was used
+/// and which were skipped. A no-op when `--to` was given explicitly (the
+/// user made the choice on the command line, not via a declaration this
+/// render silently reduced), for project renders, or when the input has
+/// no front matter.
+fn multi_format_warning_diagnostics(
+    inputs: &[String],
+    cli_to: Option<&str>,
+    used_key: &str,
+) -> Vec<quarto_error_reporting::DiagnosticMessage> {
+    if cli_to.is_some() {
+        return Vec::new();
+    }
+    let Some(content) = read_single_input_content(inputs) else {
+        return Vec::new();
+    };
+    let all_keys = quarto_core::format::format_keys_from_frontmatter(&content);
+    quarto_core::format::multi_format_diagnostics(&all_keys, used_key)
 }
 
 // ====================================================================
@@ -1159,38 +1942,180 @@ fn detect_single_input_format(inputs: &[String]) -> Option<String> {
 // All functions in this section write one JSON object per line to
 // stderr. The wire shapes are `JsonDiagnostic` and `JsonPass1Failure`
 // from `quarto-error-reporting`; each emitted object carries a
-// `$schema` field pointing at the JSON Schema in
-// `crates/quarto-error-reporting/schemas/`.
+// `$schema` field pointing at the JSON Schema in the `schemas/`
+// directory of the external `quarto-error-reporting` crate
+// (posit-dev/quarto-error-reporting).
 //
 // Stdout is NEVER written by this module — the render outputs still
 // go to disk (or to stdout via `--output -`); the diagnostics stream
 // is stderr-only so machine consumers can split clearly.
 // ====================================================================
 
+/// Convert `diag` to its `JsonDiagnostic` wire form, with
+/// `source_file` attributed (bd-gnw9asuo). Every `--json-errors`
+/// conversion in this module goes through here, so a located record
+/// always says which file its coordinates are in.
+///
+/// `rendered` is drawn plain, with no SGR color and no OSC-8 hyperlinks
+/// (bd-ckbqmupi): the stream is for jq pipelines and agents, not a
+/// terminal. Hyperlink targets travel structurally (`source_file`,
+/// `origin.notebook_path`).
+///
+/// `fallback` is the file the caller knows the diagnostic is about
+/// (the page being rendered, the project config); see
+/// [`json_source_file`] for when it applies.
+fn diagnostic_json(
+    diag: &DiagnosticMessage,
+    ctx: &SourceContext,
+    fallback: Option<&Path>,
+) -> JsonDiagnostic {
+    let json = diagnostic_to_json_with_options(diag, ctx, &TextRenderOptions::plain());
+    match json_source_file(diag, ctx, fallback) {
+        Some(source_file) => with_source_file(json, source_file),
+        None => json,
+    }
+}
+
+/// The `source_file` for `diag`: the file its `start_line` /
+/// `start_column` refer to.
+///
+/// That is not always the caller's file — a page render can report a
+/// warning located in `_quarto.yml` (raw HTML in a page footer, say),
+/// and tagging it with the page would point the coordinates at the
+/// wrong file. So the file comes from the diagnostic's own location,
+/// resolved through the same `SourceContext` (and the same
+/// `map_offset(0, ..)`) that `diagnostic_to_json` uses for the
+/// coordinates, following the rule `quarto-error-reporting` uses for
+/// its text hyperlinks (`hyperlink_target`):
+///
+/// - a notebook-cell virtual file reports its notebook (the record's
+///   `origin` carries the cell);
+/// - a file on disk reports its own path;
+/// - a resolved file that is not on disk (in-memory content) reports
+///   nothing, since there is no file the coordinates could be opened in.
+///
+/// Only when there is no location, or it does not resolve, does the
+/// caller's `fallback` apply: the record then has no coordinates, and
+/// the fallback names the file it is about. Paths are absolute.
+fn json_source_file(
+    diag: &DiagnosticMessage,
+    ctx: &SourceContext,
+    fallback: Option<&Path>,
+) -> Option<String> {
+    let resolved = diag
+        .location
+        .as_ref()
+        .and_then(|loc| loc.map_offset(0, ctx))
+        .and_then(|mapped| ctx.get_file(mapped.file_id));
+    let path = match resolved {
+        Some(file) => match &file.metadata.origin {
+            Some(quarto_source_map::FileOrigin::NotebookCell { notebook_path, .. }) => {
+                PathBuf::from(notebook_path)
+            }
+            None => {
+                let path = PathBuf::from(&file.path);
+                if !path.exists() {
+                    return None;
+                }
+                path
+            }
+        },
+        None => fallback?.to_path_buf(),
+    };
+    Some(wire_path(&path))
+}
+
+/// A path as `--json-errors` spells it: absolute, without resolving
+/// symlinks (`std::path::absolute` keeps the plain form on Windows,
+/// unlike `canonicalize`'s `\\?\` prefix).
+fn wire_path(path: &Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// A file failure's message, rendered with `opts`.
+///
+/// A failure with structured diagnostics is re-rendered from them, in
+/// the same order and with the same separator as `ParseError::render`
+/// (which produced `failure.error` with the default options), so the
+/// result honors `opts`. A failure without them has only an opaque
+/// message: it is plain text for every `QuartoError` variant today but
+/// can embed text rendered elsewhere, so it is sanitized when `opts`
+/// asks for no color.
+fn failure_error_text(
+    failure: &quarto_core::project::orchestrator::FileFailure,
+    opts: &TextRenderOptions,
+) -> String {
+    match &failure.source_context {
+        Some(ctx) if !failure.diagnostics.is_empty() => failure
+            .diagnostics
+            .iter()
+            .filter_map(|d| {
+                render_diagnostic_guarded(d.code.as_deref(), || {
+                    d.to_text_with_options(Some(ctx), opts)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ if !opts.enable_color => strip_ansi_escapes(&failure.error),
+        _ => failure.error.clone(),
+    }
+}
+
+/// Print a diagnostic the CLI raises itself, outside the render
+/// summary: ariadne text normally, one NDJSON record under
+/// `--json-errors`. `ctx` resolves its location for the JSON record
+/// (the text form keeps rendering span-less, as it always has);
+/// `fallback` is the file it is about.
+fn emit_cli_diagnostic(
+    diagnostic: &DiagnosticMessage,
+    args: &RenderArgs,
+    ctx: &SourceContext,
+    fallback: Option<&Path>,
+) {
+    let code = diagnostic.code.as_deref();
+    if args.json_errors {
+        if let Some(json) =
+            render_diagnostic_guarded(code, || diagnostic_json(diagnostic, ctx, fallback))
+        {
+            emit_json_line(&json);
+        }
+    } else if let Some(text) = render_diagnostic_guarded(code, || diagnostic.to_text(None)) {
+        eprintln!("{}", text);
+    }
+}
+
 /// JSON branch of `print_render_diagnostics`. Mirrors the structure
 /// of the text branch (one source of diagnostics at a time) but
 /// emits NDJSON instead.
 fn print_render_diagnostics_json(
     summary: &quarto_core::project::orchestrator::ProjectRenderSummary,
+    config_sources: &[PathBuf],
 ) {
     // Pass-1 failures: emit one JsonPass1Failure per failure. If the
     // failure has structured diagnostics + a source context, attach
-    // them in JsonDiagnostic form (each tagged with the source
-    // file). If not, the wrapper still carries the source_file and
-    // error string so the agent can route the error.
+    // them in JsonDiagnostic form (each attributed to its file). If
+    // not, the wrapper still carries the source_file and error
+    // string so the agent can route the error.
     for failure in &summary.pass1_failures {
-        let source_file = failure.input.display().to_string();
         let diagnostics: Vec<JsonDiagnostic> = match &failure.source_context {
             Some(ctx) => failure
                 .diagnostics
                 .iter()
-                .map(|d| with_source_file(diagnostic_to_json(d, ctx), source_file.clone()))
+                .filter_map(|d| {
+                    let code = d.code.as_deref();
+                    render_diagnostic_guarded(code, || {
+                        diagnostic_json(d, ctx, Some(&failure.input))
+                    })
+                })
                 .collect(),
             None => Vec::new(),
         };
         emit_json_line(&JsonPass1Failure::new(
-            source_file,
-            failure.error.clone(),
+            wire_path(&failure.input),
+            failure_error_text(failure, &TextRenderOptions::plain()),
             diagnostics,
         ));
     }
@@ -1201,15 +2126,15 @@ fn print_render_diagnostics_json(
     // error string and the input path.
     for failure in &summary.pass2_failures {
         if failure.diagnostics.is_empty() {
-            let source_file = failure.input.display().to_string();
             let diag = DiagnosticMessageBuilder::error("Render failed")
-                .problem(failure.error.clone())
+                .problem(failure_error_text(failure, &TextRenderOptions::plain()))
                 .build();
-            let json = with_source_file(
-                diagnostic_to_json(&diag, &SourceContext::new()),
-                source_file,
-            );
-            emit_json_line(&json);
+            let code = diag.code.as_deref();
+            if let Some(json) = render_diagnostic_guarded(code, || {
+                diagnostic_json(&diag, &SourceContext::new(), Some(&failure.input))
+            }) {
+                emit_json_line(&json);
+            }
             continue;
         }
         let ctx_owned;
@@ -1220,61 +2145,68 @@ fn print_render_diagnostics_json(
                 &ctx_owned
             }
         };
-        let source_file = failure.input.display().to_string();
         for d in &failure.diagnostics {
-            let json = with_source_file(diagnostic_to_json(d, ctx_ref), source_file.clone());
+            let code = d.code.as_deref();
+            if let Some(json) = render_diagnostic_guarded(code, || {
+                diagnostic_json(d, ctx_ref, Some(&failure.input))
+            }) {
+                emit_json_line(&json);
+            }
+        }
+    }
+
+    // Project-level diagnostics. Most (e.g. Q-PROJECT-EMPTY) are pure
+    // project-scope with no span; those anchored in `_quarto.yml`
+    // (the `project.render` glob diagnostics, Q-5-13/14/15) resolve
+    // through the config's source context, which also attributes them
+    // to `_quarto.yml`. Span-less ones are about the project as a
+    // whole, so they name no file.
+    let project_ctx = config_source_context(config_sources).unwrap_or_default();
+    for diagnostic in &summary.project_diagnostics {
+        let code = diagnostic.code.as_deref();
+        if let Some(json) =
+            render_diagnostic_guarded(code, || diagnostic_json(diagnostic, &project_ctx, None))
+        {
             emit_json_line(&json);
         }
     }
 
-    // Project-level diagnostics (e.g. Q-PROJECT-EMPTY): no source
-    // context, no source-file attribution — pure project-scope.
-    let empty_ctx = SourceContext::new();
-    for diagnostic in &summary.project_diagnostics {
-        emit_json_line(&diagnostic_to_json(diagnostic, &empty_ctx));
-    }
-
-    // Per-page render diagnostics on successful outputs. The
-    // RenderToFileResult does not carry the input path (see the
-    // comment in the text branch), so these are emitted without a
-    // source_file tag — agents have to attribute them via the
-    // location.file_id encoded in the diagnostic.
+    // Per-page render diagnostics on successful outputs, attributed
+    // to the file their location resolves into, else to the page.
     for result in &summary.outputs {
         for d in &result.render_output.diagnostics {
-            emit_json_line(&diagnostic_to_json(d, &result.render_output.source_context));
+            let code = d.code.as_deref();
+            if let Some(json) = render_diagnostic_guarded(code, || {
+                diagnostic_json(
+                    d,
+                    &result.render_output.source_context,
+                    Some(&result.input_path),
+                )
+            }) {
+                emit_json_line(&json);
+            }
         }
     }
 }
 
 /// Emit a `QuartoError::Parse` as one or more JSON diagnostics on
 /// stderr. Each attached structured diagnostic becomes its own
-/// `JsonDiagnostic` line (tagged with `source_file` when an input
-/// path is known). If the parse error has no structured
+/// `JsonDiagnostic` line, attributed by [`diagnostic_json`] (`input`
+/// is the fallback file, when known). If the parse error has no structured
 /// diagnostics, a single synthetic diagnostic is emitted from
 /// the error string so callers still get a JSON line.
 fn emit_parse_error_json(parse_error: &quarto_core::ParseError, input: Option<&Path>) {
-    let source_file = input.map(|p| p.display().to_string());
+    // Preserve any source context we can; ParseError owns one.
+    let ctx = &parse_error.source_context;
     if parse_error.diagnostics.is_empty() {
-        let mut diag = DiagnosticMessageBuilder::error("Parse error")
+        let diag = DiagnosticMessageBuilder::error("Parse error")
             .problem(parse_error.to_string())
             .build();
-        // Preserve any source context we can; ParseError owns one.
-        let mut json = diagnostic_to_json(&diag, &parse_error.source_context);
-        if let Some(sf) = source_file {
-            json = with_source_file(json, sf);
-        }
-        emit_json_line(&json);
-        // Touch `diag` so clippy doesn't warn about the unused
-        // builder var on the trivial path.
-        let _ = &mut diag;
+        emit_json_line(&diagnostic_json(&diag, ctx, input));
         return;
     }
     for d in &parse_error.diagnostics {
-        let mut json = diagnostic_to_json(d, &parse_error.source_context);
-        if let Some(sf) = &source_file {
-            json = with_source_file(json, sf.clone());
-        }
-        emit_json_line(&json);
+        emit_json_line(&diagnostic_json(d, ctx, input));
     }
 }
 
@@ -1285,9 +2217,17 @@ fn emit_parse_error_json(parse_error: &quarto_core::ParseError, input: Option<&P
 /// `crates/quarto-error-catalog/error_catalog.json` — keep them
 /// in sync.
 fn emit_dispatch_error_json(e: &DispatchError) {
-    emit_json_line(&diagnostic_to_json(
+    // Structured parse diagnostics emit their real per-diagnostic
+    // codes and source locations (bd-y56u1gl7); everything else gets
+    // its Q-7-N classification.
+    if let DispatchError::DiscoverParse(pe) = e {
+        emit_parse_error_json(pe, None);
+        return;
+    }
+    emit_json_line(&diagnostic_json(
         &dispatch_error_to_diagnostic(e),
         &SourceContext::new(),
+        None,
     ));
 }
 
@@ -1329,28 +2269,37 @@ fn dispatch_error_to_diagnostic(e: &DispatchError) -> DiagnosticMessage {
                 ))
                 .build()
         }
-        DispatchError::NotInRenderList { path, project_dir } => DiagnosticMessageBuilder::error(
-            "Input Excluded From Render List",
-        )
-        .with_code("Q-7-6")
-        .problem(format!(
-            "{} is excluded from the render list of project {}.",
-            path.display(),
-            project_dir.display()
-        ))
-        .add_hint(
-            "Check `project.render` in `_quarto.yml` and the underscore/hidden file conventions.",
-        )
-        .build(),
+        DispatchError::NotInRenderList { path, project_dir } => {
+            DiagnosticMessageBuilder::error("Input Excluded From Render List")
+                .with_code("Q-7-6")
+                .problem(format!(
+                    "{} is excluded from the render list of project {}.",
+                    path.display(),
+                    project_dir.display()
+                ))
+                .add_hint(format!("{}.", render_list_exclusion_hint(path)))
+                .build()
+        }
         DispatchError::NoRenderableMatches { path } => {
             DiagnosticMessageBuilder::error("No Renderable Files Matched")
                 .with_code("Q-7-7")
                 .problem(format!(
-                    "No renderable `.qmd` files matched: {}",
+                    "No renderable source files matched: {}",
                     path.display()
                 ))
                 .build()
         }
+        // Normally unreachable through `emit_dispatch_error_json`
+        // (which routes DiscoverParse to `emit_parse_error_json` for
+        // multi-diagnostic + source-context fidelity); kept total so
+        // direct callers still get the leading real diagnostic
+        // rather than a stringified wrapper.
+        DispatchError::DiscoverParse(pe) => pe.diagnostics.first().cloned().unwrap_or_else(|| {
+            DiagnosticMessageBuilder::error("Project Discovery Failed")
+                .with_code("Q-7-8")
+                .problem(format!("Project discovery failed: {pe}"))
+                .build()
+        }),
         DispatchError::Discover(msg) => DiagnosticMessageBuilder::error("Project Discovery Failed")
             .with_code("Q-7-8")
             .problem(format!("Project discovery failed: {msg}"))
@@ -1375,6 +2324,175 @@ fn emit_json_line<T: serde::Serialize>(value: &T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use quarto_error_reporting::DiagnosticMessageBuilder;
+    use quarto_error_reporting::coalesce::CoalescedDiagnostic;
+    use quarto_source_map::SourceContext;
+
+    /// bd-render-failure-unattributed-yxe0v7th.
+    ///
+    /// `format_render_diagnostics_text` names the failing file only for
+    /// `legacy_failures` (failures with no structured diagnostics). Every
+    /// other failure is rendered by `CoalescedDiagnostic::to_text()`, which
+    /// relies entirely on the diagnostic's own span — and deliberately omits
+    /// the `Affected files:` tail for singleton groups. So when the span
+    /// cannot be resolved, or resolves to a file that is *not* the document
+    /// being rendered (an engine intermediate), the known-good
+    /// `FileFailure.input` is discarded and nothing names the page.
+    ///
+    /// These tests pin `failure_attribution_line`, the predicate that
+    /// decides when to restore it.
+    fn entry(file: &str, code: &str) -> (PathBuf, DiagnosticMessage, Option<SourceContext>) {
+        (
+            PathBuf::from(file),
+            DiagnosticMessageBuilder::warning("w")
+                .with_code(code)
+                .build(),
+            None,
+        )
+    }
+
+    #[test]
+    fn unreferenced_brand_collapses_to_one_group_listing_every_page() {
+        let (group, rest) = collapse_unreferenced_brand(vec![
+            entry("a.qmd", "Q-5-37"),
+            entry("b.qmd", "Q-2-1"),
+            entry("c.qmd", "Q-5-37"),
+        ]);
+        let group = group.expect("a brand group");
+        assert_eq!(
+            group.affected_files,
+            vec![PathBuf::from("a.qmd"), PathBuf::from("c.qmd")]
+        );
+        assert!(group.to_text().contains("Affected files: a.qmd, c.qmd"));
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].1.code.as_deref(), Some("Q-2-1"));
+    }
+
+    #[test]
+    fn no_brand_group_when_no_page_warned() {
+        let (group, rest) = collapse_unreferenced_brand(vec![entry("a.qmd", "Q-2-1")]);
+        assert!(group.is_none());
+        assert_eq!(rest.len(), 1);
+    }
+
+    fn group(
+        diagnostic: quarto_error_reporting::DiagnosticMessage,
+        ctx: Option<SourceContext>,
+        files: &[&str],
+    ) -> CoalescedDiagnostic {
+        CoalescedDiagnostic {
+            representative: diagnostic,
+            source_context: ctx,
+            affected_files: files.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    fn located_in(
+        path: &str,
+        content: &str,
+        offset: usize,
+    ) -> (quarto_error_reporting::DiagnosticMessage, SourceContext) {
+        let mut ctx = SourceContext::new();
+        let id = ctx.add_file(path.to_string(), Some(content.to_string()));
+        let info = quarto_source_map::SourceInfo::from_range(
+            id,
+            quarto_source_map::Range {
+                start: quarto_source_map::Location {
+                    offset,
+                    row: 0,
+                    column: offset,
+                },
+                end: quarto_source_map::Location {
+                    offset: offset + 1,
+                    row: 0,
+                    column: offset + 1,
+                },
+            },
+        );
+        let diag = DiagnosticMessageBuilder::error("Boom")
+            .with_location(info)
+            .build();
+        (diag, ctx)
+    }
+
+    /// A diagnostic with no location at all (shape 2: the knitr
+    /// execution failure, `location: None`). Nothing in the rendered text
+    /// can name the page, so the attribution line must be supplied.
+    #[test]
+    fn attribution_added_for_location_less_diagnostic() {
+        let diag =
+            DiagnosticMessageBuilder::error("Execution failed in knitr: R process failed").build();
+        let g = group(diag, None, &["/project/failing.qmd"]);
+
+        assert_eq!(
+            failure_attribution_line(&g).as_deref(),
+            Some("/project/failing.qmd"),
+        );
+    }
+
+    /// A diagnostic whose span resolves to the very file being rendered —
+    /// the ordinary parse error. The ariadne frame already names it, so no
+    /// extra line (existing output and its snapshots stay byte-identical).
+    #[test]
+    fn attribution_omitted_when_frame_already_names_the_file() {
+        let (diag, ctx) = located_in("/project/bad.qmd", "hello world\n", 3);
+        let g = group(diag, Some(ctx), &["/project/bad.qmd"]);
+
+        assert_eq!(failure_attribution_line(&g), None);
+    }
+
+    /// Shape 1 after the engine-execution fix: the span legitimately
+    /// resolves, but to the engine's `.rmarkdown` intermediate rather than
+    /// the `.qmd` the user wrote. The frame is correct and useful, but the
+    /// user still needs to be told which page died.
+    #[test]
+    fn attribution_added_when_frame_names_an_engine_intermediate() {
+        let (diag, ctx) = located_in("/project/knit.knitr.rmarkdown", "{{< fa size=1x >}}\n", 3);
+        let g = group(diag, Some(ctx), &["/project/knit.qmd"]);
+
+        assert_eq!(
+            failure_attribution_line(&g).as_deref(),
+            Some("/project/knit.qmd"),
+        );
+    }
+
+    /// A span pointing past the end of the file it is bound to does not
+    /// resolve, so no frame renders — the exact silent-failure shape the
+    /// strand reports. Attribution must be supplied.
+    #[test]
+    fn attribution_added_when_span_does_not_resolve() {
+        let (diag, ctx) = located_in("/project/knit.qmd", "short\n", 4716);
+        let g = group(diag, Some(ctx), &["/project/knit.qmd"]);
+
+        assert_eq!(
+            failure_attribution_line(&g).as_deref(),
+            Some("/project/knit.qmd"),
+        );
+    }
+
+    /// Registered paths reach the source context in mixed separator
+    /// conventions — the engine intermediate is normalized through
+    /// `to_forward_slashes`, while `FileFailure.input` stays a native
+    /// `PathBuf`. Matching must survive that, or on Windows every ordinary
+    /// parse error would gain a redundant attribution line.
+    #[test]
+    fn attribution_matching_is_separator_insensitive() {
+        let (diag, ctx) = located_in("C:/project/bad.qmd", "hello world\n", 3);
+        let g = group(diag, Some(ctx), &[r"C:\project\bad.qmd"]);
+
+        assert_eq!(failure_attribution_line(&g), None);
+    }
+
+    /// A multi-file group already lists its pages in the `Affected files:`
+    /// tail, so it needs no additional attribution line.
+    #[test]
+    fn attribution_omitted_for_multi_file_group() {
+        let diag = DiagnosticMessageBuilder::error("Shared problem").build();
+        let g = group(diag, None, &["/project/a.qmd", "/project/b.qmd"]);
+
+        assert_eq!(failure_attribution_line(&g), None);
+    }
     use quarto_core::FormatIdentifier;
     use quarto_system_runtime::NativeRuntime;
     use std::sync::Arc;
@@ -1539,8 +2657,9 @@ mod tests {
 
     // === classify_inputs tests =============================================
 
+    // Same function the runtime seam uses, so expected paths share its spelling.
     fn canonical(p: &Path) -> PathBuf {
-        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+        quarto_system_runtime::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
     }
 
     fn write_file(path: &Path, contents: &str) {
@@ -1608,7 +2727,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_project(&temp, &["index.qmd", "about.qmd"], None);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&[], &project, &runtime).unwrap();
+        let target = classify_inputs(&[], &project, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -1617,12 +2736,31 @@ mod tests {
         );
     }
 
+    /// bd-y56u1gl7: a structured parse error from project discovery
+    /// (here: Q-5-17 unknown `project.type`) must survive
+    /// classification as a `ParseError`, not be flattened into the
+    /// `Discover(String)` variant.
+    #[test]
+    fn classify_project_with_unknown_type_yields_structured_parse_error() {
+        let temp = TempDir::new().unwrap();
+        let dir = canonical(temp.path());
+        write_file(&dir.join("_quarto.yml"), "project:\n  type: posit-docs\n");
+        write_file(&dir.join("index.qmd"), "---\ntitle: x\n---\n");
+        let runtime = NativeRuntime::new();
+        let err = classify_inputs(&[], &dir, &runtime, None).unwrap_err();
+        let DispatchError::DiscoverParse(pe) = err else {
+            panic!("expected DiscoverParse, got {err:?}");
+        };
+        assert_eq!(pe.diagnostics.len(), 1);
+        assert_eq!(pe.diagnostics[0].code.as_deref(), Some("Q-5-17"));
+    }
+
     #[test]
     fn classify_no_args_outside_project_errors() {
         let temp = TempDir::new().unwrap();
         let dir = make_loose_dir(&temp, &["foo.qmd"]);
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&[], &dir, &runtime).unwrap_err();
+        let err = classify_inputs(&[], &dir, &runtime, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::NoInputAndNoProject(_)),
             "expected NoInputAndNoProject, got {err:?}"
@@ -1649,7 +2787,7 @@ mod tests {
         write_file(&dir.join("sub/decoy.qmd"), "---\ntitle: decoy\n---\n");
 
         let runtime = RecordingRuntime::new();
-        let err = classify_inputs(&[], &dir, &runtime).unwrap_err();
+        let err = classify_inputs(&[], &dir, &runtime, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::NoInputAndNoProject(_)),
             "expected NoInputAndNoProject, got {err:?}"
@@ -1673,7 +2811,7 @@ mod tests {
         let project = make_project(&temp, &["index.qmd", "sub/a.qmd", "sub/sub2/b.qmd"], None);
         let nested = project.join("sub").join("sub2");
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&[], &nested, &runtime).unwrap();
+        let target = classify_inputs(&[], &nested, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -1687,7 +2825,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_project(&temp, &["index.qmd", "about.qmd"], None);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&["about.qmd".into()], &project, &runtime).unwrap();
+        let target = classify_inputs(&["about.qmd".into()], &project, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::Subset {
@@ -1702,7 +2840,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = make_loose_dir(&temp, &["foo.qmd"]);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&["foo.qmd".into()], &dir, &runtime).unwrap();
+        let target = classify_inputs(&["foo.qmd".into()], &dir, &runtime, None).unwrap();
         assert_eq!(target, RenderTarget::SingleDoc(dir.join("foo.qmd")));
     }
 
@@ -1712,8 +2850,13 @@ mod tests {
         let project = make_project(&temp, &["index.qmd", "about.qmd"], None);
         let cwd = canonical(temp.path()); // any cwd
         let runtime = NativeRuntime::new();
-        let target =
-            classify_inputs(&[project.to_string_lossy().into_owned()], &cwd, &runtime).unwrap();
+        let target = classify_inputs(
+            &[project.to_string_lossy().into_owned()],
+            &cwd,
+            &runtime,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -1727,7 +2870,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_project(&temp, &["top.qmd", "sub/a.qmd", "sub/b.qmd"], None);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&["sub".into()], &project, &runtime).unwrap();
+        let target = classify_inputs(&["sub".into()], &project, &runtime, None).unwrap();
         match target {
             RenderTarget::Subset {
                 project_dir,
@@ -1756,7 +2899,7 @@ mod tests {
         let project = make_project(&temp, &["a.qmd", "b.qmd", "c.qmd"], None);
         let runtime = NativeRuntime::new();
         let target =
-            classify_inputs(&["a.qmd".into(), "b.qmd".into()], &project, &runtime).unwrap();
+            classify_inputs(&["a.qmd".into(), "b.qmd".into()], &project, &runtime, None).unwrap();
         match target {
             RenderTarget::Subset {
                 project_dir,
@@ -1779,7 +2922,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_project(&temp, &["a.qmd", "b.qmd"], Some(&["a.qmd"]));
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&["b.qmd".into()], &project, &runtime).unwrap_err();
+        let err = classify_inputs(&["b.qmd".into()], &project, &runtime, None).unwrap_err();
         match err {
             DispatchError::NotInRenderList { path, project_dir } => {
                 assert_eq!(path, project.join("b.qmd"));
@@ -1787,6 +2930,111 @@ mod tests {
             }
             other => panic!("expected NotInRenderList, got {other:?}"),
         }
+    }
+
+    /// Recursively copy `src` into `dst` (dst is created). Used by T8b to
+    /// install the committed echo-engine extension fixture
+    /// (`crates/quarto-core/tests/fixtures/extensions/echo-engine`) into a
+    /// temp project's `_extensions/`.
+    fn copy_dir(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if from.is_dir() {
+                copy_dir(&from, &to);
+            } else {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+    }
+
+    /// An engine-claimed extension passes gate 1 and is admitted by
+    /// `classify_inputs` **when a `render:` pattern selects it**.
+    ///
+    /// Preserves the original T8b intent (engine extensions are not rejected
+    /// out of hand) under the discovery rule that supersedes runbook D1:
+    /// auto-discovery is `**/*.qmd` only, so the pattern is what puts `a.echo`
+    /// into `project.files`.
+    ///
+    /// Named revert: drop the `.echo` extension from the discovery-set union
+    /// (`RenderableExtensions::fixed()` in `project/mod.rs`'s `discover`) and
+    /// `a.echo` fails gate 1 even with the pattern -> `NotInRenderList` -> RED.
+    #[test]
+    fn classify_echo_file_admitted_when_listed_in_render() {
+        let (dir, _temp) = echo_project_with_render(Some(
+            "project:\n  type: default\n  render:\n    - \"**/*.qmd\"\n    - \"**/*.echo\"\n",
+        ));
+        let runtime = NativeRuntime::new();
+        let target = classify_inputs(&["a.echo".into()], &dir, &runtime, None)
+            .unwrap_or_else(|e| panic!("a listed a.echo must be admitted: {e:?}"));
+        match target {
+            RenderTarget::Subset {
+                project_dir,
+                targets,
+            } => {
+                assert_eq!(project_dir, dir);
+                assert_eq!(targets, vec![dir.join("a.echo")]);
+            }
+            other => panic!("expected Subset admitting a.echo, got {other:?}"),
+        }
+    }
+
+    /// Without a `render:` pattern, an explicitly-named engine-claimed file is
+    /// refused — exactly as `.md` and `_partial.qmd` already are.
+    ///
+    /// This is a BEHAVIOR CHANGE introduced by superseding D1, not a
+    /// pre-existing wart: under D1 `.echo` was auto-discovered, so
+    /// `q2 render a.echo` worked. It documents the consequence rather than
+    /// endorsing it — whether q2 should render an explicitly-named file that
+    /// no pattern selects is an open question (Quarto 1 does, silently, with
+    /// output written beside the source). If that question is answered
+    /// "render it", this test changes with that work.
+    #[test]
+    fn classify_unlisted_echo_file_is_refused() {
+        let (dir, _temp) = echo_project_with_render(None);
+        let runtime = NativeRuntime::new();
+        let err = classify_inputs(&["a.echo".into()], &dir, &runtime, None)
+            .expect_err("an unlisted a.echo must be refused, like an unlisted .md");
+        assert!(
+            matches!(err, DispatchError::NotInRenderList { .. }),
+            "expected NotInRenderList, got {err:?}"
+        );
+    }
+
+    /// Shared fixture for the two tests above: a project with the committed
+    /// echo-engine extension installed and one `a.echo` file. `render` is the
+    /// full `_quarto.yml` body, or `None` for the bare default.
+    fn echo_project_with_render(render: Option<&str>) -> (PathBuf, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let dir = canonical(temp.path());
+        write_file(
+            &dir.join("_quarto.yml"),
+            render.unwrap_or("project:\n  type: default\n"),
+        );
+        write_file(
+            &dir.join("index.qmd"),
+            "---\ntitle: Index\n---\n\nContent.\n",
+        );
+        let fixture_ext = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../quarto-core/tests/fixtures/extensions/echo-engine");
+        assert!(
+            fixture_ext.exists(),
+            "echo-engine fixture missing: {}",
+            fixture_ext.display()
+        );
+        copy_dir(&fixture_ext, &dir.join("_extensions/echo-engine"));
+        // The committed bundle is deleted (plan1c3: hermetic fixtures are
+        // regenerated at test time). These classify-only paths never execute
+        // the engine — they only need the bundle to EXIST for
+        // `build_engine_registry`'s bundle-exists guard.
+        write_file(
+            &dir.join("_extensions/echo-engine/dist/echo-engine.js"),
+            "// stub for registry existence check\n",
+        );
+        write_file(&dir.join("a.echo"), "Whole-file echo body.\n");
+        (dir, temp)
     }
 
     #[test]
@@ -1797,7 +3045,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_project(&temp, &["main.qmd", "_partial.qmd"], None);
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&["_partial.qmd".into()], &project, &runtime).unwrap_err();
+        let err = classify_inputs(&["_partial.qmd".into()], &project, &runtime, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::NotInRenderList { .. }),
             "expected NotInRenderList, got {err:?}"
@@ -1811,7 +3059,7 @@ mod tests {
         // Empty subdirectory.
         std::fs::create_dir_all(project.join("empty")).unwrap();
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&["empty".into()], &project, &runtime).unwrap_err();
+        let err = classify_inputs(&["empty".into()], &project, &runtime, None).unwrap_err();
         match err {
             DispatchError::NoRenderableMatches { path } => {
                 assert_eq!(path, project.join("empty"));
@@ -1835,6 +3083,7 @@ mod tests {
             ],
             &cwd,
             &runtime,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -1848,7 +3097,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = make_loose_dir(&temp, &["a.qmd", "b.qmd"]);
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&["a.qmd".into(), "b.qmd".into()], &dir, &runtime).unwrap_err();
+        let err =
+            classify_inputs(&["a.qmd".into(), "b.qmd".into()], &dir, &runtime, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::MultiArgNonProject),
             "expected MultiArgNonProject, got {err:?}"
@@ -1860,7 +3110,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let dir = canonical(temp.path());
         let runtime = NativeRuntime::new();
-        let err = classify_inputs(&["does-not-exist.qmd".into()], &dir, &runtime).unwrap_err();
+        let err =
+            classify_inputs(&["does-not-exist.qmd".into()], &dir, &runtime, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::PathNotFound(_)),
             "expected PathNotFound, got {err:?}"
@@ -1881,7 +3132,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_default_project(&temp, &["index.qmd"]);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&["index.qmd".into()], &project, &runtime).unwrap();
+        let target = classify_inputs(&["index.qmd".into()], &project, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -1902,7 +3153,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let project = make_default_project(&temp, &["index.qmd", "about.qmd"]);
         let runtime = NativeRuntime::new();
-        let target = classify_inputs(&[], &project, &runtime).unwrap();
+        let target = classify_inputs(&[], &project, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -1920,7 +3171,7 @@ mod tests {
         let project = make_project(&temp, &["a.qmd", "b.qmd"], None);
         let runtime = NativeRuntime::new();
         let target =
-            classify_inputs(&["a.qmd".into(), "b.qmd".into()], &project, &runtime).unwrap();
+            classify_inputs(&["a.qmd".into(), "b.qmd".into()], &project, &runtime, None).unwrap();
         assert_eq!(
             target,
             RenderTarget::FullProject {
@@ -2232,5 +3483,201 @@ mod tests {
         let summary = summary_with_output(vec![DiagnosticMessage::info("i")]);
         assert!(!should_exit_nonzero(&summary, false));
         assert!(!should_exit_nonzero(&summary, true));
+    }
+}
+
+/// Phase 1 of `q2 preview --static` (bd-sl79jjiq): `render_once` is the
+/// in-process, loop-safe form of `execute`. It must never exit the
+/// process, and it must hand back everything the CLI presents so that
+/// `execute` stays byte-identical on stderr.
+#[cfg(test)]
+mod render_once_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// A two-page website in a fresh tempdir. Returns the canonical root.
+    fn website(temp: &TempDir) -> PathBuf {
+        let dir = quarto_system_runtime::canonicalize(temp.path()).unwrap();
+        write(
+            &dir.join("_quarto.yml"),
+            "project:\n  type: website\nwebsite:\n  title: Base\n",
+        );
+        write(&dir.join("index.qmd"), "---\ntitle: Home\n---\n\nHello.\n");
+        write(&dir.join("about.qmd"), "---\ntitle: About\n---\n\nAbout.\n");
+        dir
+    }
+
+    fn args_for(input: &Path) -> RenderArgs {
+        RenderArgs {
+            inputs: vec![input.to_string_lossy().into_owned()],
+            quiet: true,
+            ..RenderArgs::default()
+        }
+    }
+
+    fn quiet_presenter() -> impl FnMut(&RenderReport) {
+        |_| {}
+    }
+
+    #[test]
+    fn project_render_reports_output_dir_and_input_output_pairs() {
+        let temp = TempDir::new().unwrap();
+        let dir = website(&temp);
+        let report = render_once(&args_for(&dir), &mut quiet_presenter()).expect("render ok");
+
+        assert_eq!(report.output_dir, dir.join("_site"));
+        assert_eq!(report.project_dir, dir);
+        assert!(matches!(report.target, RenderTarget::FullProject { .. }));
+        assert!(!report.exit_nonzero);
+        assert!(report.failed_inputs().is_empty());
+        assert_eq!(report.diagnostic_counts(), DiagnosticCounts::default());
+
+        let mut pairs = report.outputs();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (dir.join("about.qmd"), dir.join("_site").join("about.html")),
+                (dir.join("index.qmd"), dir.join("_site").join("index.html")),
+            ]
+        );
+        assert!(dir.join("_site/index.html").exists());
+    }
+
+    #[test]
+    fn single_document_outside_a_project_renders_beside_the_source() {
+        let temp = TempDir::new().unwrap();
+        let dir = quarto_system_runtime::canonicalize(temp.path()).unwrap();
+        let doc = dir.join("doc.qmd");
+        write(&doc, "---\ntitle: Doc\n---\n\nBody.\n");
+        let report = render_once(&args_for(&doc), &mut quiet_presenter()).expect("render ok");
+
+        assert!(matches!(report.target, RenderTarget::SingleDoc(_)));
+        assert_eq!(report.output_dir, dir);
+        assert_eq!(report.outputs(), vec![(doc.clone(), dir.join("doc.html"))]);
+        assert!(!report.exit_nonzero);
+    }
+
+    /// The whole point: a page that fails must come back as data, not
+    /// as `process::exit(1)`. The other pages still render.
+    #[test]
+    fn page_error_is_reported_not_fatal() {
+        let temp = TempDir::new().unwrap();
+        let dir = website(&temp);
+        write(
+            &dir.join("bad.qmd"),
+            "---\ntitle: [unclosed\n---\n\nBroken.\n",
+        );
+        let report = render_once(&args_for(&dir), &mut quiet_presenter()).expect("render ok");
+
+        assert!(
+            report.exit_nonzero,
+            "an error diagnostic must fail the exit gate"
+        );
+        assert_eq!(report.diagnostic_counts().errors, 1);
+        assert!(
+            dir.join("_site/index.html").exists(),
+            "good pages still render"
+        );
+
+        let text = report.diagnostics_text(false);
+        // Q-1-1 "YAML Syntax Error" (was the generic Q-0-99 until bd-x30aq7ae).
+        assert!(
+            text.contains("Q-1-1"),
+            "diagnostics text carries the code: {text}"
+        );
+        assert!(
+            text.contains("bad.qmd"),
+            "diagnostics text names the page: {text}"
+        );
+        assert!(
+            !text.contains("\x1b["),
+            "color=false must yield no ANSI escapes: {text:?}"
+        );
+        assert!(
+            report.diagnostics_text(true).contains("\x1b["),
+            "color=true keeps the terminal colors"
+        );
+    }
+
+    /// The presenter runs exactly once, with the same report the
+    /// caller receives, and before post-render scripts (which is why
+    /// it is a callback at all).
+    #[test]
+    fn presenter_sees_the_report_once_before_return() {
+        let temp = TempDir::new().unwrap();
+        let dir = website(&temp);
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let report = render_once(&args_for(&dir), &mut |r: &RenderReport| {
+            seen.push(r.output_dir.clone())
+        })
+        .expect("render ok");
+        assert_eq!(seen, vec![report.output_dir.clone()]);
+    }
+
+    #[test]
+    fn broken_project_config_aborts_with_a_dispatch_error() {
+        let temp = TempDir::new().unwrap();
+        let dir = website(&temp);
+        write(&dir.join("_quarto.yml"), "project:\n  type: [unclosed\n");
+        let err = render_once(&args_for(&dir), &mut quiet_presenter()).expect_err("must abort");
+        // A YAML syntax error surfaces as the generic `Discover` variant
+        // (a structured `DiscoverParse` needs quarto-yaml's diagnostics);
+        // the contract here is only that it is an *abort*, not an exit.
+        assert!(matches!(err, RenderAbort::Dispatch(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn missing_input_aborts_with_path_not_found() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().canonicalize().unwrap().join("nope.qmd");
+        let err = render_once(&args_for(&missing), &mut quiet_presenter()).expect_err("must abort");
+        assert!(
+            matches!(err, RenderAbort::Dispatch(DispatchError::PathNotFound(_))),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_sgr_and_osc8_sequences() {
+        assert_eq!(strip_ansi_escapes("plain text"), "plain text");
+        assert_eq!(
+            strip_ansi_escapes("\x1b[31mError:\x1b[0m [Q-1-2] \x1b[38;5;246m\u{256d}\x1b[0m"),
+            "Error: [Q-1-2] \u{256d}"
+        );
+        // OSC 8 hyperlink, ESC-backslash terminated (what ariadne emits).
+        assert_eq!(
+            strip_ansi_escapes("\x1b]8;;file:///a/b.qmd#5:26\x1b\\/a/b.qmd:5:26\x1b]8;;\x1b\\ ]"),
+            "/a/b.qmd:5:26 ]"
+        );
+        // BEL-terminated OSC.
+        assert_eq!(strip_ansi_escapes("\x1b]0;title\x07after"), "after");
+        // A dangling introducer at the end of input must not panic.
+        assert_eq!(strip_ansi_escapes("end\x1b"), "end");
+        assert_eq!(strip_ansi_escapes("end\x1b["), "end");
+    }
+
+    #[test]
+    fn unsupported_format_aborts_before_any_render() {
+        let temp = TempDir::new().unwrap();
+        let dir = website(&temp);
+        // `pdf` is the load-bearing example of a still-refused format
+        // (non-native, non-pandoc-hybrid). `gfm` used to sit here, but the
+        // long-tail Phase 1 gate change admits it — and `e2e_render_gfm`
+        // pins that it now *succeeds*.
+        let args = RenderArgs {
+            to: Some("pdf".to_string()),
+            ..args_for(&dir)
+        };
+        let err = render_once(&args, &mut quiet_presenter()).expect_err("must abort");
+        assert!(matches!(err, RenderAbort::Other(_)), "got {err:?}");
+        assert!(!dir.join("_site").exists(), "nothing rendered");
     }
 }

@@ -1,6 +1,9 @@
-# Comprehensive Plan for bd-8: YAML Schema Deserialization from quarto-cli YAML Files
+---
+title: 'Comprehensive Plan for bd-8: YAML Schema Deserialization from quarto-cli YAML Files'
+date: 2025-10-27
+description: 'Plans a Rust `Deserialize` implementation for the Schema type so it can load quarto-cli YAML schema files, auditing the existing `Schema::from_yaml()` against every syntax form quarto-cli accepts.'
+---
 
-**Date**: 2025-10-27
 **Issue**: bd-8 - YAML schema deserialization: Add Deserialize impl for Schema enum
 **Blocks**: bd-9 - SchemaField and schema file loading
 
@@ -8,7 +11,7 @@
 
 This document provides a comprehensive plan for implementing full quarto-cli YAML schema syntax support in Rust. After deep analysis of the quarto-cli codebase, particularly `from-yaml.ts`, the schema YAML files, and TypeScript type definitions, I've identified the exact patterns we need to support and how to port them to Rust.
 
-**Key Finding**: The current Rust `Schema::from_yaml()` implementation (~1300 lines) already exists but may not handle all quarto-cli syntax variations. We need to audit it against the patterns found in quarto-cli and ensure complete compatibility.
+**Key Finding**: The current Rust `Schema::from_yaml()` implementation (\~1300 lines) already exists but may not handle all quarto-cli syntax variations. We need to audit it against the patterns found in quarto-cli and ensure complete compatibility.
 
 ## Background: How quarto-cli Handles YAML Schemas
 
@@ -540,7 +543,7 @@ pub enum Description {
 
 ### What We Have
 
-**File**: `private-crates/quarto-yaml-validation/src/schema.rs` (~1300 lines)
+**File**: `private-crates/quarto-yaml-validation/src/schema.rs` (\~1300 lines)
 
 **Implemented**:
 - `Schema::from_yaml(yaml: &YamlWithSourceInfo) -> SchemaResult<Schema>` (line 288)

@@ -1,6 +1,9 @@
-# Investigation Report: qmd-syntax-helper Test Failures
+---
+title: 'Investigation Report: qmd-syntax-helper Test Failures'
+date: 2025-11-10
+description: 'Diagnoses why `qmd-syntax-helper` attribute ordering tests find no violations after a tree-sitter grammar change shifted parser state numbers, leaving the generated error table stale.'
+---
 
-**Date**: 2025-11-10
 **Branch**: bugfix/92
 **Issue**: crates/qmd-syntax-helper test suite failing after recent commits
 
@@ -127,7 +130,7 @@ The table was not updated after the grammar changes, so it still references the 
 
 The error table needs to be regenerated to reflect the new parser state numbers. According to the CLAUDE.md documentation in `crates/quarto-markdown-pandoc`:
 
-> After changing any of the resources/error-corpus/*.{json,qmd} files, run the script `scripts/build_error_table.ts`. It's executable with a deno hashbang line.
+> After changing any of the resources/error-corpus/\*.\{json,qmd\} files, run the script `scripts/build_error_table.ts`. It's executable with a deno hashbang line.
 
 The same process must be run whenever the grammar changes, even if the error corpus files themselves haven't changed.
 

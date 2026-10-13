@@ -22,9 +22,7 @@ use std::sync::Arc;
 
 use quarto_core::document_profile::DocumentProfile;
 use quarto_core::format::Format;
-use quarto_core::pipeline::{
-    HtmlRenderConfig, build_html_pipeline_stages, build_wasm_html_pipeline, render_qmd_to_html,
-};
+use quarto_core::pipeline::{HtmlRenderConfig, build_html_pipeline_stages, render_qmd_to_html};
 use quarto_core::project::{DocumentInfo, ProjectConfig, ProjectContext};
 use quarto_core::render::{BinaryDependencies, RenderContext};
 use quarto_core::stage::{
@@ -62,6 +60,8 @@ fn make_project() -> ProjectContext {
         is_single_file: true,
         files: vec![DocumentInfo::from_path(test_project_dir().join("test.qmd"))],
         output_dir: test_project_dir(),
+
+        ..Default::default()
     }
 }
 
@@ -83,39 +83,6 @@ fn position_of(stages: &[Box<dyn PipelineStage>], target: &str) -> Option<usize>
 // ---------------------------------------------------------------------------
 // Test 12: wasm pipeline includes the checkpoint stages.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn wasm_pipeline_includes_profile_stage() {
-    let pipeline = build_wasm_html_pipeline();
-    let names = pipeline.stage_names();
-    assert!(
-        names.contains(&"document-profile"),
-        "WASM HTML pipeline must include DocumentProfileStage; got {names:?}"
-    );
-    assert!(
-        names.contains(&"unwrap-profile"),
-        "WASM HTML pipeline must include UnwrapProfileStage; got {names:?}"
-    );
-
-    // After Phase-8 sub-phase 8.0d, link-resolution sits between
-    // document-profile and unwrap-profile. Both stages take/produce
-    // AtProfile, so downstream stages still receive DocumentAst from
-    // unwrap-profile as before.
-    let p = names
-        .iter()
-        .position(|n| *n == "document-profile")
-        .expect("document-profile present");
-    assert_eq!(
-        names.get(p + 1).copied(),
-        Some("link-resolution"),
-        "link-resolution must follow document-profile"
-    );
-    assert_eq!(
-        names.get(p + 2).copied(),
-        Some("unwrap-profile"),
-        "unwrap-profile must follow link-resolution"
-    );
-}
 
 #[test]
 fn html_pipeline_includes_profile_stage() {
@@ -188,7 +155,14 @@ async fn pipeline_profile_matches_metadata() {
 
     assert_eq!(profile.profile_version, DocumentProfile::VERSION);
     assert_eq!(profile.format_id, "html");
-    assert_eq!(profile.title.as_deref(), Some("Profile fixture"));
+    assert_eq!(
+        profile
+            .title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Profile fixture")
+    );
     assert_eq!(profile.authors, vec!["Jane Example".to_string()]);
     assert_eq!(profile.date.as_deref(), Some("2026-04-23"));
     assert_eq!(
@@ -199,11 +173,14 @@ async fn pipeline_profile_matches_metadata() {
 
     // Outline: two top-level sections, first has one subsection.
     assert_eq!(profile.outline.len(), 2, "two top-level headings");
-    assert_eq!(profile.outline[0].title, "Section one");
+    assert_eq!(title_text(&profile.outline[0].title), "Section one");
     assert_eq!(profile.outline[0].level, 1);
     assert_eq!(profile.outline[0].children.len(), 1);
-    assert_eq!(profile.outline[0].children[0].title, "Subsection");
-    assert_eq!(profile.outline[1].title, "Section two");
+    assert_eq!(
+        title_text(&profile.outline[0].children[0].title),
+        "Subsection"
+    );
+    assert_eq!(title_text(&profile.outline[1].title), "Section two");
 
     // The inner ast is still present and usable.
     assert!(
@@ -347,6 +324,8 @@ async fn run_head_pipeline_in_dir(
         is_single_file: true,
         files: vec![DocumentInfo::from_path(parent_path)],
         output_dir: project_dir.to_path_buf(),
+
+        ..Default::default()
     };
     let doc = DocumentInfo::from_path(parent_path);
     let format = Format::html();
@@ -364,9 +343,13 @@ async fn run_head_pipeline_in_dir(
 /// Walk every entry in an outline (and its nested children) and collect
 /// their titles, so we can check for the presence of a specific heading
 /// without assuming tree shape.
+fn title_text(title: &quarto_pandoc_types::Inlines) -> String {
+    pampa::writers::plaintext::inlines_to_string(title).0
+}
+
 fn collect_outline_titles(outline: &[pampa::toc::TocEntry]) -> Vec<String> {
     fn walk(entry: &pampa::toc::TocEntry, out: &mut Vec<String>) {
-        out.push(entry.title.clone());
+        out.push(pampa::writers::plaintext::inlines_to_string(&entry.title).0);
         for child in &entry.children {
             walk(child, out);
         }
@@ -402,6 +385,97 @@ async fn profile_sees_heading_from_included_file() {
         titles.iter().any(|t| t == "Child Heading"),
         "DocumentProfile.outline must include the heading `## Child Heading` \
          from the included file (bd-xfwx); got outline titles: {titles:?}"
+    );
+}
+
+/// Walk an outline (and nested children) collecting entry ids in
+/// document order.
+fn collect_outline_ids(outline: &[pampa::toc::TocEntry]) -> Vec<String> {
+    fn walk(entry: &pampa::toc::TocEntry, out: &mut Vec<String>) {
+        out.push(entry.id.clone());
+        for child in &entry.children {
+            walk(child, out);
+        }
+    }
+    let mut ids = Vec::new();
+    for entry in outline {
+        walk(entry, &mut ids);
+    }
+    ids
+}
+
+#[tokio::test]
+async fn profile_outline_ids_deduped_across_includes() {
+    // bd-duplicate-heading-ids-mou5z7ux: the scoped uniqueIdent pass
+    // runs at the tail of IncludeExpansionStage, i.e. *before* the
+    // DocumentProfile checkpoint — so the profile outline (consumed by
+    // sidebars, cross-doc links, incremental rebuilds) must already see
+    // the disambiguated ids, not three copies of the same one.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| temp.path().to_path_buf());
+
+    let child_path = project_dir.join("child.qmd");
+    std::fs::write(&child_path, "## Child Heading\n\nChild body.\n").expect("write child");
+
+    let parent_path = project_dir.join("parent.qmd");
+    let parent_content: &[u8] = b"---\ntitle: Parent\n---\n\n\
+        {{< include child.qmd >}}\n\n{{< include child.qmd >}}\n";
+
+    let bundle = run_head_pipeline_in_dir(&project_dir, &parent_path, parent_content).await;
+
+    let ids = collect_outline_ids(&bundle.profile.outline);
+    assert_eq!(
+        ids,
+        vec!["child-heading", "child-heading-1"],
+        "profile outline must carry disambiguated ids \
+         (bd-duplicate-heading-ids-mou5z7ux); got: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn profile_sees_comments_from_included_file() {
+    // bd-0rsk07il (GH #445): comments in an included file count toward
+    // the including document — IncludeExpansion runs before the
+    // DocumentProfile checkpoint, so the comment scan sees the
+    // post-include AST. Also pins source order across the splice
+    // boundary (parent comment before the include, child comment,
+    // parent comment after).
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| temp.path().to_path_buf());
+
+    let child_path = project_dir.join("child.qmd");
+    std::fs::write(&child_path, "Child body [>> child note ] here.\n").expect("write child");
+
+    let parent_path = project_dir.join("parent.qmd");
+    let parent_content: &[u8] = b"---\ntitle: Parent\n---\n\n\
+        Before [>> parent first ] text.\n\n\
+        {{< include child.qmd >}}\n\n\
+        After [>> parent last ]{author=\"Alice\"} text.\n";
+
+    let bundle = run_head_pipeline_in_dir(&project_dir, &parent_path, parent_content).await;
+
+    let texts: Vec<&str> = bundle
+        .profile
+        .comments
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["parent first", "child note", "parent last"],
+        "comments from included files count toward the host, in source \
+         order (bd-0rsk07il); got: {texts:?}"
+    );
+    assert_eq!(
+        bundle.profile.comments[2].author.as_deref(),
+        Some("Alice"),
+        "in-band author attribute survives the pipeline path"
     );
 }
 
@@ -520,8 +594,20 @@ Body paragraph.
 async fn pipeline_extracts_listing_item_from_frontmatter() {
     let bundle = run_head_pipeline(LISTING_ITEM_FIXTURE_QMD).await;
     let li = &bundle.profile.listing_item;
-    assert_eq!(li.title.as_deref(), Some("Listing title"));
-    assert_eq!(li.description.as_deref(), Some("Listing desc"));
+    assert_eq!(
+        li.title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Listing title")
+    );
+    assert_eq!(
+        li.description
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Listing desc")
+    );
     assert_eq!(li.reading_time_minutes, Some(12));
     assert_eq!(li.categories, vec!["a".to_string(), "b".to_string()]);
     let status = li
@@ -578,17 +664,23 @@ This is the first paragraph that L1 will harvest as the description.\n\
 
 #[tokio::test]
 async fn pipeline_listing_item_autofill_end_to_end() {
-    // No `listing-item:` key in frontmatter; L1 derives every field
-    // from the AST and mtime, then DocumentProfileStage extracts a
-    // populated ListingItemInfo into the profile.
+    // No `listing-item:` key in frontmatter. L1 derives the
+    // description and image into the `derived_listing` side-channel
+    // (never into the authored `listing_item` slots —
+    // bd-listing-description-precedence-x4bh6w3m) and fills the
+    // numeric fields into `meta.listing-item`; DocumentProfileStage
+    // carries both into the profile.
     let bundle = run_head_pipeline(L1_FIXTURE_QMD).await;
-    let li = &bundle.profile.listing_item;
-
+    let derived = &bundle.profile.derived_listing;
     assert_eq!(
-        li.description.as_deref(),
+        derived.description.as_deref(),
         Some("This is the first paragraph that L1 will harvest as the description.")
     );
-    assert_eq!(li.image.as_deref(), Some("figs/cover.png"));
+    assert_eq!(derived.image.as_deref(), Some("figs/cover.png"));
+
+    let li = &bundle.profile.listing_item;
+    assert_eq!(li.description, None);
+    assert_eq!(li.image, None);
     // 12 words in the paragraph (image alt-text excluded; image is
     // its own block-level paragraph in the AST but contributes no
     // word-bearing prose).
@@ -612,7 +704,18 @@ async fn pipeline_listing_item_author_overrides_winner() {
     let fixture: &[u8] = b"---\ntitle: Hello\nlisting-item:\n  description: Author wrote this\n---\n\nAuto-fill would have used this paragraph instead.\n";
     let bundle = run_head_pipeline(fixture).await;
     let li = &bundle.profile.listing_item;
-    assert_eq!(li.description.as_deref(), Some("Author wrote this"));
+    assert_eq!(
+        li.description
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Author wrote this")
+    );
+    // The derived value is still recorded, separately.
+    assert_eq!(
+        bundle.profile.derived_listing.description.as_deref(),
+        Some("Auto-fill would have used this paragraph instead.")
+    );
 }
 
 #[tokio::test]
@@ -628,9 +731,71 @@ async fn pipeline_clone_and_resume_listing_item_visible_in_profile() {
 
     // FIXTURE_QMD has paragraphs ("Hello.", "More hello.", "Goodbye.")
     // separated by headings. L1's first non-empty paragraph wins.
-    assert_eq!(li.description.as_deref(), Some("Hello."));
+    assert_eq!(
+        bundle.profile.derived_listing.description.as_deref(),
+        Some("Hello.")
+    );
     // Word count: "Hello.", "More hello.", "Goodbye." plus heading
     // text ("Section one", "Subsection", "Section two") = 9 words.
     assert_eq!(li.word_count, Some(9));
     assert_eq!(li.reading_time_minutes, Some(1));
+}
+
+/// bd-0rsk07il Phase 2: the profile extracted at the checkpoint is
+/// stashed on `StageContext` by `DocumentProfileStage` and bridged
+/// back to the caller's `RenderContext` by `run_pipeline`, so
+/// response builders (the WASM `RenderResponse`, future native
+/// consumers) can read it after a full render without re-parsing.
+#[tokio::test]
+async fn render_qmd_to_html_bridges_document_profile_to_ctx() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let dir = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| temp.path().to_path_buf());
+    let qmd = b"---\ntitle: Bridged\n---\n\nProse [>> needs work ] here.\n";
+    let qmd_path = dir.join("doc.qmd");
+    std::fs::write(&qmd_path, qmd).expect("write fixture");
+
+    let project = ProjectContext {
+        dir: dir.clone(),
+        config: ProjectConfig::default(),
+        is_single_file: true,
+        files: vec![DocumentInfo::from_path(qmd_path.clone())],
+        output_dir: dir.clone(),
+
+        ..Default::default()
+    };
+    let doc = DocumentInfo::from_path(qmd_path.clone());
+    let format = Format::html();
+    let binaries = quarto_core::render::BinaryDependencies::new();
+    let mut ctx = RenderContext::new(&project, &doc, &format, &binaries);
+    let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+        Arc::new(quarto_system_runtime::NativeRuntime::new());
+
+    let output = render_qmd_to_html(
+        qmd,
+        &qmd_path.to_string_lossy(),
+        &mut ctx,
+        &HtmlRenderConfig::default(),
+        runtime,
+    )
+    .await
+    .expect("render succeeds");
+    assert!(!output.html.is_empty());
+
+    let profile = ctx
+        .document_profile
+        .as_ref()
+        .expect("RenderContext must carry the bridged document profile");
+    assert_eq!(
+        profile
+            .title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Bridged")
+    );
+    let texts: Vec<&str> = profile.comments.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, vec!["needs work"]);
 }

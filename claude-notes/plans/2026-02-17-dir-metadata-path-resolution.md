@@ -1,7 +1,10 @@
-# Directory Metadata Path Resolution
+---
+title: 'Directory Metadata Path Resolution'
+date: 2026-02-17
+description: 'Rewrites relative `!path` values in `_metadata.yml` files so they resolve from the rendered document''s directory rather than the metadata file''s own directory, using path diffing.'
+status: done
+---
 
-**Date**: 2026-02-17
-**Status**: Complete
 **Depends on**: `2026-02-17-metadata-yml-support.md` (Complete)
 
 ## Completion Summary
@@ -302,7 +305,7 @@ fn adjust_paths_recursive(
 
 **File**: `crates/quarto-core/src/project.rs`
 
-Update `directory_metadata_for_document()` at line ~133 (after `yaml_to_config_value` call, before `layers.push`):
+Update `directory_metadata_for_document()` at line \~133 (after `yaml_to_config_value` call, before `layers.push`):
 
 ```rust
 // Current code around line 132-137:

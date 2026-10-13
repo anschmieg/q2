@@ -10,11 +10,21 @@
 //! 3. Build hub-client (includes WASM via `npm run build:all`)
 //! 4. Build trace-viewer (if present; Phase 4.3+)
 //! 5. Build q2-preview-spa (if present; q2-preview Phase A.4 / bd-501n)
-//! 6. Build the Rust workspace (`cargo build --workspace`)
+//! 6. Build the hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
+//! 7. Build the engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
+//! 8. Build the Rust workspace (`cargo build --workspace`)
+//! 9. Stage the docs embed for `q2 docs llms` and re-embed it into the
+//!    `q2` binary (bd-hwop1zii)
 //!
 //! Both SPAs (trace-viewer + q2-preview-spa) must build *before* the
 //! Rust workspace because `quarto-trace-server` and `quarto-preview`
 //! embed their respective `dist/` directories via `include_dir!`.
+//!
+//! The docs embed is the one artifact that must come *after* the Rust
+//! build instead: staging it renders `docs/` with the freshly built
+//! `q2`, so the binary has to exist first. That is why step 9 ends with
+//! a second, narrower `cargo build --bin q2` — the run that actually
+//! embeds the staged tree.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -33,11 +43,17 @@ pub struct BuildAllConfig {
     pub skip_trace_viewer_build: bool,
     /// Skip the hub MCP bundle build step (q2-mcp embed artifact).
     pub skip_hub_mcp_bundle: bool,
+    /// Skip the engine-host-deno bundle build step (quarto-core embed artifact).
+    pub skip_engine_host_bundle: bool,
     /// Skip the q2-preview-spa build step. No-op when the SPA dir is
     /// absent (e.g. branches before bd-hfjj Phase 6).
     pub skip_q2_preview_spa_build: bool,
     /// Skip the final `cargo build --workspace` step.
     pub skip_rust_build: bool,
+    /// Skip staging + embedding the docs for `q2 docs llms`. Implied by
+    /// `skip_rust_build` (staging needs a built `q2`, and the embed
+    /// needs a rebuild to take effect).
+    pub skip_agents_docs: bool,
     /// Pass `--release` to `cargo build`.
     pub release: bool,
 }
@@ -66,7 +82,15 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
             "hub MCP bundle build",
             !config.skip_hub_mcp_bundle && hub_mcp_exists(&project_root),
         ),
+        (
+            "engine-host-deno bundle build",
+            !config.skip_engine_host_bundle && engine_host_exists(&project_root),
+        ),
         ("Rust workspace build", !config.skip_rust_build),
+        (
+            "docs embed for `q2 docs llms`",
+            !config.skip_agents_docs && !config.skip_rust_build,
+        ),
     ];
 
     let enabled_count = steps.iter().filter(|(_, enabled)| *enabled).count();
@@ -171,6 +195,22 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
         println!("✓ hub MCP bundle complete");
     }
 
+    // Step: engine-host-deno bundle (Plan 1b) — the artifact `quarto-core`
+    // embeds via `include_str!`; must exist before the Rust build.
+    if !config.skip_engine_host_bundle && engine_host_exists(&project_root) {
+        step_idx += 1;
+        banner(step_idx, total, "Building engine-host-deno bundle");
+        let pkg_dir = project_root.join("ts-packages/quarto-engine-host-deno");
+        run_command(
+            "npm",
+            &["run", "bundle"],
+            &pkg_dir,
+            None,
+            "engine-host-deno bundle build failed",
+        )?;
+        println!("✓ engine-host-deno bundle complete");
+    }
+
     // Step: Rust workspace build
     if !config.skip_rust_build {
         step_idx += 1;
@@ -186,6 +226,32 @@ pub fn run(config: &BuildAllConfig) -> Result<()> {
         }
         run_command("cargo", &args, &project_root, None, "Rust build failed")?;
         println!("✓ Rust build complete");
+    }
+
+    // Step: docs embed for `q2 docs llms` (bd-hwop1zii). Unlike every
+    // other embed artifact this one runs *after* the Rust build — it
+    // renders `docs/` with the `q2` that build just produced — so it
+    // ends with a second `cargo build --bin q2` that embeds the result.
+    if !config.skip_agents_docs && !config.skip_rust_build {
+        step_idx += 1;
+        banner(
+            step_idx,
+            total,
+            "Staging + embedding docs for `q2 docs llms`",
+        );
+        crate::build_agents_docs::run()?;
+        let mut args: Vec<&str> = vec!["build", "--bin", "q2"];
+        if config.release {
+            args.push("--release");
+        }
+        run_command(
+            "cargo",
+            &args,
+            &project_root,
+            None,
+            "q2 docs re-embed build failed",
+        )?;
+        println!("✓ docs embed complete");
     }
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -216,6 +282,13 @@ fn q2_preview_spa_exists(project_root: &Path) -> bool {
 fn hub_mcp_exists(project_root: &Path) -> bool {
     project_root
         .join("ts-packages/quarto-hub-mcp")
+        .join("package.json")
+        .is_file()
+}
+
+fn engine_host_exists(project_root: &Path) -> bool {
+    project_root
+        .join("ts-packages/quarto-engine-host-deno")
         .join("package.json")
         .is_file()
 }

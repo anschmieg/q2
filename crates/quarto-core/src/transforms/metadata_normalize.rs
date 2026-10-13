@@ -308,6 +308,8 @@ mod tests {
             is_single_file: true,
             files: vec![DocumentInfo::from_path("/project/doc.qmd")],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         }
     }
 
@@ -716,6 +718,7 @@ mod tests {
             math_type: quarto_pandoc_types::inline::MathType::InlineMath,
             text: "E=mc^2".to_string(),
             source_info: dummy_source_info(),
+            text_source: None,
         })];
         let text = inlines_to_plain_text(&inlines);
         assert_eq!(text, "E=mc^2");

@@ -1,9 +1,15 @@
-# q2 preview: AST-splice the captured engine output into live edits
+---
+title: 'q2 preview: AST-splice the captured engine output into live edits'
+date: 2026-05-18
+description: 'Has `q2 preview` splice captured engine output into the live document''s AST, keyed by cell content hash and occurrence, so code-cell output survives prose edits to the source.'
+status: draft  # Design (2026-05-18). Implementation pending.
+braid:
+  strand: bd-lucp  # parent-child to bd-kw93, discovered-from bd-m0mu
+  priority: P0
+---
 
-**Beads:** bd-lucp (parent-child to bd-kw93, discovered-from bd-m0mu).
 **Supersedes:** bd-m0mu (engine_registry plumbing) — see "Why this
 supersedes bd-m0mu" below.
-**Status:** Design (2026-05-18). Implementation pending.
 
 ## Goal
 
@@ -14,7 +20,7 @@ pipeline can't use it: the original Phase C.4 design routed capture
 bytes through `EngineRegistry::with_replay`, which uses byte-equality
 against the recorded `input_qmd`. Any prose edit (or mtime drift from
 `listing-item.date-modified`) misses, and the user sees raw `{r}`
-source instead of `cat("Hello, world")`'s output.
+source instead of `cat("Hello, world")`\'s output.
 
 ## What changed in the design (2026-05-18 review)
 
@@ -380,8 +386,8 @@ All cases use `quarto_ast_reconcile::compute_block_hash_fresh` and
    should be lossless, but if a token escape differs the structural
    hashes won't match and every cell falls through to raw source.
    Mitigation: a round-trip test in Phase 1 that parses
-   `input_qmd` and asserts the cells' structural hashes equal
-   `A2`'s for an unedited document.
+   `input_qmd` and asserts the cells\' structural hashes equal
+   `A2`\'s for an unedited document.
 2. **Block-level walk assumption.** The algorithm assumes the engine
    transforms only at the block level. True for knitr/jupyter today
    in Q2; would break if an engine emitted inline-only transforms.

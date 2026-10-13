@@ -36,10 +36,12 @@ use quarto_config::resolve_website_value;
 use quarto_pandoc_types::ConfigValue;
 use quarto_sass::{CSS_BUILD_ID, SassLayer, ThemeConfig, ThemeContext, compile_default_css};
 use quarto_system_runtime::{
-    SASS_CACHE_BUDGET_BYTES, SystemRuntime, cache_get_lru, cache_set_lru, ensure_namespace_version,
+    PathKind, SASS_CACHE_BUDGET_BYTES, SystemRuntime, cache_get_lru, cache_set_lru,
+    ensure_namespace_version,
 };
 
 use crate::artifact::{Artifact, ArtifactScope};
+use crate::project::ProjectKind;
 use crate::resources::DEFAULT_CSS;
 use crate::stage::{
     EventLevel, PipelineData, PipelineDataKind, PipelineError, PipelineStage, StageContext,
@@ -85,14 +87,117 @@ pub fn derive_doc_scss_layer(meta: &ConfigValue) -> SassLayer {
         }
     }
 
+    // Q1's `code-block-bg` / `code-block-color` metadata keys
+    // (`pandocVariablesToThemeDefaults`). Emitted unconditionally
+    // (no `!default`): doc vars land at the top of the merged
+    // defaults band, so this is what lets one YAML line beat a
+    // highlight palette's `$code-block-bg: … !default` under the
+    // palette-wins policy (bd-hl-theme-translator-2mdgh4k6).
+    // `code-block-bg` also accepts booleans (`false` disables the
+    // background, `true` restores the theme-derived default).
+    for (key, var, allow_bool) in [
+        ("code-block-bg", "code-block-bg", true),
+        ("code-block-color", "code-block-color", false),
+    ] {
+        let Some(value) = meta.get(key) else {
+            continue;
+        };
+        if allow_bool && let Some(b) = value.as_bool() {
+            defaults.push_str(&format!("${var}: {b};\n"));
+            continue;
+        }
+        if let Some(text) = value.as_plain_text()
+            && quarto_sass::highlight_theme::is_safe_css_value(&text)
+        {
+            defaults.push_str(&format!("${var}: {text};\n"));
+        }
+    }
+
     SassLayer {
         defaults,
         ..Default::default()
     }
 }
 
+/// The one rule from Q1's `resources/projects/book/book.scss`, shipped by
+/// `bookScssBundle()` (book.ts) as an extra sass layer on every
+/// Bootstrap-based HTML page of a book project: it colors the decorated
+/// sidebar chapter numbers in the body color. The literal is embedded here
+/// rather than referenced from `external-sources/` (repo policy). Content
+/// changes stay cache-safe because non-empty `doc_vars.rules` is hashed
+/// into the compile's cache key (see `cache_key`).
+const BOOK_SCSS_RULES: &str = "\
+.sidebar-item .chapter-number {
+  color: $body-color;
+}
+";
+
 /// Name of the cache namespace used for compiled SCSS CSS output.
 const SASS_CACHE_NAMESPACE: &str = "sass";
+
+/// Perf gauge for the SCSS compile path (bd-fq44dlnm). Counted
+/// unconditionally (atomic increments are cheap), printed only under
+/// `QUARTO_PERF_STATS=1` by [`print_sass_stats_if_enabled`]. Atomics
+/// because Pass 2 runs this stage from rayon workers concurrently.
+///
+/// - `hits`: variant served from the runtime `sass` cache.
+/// - `compiles`: variant that went through grass (cache miss, or
+///   caching disabled for this document).
+/// - `uncached`: variants compiled with `cache_ok == false` (subset of
+///   `compiles`); a nonzero value with a themed project means the
+///   cache is not even being consulted.
+/// - `stale`: the key matched an entry but its import manifest did not
+///   (an `@import`ed partial changed — bd-m3hga05o); subset of
+///   `compiles`. Distinguishes "the theme file changed" (a key miss)
+///   from "a file it imports changed".
+mod sass_perf {
+    use std::sync::atomic::AtomicUsize;
+    pub static HITS: AtomicUsize = AtomicUsize::new(0);
+    pub static COMPILES: AtomicUsize = AtomicUsize::new(0);
+    pub static UNCACHED: AtomicUsize = AtomicUsize::new(0);
+    pub static STALE: AtomicUsize = AtomicUsize::new(0);
+}
+
+/// A snapshot of the [`sass_perf`] counters (process-wide, monotonic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SassPerfCounters {
+    pub hits: usize,
+    pub compiles: usize,
+    pub uncached: usize,
+    pub stale: usize,
+}
+
+/// Read the [`sass_perf`] counters. Tests use this to assert *why* a
+/// variant compiled (key miss vs. stale manifest); `q2 render` prints
+/// the same numbers via [`print_sass_stats_if_enabled`].
+pub fn sass_perf_counters() -> SassPerfCounters {
+    use std::sync::atomic::Ordering::Relaxed;
+    SassPerfCounters {
+        hits: sass_perf::HITS.load(Relaxed),
+        compiles: sass_perf::COMPILES.load(Relaxed),
+        uncached: sass_perf::UNCACHED.load(Relaxed),
+        stale: sass_perf::STALE.load(Relaxed),
+    }
+}
+
+/// Print `perf.sass hits=N compiles=N uncached=N stale=N` to stderr
+/// when `QUARTO_PERF_STATS=1`. Call once at the end of a top-level
+/// command (`q2 render`), like the other `perf.*` gauges. With a
+/// project-wide theme, a healthy render shows `compiles` in the low
+/// single digits (one per variant) and `hits` ≈ 2 × documents;
+/// `compiles` tracking the document count means the cache key is
+/// varying per document (the 2026-09-13 Connect-docs profile: 78 % of
+/// serial render time).
+pub fn print_sass_stats_if_enabled() {
+    if !std::env::var_os("QUARTO_PERF_STATS").is_some_and(|v| v == "1") {
+        return;
+    }
+    let c = sass_perf_counters();
+    eprintln!(
+        "perf.sass hits={} compiles={} uncached={} stale={}",
+        c.hits, c.compiles, c.uncached, c.stale,
+    );
+}
 
 /// Fixed cache key for the default (no-theme) compiled CSS. The
 /// minified flag distinguishes minified from expanded output; the
@@ -112,6 +217,18 @@ fn default_cache_key(minified: bool) -> &'static str {
     }
 }
 
+/// Format tag of the values stored in the `sass` namespace. Bumped when
+/// the envelope layout changes so the generational purge clears the
+/// old entries in one go rather than each reading as a miss.
+const SASS_CACHE_FORMAT: &str = "env1";
+
+/// The version sentinel the `sass` namespace is stamped with:
+/// [`CSS_BUILD_ID`] (any SCSS resource or `quarto-sass` source change)
+/// plus the value format tag (any envelope change).
+pub fn sass_cache_version() -> Vec<u8> {
+    format!("{CSS_BUILD_ID}:{SASS_CACHE_FORMAT}").into_bytes()
+}
+
 /// Run the generational-purge check on the `sass` namespace.
 ///
 /// Called once per stage run (not memoized). On WASM this adds a single
@@ -121,9 +238,155 @@ fn default_cache_key(minified: bool) -> &'static str {
 /// between tests and between runtimes). Returns `false` if the cache
 /// layer errors out; callers fall through to compile-without-caching.
 async fn ensure_sass_cache_ready(runtime: &dyn SystemRuntime) -> bool {
-    ensure_namespace_version(runtime, SASS_CACHE_NAMESPACE, CSS_BUILD_ID.as_bytes())
+    ensure_namespace_version(runtime, SASS_CACHE_NAMESPACE, &sass_cache_version())
         .await
         .is_ok()
+}
+
+// ── Cache-value envelope: import manifest + CSS (bd-m3hga05o) ────────
+//
+// The cache *key* is a function of what is known before compiling: the
+// top-level theme file's contents, the doc-vars, the flags. What the
+// theme `@import`s is only known once the compiler has resolved it, so
+// it cannot be in the key — and without it, editing a partial served
+// the previous compile's CSS until the user deleted the cache by hand.
+//
+// So every value in the `sass` namespace is an envelope:
+//
+//     q2-sass-cache-v1
+
+//     <JSON array of {path, sha256}>
+
+//     <CSS bytes>
+//
+// The manifest lists the files the compile that produced the CSS loaded
+// through the runtime (the import closure; embedded resources are
+// covered by the key and excluded), each with the SHA-256 of its
+// contents at compile time. A lookup re-reads every listed file and
+// serves the CSS only if all hashes still match; otherwise it compiles
+// again, which yields the current closure, and overwrites the entry.
+//
+// Trusting the *previous* closure is sound because imports are declared
+// inside the files being hashed: for the closure to change, some listed
+// file must change, which fails validation. The one gap is a new file
+// that would now shadow an existing import path with no listed file
+// changing (a negative dependency); the normalized path in the key
+// rules out the cross-directory case, and the rest is documented in
+// `claude-notes/plans/2026-09-14-scss-cache-import-closure.md`.
+
+/// Magic first line of an enveloped cache value.
+const CACHE_ENVELOPE_HEADER: &str = "q2-sass-cache-v1";
+
+/// One file of the import closure a cached compile depended on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManifestEntry {
+    /// The path the compiler loaded the file by, forward-slashed. Read
+    /// back through `SystemRuntime::file_read` on validation.
+    pub path: String,
+    /// Lowercase hex SHA-256 of the file's contents at compile time.
+    pub sha256: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Build the manifest for a compile that loaded `loaded_files` through
+/// `runtime`. Embedded resource paths are skipped. A file that cannot
+/// be read back (unexpected — the compiler just read it) gets an empty
+/// hash, which never matches, so the entry is re-validated as stale on
+/// every lookup rather than trusted.
+fn build_manifest(runtime: &dyn SystemRuntime, loaded_files: &[PathBuf]) -> Vec<ManifestEntry> {
+    loaded_files
+        .iter()
+        .filter(|p| !p.starts_with(quarto_sass::RESOURCE_PATH_PREFIX))
+        .map(|p| ManifestEntry {
+            path: quarto_util::to_forward_slashes(p),
+            sha256: runtime
+                .file_read(p)
+                .map(|bytes| sha256_hex(&bytes))
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// `true` when every file in `manifest` still hashes to what the cached
+/// compile saw. Any unreadable or changed file makes the entry stale.
+fn manifest_is_current(runtime: &dyn SystemRuntime, manifest: &[ManifestEntry]) -> bool {
+    manifest.iter().all(|entry| {
+        runtime
+            .file_read(std::path::Path::new(&entry.path))
+            .is_ok_and(|bytes| sha256_hex(&bytes) == entry.sha256)
+    })
+}
+
+/// Serialize `(manifest, css)` into one cache value.
+fn encode_cache_value(manifest: &[ManifestEntry], css: &[u8]) -> Vec<u8> {
+    let json = serde_json::to_string(manifest).expect("manifest entries serialize");
+    let mut out = Vec::with_capacity(CACHE_ENVELOPE_HEADER.len() + json.len() + css.len() + 2);
+    out.extend_from_slice(CACHE_ENVELOPE_HEADER.as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(json.as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(css);
+    out
+}
+
+/// Split a cache value back into its manifest and CSS bytes. `None`
+/// for anything that is not a well-formed envelope (a pre-envelope raw
+/// CSS entry, a truncated write) — the caller treats that as a miss.
+fn decode_cache_value(bytes: &[u8]) -> Option<(Vec<ManifestEntry>, &[u8])> {
+    let header_end = bytes.iter().position(|&b| b == b'\n')?;
+    if &bytes[..header_end] != CACHE_ENVELOPE_HEADER.as_bytes() {
+        return None;
+    }
+    let rest = &bytes[header_end + 1..];
+    let json_end = rest.iter().position(|&b| b == b'\n')?;
+    let manifest: Vec<ManifestEntry> = serde_json::from_slice(&rest[..json_end]).ok()?;
+    Some((manifest, &rest[json_end + 1..]))
+}
+
+/// Why a cache lookup did not produce CSS.
+enum CacheMiss {
+    /// No entry under the key, an undecodable entry, or a cache error.
+    Absent,
+    /// An entry whose import manifest no longer matches the files.
+    Stale,
+}
+
+/// Look `key` up in the `sass` namespace and return its CSS if the
+/// entry decodes and its manifest is still current.
+async fn cache_lookup_css(runtime: &dyn SystemRuntime, key: &str) -> Result<String, CacheMiss> {
+    let Ok(Some(bytes)) = cache_get_lru(runtime, SASS_CACHE_NAMESPACE, key).await else {
+        return Err(CacheMiss::Absent);
+    };
+    let Some((manifest, css)) = decode_cache_value(&bytes) else {
+        return Err(CacheMiss::Absent);
+    };
+    if !manifest_is_current(runtime, &manifest) {
+        return Err(CacheMiss::Stale);
+    }
+    String::from_utf8(css.to_vec()).map_err(|_| CacheMiss::Absent)
+}
+
+/// Store `css` under `key` with the manifest of `loaded_files`
+/// (best-effort: cache errors are not surfaced).
+async fn cache_store_css(
+    runtime: &dyn SystemRuntime,
+    key: &str,
+    css: &str,
+    loaded_files: &[PathBuf],
+) {
+    let manifest = build_manifest(runtime, loaded_files);
+    let _ = cache_set_lru(
+        runtime,
+        SASS_CACHE_NAMESPACE,
+        key,
+        &encode_cache_value(&manifest, css.as_bytes()),
+        SASS_CACHE_BUDGET_BYTES,
+    )
+    .await;
 }
 
 /// Compile theme CSS and store as a pipeline artifact.
@@ -162,7 +425,16 @@ impl Default for CompileThemeCssStage {
 /// The key is `SHA256(SCSS_RESOURCES_HASH + theme_identities +
 /// custom_file_contents + doc_vars + minified)`. Built-in themes contribute
 /// only their name (content is already covered by `SCSS_RESOURCES_HASH`).
-/// Custom themes contribute their resolved path and file contents.
+/// Custom themes contribute their resolved path and file contents. The
+/// path is the one `ThemeContext::resolve_path` returns — lexically
+/// normalized, so the per-document spellings the metadata merge
+/// produces for one file (`../theme.scss` vs `../../theme.scss`) share
+/// a key (bd-79c4do6g). The files a custom theme `@import`s are **not**
+/// in the key: they are only known after compiling, so they travel in
+/// the cached value's manifest instead and are validated on lookup
+/// (bd-m3hga05o; see the envelope section above). The path stays in the
+/// key anyway — it keeps two directories with same-text themes apart
+/// without a manifest read.
 /// `doc_vars` contributes its serialized `defaults` string so two
 /// documents with different per-document variables (e.g. docked vs.
 /// floating sidebar → different `$sidebar-border`) get distinct keys
@@ -206,6 +478,12 @@ fn cache_key(
                 // absent here we still hash the marker — `compile_with_doc_vars`
                 // will fail downstream, and the failure path bypasses
                 // the cache.
+                //
+                // Deliberately NOT keyed on the document's location:
+                // a brand's `@font-face` URLs are the constant
+                // `fonts/<name>` (bd-ve916wr8), so the compiled CSS is
+                // the same for every page. The font *names* are part
+                // of the YAML, so renaming a file does invalidate.
                 if let Some(brand) = theme_context.brand() {
                     let yaml = serde_yaml::to_string(brand)
                         .map_err(|e| format!("serialize brand for cache key: {e}"))?;
@@ -222,6 +500,28 @@ fn cache_key(
     // this hash should grow accordingly.
     hasher.update(b"doc_vars:");
     hasher.update(doc_vars.defaults.as_bytes());
+    hasher.update(b"\n");
+
+    // …and its rules section, when non-empty: the book-projects rules
+    // layer (`BOOK_SCSS_RULES`, appended by `run` for book projects)
+    // must discriminate the key, or a cached non-book compile of the
+    // same themes/doc-vars would serve the book page without the rule
+    // (and a cached book compile would leak the rule into non-book
+    // pages). Hashed only when non-empty so every existing (rules-free)
+    // cache key — and its cache entries — stay valid.
+    if !doc_vars.rules.is_empty() {
+        hasher.update(b"doc_rules:");
+        hasher.update(doc_vars.rules.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    // Include the highlight palette (bd-0pic6 phase B): the same theme
+    // list compiles differently under different `highlight-style`
+    // values, so the palette name must discriminate cache entries.
+    hasher.update(b"highlight:");
+    if let Some(style) = &theme_config.highlight_style {
+        hasher.update(style.name.as_bytes());
+    }
     hasher.update(b"\n");
 
     // Include minification flag
@@ -260,13 +560,19 @@ impl PipelineStage for CompileThemeCssStage {
         input: PipelineData,
         ctx: &mut StageContext,
     ) -> Result<PipelineData, PipelineError> {
-        let PipelineData::DocumentAst(doc) = input else {
+        let PipelineData::DocumentAst(mut doc) = input else {
             return Err(PipelineError::unexpected_input(
                 self.name(),
                 self.input_kind(),
                 input.kind(),
             ));
         };
+
+        // The span of the whole `theme:` value. Compile failures carry
+        // no location of their own (grass points into the assembled
+        // bundle), so their structured diagnostic anchors here
+        // (bd-jsvetdea). `None` for documents without a `theme:` key.
+        let theme_location = doc.ast.meta.get("theme").map(|v| v.source_info.clone());
 
         // `format: revealjs` uses its own reveal.js CSS + theme, not Bootstrap.
         // A reveal theme name like `white` is not a Bootswatch theme — running
@@ -304,35 +610,53 @@ impl PipelineStage for CompileThemeCssStage {
             // against the project dir, mirroring the HTML path. Reveal resolves
             // brand on its own because the Bootstrap `ThemeConfig` theme path
             // rejects reveal theme names.
-            let brand_layers = quarto_sass::resolve_brand_layers(
+            let brand_layers = match quarto_sass::resolve_brand(
                 &doc.ast.meta,
                 ctx.runtime.as_ref(),
                 &ctx.project.dir,
-                std::path::Path::new(""),
             )
             .map_err(|e| {
-                PipelineError::stage_error(self.name(), format!("brand resolution: {e}"))
-            })?;
+                PipelineError::Structured(crate::theme_diagnostic::sass_error_to_parse_error(
+                    &e,
+                    &theme_error_candidates(ctx),
+                ))
+            })? {
+                Some(brand) => {
+                    // Reveal's theme CSS lives under `revealjs/`, so its
+                    // `source: file` fonts publish to `revealjs/fonts/`
+                    // (bd-ve916wr8) — same contract as the Bootstrap path.
+                    let runtime = ctx.runtime.clone();
+                    let warnings = crate::brand_fonts::publish_brand_fonts(
+                        &mut ctx.artifacts,
+                        runtime.as_ref(),
+                        &ctx.project.dir,
+                        &[&brand],
+                        REVEAL_THEME_ARTIFACT_DIR,
+                    )
+                    .map_err(PipelineError::Structured)?;
+                    ctx.add_diagnostics(warnings);
+                    quarto_sass::brand_to_layers(&brand.brand).map_err(|e| {
+                        PipelineError::Structured(
+                            crate::theme_diagnostic::sass_error_to_parse_error(
+                                &e,
+                                &theme_error_candidates(ctx),
+                            ),
+                        )
+                    })?
+                }
+                None => Vec::new(),
+            };
             resolution.layers.extend(brand_layers);
 
             // Compile Quarto's reveal theme (single unified SCSS pass, D1) and
             // register it as the theme-slot artifact (keyed by content
-            // fingerprint). On a *compile* failure we fall back to the vendored
-            // stock theme CSS so the deck still renders (mirrors the Bootstrap
-            // path's graceful fallback).
-            let compiled =
-                match compile_reveal(ctx, true, &resolution.layers, &resolution.load_paths).await {
-                    Ok(css) => Some(css),
-                    Err(e) => {
-                        trace_event!(
-                            ctx,
-                            EventLevel::Warn,
-                            "reveal theme compilation failed: {}, using vendored stock theme",
-                            e
-                        );
-                        None
-                    }
-                };
+            // fingerprint). A compile failure is a structured hard error
+            // (Q-14-6), same as the Bootstrap path — it used to fall back
+            // to the vendored stock theme with only a trace-level warning,
+            // which no CLI observer receives (bd-jsvetdea).
+            let compiled = compile_reveal(ctx, true, &resolution.layers, &resolution.load_paths)
+                .await
+                .map_err(|e| structured_compile_error(ctx, &e, theme_location.clone()))?;
             // Render (`revealjs`) links the full vendored asset set
             // (reset/reveal/theme/quarto-reveal + reveal.js) via `site_libs`;
             // the assembler emits `<link>`s in cascade order. Preview
@@ -344,11 +668,9 @@ impl PipelineStage for CompileThemeCssStage {
             // preview's theme transport verbatim — no preview-specific WASM
             // plumbing (bd-y259zb57).
             if ctx.format.target_format == "q2-slides" {
-                let theme_css = compiled
-                    .unwrap_or_else(|| crate::revealjs::stock_reveal_theme_css().to_string());
-                store_css(ctx, theme_css);
+                store_css(ctx, compiled);
             } else {
-                crate::revealjs::register_reveal_assets(&mut ctx.artifacts, compiled.as_deref());
+                crate::revealjs::register_reveal_assets(&mut ctx.artifacts, Some(&compiled));
             }
             return Ok(PipelineData::DocumentAst(doc));
         }
@@ -368,208 +690,491 @@ impl PipelineStage for CompileThemeCssStage {
         let theme_config = match ThemeConfig::from_config_value(&doc.ast.meta) {
             Ok(c) => c,
             Err(e) => {
-                // The error's source span can point at either the
-                // project's _quarto.yml (most common) OR the
-                // document's own frontmatter (when the document
-                // overrides `theme:`). Hand the converter both
-                // candidates with their FileId bindings:
-                // - _quarto.yml uses the YAML parser's hash-based
-                //   FileId (via `quarto_yaml::file_id_for_filename`).
-                // - The document uses pampa's primary FileId(0).
-                let mut candidates: Vec<(quarto_source_map::FileId, &std::path::Path)> = Vec::new();
-                if let Some(p) = ctx.project.config.config_path.as_deref() {
-                    let fid = quarto_yaml::file_id_for_filename(&p.to_string_lossy());
-                    candidates.push((fid, p));
-                }
-                candidates.push((quarto_source_map::FileId(0), ctx.document.input.as_path()));
-                let pe = crate::theme_diagnostic::sass_error_to_parse_error(&e, &candidates);
+                let pe = crate::theme_diagnostic::sass_error_to_parse_error(
+                    &e,
+                    &theme_error_candidates(ctx),
+                );
                 return Err(PipelineError::Structured(pe));
             }
         };
 
-        // `theme: none` → ship the static lightweight DEFAULT_CSS without
-        // compiling Bootstrap. This is the explicit opt-out path.
-        if theme_config.suppress_bootstrap {
-            trace_event!(
-                ctx,
-                EventLevel::Debug,
-                "theme: none set, using static DEFAULT_CSS"
-            );
-            store_default_css(ctx);
-            return Ok(PipelineData::DocumentAst(doc));
-        }
+        // ── Variant-aware compilation (bd-0pic6, phase A2) ─────────
+        // The light variant always compiles. A `theme: {light: …,
+        // dark: …}` map additionally compiles the dark half — through
+        // the exact same pure pipeline, via the projected
+        // `dark_variant()` config — into its own `css:theme-dark:*`
+        // artifact. The interim Q-14-3 warning (bd-o76p01wb) is
+        // retired: nothing is ignored anymore.
 
-        // Ensure the sass namespace matches the current SCSS resources
-        // generation. When this returns `false` the cache layer is
-        // unavailable and we compile without caching.
-        let cache_ok = ensure_sass_cache_ready(ctx.runtime.as_ref()).await;
-
-        // Build the per-document SCSS variables layer (Phase 2 of bd-k8y0).
-        // Today this is just `$sidebar-border` from `website.sidebar.style`,
-        // but the same hook is the home for future `$sidebar-bg`,
-        // `$navbar-bg`, etc. injections — see the plan and `derive_doc_scss_layer`.
-        let doc_vars = derive_doc_scss_layer(&doc.ast.meta);
-
-        // Fast path: no themes, no doc-derived variables, and the
-        // default layer set (title-block layer included). Use the
-        // shared, cached default-CSS bundle. This preserves byte-identity
-        // with prior behavior for plain documents (no website / no sidebar).
-        // `title-block-style: plain|none` docs take the fingerprinted
-        // path below so their layer-less bundle gets its own cache key.
-        if !theme_config.has_themes() && doc_vars.is_empty() && theme_config.title_block_layer {
-            // Try the runtime cache first (cross-session persistence).
-            if cache_ok
-                && let Ok(Some(cached)) = cache_get_lru(
-                    ctx.runtime.as_ref(),
-                    SASS_CACHE_NAMESPACE,
-                    default_cache_key(theme_config.minified),
+        // Unknown `highlight-style:` names fall back to the default
+        // palette inside quarto-sass; make the fallback loud with one
+        // Q-14-5 warning per distinct unknown name (bd-0pic6 phase B —
+        // same data-then-diagnostic split as the theme codes).
+        {
+            let mut warned: Vec<&str> = Vec::new();
+            let variant_styles = [
+                theme_config.highlight_style.as_ref(),
+                theme_config
+                    .dark
+                    .as_ref()
+                    .and_then(|d| d.highlight_style.as_ref()),
+            ];
+            for style in variant_styles.into_iter().flatten() {
+                if quarto_sass::is_known_highlight_palette(&style.name)
+                    || warned.contains(&style.name.as_str())
+                {
+                    continue;
+                }
+                warned.push(style.name.as_str());
+                let mut builder = quarto_error_reporting::DiagnosticMessageBuilder::warning(
+                    "Unknown highlight style",
                 )
-                .await
-                && let Ok(css) = String::from_utf8(cached)
-            {
-                trace_event!(ctx, EventLevel::Debug, "cache hit for default CSS");
-                store_css(ctx, css);
-                return Ok(PipelineData::DocumentAst(doc));
-            }
-
-            trace_event!(
-                ctx,
-                EventLevel::Debug,
-                "no theme / no doc-vars, compiling default Bootstrap + Quarto layer"
-            );
-            match compile_default(ctx, theme_config.minified).await {
-                Ok(css) => {
-                    if cache_ok {
-                        let _ = cache_set_lru(
-                            ctx.runtime.as_ref(),
-                            SASS_CACHE_NAMESPACE,
-                            default_cache_key(theme_config.minified),
-                            css.as_bytes(),
-                            SASS_CACHE_BUDGET_BYTES,
-                        )
-                        .await;
-                    }
-                    store_css(ctx, css);
+                .with_code("Q-14-5")
+                .problem(format!(
+                    "`highlight-style: {}` does not name a highlight palette \
+                     shipped with Quarto; the default palette is used instead.",
+                    style.name
+                ))
+                .add_hint(format!(
+                    "Available palettes: {}. Adaptive names resolve per theme \
+                     variant; explicit `<name>-light` / `<name>-dark` forms \
+                     are also accepted.",
+                    quarto_sass::known_highlight_palettes().join(", ")
+                ));
+                if let Some(loc) = &style.location {
+                    builder = builder.with_location(loc.clone());
                 }
-                Err(e) => {
-                    trace_event!(
-                        ctx,
-                        EventLevel::Warn,
-                        "default Bootstrap compilation failed: {}, using static DEFAULT_CSS",
-                        e
-                    );
-                    store_default_css(ctx);
-                }
+                ctx.add_diagnostic(builder.build());
             }
-            return Ok(PipelineData::DocumentAst(doc));
         }
 
-        // Themed and/or doc-vars-bearing path: compute fingerprinted cache
-        // key (factors in theme identities + doc-vars), check the runtime
-        // cache, then compile via `compile_with_doc_vars` on miss.
+        // Per-document SCSS variables layer (Phase 2 of bd-k8y0),
+        // shared by both variants. Today this is just
+        // `$sidebar-border` from `website.sidebar.style`; the same
+        // hook is the home for future `$sidebar-bg`, `$navbar-bg`,
+        // etc. injections — see `derive_doc_scss_layer`.
+        let mut doc_vars = derive_doc_scss_layer(&doc.ast.meta);
+
+        // book-projects P4: Q1's `bookScssBundle()` adds one extra rules
+        // layer to every Bootstrap-based HTML page of a book project —
+        // `.sidebar-item .chapter-number { color: $body-color; }` — so
+        // the decorated sidebar chapter numbers render in the body
+        // color. Ported as rules on the doc-vars layer: as the last
+        // user layer its rules section compiles after every Bootstrap
+        // default, so `$body-color` resolves. Variant suppression
+        // (`theme: none`) returns DEFAULT_CSS before this layer is ever
+        // compiled, matching Q1's `formatHasBootstrap` gate in spirit;
+        // revealjs targets returned above for the same reason.
+        if ctx.project.project_kind() == ProjectKind::Book {
+            doc_vars.rules.push_str(BOOK_SCSS_RULES);
+        }
+
+        // Ensure the sass namespace matches the current SCSS
+        // resources generation — only worth the roundtrip when some
+        // variant actually compiles. `false` → compile without
+        // caching.
+        let cache_ok = if theme_config.ships_bootstrap() {
+            ensure_sass_cache_ready(ctx.runtime.as_ref()).await
+        } else {
+            false
+        };
+
         let document_dir = doc
             .path
             .parent()
             .map_or_else(|| PathBuf::from("."), |p| p.to_path_buf());
 
-        // Resolve the brand (if any) before building the theme context.
-        // I/O happens here. Failures are user-facing configuration
-        // errors (missing `_brand.yml`, invalid YAML, unknown brand
-        // shape) — propagate them rather than silently shipping
-        // DEFAULT_CSS, same reasoning as the `from_config_value`
-        // error path above.
+        // Resolve every brand and attach any dark variant the brand
+        // *content* calls for (bd-0pic6 phase C + the unified split,
+        // bd-unified-brand-split-ep49amad): the brand file is read
+        // ONCE, parsed as a unified brand ({light:, dark:} values
+        // allowed), and split — the light variant compiles with the
+        // light half, the dark variant with the dark half; a brand
+        // whose content enables dark mode synthesizes the dark
+        // variant right here. I/O happens here. Failures are
+        // user-facing configuration errors (missing `_brand.yml`,
+        // invalid YAML, unknown brand shape, an invalid font weight) —
+        // propagate them as structured diagnostics, same as the
+        // `from_config_value` error path above: `Q-14-1` for shape
+        // errors (span-less: `_brand.yml` values carry no source
+        // info), `Q-14-8` for an invalid weight (with a span into
+        // `_brand.yml`, bd-5fseopxy).
         let resolved = theme_config
-            .clone()
-            .resolve(ctx.runtime.as_ref(), &ctx.project.dir)
+            .resolve_variants(ctx.runtime.as_ref(), &ctx.project.dir)
             .map_err(|e| {
-                PipelineError::stage_error(self.name(), format!("brand resolution: {e}"))
+                PipelineError::Structured(crate::theme_diagnostic::sass_error_to_parse_error(
+                    &e,
+                    &theme_error_candidates(ctx),
+                ))
             })?;
+        let theme_config = &resolved.config;
 
-        let mut theme_context = ThemeContext::new(document_dir, ctx.runtime.as_ref());
-        if let Some(brand) = resolved.brand.as_ref() {
-            let brand_dir = resolved
-                .brand_dir
-                .clone()
-                .unwrap_or_else(|| ctx.project.dir.clone());
-            theme_context = theme_context.with_brand(brand, brand_dir);
+        // The ThemeContexts borrow a local Arc clone of the runtime
+        // (not `ctx`) so `ctx` stays mutably borrowable inside
+        // `variant_css`.
+        let runtime = ctx.runtime.clone();
+        // Publish every `source: file` brand font beside the theme CSS
+        // (bd-ve916wr8): the SCSS layer references `fonts/<name>`, and
+        // these artifacts are what make that URL resolve. Light and
+        // dark brands both contribute; a same-name/different-bytes
+        // clash is a hard `Q-14-10` error, a missing file or an
+        // unsupported key only warns.
+        let brands: Vec<&quarto_brand::ResolvedBrand> = resolved
+            .light_brand
+            .iter()
+            .chain(resolved.dark_brand.iter())
+            .collect();
+        if !brands.is_empty() {
+            let warnings = crate::brand_fonts::publish_brand_fonts(
+                &mut ctx.artifacts,
+                runtime.as_ref(),
+                &ctx.project.dir,
+                &brands,
+                theme_artifact_dir(ctx.project.is_single_file),
+            )
+            .map_err(PipelineError::Structured)?;
+            ctx.add_diagnostics(warnings);
         }
 
-        let key = match cache_key(
-            &theme_config,
-            &theme_context,
-            ctx.runtime.as_ref(),
-            &doc_vars,
-        ) {
-            Ok(k) => k,
-            Err(e) => {
-                trace_event!(
-                    ctx,
-                    EventLevel::Warn,
-                    "failed to compute cache key: {}, compiling without cache",
-                    e
-                );
-                // Fall through with no cache key — will compile without caching
-                String::new()
-            }
-        };
+        let mut theme_context = ThemeContext::new(document_dir.clone(), runtime.as_ref());
+        if let Some(rb) = resolved.light_brand.as_ref() {
+            theme_context = theme_context.with_brand(&rb.brand);
+        }
 
-        // Check cache (best-effort — errors are non-fatal).
-        if cache_ok
-            && !key.is_empty()
-            && let Ok(Some(cached)) =
-                cache_get_lru(ctx.runtime.as_ref(), SASS_CACHE_NAMESPACE, &key).await
-            && let Ok(css) = String::from_utf8(cached)
-        {
-            trace_event!(
+        let light_css = variant_css(
+            ctx,
+            theme_config,
+            &theme_context,
+            &doc_vars,
+            cache_ok,
+            theme_location.as_ref(),
+        )
+        .await?;
+
+        if let Some(dark_cfg) = theme_config.dark_variant() {
+            let mut dark_context = ThemeContext::new(document_dir, runtime.as_ref());
+            if let Some(rb) = resolved.dark_brand.as_ref() {
+                dark_context = dark_context.with_brand(&rb.brand);
+            }
+            let dark_css = variant_css(
                 ctx,
-                EventLevel::Debug,
-                "cache hit for theme CSS (key={})",
-                key
+                &dark_cfg,
+                &dark_context,
+                &doc_vars,
+                cache_ok,
+                theme_location.as_ref(),
+            )
+            .await?;
+            let dark_is_default = theme_config.dark.as_ref().is_some_and(|d| d.is_default);
+            store_variant_pair(ctx, light_css, dark_css, dark_is_default);
+            // Record the pair decision where the downstream consumers
+            // can read it (`rendered.theme.dark-is-default`). The
+            // color-mode script/meta (ApplyTemplateStage) and the
+            // navbar toggle (AstTransformsStage) both run after this
+            // stage but cannot re-derive a CONTENT-driven dark
+            // variant from config alone — this key is the single
+            // source of truth; their config re-derivation remains
+            // only as a fallback for pipelines that skip this stage.
+            let si = doc.ast.meta.source_info.clone();
+            doc.ast.meta.insert_path(
+                &["rendered", "theme", "dark-is-default"],
+                quarto_pandoc_types::ConfigValue::new_bool(dark_is_default, si),
             );
-            store_css(ctx, css);
-            return Ok(PipelineData::DocumentAst(doc));
+        } else {
+            // Single variant: plain, attribute-free link — byte-identical
+            // to the pre-light/dark output.
+            store_css(ctx, light_css);
+        }
+
+        Ok(PipelineData::DocumentAst(doc))
+    }
+}
+
+/// Produce the compiled CSS for ONE variant (the top-level light
+/// config, or the projection `ThemeConfig::dark_variant()` of the
+/// dark half). Pure with respect to artifacts — the caller stores the
+/// result under the variant's key — but reads/writes the runtime CSS
+/// cache and emits trace events.
+///
+/// Error contract: every failure is a structured hard error.
+/// Dangling custom themes are Q-14-4; a theme file without layer
+/// markers is Q-14-7; any other compile failure (grass / dart-sass,
+/// on the themed *or* the default-bundle path) is Q-14-6, anchored at
+/// `theme_location` — the whole `theme:` value — since the compiler
+/// only knows lines of the assembled bundle. Compile failures used to
+/// degrade to `DEFAULT_CSS` with a trace-level warning that no CLI
+/// observer receives, so a one-line unit mistake in a user theme
+/// silently shipped an unstyled page (bd-jsvetdea, bd-qmpygp02,
+/// decision recorded in bd-36vmz7nk).
+async fn variant_css(
+    ctx: &mut StageContext,
+    variant_config: &ThemeConfig,
+    theme_context: &ThemeContext<'_>,
+    doc_vars: &SassLayer,
+    cache_ok: bool,
+    theme_location: Option<&quarto_source_map::SourceInfo>,
+) -> Result<String, PipelineError> {
+    // `theme: none` (for this variant) → the static lightweight
+    // DEFAULT_CSS without compiling Bootstrap. Explicit opt-out.
+    if variant_config.suppress_bootstrap {
+        trace_event!(
+            ctx,
+            EventLevel::Debug,
+            "theme: none set, using static DEFAULT_CSS"
+        );
+        return Ok(DEFAULT_CSS.to_string());
+    }
+
+    // Fast path: no themes, no doc-derived variables, no
+    // highlight-style, and the default layer set (title-block layer
+    // included). Use the shared, cached default-CSS bundle. This
+    // preserves byte-identity with prior behavior for plain documents
+    // (no website / no sidebar). `title-block-style: plain|none` docs
+    // and `highlight-style:` docs take the fingerprinted path below so
+    // their non-default bundles get their own cache keys.
+    if !variant_config.has_themes()
+        && doc_vars.is_empty()
+        && variant_config.title_block_layer
+        && variant_config.highlight_style.is_none()
+    {
+        // Try the runtime cache first (cross-session persistence). The
+        // default bundle loads nothing through the runtime, so its
+        // manifest is empty and validation is trivial.
+        if cache_ok
+            && let Ok(css) = cache_lookup_css(
+                ctx.runtime.as_ref(),
+                default_cache_key(variant_config.minified),
+            )
+            .await
+        {
+            trace_event!(ctx, EventLevel::Debug, "cache hit for default CSS");
+            sass_perf::HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(css);
         }
 
         trace_event!(
             ctx,
             EventLevel::Debug,
-            "compiling theme CSS ({} themes, doc_vars={} bytes, key={})",
-            theme_config.themes.len(),
-            doc_vars.defaults.len(),
-            key
+            "no theme / no doc-vars, compiling default Bootstrap + Quarto layer"
         );
-
-        let css =
-            compile_with_doc_vars_via_runtime(ctx, &theme_config, &theme_context, &doc_vars).await;
-
-        match css {
+        sass_perf::COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !cache_ok {
+            sass_perf::UNCACHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return match compile_default(ctx, variant_config.minified).await {
             Ok(css) => {
-                // Store in cache (best-effort, skip if no key or cache unavailable).
-                if cache_ok && !key.is_empty() {
-                    let _ = cache_set_lru(
+                if cache_ok {
+                    cache_store_css(
                         ctx.runtime.as_ref(),
-                        SASS_CACHE_NAMESPACE,
-                        &key,
-                        css.as_bytes(),
-                        SASS_CACHE_BUDGET_BYTES,
+                        default_cache_key(variant_config.minified),
+                        &css,
+                        &[],
                     )
                     .await;
                 }
-                store_css(ctx, css);
+                Ok(css)
             }
-            Err(e) => {
+            // No user input is in this bundle, so a failure here is a
+            // Quarto bug or a broken install — still a hard error, not
+            // a silent downgrade to the static DEFAULT_CSS.
+            Err(e) => Err(structured_compile_error(ctx, &e, theme_location.cloned())),
+        };
+    }
+
+    // Themed and/or doc-vars-bearing path: compute fingerprinted cache
+    // key (factors in theme identities + doc-vars), check the runtime
+    // cache, then compile via `compile_with_doc_vars` on miss.
+    //
+    // Up-front validation: every custom theme entry must resolve
+    // to a real file (bd-of20unsb). Before this check, a dangling
+    // entry surfaced only as a compile failure swallowed by the
+    // DEFAULT_CSS fallback below — silently dropping the *entire*
+    // theme list, valid entries included. A dangling entry is a
+    // user-facing configuration error, so it gets the same
+    // structured hard-error treatment as the `from_config_value`
+    // path in `run`: Q-14-4, with a span at the offending `theme:`
+    // entry (the dark half's entries carry their own locations).
+    for (i, spec) in variant_config.themes.iter().enumerate() {
+        let Some(path) = spec.as_custom() else {
+            continue;
+        };
+        let resolved_path = theme_context.resolve_path(path);
+        let exists = ctx
+            .runtime
+            .path_exists(&resolved_path, Some(PathKind::File))
+            .unwrap_or(false);
+        if !exists {
+            let err = quarto_sass::SassError::CustomThemeNotFound {
+                path: resolved_path,
+                location: variant_config.theme_locations.get(i).cloned().flatten(),
+            };
+            let pe = crate::theme_diagnostic::sass_error_to_parse_error(
+                &err,
+                &theme_error_candidates(ctx),
+            );
+            return Err(PipelineError::Structured(pe));
+        }
+    }
+
+    let key = match cache_key(
+        variant_config,
+        theme_context,
+        ctx.runtime.as_ref(),
+        doc_vars,
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            trace_event!(
+                ctx,
+                EventLevel::Warn,
+                "failed to compute cache key: {}, compiling without cache",
+                e
+            );
+            // Fall through with no cache key — will compile without caching
+            String::new()
+        }
+    };
+
+    // Check cache (best-effort — errors are non-fatal). A key hit whose
+    // import manifest no longer matches is a miss too (an `@import`ed
+    // partial changed); counted separately so the gauge can tell the
+    // two apart.
+    if cache_ok && !key.is_empty() {
+        match cache_lookup_css(ctx.runtime.as_ref(), &key).await {
+            Ok(css) => {
                 trace_event!(
                     ctx,
-                    EventLevel::Warn,
-                    "theme CSS compilation failed: {}, using default CSS",
-                    e
+                    EventLevel::Debug,
+                    "cache hit for theme CSS (key={})",
+                    key
                 );
-                store_default_css(ctx);
+                sass_perf::HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(css);
             }
+            Err(CacheMiss::Stale) => {
+                trace_event!(
+                    ctx,
+                    EventLevel::Debug,
+                    "cached theme CSS is stale: an imported file changed (key={})",
+                    key
+                );
+                sass_perf::STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(CacheMiss::Absent) => {}
         }
-
-        Ok(PipelineData::DocumentAst(doc))
     }
+
+    trace_event!(
+        ctx,
+        EventLevel::Debug,
+        "compiling theme CSS ({} themes, doc_vars={} bytes, key={})",
+        variant_config.themes.len(),
+        doc_vars.defaults.len(),
+        key
+    );
+
+    sass_perf::COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if !cache_ok || key.is_empty() {
+        sass_perf::UNCACHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    match compile_with_doc_vars_via_runtime(ctx, variant_config, theme_context, doc_vars).await {
+        Ok(out) => {
+            // Store in cache (best-effort, skip if no key or cache
+            // unavailable), with the import closure this compile loaded.
+            if cache_ok && !key.is_empty() {
+                cache_store_css(ctx.runtime.as_ref(), &key, &out.css, &out.loaded_files).await;
+            }
+            Ok(out.css)
+        }
+        Err(e) => {
+            let e = attach_entry_location(e, variant_config, theme_context);
+            Err(structured_compile_error(ctx, &e, theme_location.cloned()))
+        }
+    }
+}
+
+/// Lift a compile-path [`quarto_sass::SassError`] into the structured
+/// hard error every theme failure is (bd-jsvetdea): Q-14-6 / Q-14-7
+/// via `theme_diagnostic`, anchored at `location` (the whole `theme:`
+/// value) when the error carries no span of its own.
+fn structured_compile_error(
+    ctx: &StageContext,
+    err: &quarto_sass::SassError,
+    location: Option<quarto_source_map::SourceInfo>,
+) -> PipelineError {
+    let pe = crate::theme_diagnostic::sass_error_to_parse_error_at(
+        err,
+        location,
+        &theme_error_candidates(ctx),
+    );
+    PipelineError::Structured(pe)
+}
+
+/// Give an [`quarto_sass::SassError::InvalidScssFile`] the span of the
+/// `theme:` entry that named it, when its resolved path matches one of
+/// the variant's custom entries (the loader only knows the path). Any
+/// other error, or an unmatched path, passes through unchanged and
+/// falls back to the whole-`theme:` anchor.
+fn attach_entry_location(
+    err: quarto_sass::SassError,
+    config: &ThemeConfig,
+    context: &ThemeContext<'_>,
+) -> quarto_sass::SassError {
+    let entry_location = match &err {
+        quarto_sass::SassError::InvalidScssFile {
+            path,
+            location: None,
+        } => config.themes.iter().enumerate().find_map(|(i, spec)| {
+            let custom = spec.as_custom()?;
+            if context.resolve_path(custom) == *path {
+                config.theme_locations.get(i).cloned().flatten()
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    };
+    match entry_location {
+        Some(loc) => err.with_location(loc),
+        None => err,
+    }
+}
+
+/// FileId candidates for rendering a theme-config diagnostic's source
+/// span. The merged `theme:` value can live in the project's
+/// `_quarto.yml`, the document's own frontmatter, a directory
+/// `_metadata.yml` layer, or a contributing extension's
+/// `_extension.yml` (bd-r64mj1aa) — two FileId schemes:
+///
+/// - Standalone YAML files use the parser's hash-based FileId (via
+///   `quarto_yaml::file_id_for_filename`).
+/// - The document uses pampa's primary `FileId(0)`.
+fn theme_error_candidates(
+    ctx: &StageContext,
+) -> Vec<(quarto_source_map::FileId, std::path::PathBuf)> {
+    let hash = |p: &std::path::Path| quarto_yaml::file_id_for_filename(&p.to_string_lossy());
+    let mut candidates: Vec<(quarto_source_map::FileId, std::path::PathBuf)> = Vec::new();
+    if let Some(p) = ctx.project.config.config_path.as_deref() {
+        candidates.push((hash(p), p.to_path_buf()));
+    }
+    candidates.push((quarto_source_map::FileId(0), ctx.document.input.clone()));
+    // Project-profile overlays / `_quarto.yml.local` (bd-fu16z22k):
+    // a merged `theme:` can be written in any of them.
+    for p in &ctx.project.config.profile_config_paths {
+        candidates.push((hash(p), p.clone()));
+    }
+    for p in &ctx.project.config.extension_manifest_paths {
+        candidates.push((hash(p), p.clone()));
+    }
+    for p in crate::project::directory_metadata_paths_for_document(
+        &ctx.project,
+        &ctx.document.input,
+        ctx.runtime.as_ref(),
+    ) {
+        let fid = hash(&p);
+        candidates.push((fid, p));
+    }
+    candidates
 }
 
 /// Length of the theme fingerprint hex prefix used in artifact
@@ -623,13 +1228,42 @@ fn theme_artifact_key_and_path(fingerprint: &str, single_doc: bool) -> (String, 
     let path = if single_doc {
         PathBuf::from("styles.css")
     } else {
-        PathBuf::from(format!("quarto/quarto-theme-{}.css", fingerprint))
+        PathBuf::from(format!(
+            "{}/quarto-theme-{}.css",
+            theme_artifact_dir(false),
+            fingerprint
+        ))
     };
     (key, path)
 }
 
-fn store_default_css(ctx: &mut StageContext) {
-    store_css(ctx, DEFAULT_CSS.to_string());
+/// Directory (relative to the lib dir) the Bootstrap theme CSS is
+/// published in: the bare resource dir for a single document, `quarto/`
+/// for a project. Published brand fonts sit in `fonts/` under the same
+/// directory so the theme's `fonts/<name>` URLs resolve
+/// (`crate::brand_fonts`).
+fn theme_artifact_dir(single_doc: bool) -> &'static str {
+    if single_doc { "" } else { "quarto" }
+}
+
+/// The reveal counterpart of [`theme_artifact_dir`]: reveal assets are
+/// registered under `revealjs/` (`crate::revealjs::assemble`).
+const REVEAL_THEME_ARTIFACT_DIR: &str = "revealjs";
+
+/// Dark-variant analog of [`theme_artifact_key_and_path`]. The key
+/// prefix is `css:theme-dark:` — deliberately NOT an extension of
+/// `css:theme:` (`'-' != ':'`), so every existing
+/// `get_by_prefix("css:theme:")` consumer (preview transport, wasm
+/// `extract_theme_fingerprint`, test assertions) keeps selecting the
+/// light variant untouched.
+fn dark_theme_artifact_key_and_path(fingerprint: &str, single_doc: bool) -> (String, PathBuf) {
+    let key = format!("css:theme-dark:{}", fingerprint);
+    let path = if single_doc {
+        PathBuf::from("styles-dark.css")
+    } else {
+        PathBuf::from(format!("quarto/quarto-theme-dark-{}.css", fingerprint))
+    };
+    (key, path)
 }
 
 fn store_css(ctx: &mut StageContext, css: String) {
@@ -643,6 +1277,106 @@ fn store_css(ctx: &mut StageContext, css: String) {
     );
 }
 
+/// Whether a compiled theme CSS is dark, per the `/*! dark */`
+/// sentinel comment the vendored `_bootstrap-rules.scss` emits when
+/// `blackness($body-bg)` crosses the threshold (Q1's mechanism —
+/// `cssHasDarkModeSentinel`). Handles custom-SCSS variants that a
+/// `BuiltInTheme::is_dark()` check could not (e.g. quarto-web's
+/// `[cosmo, theme-dark.scss]` dark half).
+fn css_is_dark(css: &str) -> bool {
+    css.contains("/*! dark */")
+}
+
+/// Emission order for the light/dark link trio (see
+/// [`crate::artifact::Artifact::link_order`]): light, then dark, then
+/// the trailing default copy. Everything else stays at order 0.
+const THEME_LINK_ORDER_LIGHT: i32 = 10;
+const THEME_LINK_ORDER_DARK: i32 = 20;
+const THEME_LINK_ORDER_EXTRA: i32 = 30;
+
+/// Store the light/dark variant pair with Q1's link attributes and
+/// FOUC-safe ordering (bd-0pic6 A3):
+///
+/// - light: `class="quarto-color-scheme" id="quarto-bootstrap"
+///   data-mode="…"` — the primary sheet, never disabled by the toggle.
+/// - dark: `class="quarto-color-scheme quarto-color-alternate"` — the
+///   alternate sheet, layered ON TOP of light when active.
+/// - author-default-light additionally re-links the light file LAST
+///   with `class="quarto-color-scheme-extra"` (class replaces, so the
+///   toggle's `.quarto-color-scheme` selectors skip it): pre-toggle
+///   paint and no-JS browsers land on the default variant because the
+///   last enabled sheet wins the cascade. Author-default-dark needs no
+///   copy — dark already loads last.
+///
+/// `data-mode` comes from each sheet's compiled darkness sentinel, not
+/// its slot: the toggle syncs `body.quarto-light`/`quarto-dark` from
+/// the active sheet's actual darkness (Q1 semantics).
+fn store_variant_pair(
+    ctx: &mut StageContext,
+    light_css: String,
+    dark_css: String,
+    dark_is_default: bool,
+) {
+    let single_doc = ctx.project.is_single_file;
+    let light_mode = if css_is_dark(&light_css) {
+        "dark"
+    } else {
+        "light"
+    };
+    let dark_mode = if css_is_dark(&dark_css) {
+        "dark"
+    } else {
+        "light"
+    };
+
+    let light_fp = theme_fingerprint(&light_css);
+    let (light_key, light_path) = theme_artifact_key_and_path(&light_fp, single_doc);
+    let dark_fp = theme_fingerprint(&dark_css);
+    let (dark_key, dark_path) = dark_theme_artifact_key_and_path(&dark_fp, single_doc);
+
+    if !dark_is_default {
+        let extra_key = format!("css:theme-extra:{}", light_fp);
+        ctx.artifacts.store(
+            extra_key,
+            Artifact::from_string(light_css.clone(), "text/css")
+                .with_path(light_path.clone())
+                .with_scope(ArtifactScope::Project)
+                .with_link_attribs([
+                    ("class", "quarto-color-scheme-extra"),
+                    ("id", "quarto-bootstrap"),
+                    ("data-mode", light_mode),
+                ])
+                .with_link_order(THEME_LINK_ORDER_EXTRA),
+        );
+    }
+
+    ctx.artifacts.store(
+        light_key,
+        Artifact::from_string(light_css, "text/css")
+            .with_path(light_path)
+            .with_scope(ArtifactScope::Project)
+            .with_link_attribs([
+                ("class", "quarto-color-scheme"),
+                ("id", "quarto-bootstrap"),
+                ("data-mode", light_mode),
+            ])
+            .with_link_order(THEME_LINK_ORDER_LIGHT),
+    );
+
+    ctx.artifacts.store(
+        dark_key,
+        Artifact::from_string(dark_css, "text/css")
+            .with_path(dark_path)
+            .with_scope(ArtifactScope::Project)
+            .with_link_attribs([
+                ("class", "quarto-color-scheme quarto-color-alternate"),
+                ("id", "quarto-bootstrap"),
+                ("data-mode", dark_mode),
+            ])
+            .with_link_order(THEME_LINK_ORDER_DARK),
+    );
+}
+
 /// Compile assembled SCSS to CSS.
 ///
 /// Uses `compile_scss_with_embedded` on native (sync, via grass) and
@@ -652,15 +1386,19 @@ fn store_css(ctx: &mut StageContext, css: String) {
 /// Native uses `grass` in-process (sync); WASM uses the dart-sass JS bridge
 /// (async). This wrapper gives the stage one call site.
 #[cfg(not(target_arch = "wasm32"))]
-async fn compile_default(ctx: &StageContext, minified: bool) -> Result<String, String> {
-    compile_default_css(ctx.runtime.as_ref(), minified).map_err(|e| e.to_string())
+async fn compile_default(
+    ctx: &StageContext,
+    minified: bool,
+) -> Result<String, quarto_sass::SassError> {
+    compile_default_css(ctx.runtime.as_ref(), minified)
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn compile_default(ctx: &StageContext, minified: bool) -> Result<String, String> {
-    compile_default_css(ctx.runtime.as_ref(), minified)
-        .await
-        .map_err(|e| e.to_string())
+async fn compile_default(
+    ctx: &StageContext,
+    minified: bool,
+) -> Result<String, quarto_sass::SassError> {
+    compile_default_css(ctx.runtime.as_ref(), minified).await
 }
 
 /// Compile Quarto's reveal.js theme CSS. Native uses `grass` in-process (sync);
@@ -672,9 +1410,8 @@ async fn compile_reveal(
     minified: bool,
     theme_layers: &[SassLayer],
     load_paths: &[PathBuf],
-) -> Result<String, String> {
+) -> Result<String, quarto_sass::SassError> {
     quarto_sass::compile_reveal_theme_css(ctx.runtime.as_ref(), minified, theme_layers, load_paths)
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -683,10 +1420,9 @@ async fn compile_reveal(
     minified: bool,
     theme_layers: &[SassLayer],
     load_paths: &[PathBuf],
-) -> Result<String, String> {
+) -> Result<String, quarto_sass::SassError> {
     quarto_sass::compile_reveal_theme_css(ctx.runtime.as_ref(), minified, theme_layers, load_paths)
         .await
-        .map_err(|e| e.to_string())
 }
 
 /// Compile a (possibly themed) bundle plus an optional doc-derived
@@ -698,10 +1434,9 @@ async fn compile_with_doc_vars_via_runtime(
     theme_config: &ThemeConfig,
     theme_context: &ThemeContext<'_>,
     doc_vars: &SassLayer,
-) -> Result<String, String> {
+) -> Result<quarto_sass::SassOutput, quarto_sass::SassError> {
     let _ = ctx; // runtime is captured inside theme_context
     quarto_sass::compile_with_doc_vars(theme_config, theme_context, doc_vars)
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -710,11 +1445,9 @@ async fn compile_with_doc_vars_via_runtime(
     theme_config: &ThemeConfig,
     theme_context: &ThemeContext<'_>,
     doc_vars: &SassLayer,
-) -> Result<String, String> {
+) -> Result<quarto_sass::SassOutput, quarto_sass::SassError> {
     let _ = ctx; // runtime is captured inside theme_context
-    quarto_sass::compile_with_doc_vars(theme_config, theme_context, doc_vars)
-        .await
-        .map_err(|e| e.to_string())
+    quarto_sass::compile_with_doc_vars(theme_config, theme_context, doc_vars).await
 }
 
 #[cfg(test)]
@@ -740,6 +1473,8 @@ mod tests {
             is_single_file: true,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::html();
@@ -759,6 +1494,8 @@ mod tests {
             is_single_file: true,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::from_format_string("q2-slides").unwrap();
@@ -776,6 +1513,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -789,7 +1527,7 @@ mod tests {
 
     fn meta_with_theme(theme: &str) -> ConfigValue {
         let theme_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String(theme.to_string())),
+            value: ConfigValueKind::scalar(Yaml::String(theme.to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -807,6 +1545,38 @@ mod tests {
         }
     }
 
+    /// Metadata with the Q1 light/dark map form:
+    /// `theme: {light: [<light>], dark: [<dark>]}` (bd-o76p01wb).
+    fn meta_with_light_dark_theme(light: &str, dark: &str) -> ConfigValue {
+        let list = |name: &str| ConfigValue {
+            value: ConfigValueKind::Array(vec![ConfigValue {
+                value: ConfigValueKind::scalar(Yaml::String(name.to_string())),
+                source_info: SourceInfo::for_test(),
+                merge_op: quarto_pandoc_types::MergeOp::Concat,
+            }]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        let entry = |key: &str, value: ConfigValue| ConfigMapEntry {
+            key: key.to_string(),
+            key_source: SourceInfo::for_test(),
+            value,
+        };
+        let theme_value = ConfigValue {
+            value: ConfigValueKind::Map(vec![
+                entry("light", list(light)),
+                entry("dark", list(dark)),
+            ]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        ConfigValue {
+            value: ConfigValueKind::Map(vec![entry("theme", theme_value)]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        }
+    }
+
     /// Locate the (single) `css:theme:*` artifact stored by
     /// [`CompileThemeCssStage`] and return its content as a string.
     /// Phase 5 retires the singleton `"css:default"` key in favor
@@ -817,6 +1587,23 @@ mod tests {
             entries.len(),
             1,
             "expected exactly one css:theme:* artifact, found {}",
+            entries.len()
+        );
+        let artifact = entries[0].1;
+        assert_eq!(artifact.scope, ArtifactScope::Project);
+        String::from_utf8(artifact.content.clone()).expect("CSS should be valid UTF-8")
+    }
+
+    /// The dark-variant artifact (`css:theme-dark:*`). Note the key
+    /// prefix deliberately does NOT match `css:theme:` — every
+    /// existing light-only consumer keeps selecting the light variant
+    /// untouched.
+    fn get_dark_css_artifact(ctx: &StageContext) -> String {
+        let entries: Vec<_> = ctx.artifacts.get_by_prefix("css:theme-dark:");
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one css:theme-dark:* artifact, found {}",
             entries.len()
         );
         let artifact = entries[0].1;
@@ -1039,6 +1826,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn light_dark_theme_map_compiles_both_variants() {
+        // bd-0pic6 phase A2: the Q1 `theme: {light: […], dark: […]}`
+        // map form compiles BOTH variants — the light half into the
+        // `css:theme:*` artifact, the dark half into `css:theme-dark:*`.
+        // The interim Q-14-3 warning is retired: nothing is ignored.
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context(runtime);
+        let stage = CompileThemeCssStage::new();
+
+        let input = make_doc_ast(meta_with_light_dark_theme("cosmo", "darkly"));
+        let output = stage
+            .run(input, &mut ctx)
+            .await
+            .expect("light/dark map form must not fail the stage");
+        assert!(output.into_document_ast().is_some());
+
+        let css = get_css_artifact(&ctx);
+        assert_ne!(
+            css, DEFAULT_CSS,
+            "light half must be compiled, not fallback"
+        );
+        assert!(
+            css.contains(".btn"),
+            "light half must produce real Bootstrap CSS"
+        );
+        assert!(
+            css.contains("color-scheme:light") || css.contains("color-scheme: light"),
+            "cosmo-based light variant must declare color-scheme light (D1a)"
+        );
+
+        let dark_css = get_dark_css_artifact(&ctx);
+        assert!(
+            dark_css.contains(".btn"),
+            "dark half must produce real Bootstrap CSS"
+        );
+        assert!(
+            dark_css.contains("color-scheme:dark") || dark_css.contains("color-scheme: dark"),
+            "darkly-based dark variant must declare color-scheme dark (D1a)"
+        );
+        assert_ne!(css, dark_css, "the two variants must differ");
+
+        assert!(
+            !ctx.diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some("Q-14-3")),
+            "Q-14-3 is retired: the dark half compiles, nothing is ignored; \
+             diagnostics: {:?}",
+            ctx.diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_theme_produces_no_dark_artifact() {
+        // A non-map theme must not grow a dark artifact.
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context(runtime);
+        let stage = CompileThemeCssStage::new();
+
+        let input = make_doc_ast(meta_with_theme("cosmo"));
+        stage.run(input, &mut ctx).await.unwrap();
+
+        let _ = get_css_artifact(&ctx); // exactly one light artifact
+        assert!(
+            ctx.artifacts.get_by_prefix("css:theme-dark:").is_empty(),
+            "plain theme must not produce a css:theme-dark:* artifact"
+        );
+    }
+
+    #[tokio::test]
     async fn reveal_preview_delivers_compiled_theme_via_css_theme_artifact() {
         // L2.1 (bd-y259zb57): `q2 preview` of a `format: revealjs` deck runs the
         // `q2-slides` pseudo-format, whose `FormatIdentifier` is `Html`. The old
@@ -1139,10 +1997,7 @@ mod tests {
         let version =
             pollster::block_on(runtime.cache_get("sass", quarto_system_runtime::CACHE_VERSION_KEY))
                 .unwrap();
-        assert_eq!(
-            version.as_deref(),
-            Some(quarto_sass::CSS_BUILD_ID.as_bytes())
-        );
+        assert_eq!(version.as_deref(), Some(sass_cache_version().as_slice()));
     }
 
     #[tokio::test]
@@ -1159,15 +2014,17 @@ mod tests {
         pollster::block_on(runtime.cache_set(
             "sass",
             quarto_system_runtime::CACHE_VERSION_KEY,
-            quarto_sass::CSS_BUILD_ID.as_bytes(),
+            &sass_cache_version(),
         ))
         .unwrap();
+        // Seeded in the stored envelope form (empty import manifest:
+        // the default bundle loads nothing through the runtime).
         const SENTINEL: &str = "/* cached sentinel */";
         pollster::block_on(quarto_system_runtime::cache_set_lru(
             runtime.as_ref(),
             "sass",
             DEFAULT_CACHE_KEY_MINIFIED,
-            SENTINEL.as_bytes(),
+            &encode_cache_value(&[], SENTINEL.as_bytes()),
             quarto_system_runtime::SASS_CACHE_BUDGET_BYTES,
         ))
         .unwrap();
@@ -1262,7 +2119,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             version.as_deref(),
-            Some(quarto_sass::CSS_BUILD_ID.as_bytes()),
+            Some(sass_cache_version().as_slice()),
             "generational purge must rewrite the sentinel to the current CSS_BUILD_ID",
         );
     }
@@ -1308,10 +2165,7 @@ mod tests {
         let version =
             pollster::block_on(runtime.cache_get("sass", quarto_system_runtime::CACHE_VERSION_KEY))
                 .unwrap();
-        assert_eq!(
-            version.as_deref(),
-            Some(quarto_sass::CSS_BUILD_ID.as_bytes())
-        );
+        assert_eq!(version.as_deref(), Some(sass_cache_version().as_slice()));
     }
 
     #[tokio::test]
@@ -1353,7 +2207,7 @@ mod tests {
 
         // theme: null
         let theme_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::Null),
+            value: ConfigValueKind::scalar(Yaml::Null),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -1387,7 +2241,7 @@ mod tests {
         let items: Vec<ConfigValue> = themes
             .iter()
             .map(|s| ConfigValue {
-                value: ConfigValueKind::Scalar(Yaml::String(s.to_string())),
+                value: ConfigValueKind::scalar(Yaml::String(s.to_string())),
                 source_info: SourceInfo::for_test(),
                 merge_op: quarto_pandoc_types::MergeOp::Concat,
             })
@@ -1424,6 +2278,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -1438,11 +2293,89 @@ mod tests {
             is_single_file: true,
             files: vec![],
             output_dir: PathBuf::from(project_dir),
+
+            ..Default::default()
         };
         let doc_path = format!("{}/test.qmd", project_dir);
         let doc = DocumentInfo::from_path(&doc_path);
         let format = Format::html();
         StageContext::new(runtime, format, project, doc).unwrap()
+    }
+
+    /// Like [`make_stage_context`], but with a specific project kind —
+    /// the gate for the book-projects `book.scss` rules layer.
+    fn make_stage_context_with_kind(
+        runtime: Arc<dyn quarto_system_runtime::SystemRuntime>,
+        kind: crate::project::ProjectKind,
+    ) -> StageContext {
+        let project = ProjectContext {
+            dir: PathBuf::from("/project"),
+            config: crate::project::ProjectConfig {
+                project_kind: kind,
+                ..Default::default()
+            },
+            is_single_file: true,
+            files: vec![],
+            output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
+        };
+        let doc = DocumentInfo::from_path("/project/test.qmd");
+        let format = Format::html();
+        StageContext::new(runtime, format, project, doc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn book_project_compiles_book_scss_rules_into_theme_css() {
+        // P4: Q1's `bookScssBundle()` ships `.sidebar-item .chapter-number
+        // { color: $body-color; }` on every Bootstrap-based HTML page of a
+        // book project. The port compiles the rule into the theme CSS
+        // (as rules on the doc-vars layer), with `$body-color` resolved
+        // by the surrounding Bootstrap compile — a hard compile error if
+        // it ever stops resolving.
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context_with_kind(runtime, crate::project::ProjectKind::Book);
+        let stage = CompileThemeCssStage::new();
+        stage
+            .run(make_doc_ast(empty_meta()), &mut ctx)
+            .await
+            .unwrap();
+
+        let css = get_css_artifact(&ctx);
+        let Some(idx) = css.find(".sidebar-item .chapter-number") else {
+            panic!(
+                "book-project theme CSS must carry the book.scss rule: {}",
+                &css[..css.len().min(500)]
+            );
+        };
+        let window_end = (idx + 200).min(css.len());
+        assert!(
+            css[idx..window_end].contains("color:"),
+            "the book rule must carry a resolved color declaration: {}",
+            &css[idx..window_end]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_book_project_does_not_gain_book_scss_rules() {
+        // The rule is book-gated: an otherwise identical non-book compile
+        // must not grow it (websites have `.sidebar-item` too, but no
+        // decorated chapter numbers to color).
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context(runtime);
+        let stage = CompileThemeCssStage::new();
+        stage
+            .run(make_doc_ast(empty_meta()), &mut ctx)
+            .await
+            .unwrap();
+
+        let css = get_css_artifact(&ctx);
+        assert!(
+            !css.contains(".sidebar-item .chapter-number"),
+            "non-book theme CSS must not gain the book.scss rule"
+        );
     }
 
     #[tokio::test]
@@ -1480,14 +2413,190 @@ mod tests {
         );
     }
 
+    // ── Compile failures are structured hard errors (bd-jsvetdea) ────
+
+    /// A well-formed layered theme whose one variable breaks the
+    /// Bootstrap grid arithmetic (`calc(... - 3em)` on a `rem` value
+    /// makes grass raise "Incompatible units px and rem"). This is the
+    /// bd-jsvetdea repro verbatim.
+    const BAD_UNITS_SCSS: &str = "/*-- scss:defaults --*/\n$grid-body-width: 52rem;\n";
+
+    /// A file that exists but has no `/*-- scss:... --*/` layer marker
+    /// (bd-qmpygp02).
+    const NO_MARKERS_SCSS: &str = ".plain-marker { color: #0a1b2c; }\n";
+
+    /// Write theme files into a fresh temp dir; returns the guard and
+    /// the canonical dir path (macOS `/tmp` is a symlink, and the stage
+    /// resolves custom themes against the document dir).
+    fn temp_theme_dir(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        for (name, contents) in files {
+            std::fs::write(dir.join(name), contents).unwrap();
+        }
+        (temp, dir)
+    }
+
+    /// `theme: {light: [..], dark: [..]}` with arbitrary lists on each
+    /// side (the single-name helper above cannot express a custom
+    /// entry in the dark half).
+    fn meta_with_light_dark_theme_lists(light: &[&str], dark: &[&str]) -> ConfigValue {
+        let list = |names: &[&str]| ConfigValue {
+            value: ConfigValueKind::Array(
+                names
+                    .iter()
+                    .map(|s| ConfigValue {
+                        value: ConfigValueKind::scalar(Yaml::String(s.to_string())),
+                        source_info: SourceInfo::for_test(),
+                        merge_op: quarto_pandoc_types::MergeOp::Concat,
+                    })
+                    .collect(),
+            ),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        let entry = |key: &str, value: ConfigValue| ConfigMapEntry {
+            key: key.to_string(),
+            key_source: SourceInfo::for_test(),
+            value,
+        };
+        let theme_value = ConfigValue {
+            value: ConfigValueKind::Map(vec![
+                entry("light", list(light)),
+                entry("dark", list(dark)),
+            ]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        };
+        ConfigValue {
+            value: ConfigValueKind::Map(vec![entry("theme", theme_value)]),
+            source_info: SourceInfo::for_test(),
+            merge_op: quarto_pandoc_types::MergeOp::Concat,
+        }
+    }
+
+    /// Unwrap a `PipelineError::Structured` carrying exactly one
+    /// diagnostic with the given code; returns its rendered text.
+    fn expect_structured(err: PipelineError, code: &str) -> String {
+        match err {
+            PipelineError::Structured(pe) => {
+                assert_eq!(
+                    pe.diagnostics.len(),
+                    1,
+                    "expected exactly one diagnostic, got {:?}",
+                    pe.diagnostics
+                );
+                let d = &pe.diagnostics[0];
+                assert_eq!(
+                    d.code.as_deref(),
+                    Some(code),
+                    "diagnostic: {}",
+                    d.to_text(None)
+                );
+                let opts = quarto_error_reporting::TextRenderOptions::default().hyperlinks(false);
+                d.to_text_with_options(Some(&pe.source_context), &opts)
+            }
+            other => panic!("expected PipelineError::Structured, got: {other}"),
+        }
+    }
+
+    fn assert_no_theme_artifacts(ctx: &StageContext) {
+        assert!(
+            ctx.artifacts.get_by_prefix("css:theme:").is_empty(),
+            "a failed compile must not store a css:theme:* artifact"
+        );
+        assert!(
+            ctx.artifacts.get_by_prefix("css:theme-dark:").is_empty(),
+            "a failed compile must not store a css:theme-dark:* artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_theme_compile_error_is_structured_q146() {
+        // bd-jsvetdea: before the fix the Err arm returned
+        // Ok(DEFAULT_CSS) and the render reported success. A grass
+        // failure with a user theme in the bundle must be a Q-14-6
+        // hard error carrying the grass text.
+        let (_temp, dir) = temp_theme_dir(&[("bad.scss", BAD_UNITS_SCSS)]);
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context_at(runtime, dir.to_str().unwrap());
+        let stage = CompileThemeCssStage::new();
+
+        let meta = meta_with_theme_array(&["cosmo", "bad.scss"]);
+        let input = make_doc_ast_at(dir.join("test.qmd").to_str().unwrap(), meta);
+        let err = stage
+            .run(input, &mut ctx)
+            .await
+            .expect_err("a theme compile failure must fail the stage");
+
+        let text = expect_structured(err, "Q-14-6");
+        assert!(
+            text.contains("Incompatible units px and rem"),
+            "diagnostic must carry the grass message:\n{text}"
+        );
+        assert_no_theme_artifacts(&ctx);
+    }
+
+    #[tokio::test]
+    async fn test_dark_variant_compile_error_is_structured_q146() {
+        // The per-variant split (bd-0pic6 A2) used to ship *light*
+        // DEFAULT_CSS under the dark key when the dark half failed.
+        // A dark-half failure is the same hard error, and neither
+        // variant's artifact is stored.
+        let (_temp, dir) = temp_theme_dir(&[("bad.scss", BAD_UNITS_SCSS)]);
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context_at(runtime, dir.to_str().unwrap());
+        let stage = CompileThemeCssStage::new();
+
+        let meta = meta_with_light_dark_theme_lists(&["cosmo"], &["darkly", "bad.scss"]);
+        let input = make_doc_ast_at(dir.join("test.qmd").to_str().unwrap(), meta);
+        let err = stage
+            .run(input, &mut ctx)
+            .await
+            .expect_err("a dark-variant compile failure must fail the stage");
+
+        let text = expect_structured(err, "Q-14-6");
+        assert!(
+            text.contains("Incompatible units px and rem"),
+            "diagnostic must carry the grass message:\n{text}"
+        );
+        assert_no_theme_artifacts(&ctx);
+    }
+
+    #[tokio::test]
+    async fn test_theme_without_layer_markers_is_structured_q147() {
+        // bd-qmpygp02: a theme file that exists but has no layer
+        // markers was swallowed by the same Err arm. It is a Q-14-7
+        // hard error naming the file.
+        let (_temp, dir) = temp_theme_dir(&[("nomarkers.scss", NO_MARKERS_SCSS)]);
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut ctx = make_stage_context_at(runtime, dir.to_str().unwrap());
+        let stage = CompileThemeCssStage::new();
+
+        let meta = meta_with_theme_array(&["cosmo", "nomarkers.scss"]);
+        let input = make_doc_ast_at(dir.join("test.qmd").to_str().unwrap(), meta);
+        let err = stage
+            .run(input, &mut ctx)
+            .await
+            .expect_err("a theme file without layer markers must fail the stage");
+
+        let text = expect_structured(err, "Q-14-7");
+        assert!(
+            text.contains("nomarkers.scss"),
+            "diagnostic must name the offending file:\n{text}"
+        );
+        assert_no_theme_artifacts(&ctx);
+    }
+
     fn make_builtin_config(theme: &str, minified: bool) -> ThemeConfig {
         let spec = ThemeSpec::parse(theme).unwrap();
         ThemeConfig {
             themes: vec![spec],
             minified,
-            suppress_bootstrap: false,
-            title_block_layer: true,
-            brand_ref: None,
+            ..ThemeConfig::default_bootstrap()
         }
     }
 
@@ -1495,9 +2604,7 @@ mod tests {
         ThemeConfig {
             themes: vec![ThemeSpec::Custom(PathBuf::from(path))],
             minified,
-            suppress_bootstrap: false,
-            title_block_layer: true,
-            brand_ref: None,
+            ..ThemeConfig::default_bootstrap()
         }
     }
 
@@ -1535,18 +2642,56 @@ mod tests {
         assert_ne!(key1, key2);
     }
 
+    /// Two *different* files with identical contents must keep
+    /// distinct keys: `a/theme.scss` and `b/theme.scss` can both say
+    /// `@import "_colors"` and mean different partials. The partials
+    /// are validated through the cached value's manifest (bd-m3hga05o),
+    /// so this is no longer load-bearing for correctness, but the
+    /// (normalized) path keeps the two entries apart without a manifest
+    /// read. MockRuntime returns empty bytes for every read, so only the
+    /// path differs.
     #[test]
-    fn test_cache_key_custom_file_reads_content() {
-        // MockRuntime returns empty bytes for file_read, so two different
-        // custom paths with the same (empty) content but different paths
-        // should still differ.
+    fn test_cache_key_distinct_files_with_same_content_stay_distinct() {
         let runtime = MockRuntime;
-        let config_a = make_custom_config("theme_a.scss", true);
-        let config_b = make_custom_config("theme_b.scss", true);
+        let config_a = make_custom_config("a/theme.scss", true);
+        let config_b = make_custom_config("b/theme.scss", true);
         let ctx = ThemeContext::new(PathBuf::from("/project"), &runtime);
         let key_a = cache_key(&config_a, &ctx, &runtime, &SassLayer::default()).unwrap();
         let key_b = cache_key(&config_b, &ctx, &runtime, &SassLayer::default()).unwrap();
         assert_ne!(key_a, key_b);
+    }
+
+    /// bd-79c4do6g: the metadata merge rewrites a project-level
+    /// `theme: [theme.scss]` to a document-relative spelling per
+    /// document (`../theme.scss`, `../../theme.scss`, …), and the key
+    /// used to hash that spelling verbatim — one cache entry per
+    /// document directory for one file (97 % miss rate on the Connect
+    /// docs). The *same file* reached from different document dirs
+    /// must produce *one* key.
+    #[test]
+    fn test_cache_key_same_file_from_different_document_dirs() {
+        let runtime = MockRuntime;
+        let cases = [
+            ("/project", "theme.scss"),
+            ("/project/a", "../theme.scss"),
+            ("/project/a/b", "../../theme.scss"),
+            ("/project/a/b", "./../../theme.scss"),
+        ];
+        let keys: Vec<String> = cases
+            .iter()
+            .map(|(doc_dir, spelling)| {
+                let ctx = ThemeContext::new(PathBuf::from(doc_dir), &runtime);
+                let config = make_custom_config(spelling, true);
+                cache_key(&config, &ctx, &runtime, &SassLayer::default()).unwrap()
+            })
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(
+                key, &keys[0],
+                "spelling {:?} from {:?} must share the root spelling's key",
+                cases[i].1, cases[i].0
+            );
+        }
     }
 
     #[test]
@@ -1802,12 +2947,12 @@ mod tests {
     fn meta_with_website_sidebar_style(style: &str) -> ConfigValue {
         // Inner sidebar object: { id: "guide", style: "<style>" }
         let style_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String(style.to_string())),
+            value: ConfigValueKind::scalar(Yaml::String(style.to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
         let id_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String("guide".to_string())),
+            value: ConfigValueKind::scalar(Yaml::String("guide".to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -1847,6 +2992,89 @@ mod tests {
         );
     }
 
+    /// Build metadata with a top-level scalar entry.
+    fn meta_with_scalar(key: &str, value: Yaml) -> ConfigValue {
+        let mut meta = empty_meta();
+        meta.insert_path(
+            &[key],
+            ConfigValue {
+                value: ConfigValueKind::scalar(value),
+                source_info: SourceInfo::for_test(),
+                merge_op: quarto_pandoc_types::MergeOp::Concat,
+            },
+        );
+        meta
+    }
+
+    #[test]
+    fn doc_scss_layer_code_block_bg_and_color_strings() {
+        // Q1 parity: `code-block-bg` / `code-block-color` document
+        // metadata land as unconditional assignments at the top of the
+        // defaults band, beating any highlight palette's `!default`
+        // (the one-line escape hatch from the palette-wins policy —
+        // bd-hl-theme-translator-2mdgh4k6).
+        let mut meta = meta_with_scalar("code-block-bg", Yaml::String("#f5f5f6".to_string()));
+        meta.insert_path(
+            &["code-block-color"],
+            ConfigValue {
+                value: ConfigValueKind::scalar(Yaml::String("#333334".to_string())),
+                source_info: SourceInfo::for_test(),
+                merge_op: quarto_pandoc_types::MergeOp::Concat,
+            },
+        );
+        let layer = derive_doc_scss_layer(&meta);
+        assert!(
+            layer.defaults.contains("$code-block-bg: #f5f5f6;"),
+            "got: {:?}",
+            layer.defaults
+        );
+        assert!(
+            layer.defaults.contains("$code-block-color: #333334;"),
+            "got: {:?}",
+            layer.defaults
+        );
+        assert!(
+            !layer.defaults.contains("!default"),
+            "doc-vars assignments must be unconditional, got: {:?}",
+            layer.defaults
+        );
+    }
+
+    #[test]
+    fn doc_scss_layer_code_block_bg_boolean() {
+        // `code-block-bg: false` disables the background;
+        // `code-block-bg: true` restores the theme-derived default.
+        // Both flow through as SCSS booleans (the `@if $code-block-bg`
+        // / `type_of == color` branches in _bootstrap-rules.scss).
+        let layer = derive_doc_scss_layer(&meta_with_scalar("code-block-bg", Yaml::Boolean(false)));
+        assert!(
+            layer.defaults.contains("$code-block-bg: false;"),
+            "got: {:?}",
+            layer.defaults
+        );
+        let layer = derive_doc_scss_layer(&meta_with_scalar("code-block-bg", Yaml::Boolean(true)));
+        assert!(
+            layer.defaults.contains("$code-block-bg: true;"),
+            "got: {:?}",
+            layer.defaults
+        );
+    }
+
+    #[test]
+    fn doc_scss_layer_code_block_bg_unsafe_value_skipped() {
+        // A value that could smuggle SCSS syntax is dropped rather
+        // than spliced into the stylesheet.
+        let layer = derive_doc_scss_layer(&meta_with_scalar(
+            "code-block-bg",
+            Yaml::String("#fff; } body { display: none".to_string()),
+        ));
+        assert!(
+            !layer.defaults.contains("code-block-bg"),
+            "unsafe value must be skipped, got: {:?}",
+            layer.defaults
+        );
+    }
+
     #[test]
     fn doc_scss_layer_docked_sidebar_emits_border_true() {
         let meta = meta_with_website_sidebar_style("docked");
@@ -1881,17 +3109,17 @@ mod tests {
     /// `sidebar.border` wins over the implicit `style == docked` default.
     fn meta_with_website_sidebar_style_and_border(style: &str, border: bool) -> ConfigValue {
         let style_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String(style.to_string())),
+            value: ConfigValueKind::scalar(Yaml::String(style.to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
         let border_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::Boolean(border)),
+            value: ConfigValueKind::scalar(Yaml::Boolean(border)),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
         let id_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String("guide".to_string())),
+            value: ConfigValueKind::scalar(Yaml::String("guide".to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -1961,7 +3189,7 @@ mod tests {
         // Same shape as `meta_with_website_sidebar_style("docked")`,
         // but stored at the top level instead of under `website:`.
         let style_value = ConfigValue {
-            value: ConfigValueKind::Scalar(Yaml::String("docked".to_string())),
+            value: ConfigValueKind::scalar(Yaml::String("docked".to_string())),
             source_info: SourceInfo::for_test(),
             merge_op: quarto_pandoc_types::MergeOp::Concat,
         };
@@ -2005,9 +3233,30 @@ mod tests {
 
         let css = get_css_artifact(&ctx);
         assert!(
-            !css.contains(".sidebar.sidebar-navigation:not(.rollup)"),
+            !has_sidebar_border_rule(&css),
             "explicit `border: false` must suppress the sidebar-border rule"
         );
+    }
+
+    /// Does the compiled CSS carry the `$sidebar-border` separator rule?
+    ///
+    /// Detects the rule by its `border-right` declaration, not by its
+    /// selector. bd-26bf3j1y added a second rule on a selector that
+    /// *contains* `.sidebar.sidebar-navigation:not(.rollup)` (the
+    /// sidebar background, `nav.`-prefixed), so a bare substring search
+    /// for the selector no longer distinguishes the two.
+    fn has_sidebar_border_rule(css: &str) -> bool {
+        let needle = ".sidebar.sidebar-navigation:not(.rollup)";
+        let mut from = 0;
+        while let Some(rel) = css[from..].find(needle) {
+            let at = from + rel;
+            let body_end = css[at..].find('}').map_or(css.len(), |i| at + i);
+            if css[at..body_end].contains("border-right") {
+                return true;
+            }
+            from = at + needle.len();
+        }
+        false
     }
 
     /// End-to-end stage test for Phase 2 of bd-k8y0: a document whose
@@ -2025,11 +3274,12 @@ mod tests {
 
         let css = get_css_artifact(&ctx);
         assert!(
-            css.contains(".sidebar.sidebar-navigation:not(.rollup)"),
-            "stage CSS for a docked sidebar must include the sidebar-border selector"
+            has_sidebar_border_rule(&css),
+            "stage CSS for a docked sidebar must include the sidebar-border rule"
         );
         let idx = css
-            .find(".sidebar.sidebar-navigation:not(.rollup)")
+            .find(".sidebar.sidebar-navigation:not(.rollup){border-right")
+            .or_else(|| css.find(".sidebar.sidebar-navigation:not(.rollup) {"))
             .unwrap();
         let tail = &css[idx..idx.saturating_add(400).min(css.len())];
         assert!(
@@ -2054,7 +3304,7 @@ mod tests {
 
         let css = get_css_artifact(&ctx);
         assert!(
-            !css.contains(".sidebar.sidebar-navigation:not(.rollup)"),
+            !has_sidebar_border_rule(&css),
             "plain doc (no website sidebar) must not emit sidebar-border rule"
         );
     }
@@ -2099,12 +3349,210 @@ mod tests {
             "docked and floating sidebars must produce different CSS — cache aliasing!"
         );
         assert!(
-            css_docked.contains(".sidebar.sidebar-navigation:not(.rollup)"),
+            has_sidebar_border_rule(&css_docked),
             "docked CSS should have the rule"
         );
         assert!(
-            !css_floating.contains(".sidebar.sidebar-navigation:not(.rollup)"),
+            !has_sidebar_border_rule(&css_floating),
             "floating CSS should NOT have the rule"
         );
+    }
+
+    // ── bd-m3hga05o: imported partials must invalidate the cache ─────
+
+    /// A custom theme that reaches a colour through `@import`; the
+    /// partial is the only file that changes between runs.
+    const IMPORTING_THEME_SCSS: &str = "/*-- scss:defaults --*/\n@import \"colors\";\n\n/*-- scss:rules --*/\n.partial-guard { color: $partial-fg; }\n";
+
+    /// Run the stage once against `dir/test.qmd` with `theme: [theme.scss]`
+    /// and return the compiled CSS.
+    async fn compile_importing_theme(
+        runtime: &Arc<dyn quarto_system_runtime::SystemRuntime>,
+        dir: &std::path::Path,
+    ) -> Result<String, PipelineError> {
+        let mut ctx = make_stage_context_at(runtime.clone(), dir.to_str().unwrap());
+        let stage = CompileThemeCssStage::new();
+        let input = make_doc_ast_at(
+            dir.join("test.qmd").to_str().unwrap(),
+            meta_with_theme_array(&["theme.scss"]),
+        );
+        stage.run(input, &mut ctx).await?;
+        Ok(get_css_artifact(&ctx))
+    }
+
+    /// The cache key hashes only the top-level theme file, so editing a
+    /// partial it `@import`s used to serve the previous compile's CSS
+    /// until the user deleted `.quarto/cache/sass` by hand. The second
+    /// run must see the partial's new colour.
+    #[tokio::test]
+    async fn test_editing_an_imported_partial_invalidates_the_cache() {
+        let (_guard, dir) = temp_theme_dir(&[
+            ("theme.scss", IMPORTING_THEME_SCSS),
+            ("_colors.scss", "$partial-fg: #123457;\n"),
+        ]);
+        let cache = tempfile::TempDir::new().unwrap();
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> = Arc::new(
+            quarto_system_runtime::NativeRuntime::with_cache_dir(cache.path().to_path_buf()),
+        );
+
+        let first = compile_importing_theme(&runtime, &dir).await.unwrap();
+        assert!(
+            first.contains("#123457"),
+            "first compile must carry the partial's colour"
+        );
+
+        std::fs::write(dir.join("_colors.scss"), "$partial-fg: #abcdef;\n").unwrap();
+        let second = compile_importing_theme(&runtime, &dir).await.unwrap();
+        assert!(
+            second.contains("#abcdef"),
+            "editing the imported partial must miss the cache and recompile; got the stale colour"
+        );
+        assert!(!second.contains("#123457"));
+
+        // Unchanged inputs still hit: same CSS, and the entry was
+        // overwritten under the same key rather than added beside it.
+        let third = compile_importing_theme(&runtime, &dir).await.unwrap();
+        assert_eq!(second, third);
+        let entries: Vec<String> = std::fs::read_dir(cache.path().join("sass"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "_lru_index" && n != "_version")
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the top-level key is unchanged, so the edit overwrites one entry; got {entries:?}"
+        );
+    }
+
+    /// Deleting a partial the cached compile depended on must not serve
+    /// the cached CSS either: the recompile fails the way a fresh
+    /// render would.
+    #[tokio::test]
+    async fn test_removing_an_imported_partial_invalidates_the_cache() {
+        let (_guard, dir) = temp_theme_dir(&[
+            ("theme.scss", IMPORTING_THEME_SCSS),
+            ("_colors.scss", "$partial-fg: #123457;\n"),
+        ]);
+        let cache = tempfile::TempDir::new().unwrap();
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> = Arc::new(
+            quarto_system_runtime::NativeRuntime::with_cache_dir(cache.path().to_path_buf()),
+        );
+        compile_importing_theme(&runtime, &dir).await.unwrap();
+
+        std::fs::remove_file(dir.join("_colors.scss")).unwrap();
+        let result = compile_importing_theme(&runtime, &dir).await;
+        assert!(
+            result.is_err(),
+            "with the partial gone the theme no longer compiles; a cache hit would hide that"
+        );
+    }
+
+    // ── Cache-value envelope (manifest + CSS) ────────────────────────
+
+    #[test]
+    fn test_cache_envelope_round_trips_manifest_and_css() {
+        let manifest = vec![
+            ManifestEntry {
+                path: "_colors.scss".to_string(),
+                sha256: "ab".repeat(32),
+            },
+            ManifestEntry {
+                path: "sub/_more.scss".to_string(),
+                sha256: "cd".repeat(32),
+            },
+        ];
+        let css = ".x{color:#123457}\n/* not a header: q2-sass-cache-v1 */";
+        let bytes = encode_cache_value(&manifest, css.as_bytes());
+        let (decoded_manifest, decoded_css) = decode_cache_value(&bytes).expect("decodes");
+        assert_eq!(decoded_manifest, manifest);
+        assert_eq!(decoded_css, css.as_bytes());
+    }
+
+    #[test]
+    fn test_cache_envelope_empty_manifest_round_trips() {
+        let css = b"body{margin:0}";
+        let bytes = encode_cache_value(&[], css);
+        let (manifest, decoded_css) = decode_cache_value(&bytes).expect("decodes");
+        assert!(manifest.is_empty());
+        assert_eq!(decoded_css, css);
+    }
+
+    /// A pre-envelope entry (raw CSS bytes) or garbage must read as a
+    /// miss, never as CSS with an empty manifest.
+    #[test]
+    fn test_cache_envelope_rejects_legacy_and_malformed_values() {
+        assert!(decode_cache_value(b"body{margin:0}").is_none());
+        assert!(decode_cache_value(b"").is_none());
+        assert!(decode_cache_value(b"q2-sass-cache-v1\nnot json\nbody{}").is_none());
+        assert!(
+            decode_cache_value(b"q2-sass-cache-v1\n[]").is_none(),
+            "missing CSS separator"
+        );
+    }
+
+    /// Manifest validation re-reads every listed file through the
+    /// runtime: current when all hashes match, stale on any mismatch or
+    /// unreadable file.
+    #[test]
+    fn test_manifest_validation_against_runtime_contents() {
+        let (_guard, dir) =
+            temp_theme_dir(&[("_colors.scss", "$c: red;"), ("_sizes.scss", "$s: 1px;")]);
+        let rt = quarto_system_runtime::NativeRuntime::new();
+        let colors = dir.join("_colors.scss");
+        let sizes = dir.join("_sizes.scss");
+
+        let current = build_manifest(&rt, &[colors.clone(), sizes.clone()]);
+        assert_eq!(current.len(), 2);
+        assert_eq!(current[0].path, quarto_util::to_forward_slashes(&colors));
+        assert_eq!(current[0].sha256, sha256_hex(b"$c: red;"));
+        assert!(manifest_is_current(&rt, &current));
+
+        let mut edited = current.clone();
+        edited[1].sha256 = sha256_hex(b"$s: 2px;");
+        assert!(
+            !manifest_is_current(&rt, &edited),
+            "a changed hash is stale"
+        );
+
+        let mut missing = current.clone();
+        missing.push(ManifestEntry {
+            path: quarto_util::to_forward_slashes(&dir.join("_gone.scss")),
+            sha256: sha256_hex(b""),
+        });
+        assert!(
+            !manifest_is_current(&rt, &missing),
+            "an unreadable file is stale"
+        );
+
+        assert!(
+            manifest_is_current(&rt, &[]),
+            "an empty manifest is trivially current"
+        );
+
+        // An edit on disk is what a lookup must notice.
+        std::fs::write(&sizes, "$s: 2px;").unwrap();
+        assert!(!manifest_is_current(&rt, &current));
+        assert!(manifest_is_current(&rt, &edited));
+    }
+
+    /// Embedded resources never enter the manifest: they are covered by
+    /// `SCSS_RESOURCES_HASH` in the key, and the runtime cannot read
+    /// them back.
+    #[test]
+    fn test_build_manifest_skips_embedded_resource_paths() {
+        let rt = MockRuntime;
+        let manifest = build_manifest(
+            &rt,
+            &[
+                PathBuf::from(format!(
+                    "{}/bootstrap/scss/_variables.scss",
+                    quarto_sass::RESOURCE_PATH_PREFIX
+                )),
+                PathBuf::from("_colors.scss"),
+            ],
+        );
+        let paths: Vec<&str> = manifest.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["_colors.scss"]);
     }
 }

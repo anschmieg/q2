@@ -1,9 +1,14 @@
-# JSON Writer Diagnostic Support - k-378
+---
+title: 'JSON Writer Diagnostic Support - k-378'
+date: 2025-11-21
+description: 'Adds diagnostic reporting to the JSON writer by accumulating errors in the source info serializer instead of calling `panic!()` or `eprintln!()`, so `--json-errors` can see them.'
+braid:
+  strand: k-378
+  priority: P0
+---
 
 <!-- quarto-error-code-audit-ignore-file -->
 
-**Date**: 2025-11-21
-**Issue**: k-378 - Add diagnostic error reporting to JSON writer
 **Blocked**: k-375 (fixing JSON writer panics)
 
 ## Problem
@@ -239,7 +244,7 @@ fn test_write_json_with_shortcode_error() {
 
 Test with actual qmd files containing problematic constructs:
 
-```bash
+```{.bash shortcodes="false"}
 # Should emit Q-3-30 error
 echo '{{< shortcode >}}' | quarto-markdown-pandoc -t json --json-errors
 
@@ -251,7 +256,7 @@ echo '{++insert++}' | quarto-markdown-pandoc -t json --json-errors
 
 ### Q-3-30: Shortcode
 
-```
+```{shortcodes="false"}
 Error: Shortcode not supported in JSON format
 
 Cannot render shortcode `{{< myshortcode >}}` in JSON format

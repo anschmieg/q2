@@ -1,6 +1,9 @@
-# Implement pandoc_code_span (Inline Code)
+---
+title: 'Implement pandoc_code_span (Inline Code)'
+date: 2025-10-31
+description: 'Plans the tree-sitter handler for inline code spans, covering backtick delimiters, optional trailing attributes and content extraction, with tests written first and checked against Pandoc output.'
+---
 
-**Date**: 2025-10-31
 **Epic**: k-274 (Tree-sitter Grammar Refactoring)
 **Phase**: 2 (Basic Formatting)
 **Priority**: HIGH
@@ -50,13 +53,13 @@ Pandoc output format:
 ### Basic Functionality
 1. ✅ Single word: `` `code` `` → `Code [["", [], []], "code"]`
 2. ✅ With spaces: `` `code with spaces` `` → `Code [["", [], []], "code with spaces"]`
-3. ✅ No spaces around: `x\`y\`z` → `[Str "x", Code [..., "y"], Str "z"]`
-4. ✅ Within text: `test \`code\` here` → `[Str "test", Space, Code [...], Space, Str "here"]`
+3. ✅ No spaces around: ``x`y`z`` → `[Str "x", Code [..., "y"], Str "z"]`
+4. ✅ Within text: ``test `code` here`` → `[Str "test", Space, Code [...], Space, Str "here"]`
 
 ### Attributes
-5. ✅ With class: `` `code`{.language} `` → `Code [["", ["language"], []], "code"]`
-6. ✅ With id: `` `code`{#myid} `` → `Code [["myid", [], []], "code"]`
-7. ✅ With key-value: `` `code`{key=value} `` → `Code [["", [], [["key", "value"]]], "code"]`
+5. ✅ With class: `` `code`\{.language\} `` → `Code \[\["", \["language"\], \[\]\], "code"\]`
+6. ✅ With id: `` `code`\{#myid\} `` → `Code \[["myid", \[\], \[\]\], "code"\]`
+7. ✅ With key-value: `` `code`\{key=value\} `` → `Code \[["", \[\], \[\["key", "value"\]\]\], "code"\]`
 
 ### Edge Cases
 8. ✅ Multiple backticks: ``` `` code with ` backtick `` ``` → proper content extraction

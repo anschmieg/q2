@@ -1,0 +1,343 @@
+---
+title: "Listings"
+description: "Generate lists of pages or hand-written entries with `listing:`."
+---
+
+## Contents
+
+`contents:` names what a listing shows. Each entry is either a glob that
+selects project documents, or an inline record — a small map that *is* an
+item.
+
+### Globs
+
+A glob resolves against the file it is written in — the listing page's
+own directory for front-matter patterns, the directory holding a
+`_metadata.yml`, or the project root for patterns in `_quarto.yml`. `*`
+matches one directory level; use `**/` or name a directory to search
+subdirectories. A leading `/` anchors at the project root from anywhere.
+See [`Q-12-19`](/errors/listing/Q-12-19.qmd) for the full rules and the
+common ways a pattern matches nothing.
+
+### Records
+
+```yaml
+listing:
+  id: cards
+  type: grid
+  contents:
+    - title: "Get started"
+      description: "Download and install"
+      image: images/rocket.png
+    - title: "Release notes"
+      path: https://example.com/releases
+```
+
+A record's `title`, `subtitle`, `description`, `author`, `date`,
+`date-modified`, `image`, `image-alt`, `categories`, `order`, `path`,
+`reading-time-minutes` and `word-count` (and other fields besides) are the
+same fields a document supplies. Any other key becomes a custom field a
+custom template can read as `$it.key$` (also `$it.extra.key$`) — which
+also makes a misspelled field name easy to miss, since it's kept rather
+than rejected; watch for [`Q-12-22`](/errors/listing/Q-12-22.qmd) if an
+item is missing a field you thought you set. A record needs a `title:` or
+a `path:` to render meaningfully — one with neither produces an
+empty-titled item ([`Q-12-21`](/errors/listing/Q-12-21.qmd)). Relative
+`image:` and `path:` values resolve against the file the listing is
+written in.
+
+### Titles and descriptions are markdown
+
+An item's `title`, `subtitle` and `description` are markdown, whether
+they come from a document's front matter or from a record. Their
+formatting shows in the listing as it does on the page: a title such as
+``Fix `_scope`: a *lexical* regression`` keeps its code span and its
+emphasis. Links inside them are shown as plain text, since each item is
+already a link, and footnotes are left out.
+
+A listing shows each of them as a single paragraph. Write a
+`description:` as one paragraph; one written as several (a YAML block
+scalar with a blank line in it, or a list) is joined into one, with a
+warning ([`Q-12-26`](/errors/listing/Q-12-26.qmd)).
+
+### Where descriptions and images come from
+
+For an item that is a project document, the listing uses the first
+description it finds in this order:
+
+1. `description:` under `listing-item:` in the document's front matter;
+2. `description:`;
+3. `abstract:`;
+4. the first paragraph of the rendered page.
+
+The image follows the same pattern: `image:` under `listing-item:`, then
+`image:`, then the page's preview image. The preview image is an image
+with the class `.preview-image`, or else one whose file name contains
+`preview`, `feature`, `cover` or `thumbnail`, or else the first image on
+the page.
+
+A value you write is used as written; Quarto derives one from the page
+only when you didn't. `listing-item:` is there for the case where the
+listing should say something different from the page's own
+`description:` or `image:`. A description longer than the listing's
+`max-description-length` (default 175 characters; `0` turns the limit
+off) is cut at a word boundary, whichever way it was chosen. Derived
+descriptions appear in every layout, tables included.
+
+The derived description is taken from the *rendered* page, so a page
+whose text comes from running code still gets one. In the browser-based
+editor, which does not do that last step, the derived description is the
+page's first paragraph as written instead.
+
+A record's own `description:` and `image:` are always used as written.
+A record that points at a document but leaves them out gets the
+document's, chosen as above.
+
+### Records that point at a document
+
+`path: guide/install.qmd` merges the record over that document's own
+entry: the record's fields win, the document supplies the rest (link,
+description, date, …). A `path:` that is an external URL or a
+non-document file is used as the link as written. A `path:` that looks
+like a document (has a `.qmd`/`.md`/`.Rmd`/`.ipynb` extension) but names
+one the project doesn't render — a typo, or a file outside
+`project.render` — builds the item from the record's own fields alone
+and keeps the link as written, and warns
+([`Q-12-20`](/errors/listing/Q-12-20.qmd)).
+
+### Order
+
+Items are sorted by the listing's `sort:`. **With no `sort:` key, the
+default is `order asc, title asc`** — but that default applies only to a
+listing that contains at least one *document*: an item matched by a
+`contents:` glob, or a record whose `path:` names a document the project
+renders.
+
+A listing built entirely from records — the usual shape of a
+hand-curated card list — gets no default sort, and its items appear in
+the order you wrote them:
+
+```yaml
+listing:
+  contents:
+    - title: "Get started"     # renders first
+    - title: "Explore features"
+    - title: "Advanced usage"
+```
+
+Add one glob, or one record whose `path:` points at a page in the
+project, and the default sort applies to the whole listing again —
+alphabetizing the records along with it, since records carry no `order:`
+of their own. To keep such a list in the order you wrote it, set
+`sort: false`, or give each record an explicit `order:`.
+
+With `sort: false`, items appear in the order of the `contents:` entries
+— records included — with one exception: when `contents:` holds only
+negated patterns (e.g. `["!draft.qmd", {title: Featured}]`), the implicit
+"everything else" positive counts as declared before every entry, so a
+record sorts after those items no matter where it's written. (Quarto 1
+placed all records after all glob matches.)
+
+### Fields
+
+`fields:` lists which parts of each item a listing shows. In the `default`
+and `grid` layouts it decides what each card draws:
+
+```yaml
+listing:
+  type: grid
+  fields: [date, title, description]
+```
+
+These cards show only a date, a title and a description. There is no
+image area, and no author, subtitle, reading time or categories, even
+for items that have them. Without `fields:`, a listing uses its type's
+default set and keeps only the fields at least one item has, plus
+`image`. An item that is a project document always counts as having a
+description and an image, since Quarto can derive both from the
+rendered page.
+
+`image` is the exception: when it's in the set, every card gets an image
+area. An item with no image of its own (see
+[Where descriptions and images come from](#where-descriptions-and-images-come-from))
+gets the listing's `image-placeholder:`, or an empty placeholder. If none of your items have images, leave `image`
+out of `fields:` to avoid a row of empty boxes.
+
+### Not yet supported
+
+YAML files in `contents:` (Quarto 1's `contents: items.yml`) are skipped
+with a warning ([`Q-12-23`](/errors/listing/Q-12-23.qmd)); move the
+records inline.
+
+## Pages and categories in the browser
+
+A `default` or `grid` listing with more items than its `page-size:`
+shows one page at a time, with page links below it. The default page
+size is 25 for `default` listings, 18 for `grid` and 30 for `table`.
+
+When `categories:` is on, clicking a category — in the sidebar list or
+on an item — narrows the listing to the items in that category, and a
+"No matching items" message stands in when nothing matches. The current
+page and category are kept in the address (`#category=…`), so a
+filtered view can be linked to.
+
+The listing's element on the page has the id `listing-` followed by the
+listing's `id:`. A page's only listing, when it sets no `id:`, is
+`#listing-listing`.
+
+Not yet supported:
+
+- **`table` listings** paginate and filter in Quarto 1, but not yet in
+  Quarto 2: every row is shown.
+- **`sort-ui` and `filter-ui`** controls are not rendered yet.
+- **`custom` listings** are left as your template wrote them, without
+  paging or category filtering in the browser.
+- **The live preview** — the default `q2 preview`, and Quarto Hub —
+  shows every item on one page. `q2 render` and
+  [`q2 preview --static`](preview.qmd) produce the interactive page.
+
+## Custom templates
+
+Beyond the built-in `default`, `grid` and `table` layouts, a listing can
+render through a template you write:
+
+```yaml
+listing:
+  id: cards
+  type: custom
+  template: card.template
+  contents: "guides/*.qmd"
+```
+
+`template:` resolves relative to the page that declares the listing.
+Quarto 2 custom listing templates are **doctemplates** — the
+`$variable$` syntax Pandoc templates use — not the EJS templates of
+Quarto 1. A doctemplate cannot run code; it interpolates values,
+branches on them and loops over them. The output is markdown, parsed
+back into the page, so raw HTML goes in a ```` ```{=html} ```` block just as
+it would in a `.qmd` file.
+
+That last point has a consequence worth knowing before you write a
+template: paths inside raw HTML are **not** resolved. A link or image
+written as raw HTML keeps the path you gave it, so links to project
+documents ship unrewritten and images are never copied into the output
+— with no warning either way. Write links and images as markdown. See
+[Listing templates](listing-templates.qmd#links-and-images-must-be-markdown)
+for the idiom, and [Paths in websites](paths.qmd#raw-html-is-not-rewritten)
+for the same rule as it applies to page content.
+
+### Syntax
+
+| Directive | Meaning |
+| --- | --- |
+| `$listing.id$`, `$it.title$` | Interpolate a value; dotted paths walk into maps. |
+| `${it.title}` | The same, brace-delimited — use it when the value is followed immediately by text that would otherwise run into the name. |
+| `$for(items)$ … $endfor$` | Loop. Inside the body the current item is `$it$` (also `$items$`). Nested loops over a list-valued field work, and the inner `$it$` shadows the outer. |
+| `$sep$` | Inside a loop: emitted between items, not after the last. |
+| `$if(it.image)$ … $elseif(it.icon)$ … $else$ … $endif$` | Branch on truthiness (empty strings and missing keys are false). |
+| `$it.title/uppercase$` | Apply a pipe. Available: `uppercase`, `lowercase`, `chomp`, `nowrap`, `alpha`, `roman`, `first`, `last`, `rest`, `allbutlast`, `length`, `pairs`, `reverse`, `left`, `center`, `right`. |
+| `$it:item-default()$` | Apply a partial to a value — here the built-in `item-default` partial, or a same-named `.template` file next to your template file. |
+| `$-- text` | Comment; not rendered. |
+| `$$` | A literal dollar sign — on its own this is still literal text and does not make a file a template. |
+
+A template that contains none of these is not a template: Quarto 2
+warns ([`Q-12-24`](/errors/listing/Q-12-24.qmd)) and skips the listing
+rather than paste the file into the page.
+
+### Values a template can read
+
+- **`listing.*`** — the listing's own configuration: `id`, `type`,
+  `fields`, `field-links`, `table-header` (a pre-rendered markdown
+  header row for the `table` layout), `sort-ui`, `filter-ui`,
+  `page-size`, `grid-columns`, `template-params` (anything under
+  `template-params:` in the YAML, passed through for your template's
+  own options).
+- **`items`** — one entry per item, each with `title`, `subtitle`,
+  `description`, `author`, `authors`, `date`, `date-modified`, `image`,
+  `image-alt`, `categories`, `path` (the link target, already
+  page-relative), `filename`, `reading-time`, `reading-time-minutes`,
+  `word-count`, `order`, plus `image-html`, `category-html` and
+  `table-row` pre-rendered snippets. Custom fields from an inline record
+  or from a document's `listing-item.extra` are readable directly
+  (`$it.icon$`) and under `$it.extra.icon$`. `title`, `subtitle` and
+  `description` are **markdown** on one line, already escaped: use them
+  where the template writes markdown (`### [$it.title$]($it.path$)`).
+  Inside a raw HTML block, where markdown would show as source, use
+  their rendered twins `title-html`, `subtitle-html` and
+  `description-html` instead.
+- **`project.*`** — `site-url` and `title` from the website
+  configuration.
+
+Only `title` is guaranteed present on every item. `path` is present
+whenever the item has a link target — a document, or a record with
+`href:` — and absent for a record with neither. **The rest are absent
+when the item lacks them, and reading an absent value warns** with
+[`Q-12-10`](/errors/listing/Q-12-10.qmd) — so guard optional reads:
+`$if(it.subtitle)$…$endif$`.
+
+Four more per-item values exist for specific jobs:
+
+- **`outputHref`** — the item's rendered output path. For feeds and
+  cross-references, *not* for links: it is already resolved, so it
+  bypasses the path rewriting that makes `path` work.
+- **`description-placeholder-begin`** / **`-end`** and
+  **`image-placeholder-begin`** / **`-end`** — envelope markers that let
+  Quarto fill in a missing description or image after both documents
+  render. See
+  [Listing templates](listing-templates.qmd#descriptions-and-the-placeholder-envelope).
+- **`show.<field>`** — true for each field in the listing's field set:
+  its `fields:`, or the type's defaults (see [Fields](#fields)). A
+  `type: custom` listing without `fields:` uses every field that at
+  least one item has, as in Quarto 1.
+- **`metadata-attrs`** — `data-index`, `data-categories` and
+  `data-listing-<field>-sort` attributes, the equivalent of Quarto 1's
+  `metadataAttrs()`. Emit it in attribute position — inside a div's
+  braces (`::: {.item $it.metadata-attrs$}`) or on a tag in a
+  ```` ```{=html} ```` block; interpolated as markdown text its quotes
+  are curled into invalid HTML.
+
+These are the most useful values; the built-in templates show the rest.
+
+The built-in layouts are themselves doctemplates and make the best
+reference: `listing-default.template`, `listing-grid.template`,
+`listing-table.template` and the `item-default` partial live under
+[`crates/quarto-core/src/project/listing/templates/`](https://github.com/quarto-dev/q2/tree/main/crates/quarto-core/src/project/listing/templates)
+in the Quarto 2 repository.
+
+### Example: a card grid
+
+`card.template`:
+
+```
+::: {.custom-card-grid}
+$for(items)$
+::: {.custom-card}
+### [$it.title$]($it.path$)
+
+$if(it.description)$
+$it.description$
+$endif$
+:::
+
+$endfor$
+:::
+```
+
+Style `.custom-card-grid` and `.custom-card` in your site's CSS.
+
+### Going further
+
+[Listing templates](listing-templates.qmd) covers the rest: the two
+rules that fail silently ([links and
+images](listing-templates.qmd#links-and-images-must-be-markdown), the
+[description
+envelope](listing-templates.qmd#descriptions-and-the-placeholder-envelope)),
+what each [built-in layout
+emits](listing-templates.qmd#what-the-built-in-layouts-emit) so your
+template can inherit its styling, and a worked [port of a Quarto 1 EJS
+template](listing-templates.qmd#porting-a-quarto-1-ejs-template).
+
+If you are carrying a template over from Quarto 1, start there: Quarto 2
+does not run EJS, and a carried-over template warns with
+[`Q-12-9`](/errors/listing/Q-12-9.qmd) at the extension and
+[`Q-12-24`](/errors/listing/Q-12-24.qmd) at the contents.

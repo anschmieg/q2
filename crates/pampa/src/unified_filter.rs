@@ -13,12 +13,12 @@
  * allowing interleaving of different filter types.
  */
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use quarto_error_reporting::DiagnosticMessage;
 
-use quarto_system_runtime::SystemRuntime;
+use quarto_system_runtime::{RuntimeError, SystemRuntime};
 
 use crate::attribution::AttributionLookup;
 use crate::pandoc::Pandoc;
@@ -47,6 +47,10 @@ pub struct FilterOutput {
     /// (`bd-o8pr` Phase 3). Only populated by Lua filters.
     #[cfg(feature = "lua-filter")]
     pub resources: Vec<PathBuf>,
+    /// Book-projects P6: this chapter's harvested citation manifest,
+    /// populated only by the built-in `Citeproc` filter (`None` for Lua/JSON
+    /// filters and for a `Citeproc` pass that resolved no citations).
+    pub citation_manifest: Option<crate::citeproc_filter::ChapterCitationManifest>,
 }
 
 /// A filter specification parsed from a command-line argument.
@@ -151,17 +155,27 @@ impl From<CiteprocFilterError> for FilterError {
 #[derive(Debug)]
 pub enum CiteprocFilterError {
     /// Bibliography file not found or unreadable.
-    BibliographyNotFound(PathBuf, std::io::Error),
+    BibliographyNotFound(PathBuf, RuntimeError),
     /// Failed to parse bibliography file.
     BibliographyParseError(PathBuf, String),
     /// CSL style file not found or unreadable.
-    StyleNotFound(PathBuf, std::io::Error),
+    StyleNotFound(PathBuf, RuntimeError),
     /// Failed to parse CSL style.
     StyleParseError(PathBuf, String),
     /// Citation processing error.
     ProcessingError(String),
     /// No bibliography specified in document metadata.
     NoBibliography,
+}
+
+/// The underlying cause of a failed read. An I/O error prints bare (as it did
+/// when the files were read with `std::fs`, so the message is unchanged on
+/// native); any other runtime error keeps its own prefix.
+fn runtime_cause(err: &RuntimeError) -> String {
+    match err {
+        RuntimeError::Io(e) => e.to_string(),
+        other => other.to_string(),
+    }
 }
 
 impl std::fmt::Display for CiteprocFilterError {
@@ -172,7 +186,7 @@ impl std::fmt::Display for CiteprocFilterError {
                     f,
                     "Bibliography file '{}' not found: {}",
                     path.display(),
-                    err
+                    runtime_cause(err)
                 )
             }
             CiteprocFilterError::BibliographyParseError(path, err) => {
@@ -184,7 +198,12 @@ impl std::fmt::Display for CiteprocFilterError {
                 )
             }
             CiteprocFilterError::StyleNotFound(path, err) => {
-                write!(f, "CSL style file '{}' not found: {}", path.display(), err)
+                write!(
+                    f,
+                    "CSL style file '{}' not found: {}",
+                    path.display(),
+                    runtime_cause(err)
+                )
             }
             CiteprocFilterError::StyleParseError(path, err) => {
                 write!(f, "Failed to parse CSL style '{}': {}", path.display(), err)
@@ -209,6 +228,12 @@ impl std::error::Error for CiteprocFilterError {}
 /// The `attribution` handle is forwarded to Lua filters — see
 /// [`crate::lua::apply_lua_filter`] for the contract. Non-Lua
 /// filters (Citeproc, JSON) ignore the handle.
+///
+/// `base_dir` is the directory the citeproc filter resolves relative
+/// `bibliography`/`csl` paths against (bd-oqoozmtr) — the caller must
+/// pass the declaration site's directory (the document's directory for a
+/// single-file render, the merged document's anchor directory for a
+/// book). Filters that never touch the filesystem ignore it.
 pub async fn apply_filter(
     pandoc: Pandoc,
     context: ASTContext,
@@ -216,11 +241,18 @@ pub async fn apply_filter(
     target_format: &str,
     runtime: Arc<dyn SystemRuntime>,
     attribution: Option<Arc<dyn AttributionLookup>>,
+    base_dir: &Path,
 ) -> Result<FilterOutput, FilterError> {
     match filter {
         FilterSpec::Citeproc => {
-            let (new_pandoc, new_context, diagnostics) =
-                crate::citeproc_filter::apply_citeproc_filter(pandoc, context, target_format)?;
+            let (new_pandoc, new_context, diagnostics, citation_manifest) =
+                crate::citeproc_filter::apply_citeproc_filter(
+                    pandoc,
+                    context,
+                    target_format,
+                    base_dir,
+                    runtime.as_ref(),
+                )?;
             Ok(FilterOutput {
                 pandoc: new_pandoc,
                 context: new_context,
@@ -231,6 +263,7 @@ pub async fn apply_filter(
                 text_includes: Vec::new(),
                 #[cfg(feature = "lua-filter")]
                 resources: Vec::new(),
+                citation_manifest,
             })
         }
 
@@ -252,6 +285,7 @@ pub async fn apply_filter(
                 html_dependencies: lua_output.html_dependencies,
                 text_includes: lua_output.text_includes,
                 resources: lua_output.resources,
+                citation_manifest: None,
             })
         }
 
@@ -275,6 +309,7 @@ pub async fn apply_filter(
                 text_includes: Vec::new(),
                 #[cfg(feature = "lua-filter")]
                 resources: Vec::new(),
+                citation_manifest: None,
             })
         }
 
@@ -303,6 +338,7 @@ pub async fn apply_filters(
     target_format: &str,
     runtime: Arc<dyn SystemRuntime>,
     attribution: Option<Arc<dyn AttributionLookup>>,
+    base_dir: &Path,
 ) -> Result<FilterOutput, FilterError> {
     let mut current_pandoc = pandoc;
     let mut current_context = context;
@@ -313,6 +349,7 @@ pub async fn apply_filters(
     let mut all_text_includes = Vec::new();
     #[cfg(feature = "lua-filter")]
     let mut all_resources = Vec::new();
+    let mut citation_manifest = None;
 
     for filter in filters {
         let output = apply_filter(
@@ -322,6 +359,7 @@ pub async fn apply_filters(
             target_format,
             runtime.clone(),
             attribution.clone(),
+            base_dir,
         )
         .await?;
         current_pandoc = output.pandoc;
@@ -333,6 +371,9 @@ pub async fn apply_filters(
         all_text_includes.extend(output.text_includes);
         #[cfg(feature = "lua-filter")]
         all_resources.extend(output.resources);
+        if output.citation_manifest.is_some() {
+            citation_manifest = output.citation_manifest;
+        }
     }
 
     Ok(FilterOutput {
@@ -345,6 +386,7 @@ pub async fn apply_filters(
         text_includes: all_text_includes,
         #[cfg(feature = "lua-filter")]
         resources: all_resources,
+        citation_manifest,
     })
 }
 
@@ -414,7 +456,10 @@ mod tests {
     fn test_citeproc_error_bibliography_not_found() {
         let err = CiteprocFilterError::BibliographyNotFound(
             PathBuf::from("/path/to/refs.bib"),
-            std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "file not found",
+            )),
         );
         let msg = format!("{}", err);
         assert!(msg.contains("Bibliography file"));
@@ -438,7 +483,10 @@ mod tests {
     fn test_citeproc_error_style_not_found() {
         let err = CiteprocFilterError::StyleNotFound(
             PathBuf::from("/path/to/style.csl"),
-            std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "file not found",
+            )),
         );
         let msg = format!("{}", err);
         assert!(msg.contains("CSL style file"));

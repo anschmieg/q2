@@ -1,8 +1,12 @@
-# Crossref Design for Quarto 2
-
-**Beads Issue**: bd-jsbg (epic)
-**Created**: 2026-04-15
-**Status**: Design — iterating with user before implementation
+---
+title: 'Crossref Design for Quarto 2'
+date: 2026-04-15
+description: 'Describes the crossref design for single-file Quarto 2 documents, where floats, theorems, callouts and equations share one CustomNode and index pipeline, with multi-file crossrefs left as a later extension.'
+status: draft  # Design — iterating with user before implementation
+braid:
+  strand: bd-jsbg
+  priority: P1
+---
 
 ---
 
@@ -426,7 +430,7 @@ The key architectural extension: `CrossrefIndexTransform` currently only indexes
 
 - [ ] 4.1 Serialize per-file `CrossrefIndex` to `.quarto/xref/<file-id>.json`.
 - [ ] 4.2 Sketch `ProjectCrossrefIndex` merge in `quarto-core::project::crossref`.
-- [ ] 4.3 Sketch `StaticProjectAnalyzer` that parses all project files' **pre-engine AST** to produce a project-wide index consumable by `CrossrefResolveTransform` and by the hub-client preview.
+- [ ] 4.3 Sketch `StaticProjectAnalyzer` that parses all project files\' **pre-engine AST** to produce a project-wide index consumable by `CrossrefResolveTransform` and by the hub-client preview.
 
 Implementation of Phase 4 is out of scope for the initial crossref delivery — but Phases 0–3 must not foreclose it. Specifically: data model is serializable from day one; `CrossrefResolveTransform` takes the index by handle, not by construction.
 

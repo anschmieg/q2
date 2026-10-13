@@ -1,7 +1,10 @@
-# Quarto Lua API: `quarto.*` Namespace Implementation
+---
+title: 'Quarto Lua API: `quarto.*` Namespace Implementation'
+date: 2026-03-20
+description: 'Adds the missing `quarto.utils`, `quarto.json` and `quarto.log` tables to the pampa Lua engine so real extensions such as lipsum stop failing on a nil field.'
+status: in-progress
+---
 
-**Created**: 2026-03-20
-**Status**: IN PROGRESS
 **Branch**: `feature/shortcode-extensions`
 **Triggered by**: lipsum extension fails because `quarto.utils` is nil
 
@@ -453,7 +456,7 @@ fn test_quarto_json_decode() {
 
 ### Phase 4: End-to-end validation
 
-- [~] **4.1** Test lipsum extension manually (PARTIAL — quarto.* API works, but lipsum
+- \[\~\] **4.1** Test lipsum extension manually (PARTIAL — quarto.\* API works, but lipsum
   fails due to a separate issue: `pandoc.Para(string)` doesn't auto-convert strings to
   inlines. This is a `pandoc.Para` constructor compatibility issue, not a quarto API issue):
   ```bash

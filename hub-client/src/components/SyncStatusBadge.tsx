@@ -1,0 +1,196 @@
+/**
+ * Sync Status Badge
+ *
+ * Dot + status line shown at the top of the sidebar's FILES section
+ * (`scope: 'project'`, watching the project index doc) and in the
+ * document bottom bar (`scope: 'document'`, watching the currently
+ * open file's doc). Clicking opens the
+ * ConnectionStatusDialog (the affordance the old header online/offline
+ * indicator provided).
+ *
+ * States. Compact (default, the FILES header) shows only the time; the
+ * full description is always the button's accessible name and tooltip,
+ * and is the visible text too when `verbose` (the document bottom bar):
+ * - Disconnected (browser offline, websocket not open, or no peer
+ *   handshake): yellow dot; compact: "n minutes ago" (the color carries
+ *   the offline state); verbose: "Offline — synced n minutes ago".
+ * - Connected, sync activity this session within the last 15s (a remote
+ *   change received, or a local change the hub confirmed delivered):
+ *   green dot, "just now" / "Synced just now".
+ * - Connected, < 1 minute: yellow-green dot, "<1 minute ago".
+ * - Connected, otherwise: yellow-green dot, "n minutes/hours/days ago".
+ *
+ * The doc's last-synced timestamp is mirrored to localStorage (keyed by
+ * documentId) so a page that reloads while offline can still say how
+ * stale its local copy is.
+ */
+
+import { useEffect, useState } from 'react';
+import { getDocSyncActivity } from '@quarto/quarto-sync-client';
+import { getFileHandle, getIndexHandle, getConnectionInfo } from '@quarto/preview-runtime';
+import ConnectionStatusDialog from './ConnectionStatusDialog';
+import { syncStatus as s } from '../strings';
+import './SyncStatusBadge.css';
+
+const SYNCING_WINDOW_MS = 15_000;
+const WS_OPEN = 1; // WebSocket.OPEN
+
+function storageKey(docId: string): string {
+  return `q2hub.lastSyncedAt.${docId}`;
+}
+
+function readPersisted(docId: string): number | null {
+  try {
+    const n = Number(localStorage.getItem(storageKey(docId)));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** "less than a minute ago", then n minutes / hours / days ago. */
+function agoText(deltaMs: number): string {
+  const minutes = Math.floor(deltaMs / 60_000);
+  if (minutes < 1) return s.underMinuteAgo;
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+interface SyncStatusBadgeProps {
+  scope: 'project' | 'document';
+  /**
+   * Path of the open file. Watched when scope is 'document'; either
+   * scope forwards it to the ConnectionStatusDialog so the per-file
+   * column is labeled with the document name.
+   */
+  currentFilePath?: string | null;
+  /** Show the full status sentence instead of just the time. */
+  verbose?: boolean;
+  /** Which side of the text the dot sits on (default: before it). */
+  dotPosition?: 'start' | 'end';
+}
+
+export default function SyncStatusBadge({
+  scope,
+  currentFilePath,
+  verbose = false,
+  dotPosition = 'start',
+}: SyncStatusBadgeProps) {
+  const [now, setNow] = useState(() => Date.now());
+  const [showDialog, setShowDialog] = useState(false);
+
+  useEffect(() => {
+    const refresh = () => setNow(Date.now());
+    const intervalId = setInterval(refresh, 1000);
+    window.addEventListener('online', refresh);
+    window.addEventListener('offline', refresh);
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('online', refresh);
+      window.removeEventListener('offline', refresh);
+    };
+  }, []);
+
+  // Resolve the watched doc on every tick; handles appear as the
+  // project loads / files open.
+  let docId: string | null = null;
+  try {
+    docId =
+      scope === 'project'
+        ? (getIndexHandle()?.documentId ?? null)
+        : currentFilePath
+          ? (getFileHandle(currentFilePath)?.documentId ?? null)
+          : null;
+  } catch {
+    // not connected yet
+  }
+
+  // Sync activity = remote changes received, plus local changes the hub
+  // has confirmed delivered (remote-heads ack). Raw sync-protocol
+  // messages are deliberately excluded: a page refresh floods handshake
+  // sync messages for every doc, which would misreport freshness on load.
+  const activity = docId ? getDocSyncActivity(docId) : null;
+  const inMemory =
+    Math.max(activity?.lastRemoteChangeAt ?? 0, activity?.lastLocalDeliveredAt ?? 0) || null;
+  const lastSyncedAt = Math.max(inMemory ?? 0, (docId && readPersisted(docId)) || 0) || null;
+
+  const connInfo = getConnectionInfo();
+  const connected =
+    navigator.onLine &&
+    connInfo?.wsReadyState === WS_OPEN &&
+    (connInfo?.peers.length ?? 0) > 0;
+
+  // Mirror the freshest in-memory timestamp to localStorage. A connected
+  // client with no history at all (fresh browser / cleared storage) seeds
+  // "now" as its baseline: the initial load just brought the doc up to
+  // date, so that's a real last-synced time.
+  useEffect(() => {
+    if (!docId) return;
+    const stored = readPersisted(docId) ?? 0;
+    const next = inMemory && inMemory > stored ? inMemory : !stored && connected ? Date.now() : null;
+    if (next) {
+      try {
+        localStorage.setItem(storageKey(docId), String(next));
+      } catch {
+        // storage full/unavailable — staleness just won't survive reload
+      }
+    }
+  }, [docId, inMemory, connected]);
+
+  let dotClass: string;
+  /** Short visible text (compact mode). */
+  let detail: string;
+  /** Full description for the tooltip and accessible name. */
+  let full: string;
+  if (!connected) {
+    dotClass = 'yellow';
+    const ago = lastSyncedAt ? agoText(now - lastSyncedAt) : s.neverSynced;
+    detail = ago;
+    full = `${s.savingLocally} — ${lastSyncedAt ? s.syncedAgo(ago) : s.neverSynced}`;
+  } else if (inMemory && now - inMemory < SYNCING_WINDOW_MS) {
+    // Green only for sync activity observed *this session* — the
+    // persisted/seeded timestamp must not light "just now" on load.
+    dotClass = 'green';
+    detail = s.justNow;
+    full = `${s.synced} ${detail}`;
+  } else if (lastSyncedAt && now - lastSyncedAt < 60_000) {
+    dotClass = 'yellow-green';
+    detail = s.underMinuteAgo;
+    full = `${s.synced} ${detail}`;
+  } else {
+    dotClass = 'yellow-green';
+    detail = lastSyncedAt ? agoText(now - lastSyncedAt) : s.neverSynced;
+    full = `${s.synced} ${detail}`;
+  }
+
+  const visible = verbose ? full : detail;
+  const dot = <span className={`sync-status-dot ${dotClass}`} aria-hidden="true" />;
+
+  return (
+    <>
+      <button
+        className="sync-status-badge"
+        onClick={() => setShowDialog(true)}
+        title={`${full}. ${s.tooltip}`}
+        aria-label={`${full}. ${s.tooltip}`}
+      >
+        {dotPosition === 'start' && dot}
+        {visible && (
+          <span className="sync-status-text">
+            <em>{visible}</em>
+          </span>
+        )}
+        {dotPosition === 'end' && dot}
+      </button>
+      {showDialog && (
+        <ConnectionStatusDialog
+          currentFilePath={currentFilePath ?? null}
+          onClose={() => setShowDialog(false)}
+        />
+      )}
+    </>
+  );
+}

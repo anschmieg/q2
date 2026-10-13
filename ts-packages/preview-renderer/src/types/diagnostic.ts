@@ -62,6 +62,31 @@ export interface Pass1Failure {
 }
 
 /**
+ * One outstanding editorial comment on the rendered page, from the
+ * document's Pass-1 `DocumentProfile` (bd-0rsk07il, GH #445).
+ * Matches `quarto_core::document_profile::JsonComment`: positions are
+ * 1-based (Monaco convention); `file` is the source file the mark
+ * maps to, which for a comment inside an `{{< include >}}` is the
+ * included file rather than the active document.
+ */
+export interface RenderComment {
+  /** Plain-text comment content. */
+  text: string;
+  /** In-band author (`author=` attribute), when stamped. */
+  author?: string;
+  /** In-band ISO 8601 timestamp (`date=` attribute), when stamped. */
+  date?: string;
+  /** Remaining attr key-value pairs, authored order. */
+  attributes?: [string, string][];
+  /** Path of the source file the mark's span maps to. */
+  file?: string;
+  start_line?: number;
+  start_column?: number;
+  end_line?: number;
+  end_column?: number;
+}
+
+/**
  * Render response from WASM with structured diagnostics.
  */
 export interface RenderResponse {
@@ -76,6 +101,8 @@ export interface RenderResponse {
    * `pipelineKindForFormat(format)` to decide which is expected).
    */
   ast_json?: string;
+  /** The format the render ran with (`Format::target_format` after any preview substitution); absent on errors. */
+  format?: string;
   /**
    * Untransformed Pandoc AST JSON — the `qmd_to_pandoc` output
    * captured immediately after `ParseDocumentStage`, before any
@@ -99,6 +126,13 @@ export interface RenderResponse {
    * (errors, q2-debug, themeless single-doc).
    */
   theme_fingerprint?: string;
+  /**
+   * Outstanding editorial comments on the active page, in source
+   * order (bd-0rsk07il, GH #445). Absent when the document has none
+   * (consumers treat absent as zero) and on error responses. The
+   * comment-toggle badge reads `comments.length`.
+   */
+  comments?: RenderComment[];
 }
 
 /**

@@ -1,6 +1,9 @@
-# Attribute Processing Implementation Plan
+---
+title: 'Attribute Processing Implementation Plan'
+date: 2025-10-31
+description: 'Adds visitor handlers for the low-level attribute nodes in the tree-sitter parser so that attributes written after inline code keep their id, classes and key-value pairs instead of being dropped.'
+---
 
-**Date**: 2025-10-31
 **Context**: Add support for processing attribute nodes in tree-sitter refactoring
 
 ## Problem Statement
@@ -206,7 +209,7 @@ Create tests for:
 
 ## Success Criteria
 
-- ✅ No "[TOP-LEVEL MISSING NODE]" warnings for attribute nodes
+- ✅ No "\[TOP-LEVEL MISSING NODE\]" warnings for attribute nodes
 - ✅ Code spans with attributes parse correctly
 - ✅ All attribute components (id, classes, key-value) extracted correctly
 - ✅ Output matches Pandoc native format
@@ -235,7 +238,7 @@ Create tests for:
 - Phase 3 (commonmark_specifier): 15 minutes
 - Phase 4 (attribute_specifier): 15 minutes
 - Phase 5 (testing): 45 minutes
-- **Total**: ~2 hours
+- **Total**: \~2 hours
 
 ## References
 

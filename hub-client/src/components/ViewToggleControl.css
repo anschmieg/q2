@@ -9,15 +9,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  /* WCAG 2.5.8: minimum 24x24 CSS px target size */
+  width: 24px;
+  height: 24px;
   background: var(--view-toggle-bg);
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   color: var(--view-toggle-text);
   cursor: pointer;
   padding: 0;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .view-toggle-btn:hover {
@@ -28,4 +31,15 @@
 .view-toggle-btn.active {
   background: var(--view-toggle-active-bg);
   color: var(--view-toggle-active-text);
+}
+
+/* Grayed out when the current file has no preview (images, non-qmd/md
+   text). Same treatment as .qh-btn:disabled; hover/active must not
+   re-tint. */
+.view-toggle-btn:disabled,
+.view-toggle-btn:disabled:hover {
+  opacity: 0.5;
+  cursor: default;
+  background: transparent;
+  color: var(--view-toggle-text);
 }

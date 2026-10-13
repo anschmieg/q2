@@ -7,14 +7,14 @@ This directory contains automation scripts for the Kyoto project.
 Two modes available:
 
 **`local-prod.sh`** (Node.js proxy) - Quick setup, no dependencies
-**`local-prod-nginx.sh`** (nginx in Docker) - Test actual nginx config
+**`local-prod-nginx.sh`** (native nginx) - Test actual nginx config
 
 ### What it does
 
 Mirrors the production deployment architecture:
 - Starts the `hub` binary (Rust server) on port 3000
 - Serves the built hub-client on port 8080
-- Serves q2-sandboxed-preview.html on port 8081 (sandboxed, simulates separate domain)
+- Serves the sandboxed renderer dist (index.html + assets + serviceWorker.js) on port 8081 (simulates the separate GitHub Pages origin)
 - Proxies `/auth` and `/ws` requests to the hub server
 - Uses production-like cache headers
 
@@ -51,14 +51,14 @@ Browser → http://127.0.0.1:8080 (Node.js proxy - main app)
   └─ /* → serve from dist/ (no-cache, SPA fallback)
 
 Browser → http://127.0.0.1:8081 (q2-sandboxed-preview server - sandboxed)
-  └─ /q2-sandboxed-preview.html → sandboxed AST renderer (separate origin)
+  └─ / → sandboxed preview renderer dist (separate origin)
   
 hub:3000 (Rust binary) → .local-prod-data/
 ```
 
-**Why q2-sandboxed-preview.html on a separate port?**
+**Why the sandboxed renderer on a separate port?**
 
-In production, q2-sandboxed-preview.html will be served from a separate domain (e.g., `raw.quarto.pub`) for security isolation. The separate port in local-prod simulates this cross-origin setup. The iframe uses `sandbox="allow-scripts allow-same-origin"` and communicates via postMessage.
+In production, the sandboxed renderer is served from a separate origin (GitHub Pages) for security isolation. The separate port in local-prod simulates this cross-origin setup. The iframe uses `sandbox="allow-scripts allow-same-origin"` and communicates via postMessage.
 
 ### Node.js Proxy Mode (Recommended)
 
@@ -78,12 +78,21 @@ Fast setup, tests WebSocket proxying and routing. Good for 90% of development.
 ```bash
 cd hub-client
 npm run local-prod:nginx
+
+# Custom port works here too (pass it to both build and run):
+npm run build:local-prod -- --port 9000
+npm run local-prod:nginx -- --port 9000
 ```
 
 Tests the actual nginx configuration from production. Use when:
 - Testing nginx config changes before deploying
 - Validating gzip compression, security headers
 - Debugging nginx-specific issues
+
+If `OIDC_CLIENT_ID` is set in your shell, the local hub picks it up and runs
+with auth enabled (the script logs "Auth enabled via OIDC_CLIENT_ID from the
+environment"). The readiness check treats the resulting 401 as "up". Unset
+the variable if you want the default no-auth local setup.
 
 **Architecture differences:**
 - **Node.js mode:** Browser → Node.js proxy (port 8080) → hub (port 3000)

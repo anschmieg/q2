@@ -32,8 +32,9 @@ fn write_file(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+// Same function the runtime seam uses, so expected paths share its spelling.
 fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    quarto_system_runtime::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Run `q2 render <args...>` from `cwd` with extra environment
@@ -222,16 +223,27 @@ fn post_render_script_receives_output_files() {
         dump_value(&dump, "QUARTO_PROJECT_INPUT_FILES").is_none(),
         "INPUT_FILES is pre-render-only"
     );
-    // Shared vars.
-    assert_eq!(
-        dump_value(&dump, "QUARTO_PROJECT_DIR").map(Path::new),
-        Some(project.as_path()),
-        "QUARTO_PROJECT_DIR should be the absolute project dir"
+    // Shared vars. `project` is spelled by the shared canonicalize, so
+    // these also pin that q2 emits the same spelling.
+    let project_dir = dump_value(&dump, "QUARTO_PROJECT_DIR").expect("PROJECT_DIR set");
+    assert!(
+        Path::new(project_dir).is_absolute(),
+        "QUARTO_PROJECT_DIR should be absolute: {project_dir}"
     );
     assert_eq!(
-        dump_value(&dump, "QUARTO_PROJECT_OUTPUT_DIR").map(Path::new),
-        Some(project.join("_site").as_path()),
-        "QUARTO_PROJECT_OUTPUT_DIR should be the absolute output dir"
+        Path::new(project_dir),
+        project.as_path(),
+        "QUARTO_PROJECT_DIR should be the project dir"
+    );
+    let output_dir = dump_value(&dump, "QUARTO_PROJECT_OUTPUT_DIR").expect("OUTPUT_DIR set");
+    assert!(
+        Path::new(output_dir).is_absolute(),
+        "QUARTO_PROJECT_OUTPUT_DIR should be absolute: {output_dir}"
+    );
+    assert_eq!(
+        Path::new(output_dir),
+        project.join("_site").as_path(),
+        "QUARTO_PROJECT_OUTPUT_DIR should be the output dir"
     );
 }
 
@@ -270,14 +282,56 @@ fn env_contract_full_render() {
             "INPUT_FILES should list {expected}; got: {listed:?}"
         );
     }
-    assert_eq!(
-        dump_value(&dump, "QUARTO_PROJECT_DIR").map(Path::new),
-        Some(project.as_path()),
+    // Same spelling as the shared canonicalize (`project`).
+    let project_dir = dump_value(&dump, "QUARTO_PROJECT_DIR").expect("PROJECT_DIR set");
+    assert!(
+        Path::new(project_dir).is_absolute(),
+        "QUARTO_PROJECT_DIR should be absolute: {project_dir}"
     );
+    assert_eq!(Path::new(project_dir), project.as_path());
     // Post-render-only var must be absent during pre-render.
     assert!(
         dump_value(&dump, "QUARTO_PROJECT_OUTPUT_FILES").is_none(),
         "OUTPUT_FILES is post-render-only"
+    );
+}
+
+/// `QUARTO_PROJECT_DIR` hands user scripts the plain path whenever one
+/// exists, so no Windows `\\?\` verbatim prefix. Runs from a plain cwd,
+/// as a user would, so any verbatim prefix comes from q2 itself.
+#[test]
+fn project_dir_env_is_a_plain_path() {
+    require_python!();
+    let temp = TempDir::new().unwrap();
+    let project = dunce::simplified(&std::fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+    assert!(
+        !project.to_string_lossy().starts_with(r"\\?\"),
+        "test setup: the TEMP root gives the fixture no plain path form: {}",
+        project.display()
+    );
+    write_minimal_project(
+        &project,
+        "project:\n  type: website\n  output-dir: _site\n  pre-render: dump.py\n",
+    );
+    write_file(&project.join("dump.py"), &env_dump_script("pre-env.txt"));
+
+    let out = run_q2(&project, &[]);
+    assert!(
+        out.status.success(),
+        "render should succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let dump = read_env_dump(&project.join("pre-env.txt"));
+    let project_dir = dump_value(&dump, "QUARTO_PROJECT_DIR").expect("PROJECT_DIR set");
+    assert!(
+        !project_dir.starts_with(r"\\?\"),
+        "QUARTO_PROJECT_DIR must be a plain path, got: {project_dir}"
+    );
+    assert_eq!(
+        std::fs::canonicalize(project_dir).unwrap(),
+        std::fs::canonicalize(&project).unwrap(),
+        "QUARTO_PROJECT_DIR should be the project dir, got: {project_dir}"
     );
 }
 
@@ -365,6 +419,67 @@ fn failing_pre_render_script_aborts() {
     assert!(
         !project.join("_site/index.html").exists(),
         "pre-render failure must abort before any rendering"
+    );
+    // bd-m6wmztln control: the Q-5-8 snippet anchors in the file that
+    // declared the script (`path:line:col` in the ariadne header).
+    assert!(
+        stderr.contains("_quarto.yml:"),
+        "snippet should anchor in _quarto.yml for a directly-declared script; got: {stderr}"
+    );
+}
+
+/// bd-m6wmztln: a failing pre-render script *contributed by an
+/// extension* (`contributes.metadata.project.pre-render`) must anchor
+/// its Q-5-8 snippet in the extension's `_extension.yml`. The script's
+/// `SourceInfo` carries the manifest's filename-hash FileId; binding
+/// `_quarto.yml`'s content to it (the old behavior) rendered the
+/// manifest's byte offsets against the wrong file — a misleading span
+/// when the offsets fit, a silently dropped snippet when they didn't.
+#[test]
+fn failing_extension_contributed_script_snippet_names_extension_yml() {
+    require_python!();
+    let temp = TempDir::new().unwrap();
+    let project = canonical(temp.path());
+    // Enough `_quarto.yml` content that the manifest's byte offsets
+    // land inside it: on a regression this reproduces the worse
+    // misleading-span variant, not just a dropped snippet.
+    write_minimal_project(
+        &project,
+        "project:\n  type: website\n  output-dir: _site\n  render:\n    - \"**/*.qmd\"\n    - \"!drafts/\"\n",
+    );
+    write_file(
+        &project.join("_extensions/acme/failing/_extension.yml"),
+        "title: failing\nauthor: Acme\nversion: 0.0.1\ncontributes:\n  metadata:\n    project:\n      pre-render:\n        - fail.py\n",
+    );
+    // Lives in the extension dir, so the contributed entry is rebased
+    // to `_extensions/acme/failing/fail.py` — rebasing must preserve
+    // the manifest anchor.
+    write_file(
+        &project.join("_extensions/acme/failing/fail.py"),
+        "import sys\nsys.exit(3)\n",
+    );
+
+    let out = run_q2(&project, &[]);
+    assert!(
+        !out.status.success(),
+        "failing extension-contributed pre-render script must abort the render"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[Q-5-8]"),
+        "diagnostic should carry the Q-5-8 code; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("_extension.yml:"),
+        "snippet should anchor in the extension manifest; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("_quarto.yml:"),
+        "snippet must not anchor in _quarto.yml (the script is not declared there); got: {stderr}"
+    );
+    assert!(
+        stderr.contains("extension manifest"),
+        "diagnostic should attribute the entry to the extension manifest; got: {stderr}"
     );
 }
 
@@ -682,4 +797,36 @@ fn no_project_renders_without_scripts() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(dir.join("solo.html").exists());
+}
+
+/// bd-gnw9asuo: under `--json-errors`, stderr is reserved for NDJSON.
+/// A successful script's "Running pre-render script" status line and
+/// its own stdout/stderr chatter must not reach the stream (the same
+/// treatment `--quiet` gives them).
+#[test]
+fn json_errors_keeps_script_output_off_stderr() {
+    require_python!();
+    let temp = TempDir::new().unwrap();
+    let project = canonical(temp.path());
+    write_minimal_project(
+        &project,
+        "project:\n  type: website\n  output-dir: _site\n  pre-render: chatty.py\n",
+    );
+    write_file(
+        &project.join("chatty.py"),
+        "import sys\nprint(\"chatty stdout\")\nprint(\"chatty stderr\", file=sys.stderr)\n",
+    );
+
+    let out = run_q2(&project, &["--json-errors"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "render should succeed; stderr: {stderr}"
+    );
+    for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v.is_object()),
+            "--json-errors stderr must be pure NDJSON; non-JSON line:\n{line}\nfull stderr:\n{stderr}"
+        );
+    }
 }

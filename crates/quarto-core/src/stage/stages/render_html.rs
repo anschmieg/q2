@@ -325,6 +325,8 @@ mod tests {
             is_single_file: true,
             files: vec![],
             output_dir: PathBuf::from("/project"),
+
+            ..Default::default()
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
         let format = Format::html();
@@ -340,6 +342,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         };
 
         let input = PipelineData::DocumentAst(doc_ast);

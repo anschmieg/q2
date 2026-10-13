@@ -1,4 +1,8 @@
-# Plan: Use reqwest::blocking for native fetch_url
+---
+title: 'Plan: Use reqwest::blocking for native fetch_url'
+date: 2026-04-06
+description: 'Switches native `fetch_url` from the async reqwest client to `reqwest::blocking`, because the pollster-driven render pipeline has no tokio reactor and would panic on network calls from Lua filters.'
+---
 
 ## Status: Ready to commit
 
@@ -6,7 +10,7 @@
 
 ## Problem
 
-`NativeRuntime::fetch_url` uses `reqwest`'s async client, which requires
+`NativeRuntime::fetch_url` uses `reqwest`\'s async client, which requires
 a tokio reactor (I/O driver) to poll network sockets. However, the
 native render pipeline is driven by `pollster::block_on` in multiple
 places:
@@ -67,7 +71,7 @@ Using `reqwest::blocking` is appropriate here because:
 - [x] **3** Checked — `reqwest` import still needed for
   `reqwest::blocking::get`, no dead imports
 
-- [x] **4** Test native CLI: rendered `{{< placeholder 200 format=png >}}`
+- [x] **4** Test native CLI: rendered `{{{< placeholder 200 format=png >}}}`
   — HTML output contains embedded PNG image
 
 - [x] **5** `cargo nextest run --workspace` — 7232 passed, 0 failed

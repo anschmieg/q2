@@ -1,8 +1,12 @@
-# Multi-Pass Rendering Architecture for quarto-citeproc
-
-**Issue**: k-444
-**Created**: 2025-11-28
-**Status**: Proposed
+---
+title: 'Multi-Pass Rendering Architecture for quarto-citeproc'
+date: 2025-11-28
+description: 'Proposes separating evaluation from rendering in `quarto-citeproc` so delimiters are kept as metadata until render time, enabling correct punctuation handling and multi-pass disambiguation like Pandoc citeproc.'
+status: draft  # Proposed
+braid:
+  strand: k-444
+  priority: P4
+---
 
 ## Executive Summary
 
@@ -424,9 +428,9 @@ pub fn disambiguate_citations(
 ## Expected Impact
 
 ### Tests Unlocked
-- **Delimiter bugs**: ~20-30 tests across categories
-- **Substitute inheritance**: ~50-100 tests (126 use substitute, 20 pass)
-- **Year-suffix**: ~20-30 tests (magic, disambiguation)
+- **Delimiter bugs**: \~20-30 tests across categories
+- **Substitute inheritance**: \~50-100 tests (126 use substitute, 20 pass)
+- **Year-suffix**: \~20-30 tests (magic, disambiguation)
 - **Total estimated**: 80-150 additional tests
 
 ### Architecture Benefits

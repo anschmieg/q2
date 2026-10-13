@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+# Global allocator for the native CLI; see the `#[global_allocator]` in main.rs.
+mimalloc = "0.1"
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
@@ -20,8 +22,10 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 pollster.workspace = true
-# `signal` for the `provide-hub` serve loop's Ctrl-C shutdown.
-tokio = { workspace = true, features = ["signal"] }
+# `signal` for the `provide-hub` serve loop's Ctrl-C shutdown; `net` +
+# `io-util` for `q2 preview`'s readiness probes (TCP accept probe, and
+# the `--join` health probe through the tunnel).
+tokio = { workspace = true, features = ["signal", "net", "io-util"] }
 
 quarto-core = { workspace = true, features = ["clap"] }
 quarto-error-catalog.workspace = true
@@ -44,6 +48,10 @@ quarto-hub.workspace = true
 quarto-hub-provider = { path = "../quarto-hub-provider" }
 quarto-mcp-launcher = { path = "../quarto-mcp-launcher" }
 quarto-preview = { path = "../quarto-preview" }
+# `q2 preview --join`: ticket parsing + the guest-side tunnel client
+# (live-share plan Phase 3, bd-6y0p1bne). All iroh usage stays behind
+# quarto-p2p's API.
+quarto-p2p.workspace = true
 url = "2.5"
 quarto-publish.workspace = true
 quarto-sass.workspace = true
@@ -54,6 +62,10 @@ quarto-brand.workspace = true
 # `q2 use brand <source>`. Shared with `q2 add` when that lands.
 quarto-source-fetch = { path = "../quarto-source-fetch" }
 quarto-test.workspace = true
+# `q2 docs llms`: the docs-site llms.txt artifacts staged by
+# `cargo xtask build-agents-docs` are embedded via `include_dir!`
+# (bd-hwop1zii; see build.rs).
+include_dir.workspace = true
 serde_yaml.workspace = true
 tempfile = "3"
 # Phase D.1 (bd-kw93.8): auto-open browser tabs on `q2 preview`.
@@ -79,10 +91,23 @@ openssl-sys = { version = "0.9", optional = true }
 vendored-openssl = ["dep:openssl-sys", "openssl-sys/vendored"]
 
 [dev-dependencies]
+# Tells whether a Windows path has a plain (non-`\\?\`) form, for the
+# wire-path precondition in the E2E tests (json_errors, render_cli_e2e,
+# render_scripts_cli).
+dunce = "1"
 tempfile = "3"
 pampa.workspace = true
 sha2 = "0.11"
 walkdir.workspace = true
+# P7-foundation Task 3: reading back the docx/pptx a real `pandoc`
+# subprocess produces in the E2E CLI tests — same minimal read-only
+# feature set as quarto-core's own dev-dependency.
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Sending a console Ctrl-Break to a spawned `q2 preview` in the
+# shutdown e2e test (Windows has no per-process SIGINT).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

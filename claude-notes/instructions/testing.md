@@ -15,7 +15,7 @@ library functions.
 
 WASM-specific code paths (restricted Lua stdlib, synthetic io/os modules) are tested by
 dedicated smoke tests in `crates/pampa/tests/wasm_lua.rs` that run on the real
-`wasm32-unknown-unknown` target in CI. See `crates/pampa/CLAUDE.md` for details on when
+`wasm32-unknown-unknown` target in CI. See `crates/pampa/AGENTS.md` for details on when
 to add WASM tests.
 
 **Never add `test` to the `#[cfg(target_arch = "wasm32")]` guard.** This was a prior pattern
@@ -113,37 +113,44 @@ Examples in this repo:
 
 ## Smoke-All Tests
 
-Smoke-all test fixtures live in `crates/quarto/tests/smoke-all/`. Each `.qmd` file embeds assertions in `_quarto.tests` frontmatter. There are **three independent runners** that exercise the same fixtures through different pipelines:
+Smoke-all test fixtures live in `crates/quarto/tests/smoke-all/`. Each `.qmd` file embeds assertions in `_quarto.tests` frontmatter. There are **four independent runners** that exercise the same fixtures through different pipelines:
 
 ### 1. Rust (native renderer)
 ```bash
-cargo nextest run -p quarto --test smoke_all
+cargo nextest run -p quarto --test integration smoke_all
 ```
-Fastest (~1s). Renders via `quarto-core` directly. Runs all assertion types including `ensureHtmlElements` (CSS selectors via `scraper`), `ensureCssRegexMatches`, `ensureFileRegexMatches`, etc.
+Fastest (\~1s). Renders via `quarto-core` directly. Runs all assertion types including `ensureHtmlElements` (CSS selectors via `scraper`), `ensureCssRegexMatches`, `ensureFileRegexMatches`, etc.
 
 ### 2. WASM Vitest (jsdom)
 ```bash
 cd hub-client && npm run test:wasm
 ```
-~3s. Renders via WASM module in Node.js with jsdom for HTML assertions. Runs the full smoke-all suite plus other WASM tests.
+\~3s. Renders via WASM module in Node.js with jsdom for HTML assertions. Runs the full smoke-all suite plus other WASM tests.
 
 ### 3. Playwright E2E (browser)
 ```bash
-cd hub-client && npx playwright test e2e/smoke-all.spec.ts
+cd hub-client && npx playwright test --config=playwright.smoke-all.config.ts e2e/smoke-all.spec.ts
 ```
-~12s. Full pipeline: Automerge sync → hub server → browser → WASM render → preview iframe. Tests the complete hub-client integration.
+\~12s. Full pipeline: Automerge sync → hub server → browser → WASM render → preview iframe. Tests the complete hub-client integration. (The base `playwright.config.ts`\'s `testIgnore` excludes `smoke-all.spec.ts`, so the dedicated `playwright.smoke-all.config.ts` is required — a bare `npx playwright test e2e/smoke-all.spec.ts` silently runs zero tests.)
 
 **CRITICAL prerequisites for Playwright tests:**
 
 1. **Build with `VITE_E2E=1`** before running any Playwright test:
    ```bash
    cd hub-client
-   VITE_E2E=1 npm run build   # compiles test hooks into the bundle
+   VITE_E2E=1 VITE_DEFAULT_SYNC_SERVER=/ws npm run build   # compiles test hooks into the bundle
    ```
    Without this flag, `window.__quartoTest` is tree-shaken out and every
    `page.evaluate` call that reads it fails with "E2E test hooks not found".
    `bootstrapProjectSet` checks for this and throws a clear error, but the
    root cause is always a missing `VITE_E2E=1` build.
+
+   `VITE_DEFAULT_SYNC_SERVER=/ws` matters too: the app creates the personal
+   project set silently on first run against that default (bd-4h1hv60p),
+   and there is no setup form for a test to type the hub URL into. `/ws`
+   resolves to the page origin, which `vite preview` proxies to the e2e
+   hub; without it the suite would create every project set on the public
+   sync server.
 
 2. **No conflicting hub server on port 3031**: `globalSetup` starts its own
    `cargo run --bin hub` on port 3031. If a dev hub is already bound there,
@@ -158,6 +165,25 @@ The full e2e command handles the build automatically:
 ```bash
 cd hub-client && npm run test:e2e   # build:wasm + VITE_E2E=1 build + playwright
 ```
+
+### 4. Preview ↔ render DOM parity (WASM + jsdom)
+```bash
+cd hub-client && npm run test:wasm
+```
+Runs in the same `test:wasm` invocation as runner 2 (and therefore in `test:ci` → `cargo xtask verify` — no new CI wiring). For every fixture whose `_quarto.tests.html` carries `dom-parity: true`, renders it twice through the WASM module — `render_page_in_project` (native HTML writer) and `render_page_for_preview` (Pandoc AST, mounted read-only via `<Ast registry={previewRegistry}>` under jsdom) — and requires the canonical form of `main#quarto-document-content` to match on both sides. `SMOKE_FILTER=<substring>` narrows by fixture path, same env var as runner 2 — it also narrows the sibling smoke-all sweep in the same test file.
+
+Under vitest 4 the `Parity results: N compared, M failed, K opted in` summary and per-fixture timings only print for a failing test by default. To see them on a passing run, append `--reporter=verbose`:
+```bash
+cd hub-client && SMOKE_FILTER=simple-default npm run test:wasm -- --reporter=verbose
+```
+
+**Normalisation rules** (and their reasons) live in `ts-packages/preview-renderer/src/test-utils/domParity.ts`: `data-loc`/`data-sid` are stripped (source-tracking, preview-only); `span.math` children are treated opaque (KaTeX vs MathJax — divergent by design until bd-tmb2u5yu closes); `data-hl-spans` leaking to either side is a **hard failure**, never normalised away; attributes are sorted for comparison but class order is preserved; a `<div>` with no attribute surviving the strip list (`data-loc`/`data-sid`) is unwrapped on both sides (React's `RawBlock` needs a host element the native writer never emits); text inside `<pre>` compares verbatim, whitespace elsewhere is collapsed with an inline-neighbour edge rule.
+
+**Opt in** by adding `dom-parity: true` under `html:` in a fixture's `_quarto.tests` block (see the DSL reference below — all four runners accept the key, only this one acts on it). This is a curated allowlist with **no xfail list**: once a fixture opts in, a divergence fails the suite — fix it or remove the opt-in, never mark it expected-to-fail. On a mismatch, normalised text for both sides lands at `hub-client/test-results/parity/<rel-path-with-__-separators>/{render,preview}.norm.txt` (gitignored) for diffing.
+
+Fixtures containing math can't opt in until bd-tmb2u5yu (`Math.tsx` emits no `math inline|display` class) closes; tabsets have no React implementation yet; engine fixtures (jupyter/knitr) can't run under WASM at all. Known open divergences, each tracked by a strand labeled `preview-parity`: bd-294mbrcx (`Link` drops `role`/kv attrs), bd-q88zinyv (`OrderedList` omits `type="1"`), bd-qzwlhrlv (`Strikeout` renders `<s>` on one side, `<del>` on the other), bd-tmb2u5yu (`Math` class, see above). Each fix should end with `dom-parity: true` added to the fixture that reproduced it.
+
+See `.claude/skills/preview-render-parity/SKILL.md` for the diagnosis workflow and `claude-notes/plans/2026-08-24-preview-render-dom-parity-harness.md` for the design.
 
 ### Writing Fixtures
 
@@ -202,6 +228,7 @@ _quarto:
         - ["expected-pattern", "another-expected"]  # must match
         - ["should-not-appear"]                     # must NOT match
       noErrors: true
+      dom-parity: true                      # opt into runner 4 — see "Preview ↔ render DOM parity" above
 ```
 
 ### Running a Single Fixture
@@ -238,7 +265,7 @@ the design and budget rationale.
 ### On-disk format
 
 - **Compressed compact JSON** at `.quarto/trace/<stem>/latest.json.gz`.
-  Pretty-print accounted for ~80% of bytes on real traces; gzip on top
+  Pretty-print accounted for \~80% of bytes on real traces; gzip on top
   collapses what's left.
 - **Schema version 2** with content-addressed AST dedup: every unique
   AST is stored once in a top-level `asts` map, and pipeline entries

@@ -105,6 +105,11 @@ struct UpdateDocumentRequest {
 ///
 /// The issuer URL and image domains are validated at [`auth::AuthConfig`]
 /// construction time, so this function cannot fail from invalid config.
+/// The Typst package registry. The in-browser PDF compiler downloads `@preview`
+/// package tarballs from it (`resources/typst-wasm.json`, `package_registry`); it
+/// is the only origin besides the hub and the OIDC issuer that `connect-src` allows.
+const TYPST_PACKAGE_REGISTRY: &str = "https://packages.typst.org";
+
 fn build_csp(config: &auth::AuthConfig) -> String {
     let issuer_origin = config.issuer_origin();
 
@@ -121,7 +126,7 @@ fn build_csp(config: &auth::AuthConfig) -> String {
          style-src 'self' 'unsafe-inline'; \
          font-src 'self'; \
          img-src 'self' data: {img_src}; \
-         connect-src 'self' {issuer_origin}; \
+         connect-src 'self' {issuer_origin} {TYPST_PACKAGE_REGISTRY}; \
          frame-src {issuer_origin}"
     )
 }
@@ -960,9 +965,9 @@ async fn auth_nonce(State(ctx): State<SharedContext>) -> impl IntoResponse {
     response
 }
 
-/// Login-state failure class for a callback that presented no cookie and a
-/// nonce-less token. Retained for future callback-time compatibility branches;
-/// every other login-state failure maps to `restart`.
+/// Login-state failure class for a callback that presented no cookie
+/// **and** a nonce-less token. Named because the user-facing reason
+/// mapping keys off it; every other class maps to `restart`.
 const LOGIN_STATE_STALE_CLIENT: &str = "stale_client";
 
 /// Outcome of the callback's nonce check.
@@ -983,9 +988,10 @@ enum NonceCheck {
 /// for a stolen token — and has no way to ask "did *this* browser start
 /// *this* login?".
 ///
-/// Returns [`NonceCheck::Skipped`] for a nonce-less token while old SPA
-/// compatibility is required. Tokens that present a nonce still require an
-/// exact match against the sealed login-state cookie.
+/// Returns [`NonceCheck::Skipped`] under `--allow-insecure-auth`: the
+/// flow needs a `SameSite=None; Secure` cookie, which cannot function
+/// over plain HTTP. That is consistent with the flag's existing "never in
+/// production" contract, and the skip is logged at WARN.
 fn check_login_nonce(
     ctx: &HubContext,
     claims: &auth::OidcClaims,
@@ -999,25 +1005,23 @@ fn check_login_nonce(
         return NonceCheck::Skipped;
     }
 
-    // TODO(bd-mc00s2ws): Reject nonce-less tokens after old SPA versions no
-    // longer need to authenticate against current hub servers.
-    if claims.nonce.is_none() {
-        tracing::warn!(
-            "nonce verification skipped for a nonce-less token to support an old SPA; \
-             restore universal nonce enforcement before removing the old SPA"
-        );
-        return NonceCheck::Skipped;
-    }
-
     let Some(blob) = login_state_cookie(headers, true) else {
         // Two readings, opposite remedies — and the token's own `nonce`
         // claim separates them. Reading it here is safe: the callback
         // has already signature-validated these claims.
         //
-        // A nonce with no cookie means the pre-flight did happen and the
-        // cookie was lost in transit (fix the configuration), or a captured
-        // token is being replayed from a browser that never ran one.
-        return NonceCheck::Failed("missing");
+        // No nonce means no current client produced this (the SPA
+        // renders no button until it holds one), so the fix is a reload
+        // — or nothing, if something is driving GIS outside the app.
+        // A nonce with no cookie means the pre-flight *did* happen and
+        // the cookie was lost in transit (fix the configuration), or a
+        // captured token is being replayed from a browser that never
+        // ran one. Per-event those two are indistinguishable.
+        return NonceCheck::Failed(if claims.nonce.is_none() {
+            LOGIN_STATE_STALE_CLIENT
+        } else {
+            "missing"
+        });
     };
     let sealed = match crate::login_state::open_login_state(
         ctx.session_keys(),
@@ -1166,6 +1170,9 @@ async fn auth_callback(
             sub = %claims.sub,
             detail = %format!("login_state_{detail}"),
         );
+        // Only the nonce-less-token-without-a-cookie class is worth a
+        // distinct user-facing reason — it is the one a reload fixes.
+        // Every other class (and any added later) is a plain retry.
         return auth_error(if detail == LOGIN_STATE_STALE_CLIENT {
             AuthErrorReason::StaleClient
         } else {
@@ -1223,7 +1230,7 @@ struct AuthMeResponse {
     credential: &'static str,
 }
 
-/// Query parameters for GET /auth/actor.
+/// Query parameters for GET /auth/actor and GET /auth/author.
 #[derive(Deserialize)]
 struct AuthActorQuery {
     project: String,
@@ -1233,6 +1240,12 @@ struct AuthActorQuery {
 #[derive(Serialize)]
 struct AuthActorResponse {
     actor_id: String,
+}
+
+/// Response for GET /auth/author.
+#[derive(Serialize)]
+struct AuthAuthorResponse {
+    author_id: String,
 }
 
 /// Request body for POST /auth/session.
@@ -1304,6 +1317,10 @@ async fn auth_me(
 /// so the same user gets a different actor ID in each project. Cross-project
 /// correlation is impossible without the server secret.
 ///
+/// **Deprecated** (author-ID transition, bd-o1yn1fqy): superseded by
+/// `GET /auth/author`. Kept untouched for older clients until no released
+/// client calls it; removal is a Phase 5 follow-up strand.
+///
 /// - Returns 401 if the credential is missing or invalid.
 /// - Returns 400 if the `project` query parameter is missing (Axum extractor).
 /// - No server-side project validation: an unknown `project_id` just yields an
@@ -1320,6 +1337,33 @@ async fn auth_actor(
         &query.project,
     );
     Ok(Json(AuthActorResponse { actor_id }))
+}
+
+/// Return a per-project author ID for the authenticated user.
+///
+/// The author ID is served for automerge's change-level author metadata:
+/// it carries the stable per-user identity, while actor IDs return to
+/// automerge's random per-document default (author-ID transition,
+/// bd-o1yn1fqy). It is minted with the same HMAC construction as the
+/// legacy actor ID, so the value is byte-identical to what
+/// `GET /auth/actor` returns for the same credential+project (D5) and
+/// attribution keys are continuous across the transition.
+///
+/// Same contract as `auth_actor`: 401 missing/invalid credential, 400
+/// missing `project`, 403 disallowed user; no server-side project
+/// validation.
+async fn auth_author(
+    headers: HeaderMap,
+    State(ctx): State<SharedContext>,
+    Query(query): Query<AuthActorQuery>,
+) -> std::result::Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let user = authenticate_request(&ctx, &headers).await?;
+    let author_id = crate::auth::sub_to_actor_id_for_project(
+        ctx.server_secret_bytes(),
+        user.subject(),
+        &query.project,
+    );
+    Ok(Json(AuthAuthorResponse { author_id }))
 }
 
 /// Clear the auth cookie.
@@ -1754,6 +1798,7 @@ pub async fn build_router_with_state(ctx: SharedContext) -> Result<Router<Shared
         // Auth endpoints
         .route("/auth/me", get(auth_me))
         .route("/auth/actor", get(auth_actor))
+        .route("/auth/author", get(auth_author))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/logout-everywhere", post(auth_logout_everywhere))
         // WebSocket endpoint for automerge sync at `/ws` (hub-client +
@@ -1887,6 +1932,30 @@ pub type OnFileChangedCallback = std::sync::Arc<
 /// The caller must set `HubConfig::register_root_ws` to `false` when
 /// the extension claims `/`; otherwise axum will panic on the
 /// duplicate route.
+/// Serve `router` on `listener` until the shutdown watch fires, then
+/// drain connections gracefully. Shared by the TCP and UDS listener
+/// arms so both transports shut down identically.
+async fn serve_with_graceful_shutdown<L>(
+    listener: L,
+    router: Router<()>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Result<()>
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
+    let mut shutdown_rx_server = shutdown_rx;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            // Wait until shutdown is signaled
+            let _ = shutdown_rx_server.wait_for(|&v| v).await;
+            info!("Server shutting down...");
+        })
+        .await
+        .map_err(|e| crate::error::Error::Server(e.to_string()))?;
+    Ok(())
+}
+
 pub async fn run_server_with<F>(
     storage: StorageManager,
     config: HubConfig,
@@ -1899,12 +1968,39 @@ where
 {
     let addr = format!("{}:{}", config.host, config.port);
     let sync_interval = config.sync_interval_secs;
+    let shutdown_message = config.shutdown_message.clone();
     let watch_enabled = config.watch_enabled;
     let watch_debounce_ms = config.watch_debounce_ms;
     let watch_filter = config.watch_filter;
     let watch_single_file = config.single_file.clone();
     let project_root = storage.project_root().map(|p| p.to_path_buf());
     let has_project = project_root.is_some();
+
+    // Unix domain socket transport (bd-kosgkxjt): exclusive-UDS mode —
+    // exactly one inbound transport per hub. Extracted before `config`
+    // moves into HubContext. Lib-level guards mirror the CLI validation
+    // (`validate_socket_platform` / `validate_socket_args`) for callers
+    // that build HubConfig directly (e.g. quarto-preview).
+    let socket_requested = config.socket_path.is_some();
+    if socket_requested && config.auth_config.is_some() {
+        return Err(crate::error::Error::Server(
+            "socket_path cannot be combined with auth_config: a unix socket hub is \
+             unauthenticated local-trusted"
+                .into(),
+        ));
+    }
+    #[cfg(not(unix))]
+    if socket_requested {
+        return Err(crate::error::Error::Server(
+            "unix domain sockets are not supported on this platform (Linux and macOS only)".into(),
+        ));
+    }
+    #[cfg(unix)]
+    let socket_path = config.socket_path.clone();
+    #[cfg(unix)]
+    let socket_group = config.socket_group.clone();
+    #[cfg(unix)]
+    let socket_allow_uid = config.socket_allow_uid.clone();
 
     // HubContext::new is now async (initializes samod repo and performs initial sync)
     let ctx = Arc::new(HubContext::new(storage, config).await?);
@@ -1930,19 +2026,61 @@ where
     }
     let router = router.with_state(ctx);
 
-    let listener = TcpListener::bind(&addr).await?;
-    if has_project {
-        info!(%addr, "Hub server listening (project mode)");
+    // Listener selection: exactly one inbound transport per hub. In UDS
+    // mode the TCP bind is skipped entirely — nothing to port-scan, no
+    // loopback interface to reach.
+    #[cfg(unix)]
+    let uds_listener = match &socket_path {
+        Some(path) => Some(
+            crate::unix_socket::bind_uds_listener(path, socket_group.as_deref(), &socket_allow_uid)
+                .await
+                .map_err(|e| {
+                    crate::error::Error::Server(format!(
+                        "cannot listen on unix socket {}: {e:#}",
+                        path.display()
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let tcp_listener = if socket_requested {
+        #[cfg(unix)]
+        {
+            info!(
+                socket = %socket_path.as_deref().unwrap().display(),
+                "Hub server listening (unix socket mode)"
+            );
+            None
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("UDS mode was rejected above on this platform")
+        }
     } else {
-        info!(%addr, "Hub server listening (standalone sync mode)");
-    }
+        let listener = TcpListener::bind(&addr).await?;
+        if has_project {
+            info!(%addr, "Hub server listening (project mode)");
+        } else {
+            info!(%addr, "Hub server listening (standalone sync mode)");
+        }
+        Some(listener)
+    };
 
     // Create shutdown signal channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Spawn task to listen for OS signals and trigger shutdown
+    // Spawn task to listen for OS signals and trigger shutdown. The
+    // caller's shutdown message prints here — before the signal is
+    // forwarded, on the shutdown critical path — so teardown can
+    // never exit the process before the line appears (bd-wj9smyxg:
+    // a detached listener task races exactly that and lost in CI).
     tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
+        if wait_for_shutdown_signal().await == ShutdownSignal::CtrlC
+            && let Some(message) = shutdown_message
+        {
+            println!();
+            println!("  {message}");
+        }
         let _ = shutdown_tx.send(true);
     });
 
@@ -2019,15 +2157,37 @@ where
     };
 
     // Run server with graceful shutdown
-    let mut shutdown_rx_server = shutdown_rx.clone();
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            // Wait until shutdown is signaled
-            let _ = shutdown_rx_server.wait_for(|&v| v).await;
-            info!("Server shutting down...");
-        })
-        .await
-        .map_err(|e| crate::error::Error::Server(e.to_string()))?;
+    #[cfg(unix)]
+    match uds_listener {
+        Some(listener) => {
+            let socket_file = socket_path.clone().unwrap();
+            serve_with_graceful_shutdown(listener, router, shutdown_rx.clone()).await?;
+            // Graceful shutdown completed — reclaim the socket file so
+            // the next startup doesn't have to probe past a corpse.
+            if let Err(e) = std::fs::remove_file(&socket_file) {
+                tracing::warn!(
+                    error = %e,
+                    socket = %socket_file.display(),
+                    "Failed to remove socket file on shutdown"
+                );
+            }
+        }
+        None => {
+            serve_with_graceful_shutdown(
+                tcp_listener.expect("TCP mode binds a listener"),
+                router,
+                shutdown_rx.clone(),
+            )
+            .await?;
+        }
+    }
+    #[cfg(not(unix))]
+    serve_with_graceful_shutdown(
+        tcp_listener.expect("TCP mode binds a listener"),
+        router,
+        shutdown_rx.clone(),
+    )
+    .await?;
 
     // Wait for background tasks to finish
     if let Some(handle) = periodic_sync_handle {
@@ -2158,8 +2318,18 @@ async fn run_file_watcher(
     }
 }
 
+/// Which OS signal initiated shutdown. The distinction matters to
+/// callers printing a user-facing acknowledgment: the message reads
+/// "Received Ctrl-C", so it must not appear on a SIGTERM-driven
+/// shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownSignal {
+    CtrlC,
+    Sigterm,
+}
+
 /// Wait for shutdown signals (Ctrl-C, SIGTERM, SIGINT).
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> ShutdownSignal {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -2180,9 +2350,11 @@ async fn wait_for_shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {
             info!("Received Ctrl-C, initiating graceful shutdown...");
+            ShutdownSignal::CtrlC
         }
         _ = terminate => {
             info!("Received SIGTERM, initiating graceful shutdown...");
+            ShutdownSignal::Sigterm
         }
     }
 }
@@ -2492,6 +2664,19 @@ mod tests {
             !has_bare_ws,
             "connect-src must not allow arbitrary WebSocket hosts"
         );
+    }
+
+    #[test]
+    fn csp_allows_only_the_typst_package_registry_beyond_self_and_issuer() {
+        let config = google_auth_config();
+        let csp = build_csp(&config);
+        let connect_src = csp.split(';').find(|d| d.contains("connect-src")).unwrap();
+        let hosts: Vec<&str> = connect_src
+            .split_whitespace()
+            .skip(1)
+            .filter(|t| *t != "'self'" && *t != config.issuer_origin())
+            .collect();
+        assert_eq!(hosts, vec!["https://packages.typst.org"]);
     }
 
     #[test]

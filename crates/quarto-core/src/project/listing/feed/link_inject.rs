@@ -9,8 +9,8 @@
 //!
 //! Unlike the rest of the `feed/` submodule, this file is **not**
 //! native-only: it does no I/O, has no native-only dependencies,
-//! and runs on both `build_html_pipeline_stages_with_apply_config`
-//! and `build_wasm_html_pipeline`. The hub-client preview ends up
+//! and runs on the shared `build_html_pipeline_stages_with_apply_config`,
+//! which serves native and WASM alike. The hub-client preview ends up
 //! with a live `<link rel="alternate">` element pointing at a feed
 //! file the WASM environment never produces; clicking it 404s.
 //! That's acceptable v1 behavior — keeping the rendered HTML
@@ -184,13 +184,13 @@ mod tests {
     use crate::project::listing::config::{
         FeedType, Listing, ListingFeedOptions, ListingType, apply_type_defaults,
     };
-    use crate::project::listing::item::ListingItem;
+    use crate::project::listing::item::{ItemOrigin, ItemTarget, ListingItem};
     use crate::project::{DocumentInfo, ProjectConfig, ProjectContext};
     use crate::render::BinaryDependencies;
     use quarto_pandoc_types::ConfigMapEntry;
     use quarto_source_map::SourceInfo;
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
 
     fn s(value: &str) -> ConfigValue {
@@ -211,7 +211,9 @@ mod tests {
 
     fn make_item(title: &str) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
             description: None,
             author: None,
@@ -224,8 +226,12 @@ mod tests {
             image_lazy_loading: None,
             reading_time_minutes: None,
             word_count: None,
-            source_path: PathBuf::from(format!("posts/{}.qmd", title)),
-            output_href: format!("posts/{}.html", title),
+            order: None,
+            target: ItemTarget::document(
+                format!("posts/{}.qmd", title),
+                format!("posts/{}.html", title),
+            ),
+            origin: ItemOrigin::Document,
             extra: BTreeMap::new(),
         }
     }
@@ -275,6 +281,8 @@ mod tests {
             is_single_file: false,
             files: vec![DocumentInfo::from_path(project_dir.join("posts.qmd"))],
             output_dir: project_dir.join("_site"),
+
+            ..Default::default()
         }
     }
 

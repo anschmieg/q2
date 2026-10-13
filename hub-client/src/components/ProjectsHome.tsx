@@ -22,6 +22,7 @@ import * as projectStorage from '../services/projectStorage';
 import * as userSettingsService from '../services/userSettings';
 import {
   getProjectChoices,
+  getProjectChoiceGroups,
   createProject as wasmCreateProject,
   importProjectFromZip,
   exportProjectAsZip,
@@ -31,6 +32,7 @@ import {
   getBinaryFileContent,
   isFileBinary,
   type ProjectChoice,
+  type ProjectChoiceGroup,
   type ProjectFile,
 } from '@quarto/preview-runtime';
 import {
@@ -41,15 +43,53 @@ import {
   resolveSyncServerUrl,
 } from '../utils/routing';
 import ShareDialog from './ShareDialog';
+import { FilePlusIcon, ForkIcon, PeekIcon, PeopleIcon, SortIcon } from './icons';
+import { Menu, MenuItem, MenuDivider, MenuLabel, MenuSubmenu } from './Menu';
+import type { ReactNode } from 'react';
+import { buildChoiceTree, type ChoiceTree, type ChoiceTreeNode } from '../utils/choiceTree';
+
+/**
+ * Render the "＋ New" menu's choices as a tree (bd-q33ylfxf): choices with
+ * no `path` are plain items, and every path group becomes a submenu,
+ * recursively. Order comes from the registry via `buildChoiceTree`.
+ */
+function renderChoiceTree(
+  tree: ChoiceTree<ProjectChoice>,
+  onPick: (choice: ProjectChoice) => void,
+): ReactNode {
+  const item = (choice: ProjectChoice) => (
+    <MenuItem key={choice.id} strong subtext={choice.description} onSelect={() => onPick(choice)}>
+      {choice.name}
+    </MenuItem>
+  );
+  const renderNode = (node: ChoiceTreeNode<ProjectChoice>): ReactNode => (
+    <MenuSubmenu key={node.label} label={node.label} subtext={node.description} strong>
+      {node.choices.map(item)}
+      {node.children.map(renderNode)}
+    </MenuSubmenu>
+  );
+  return (
+    <>
+      {tree.roots.map(item)}
+      {tree.nodes.map(renderNode)}
+    </>
+  );
+}
+import Tooltip from './Tooltip';
+import ModalDialog from './ModalDialog';
+import { common } from '../strings';
 import { sortProjectItems, sortOrderLabel, type SortOrder } from '../utils/projectSort';
+import { buildProjectListExport, parseProjectListImport } from '../services/projectListExport';
 import type { Face } from '../utils/facepile';
 import type { CollectionSnapshot } from '../services/projectSetService';
 import './ProjectsHome.css';
 
 interface Props {
   onSelectProject: (project: ProjectEntry, filePathOverride?: string) => void;
-  isConnecting?: boolean;
   error?: string | null;
+  /** Re-attempt a failed project open; renders a "Try again" recovery
+   *  action on the connection error banner. */
+  onRetry?: () => void;
   onProjectCreated?: (files: ProjectFile[], title: string, projectType: string, syncServer: string) => void;
   onSignOut?: () => void;
   authEmail?: string;
@@ -63,11 +103,23 @@ interface Props {
   onRemoveProjectFromSet?: (indexDocId: string) => void;
   onTouchProject?: (indexDocId: string) => void;
   onAddProjectToSet?: (entry: Omit<ProjectSetEntry, 'addedAt' | 'lastAccessed'>) => void;
+  /** Import a project-list JSON export into the root set (import + reconcile,
+   * so the projects appear without a reload). Absent in legacy mode. */
+  onImportProjects?: (json: string) => Promise<{ imported: number; reconciled: number; connected: boolean }>;
+  /** Subscribe to an existing collection document (used by import to restore
+   * collection subscriptions from a v5 export's pointers). */
+  onSubscribeCollection?: (projectSetDocId: string, syncServer: string) => Promise<void>;
   onRenameProject?: (indexDocId: string, description: string) => void;
   /** Replace a project's cached peek summary (used by Peek's refresh). */
   onUpdateProjectSummary?: (indexDocId: string, summary: ProjectSetEntrySummary) => void;
   /** All connected collections, root first (from useCollectionSets). */
   collections?: CollectionSnapshot[];
+  /**
+   * Sort this collection's section to the top (bd-fxdcxbpq): set after
+   * joining a collection via an invite so the invitee lands looking at
+   * what they just accepted.
+   */
+  promoteCollectionId?: string;
   onCreateCollection?: (name: string) => Promise<string>;
   onUnsubscribeCollection?: (collectionDocId: string) => Promise<void>;
   onRenameCollection?: (collectionDocId: string, name: string) => void;
@@ -125,23 +177,11 @@ function setPendingCollectionAssignment(title: string, collectionId: string): vo
   );
 }
 
-/** Fork glyph for the duplicate affordance (three nodes, branch lines). */
-const forkIcon = (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <circle cx="6" cy="5" r="2.2" stroke="currentColor" strokeWidth="2" />
-    <circle cx="18" cy="5" r="2.2" stroke="currentColor" strokeWidth="2" />
-    <circle cx="12" cy="19" r="2.2" stroke="currentColor" strokeWidth="2" />
-    <path d="M6 7.5v1.5c0 1.7 1.3 3 3 3h6c1.7 0 3-1.3 3-3V7.5M12 12v4.5" stroke="currentColor" strokeWidth="2" />
-  </svg>
-);
+/** Fork glyph for the duplicate affordance. */
+const forkIcon = <ForkIcon />;
 
 /** Magnifying glass for the hover-to-peek affordance. */
-const peekIcon = (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" strokeWidth="2" />
-    <path d="M15.5 15.5L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-  </svg>
-);
+const peekIcon = <PeekIcon />;
 
 /** Base64-encode without blowing the arg-spread limit on large files. */
 function toBase64(bytes: Uint8Array): string {
@@ -215,8 +255,8 @@ function parseConnectInput(input: string): { docId: string; server?: string; nam
 
 export default function ProjectsHome({
   onSelectProject,
-  isConnecting,
   error: connectionError,
+  onRetry,
   onProjectCreated,
   onSignOut,
   authEmail,
@@ -230,9 +270,12 @@ export default function ProjectsHome({
   onRemoveProjectFromSet,
   onTouchProject,
   onAddProjectToSet,
+  onImportProjects,
+  onSubscribeCollection,
   onRenameProject,
   onUpdateProjectSummary,
   collections: collectionsProp,
+  promoteCollectionId,
   onCreateCollection,
   onUnsubscribeCollection,
   onRenameCollection,
@@ -247,6 +290,11 @@ export default function ProjectsHome({
   // Legacy IDB fallback (only when no project set is in play)
   const [legacyProjects, setLegacyProjects] = useState<ProjectEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed legacy load surfaces as an error state with retry (Phase 3)
+  // instead of silently falling through to the "No projects yet" empty
+  // copy. loadAttempt re-triggers the load effect.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   const [search, setSearch] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -254,7 +302,7 @@ export default function ProjectsHome({
   // Menus / popovers. openMenu identifies the ⋯ menu by project id or
   // `collection:<id>`; submenus and the peek popover are tracked separately.
   const [openMenu, setOpenMenu] = useState<string | null>(null);
-  const [moveSubmenuOpen, setMoveSubmenuOpen] = useState<false | 'move' | 'add'>(false);
+
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
   const [peekFor, setPeekFor] = useState<string | null>(null);
@@ -272,6 +320,8 @@ export default function ProjectsHome({
     peekTimerRef.current = window.setTimeout(() => setPeekFor(null), 180);
   }, []);
   const [peekRefreshing, setPeekRefreshing] = useState(false);
+  // Project whose share link is being prepared (fetching a peek summary).
+  const [sharingId, setSharingId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   // Dialogs
@@ -290,6 +340,7 @@ export default function ProjectsHome({
   const [showServerField, setShowServerField] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [projectChoices, setProjectChoices] = useState<ProjectChoice[]>([]);
+  const [projectChoiceGroups, setProjectChoiceGroups] = useState<ProjectChoiceGroup[]>([]);
 
   // Connect / Import dialog state
   const [addTab, setAddTab] = useState<'connect' | 'import'>('connect');
@@ -313,19 +364,26 @@ export default function ProjectsHome({
   // first). The root is the personal superset; the sections on this page
   // render the non-root collections, and "Everything else" is computed as
   // root entries not present in any of them.
-  const collectionViews: CollectionView[] = useMemo(
-    () =>
-      (collectionsProp ?? [])
-        .filter((c) => !c.isRoot)
-        .map((c) => ({
-          id: c.docId,
-          name: c.name ?? 'Untitled collection',
-          syncServer: c.syncServer,
-          entries: c.entries,
-          projectIds: c.entries.map((e) => e.indexDocId.replace(/^automerge:/, '')),
-        })),
-    [collectionsProp],
-  );
+  const collectionViews: CollectionView[] = useMemo(() => {
+    const views = (collectionsProp ?? [])
+      .filter((c) => !c.isRoot)
+      .map((c) => ({
+        id: c.docId,
+        name: c.name ?? 'Untitled collection',
+        syncServer: c.syncServer,
+        entries: c.entries,
+        projectIds: c.entries.map((e) => e.indexDocId.replace(/^automerge:/, '')),
+      }));
+    // A just-joined collection sorts to the top (stable otherwise) so the
+    // invitee lands looking at what they accepted (bd-fxdcxbpq).
+    if (promoteCollectionId) {
+      const bare = promoteCollectionId.replace(/^automerge:/, '');
+      views.sort((a, b) =>
+        Number(b.id.replace(/^automerge:/, '') === bare) -
+        Number(a.id.replace(/^automerge:/, '') === bare));
+    }
+    return views;
+  }, [collectionsProp, promoteCollectionId]);
   const collections = collectionViews;
   // Which collection's members-and-invite popover is open
   const [membersFor, setMembersFor] = useState<string | null>(null);
@@ -379,15 +437,27 @@ export default function ProjectsHome({
     (async () => {
       try {
         const entries = await projectStorage.listProjects();
-        if (!cancelled) setLegacyProjects(entries);
+        if (!cancelled) {
+          setLegacyProjects(entries);
+          setLoadError(null);
+        }
       } catch (err) {
         console.error('Failed to load projects:', err);
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [useProjectSet]);
+  }, [useProjectSet, loadAttempt]);
+
+  const handleRetryLoad = () => {
+    setLoading(true);
+    setLoadError(null);
+    setLoadAttempt((n) => n + 1);
+  };
 
   useEffect(() => {
     userSettingsService.getUserIdentity().then(setUserSettings).catch((err) => {
@@ -396,6 +466,8 @@ export default function ProjectsHome({
     getProjectChoices().then(setProjectChoices).catch((err) => {
       console.error('Failed to load project choices:', err);
     });
+    // Group subtext is a nicety: a failure leaves the labels bare.
+    getProjectChoiceGroups().then(setProjectChoiceGroups).catch(() => {});
   }, []);
 
   const items: ProjectItem[] = useMemo(() => {
@@ -454,7 +526,6 @@ export default function ProjectsHome({
 
   const closeAllMenus = useCallback(() => {
     setOpenMenu(null);
-    setMoveSubmenuOpen(false);
     setNewMenuOpen(false);
     setAvatarMenuOpen(false);
     setPeekFor(null);
@@ -498,13 +569,31 @@ export default function ProjectsHome({
   }, [collections]);
 
   const entryFor = useCallback((indexDocId: string): Omit<ProjectSetEntry, 'addedAt' | 'lastAccessed'> | null => {
+    // Carry the cached peek summary along with the identity fields:
+    // dropping it here left collection copies with no file counts until
+    // the project's next open, so invite previews showed "0 files" for
+    // populated projects (bd-fxdcxbpq follow-up).
     const item = byId.get(indexDocId)
       ?? byId.get(indexDocId.replace(/^automerge:/, ''))
       ?? byId.get(`automerge:${indexDocId}`);
-    if (item) return { indexDocId: item.indexDocId, syncServer: item.syncServer, description: item.description };
+    if (item) {
+      return {
+        indexDocId: item.indexDocId,
+        syncServer: item.syncServer,
+        description: item.description,
+        ...(item.summary && { summary: item.summary }),
+      };
+    }
     for (const c of collections) {
       const e = c.entries.find((en) => en.indexDocId.replace(/^automerge:/, '') === indexDocId.replace(/^automerge:/, ''));
-      if (e) return { indexDocId: e.indexDocId, syncServer: e.syncServer, description: e.description };
+      if (e) {
+        return {
+          indexDocId: e.indexDocId,
+          syncServer: e.syncServer,
+          description: e.description,
+          ...(e.summary && { summary: e.summary }),
+        };
+      }
     }
     return null;
   }, [byId, collections]);
@@ -600,7 +689,17 @@ export default function ProjectsHome({
     },
   }), [draggingId, dropTarget, requestMove, handleDragEnd]);
 
+  // The item being opened, shown as an italic "opening..." beside its
+  // name (replaces the old global "Connecting to sync server…" banner).
+  // Success unmounts this view; failure surfaces connectionError, which
+  // clears the marker below.
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  useEffect(() => {
+    if (connectionError) setOpeningId(null);
+  }, [connectionError]);
+
   const handleOpen = useCallback(async (item: ProjectItem) => {
+    setOpeningId(item.indexDocId);
     // Ensure a local IDB entry exists (URL routing uses local ids)
     let localProject = await projectStorage.getProjectByIndexDocId(item.indexDocId);
     if (!localProject) {
@@ -728,7 +827,12 @@ export default function ProjectsHome({
       setCopied(label);
       setTimeout(() => setCopied(null), 2000);
     } catch (err) {
+      // Surface the failure instead of only logging it: a rejected write
+      // (no transient activation left, permission denied) otherwise looks
+      // exactly like success — the label just never changes.
       console.error('Clipboard write failed:', err);
+      setCopied(`${label}:failed`);
+      setTimeout(() => setCopied(null), 3000);
     }
   }, []);
 
@@ -892,26 +996,17 @@ export default function ProjectsHome({
   }, [onColorChange]);
 
   const handleExportJson = useCallback(() => {
-    const exportData = {
-      schemaVersion: 4,
-      exportedAt: new Date().toISOString(),
-      projects: items.map((e) => ({
-        id: '',
-        indexDocId: e.indexDocId,
-        syncServer: e.syncServer,
-        description: e.description,
-        createdAt: e.addedAt,
-        lastAccessed: e.lastAccessed,
-      })),
-    };
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    // Collections are synced docs; the export records their pointers so a
+    // restoring browser can re-subscribe (root included for completeness).
+    const json = buildProjectListExport(items, collectionsProp ?? []);
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = 'quarto-hub-projects.json';
     a.click();
     URL.revokeObjectURL(url);
-  }, [items]);
+  }, [items, collectionsProp]);
 
   const handleImportJson = useCallback(() => {
     const input = document.createElement('input');
@@ -921,15 +1016,53 @@ export default function ProjectsHome({
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
       try {
-        const count = await projectStorage.importProjects(await file.text());
-        alert(`Imported ${count} project(s)`);
+        const json = await file.text();
+        if (onImportProjects) {
+          // Set mode: import + reconcile so the projects appear immediately.
+          const parsed = parseProjectListImport(json);
+          const { imported, reconciled, connected } = await onImportProjects(json);
+
+          // Restore collection subscriptions from the export's pointers (v5+).
+          // Never the root (this browser has its own), never ones already
+          // subscribed; membership arrives with sync, so nothing is written.
+          let joined = 0;
+          let failedCollections = 0;
+          if (onSubscribeCollection) {
+            const have = new Set((collectionsProp ?? []).map((c) => c.docId));
+            for (const c of parsed.collections) {
+              if (c.isRoot || have.has(c.projectSetDocId)) continue;
+              try {
+                await onSubscribeCollection(c.projectSetDocId, c.syncServer);
+                joined++;
+              } catch (err) {
+                console.error(`Failed to subscribe to collection ${c.projectSetDocId}:`, err);
+                failedCollections++;
+              }
+            }
+          }
+
+          let msg: string;
+          if (!connected) {
+            msg = `Saved ${imported} project(s) — they'll appear when the sync connection is restored`;
+          } else if (reconciled > 0) {
+            msg = `Imported ${reconciled} project(s)`;
+          } else {
+            msg = 'All projects were already in your list';
+          }
+          if (joined > 0) msg += `, joined ${joined} collection(s)`;
+          if (failedCollections > 0) msg += `; ${failedCollections} collection(s) could not be joined`;
+          alert(msg);
+        } else {
+          const count = await projectStorage.importProjects(json);
+          alert(`Imported ${count} project(s)`);
+        }
       } catch (err) {
         console.error('Failed to import:', err);
         alert('Failed to import projects. Invalid JSON format.');
       }
     };
     input.click();
-  }, []);
+  }, [onImportProjects, onSubscribeCollection, collectionsProp]);
 
   // ---- derived view data ----
 
@@ -985,13 +1118,19 @@ export default function ProjectsHome({
     const shown = users.slice(0, max);
     const extra = users.length - shown.length;
     return (
-      <span className={`ph-facepile ${size}`}>
+      <span className={`qh-facepile ${size}`}>
         {shown.map((u, i) => (
-          <span key={`${u.initials}-${i}`} className="ph-face" style={{ backgroundColor: u.color }} title={u.name}>
-            {u.initials}
-          </span>
+          <Tooltip key={`${u.initials}-${i}`} content={u.name}>
+            <span className="qh-face" style={{ backgroundColor: u.color }}>
+              {u.initials}
+            </span>
+          </Tooltip>
         ))}
-        {extra > 0 && <span className="ph-face more" title={`${extra} more`}>+{extra}</span>}
+        {extra > 0 && (
+          <Tooltip content={`${extra} more`}>
+            <span className="qh-face more">+{extra}</span>
+          </Tooltip>
+        )}
       </span>
     );
   };
@@ -999,196 +1138,241 @@ export default function ProjectsHome({
   // ---- rendering ----
 
   if (loading || projectSetConnecting) {
+    // Skeleton grid shaped like the loaded page (Phase 5); role="status"
+    // keeps the Phase 3 polite loading announcement for screen readers.
     return (
       <div className="projects-home">
-        <div className="ph-loading">
-          {projectSetConnecting ? 'Connecting to project set…' : 'Loading projects…'}
-        </div>
+        <main
+          className="qh-main qh-skeleton-page"
+          role="status"
+          aria-label={projectSetConnecting ? 'Connecting to project set…' : 'Loading projects…'}
+        >
+          <div className="qh-skeleton qh-skeleton-heading" aria-hidden="true" />
+          <div className="qh-card-grid" aria-hidden="true">
+            {Array.from({ length: 8 }, (_, i) => (
+              <div key={i} className="qh-card qh-skeleton-card">
+                <div className="qh-skeleton qh-skeleton-line" style={{ width: '60%' }} />
+                <div className="qh-skeleton qh-skeleton-line-sm" style={{ width: '40%' }} />
+              </div>
+            ))}
+          </div>
+        </main>
       </div>
     );
   }
 
+  // The shared APG menu primitive (components/Menu.tsx): arrow-key nav,
+  // type-ahead, Escape with focus return, submenus.
   const renderProjectMenu = (item: ProjectItem) => (
-    <div className="ph-menu" role="menu">
-      <button className="ph-menu-item strong" onClick={() => { closeAllMenus(); handleOpen(item); }}>
+    <Menu onClose={() => closeAllMenus()} ignoreOutsideSelector=".qh-menu-anchor, .qh-peek" aria-label={`Actions for ${item.description}`}>
+      <MenuItem strong onSelect={() => { closeAllMenus(); handleOpen(item); }}>
         Open
-      </button>
-      <div className="ph-menu-item ph-submenu-parent">
-        <button
-          className="ph-menu-item-inner"
-          onClick={(e) => { e.stopPropagation(); setMoveSubmenuOpen((v) => v === 'move' ? false : 'move'); }}
-        >
-          Move to collection <span className="ph-submenu-arrow">▸</span>
-        </button>
-        {moveSubmenuOpen === 'move' && (
-          <div className="ph-menu ph-submenu">
-            {collections
-              .filter((c) => !c.projectIds.includes(item.indexDocId.replace(/^automerge:/, '')))
-              .map((collection) => (
-                <button
-                  key={collection.id}
-                  className="ph-menu-item"
-                  onClick={() => { requestMove(item.indexDocId, collection.id); closeAllMenus(); }}
-                >
-                  {collection.name}
-                </button>
-              ))}
-            {collectionOf(item.indexDocId) && (
-              <button
-                className="ph-menu-item"
-                onClick={() => { requestMove(item.indexDocId, null); closeAllMenus(); }}
-              >
-                No collection
-              </button>
-            )}
-            <button
-              className="ph-menu-item accent"
-              onClick={() => openNewCollection(item.indexDocId)}
+      </MenuItem>
+      <MenuSubmenu label="Move to collection">
+        {collections
+          .filter((c) => !c.projectIds.includes(item.indexDocId.replace(/^automerge:/, '')))
+          .map((collection) => (
+            <MenuItem
+              key={collection.id}
+              onSelect={() => { requestMove(item.indexDocId, collection.id); closeAllMenus(); }}
             >
-              ＋ New collection…
-            </button>
+              {collection.name}
+            </MenuItem>
+          ))}
+        {collectionOf(item.indexDocId) && (
+          <MenuItem onSelect={() => { requestMove(item.indexDocId, null); closeAllMenus(); }}>
+            No collection
+          </MenuItem>
+        )}
+        <MenuItem accent onSelect={() => openNewCollection(item.indexDocId)}>
+          ＋ New collection…
+        </MenuItem>
+      </MenuSubmenu>
+      <MenuSubmenu label="Add to collection">
+        {collections
+          .filter((c) => !c.projectIds.includes(item.indexDocId.replace(/^automerge:/, '')))
+          .map((collection) => (
+            <MenuItem
+              key={collection.id}
+              onSelect={() => { addToCollection(item.indexDocId, collection.id); closeAllMenus(); }}
+            >
+              {collection.name}
+            </MenuItem>
+          ))}
+        {collections.every((c) => c.projectIds.includes(item.indexDocId.replace(/^automerge:/, ''))) && (
+          <div className="qh-menu-item qh-menu-subtext" role="presentation" style={{ cursor: 'default' }}>
+            Already in every collection
           </div>
         )}
-      </div>
-      <div className="ph-menu-item ph-submenu-parent">
-        <button
-          className="ph-menu-item-inner"
-          onClick={(e) => { e.stopPropagation(); setMoveSubmenuOpen((v) => v === 'add' ? false : 'add'); }}
-        >
-          Add to collection <span className="ph-submenu-arrow">▸</span>
-        </button>
-        {moveSubmenuOpen === 'add' && (
-          <div className="ph-menu ph-submenu">
-            {collections
-              .filter((c) => !c.projectIds.includes(item.indexDocId.replace(/^automerge:/, '')))
-              .map((collection) => (
-                <button
-                  key={collection.id}
-                  className="ph-menu-item"
-                  onClick={() => { addToCollection(item.indexDocId, collection.id); closeAllMenus(); }}
-                >
-                  {collection.name}
-                </button>
-              ))}
-            {collections.every((c) => c.projectIds.includes(item.indexDocId.replace(/^automerge:/, ''))) && (
-              <div className="ph-menu-item ph-menu-subtext" style={{ cursor: 'default' }}>
-                Already in every collection
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-      <button
-        className="ph-menu-item"
+      </MenuSubmenu>
+      <MenuItem
         disabled={!!duplicatingId}
-        onClick={(e) => { e.stopPropagation(); openDuplicateDialog(item); }}
+        subtext="Fork a fresh copy — no history carried over"
+        onSelect={() => openDuplicateDialog(item)}
       >
         Duplicate
-        <span className="ph-menu-subtext">Fork a fresh copy — no history carried over</span>
-      </button>
-      <button
-        className="ph-menu-item"
-        onClick={() => copyToClipboard(
-          buildShareableUrl(item.indexDocId, item.syncServer, item.description, 'index.qmd'),
-          item.indexDocId + ':share',
-        )}
-      >
-        {copied === item.indexDocId + ':share' ? 'Link copied!' : 'Share link…'}
-      </button>
-      <button
-        className="ph-menu-item with-hint"
-        onClick={() => copyToClipboard(item.indexDocId.replace(/^automerge:/, ''), item.indexDocId + ':id')}
+      </MenuItem>
+      <MenuItem keepOpen onSelect={() => void shareProject(item)}>
+        {copied === item.indexDocId + ':share'
+          ? 'Link copied!'
+          : copied === item.indexDocId + ':share:failed'
+            ? 'Copy failed — try again'
+            : sharingId === item.indexDocId
+              ? 'Preparing link…'
+              : 'Share link…'}
+      </MenuItem>
+      <MenuItem
+        keepOpen
+        hint={<span className="mono">{shortId(item.indexDocId)}</span>}
+        onSelect={() => copyToClipboard(item.indexDocId.replace(/^automerge:/, ''), item.indexDocId + ':id')}
       >
         {copied === item.indexDocId + ':id' ? 'ID copied!' : 'Copy project ID'}
-        <span className="ph-menu-hint mono">{shortId(item.indexDocId)}</span>
-      </button>
-      <button
-        className="ph-menu-item"
+      </MenuItem>
+      <MenuItem
         disabled={!!exportingId}
-        onClick={(e) => { e.stopPropagation(); handleDownloadZip(item); }}
+        onSelect={() => handleDownloadZip(item)}
       >
         {exportingId === item.indexDocId ? 'Preparing ZIP…' : 'Download as ZIP'}
-      </button>
-      <button className="ph-menu-item" onClick={() => startRename(item)}>Rename…</button>
-      <div className="ph-menu-divider" />
-      <button className="ph-menu-item danger" onClick={() => handleRemove(item)}>
+      </MenuItem>
+      <MenuItem onSelect={() => startRename(item)}>Rename…</MenuItem>
+      <MenuDivider />
+      <MenuItem
+        danger
+        subtext="Doesn't delete the project for others"
+        onSelect={() => handleRemove(item)}
+      >
         Remove from this device
-        <span className="ph-menu-subtext">Doesn't delete the project for others</span>
-      </button>
-    </div>
+      </MenuItem>
+    </Menu>
   );
 
   /** Refresh a peek summary via a short background connection. Contributors
    * are carried over: they only update on a real open, when presence data
    * is flowing. */
-  const refreshPeek = async (item: ProjectItem) => {
-    if (peekRefreshing || exportingId || duplicatingId) return;
+  /**
+   * Refresh a project's cached peek summary from the sync server.
+   *
+   * Returns the summary it wrote so callers can use it in the same turn —
+   * the write travels up through onUpdateProjectSummary and back down as
+   * props, so `item.summary` is still stale when this resolves. Returns
+   * null when the refresh was skipped or failed.
+   */
+  const refreshPeek = async (item: ProjectItem): Promise<ProjectSetEntrySummary | null> => {
+    if (peekRefreshing || exportingId || duplicatingId) return null;
     setPeekRefreshing(true);
     try {
       const files = await connect(resolveSyncServerUrl(item.syncServer), item.indexDocId);
-      onUpdateProjectSummary?.(item.indexDocId, {
+      const summary: ProjectSetEntrySummary = {
         fileCount: files.length,
         topFiles: files.slice(0, 5).map((f) => f.path),
         contributors: item.summary?.contributors ?? [],
         asOf: new Date().toISOString(),
-      });
+      };
+      onUpdateProjectSummary?.(item.indexDocId, summary);
+      return summary;
     } catch (err) {
       console.error('Peek refresh failed:', err);
+      return null;
     } finally {
       try { await disconnect(); } catch { /* connection already down */ }
       setPeekRefreshing(false);
     }
   };
 
+  /**
+   * Copy a share link for a project, embedding the display-only preview
+   * the recipient's invite card renders (bd-fxdcxbpq).
+   *
+   * The preview comes from the cached peek summary, which is written
+   * while a project is open in this browser. A project never opened here
+   * has none, and its links used to ship with no preview at all, so this
+   * fetches one first in that case. The cached path stays synchronous:
+   * `navigator.clipboard.writeText` needs the click's transient
+   * activation, and awaiting a round trip can outlive it — hence the
+   * explicit failure label rather than a silent console error.
+   */
+  const shareProject = async (item: ProjectItem) => {
+    let summary = item.summary ?? null;
+    if (!summary) {
+      setSharingId(item.indexDocId);
+      try {
+        summary = await refreshPeek(item);
+      } finally {
+        setSharingId(null);
+      }
+    }
+    const url = buildShareableUrl(
+      item.indexDocId,
+      item.syncServer,
+      item.description,
+      'index.qmd',
+      {
+        from: userSettings?.userName,
+        preview: summary
+          ? {
+              kind: 'project',
+              fileName: 'index.qmd',
+              topFiles: summary.topFiles.filter((f) => f !== 'index.qmd').slice(0, 2),
+              fileCount: summary.fileCount,
+              contributorInitials: summary.contributors
+                .map((c) => initialsFor(c.name))
+                .slice(0, 4),
+            }
+          : undefined,
+      },
+    );
+    await copyToClipboard(url, item.indexDocId + ':share');
+  };
+
   const renderPeek = (item: ProjectItem) => {
     const s = item.summary;
     return (
-      <div className="qh-peek ph-peek" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="qh-peek qh-peek" onMouseDown={(e) => e.stopPropagation()}>
         {s ? (
           <>
-            <div className="ph-peek-header">
+            <div className="qh-peek-header">
               {s.fileCount} {s.fileCount === 1 ? 'FILE' : 'FILES'} · AS OF {formatOpened(s.asOf).toUpperCase()}
             </div>
             {s.contributors.length > 0 && (
-              <div className="ph-peek-people">
+              <div className="qh-peek-people">
                 {renderFacepile(
                   s.contributors.map((c) => ({ name: c.name, color: c.color, initials: initialsFor(c.name) })),
                   'lg', 3,
                 )}
-                <span className="ph-peek-people-label">
+                <span className="qh-peek-people-label">
                   {s.contributors.length === 1
                     ? `${s.contributors[0].name} has joined`
                     : `${s.contributors.map((c) => c.name.split(' ')[0]).join(', ')} have joined`}
                 </span>
               </div>
             )}
-            <div className="ph-peek-files">
+            <div className="qh-peek-files">
               {s.topFiles.map((f) => (
-                <div key={f} className="ph-peek-file mono">{f}</div>
+                <div key={f} className="qh-peek-file mono qh-truncate">{f}</div>
               ))}
               {s.fileCount > s.topFiles.length && (
-                <div className="ph-peek-file more">and {s.fileCount - s.topFiles.length} more…</div>
+                <div className="qh-peek-file more">and {s.fileCount - s.topFiles.length} more…</div>
               )}
             </div>
           </>
         ) : (
           <>
-            <div className="ph-peek-header">NOT OPENED ON THIS DEVICE YET</div>
-            <div className="ph-peek-note">
+            <div className="qh-peek-header">NOT OPENED ON THIS DEVICE YET</div>
+            <div className="qh-peek-note">
               Details are cached when you open a project — or load them now without opening it.
             </div>
           </>
         )}
-        <div className="ph-peek-row">
+        <div className="qh-peek-row">
           <span className="mono">{serverHost(item.syncServer)} · {shortId(item.indexDocId)}</span>
         </div>
-        <div className="ph-peek-divider" />
-        <div className="ph-peek-actions">
-          <button className="ph-link" onClick={() => refreshPeek(item)}>
+        <div className="qh-peek-divider" />
+        <div className="qh-peek-actions">
+          <button className="qh-link" onClick={() => refreshPeek(item)}>
             {peekRefreshing ? 'Refreshing…' : s ? 'Refresh' : 'Load details'}
           </button>
         </div>
-        <div className="ph-peek-footnote">Peeking is read-only — use the ⋯ menu to act on the project.</div>
+        <div className="qh-peek-footnote">Peeking is read-only — use the ⋯ menu to act on the project.</div>
       </div>
     );
   };
@@ -1207,16 +1391,40 @@ export default function ProjectsHome({
       summary: e.summary,
     }));
 
-  /** Invite = the collection document's id + server. Nothing else travels. */
-  const buildInviteUrl = (collection: CollectionView): string =>
-    buildFullUrl({
+  /**
+   * Invite = the collection document's id + server, plus (bd-fxdcxbpq) a
+   * display-only preview= built from the cached peek summaries. Joining
+   * lands on the home screen with the collection promoted to the top —
+   * the invite is to the collection, so no start= document is emitted
+   * (the parser still tolerates start= on links already in the wild).
+   * Nothing that grants access beyond the collection id itself travels.
+   */
+  const buildInviteUrl = (collection: CollectionView): string => {
+    const items = collectionItemsOf(collection);
+    return buildFullUrl({
       type: 'join-collection',
       collectionId: collection.id,
       collectionName: collection.name,
       inviter: userSettings?.userName ?? 'A collaborator',
       syncServer: collection.syncServer,
       entries: [],
+      preview: {
+        kind: 'collection',
+        projects: items.slice(0, 3).map((it) => ({
+          name: it.description || 'Untitled project',
+          topFiles: (it.summary?.topFiles ?? []).slice(0, 1),
+          fileCount: it.summary?.fileCount ?? 0,
+          contributorInitials: (it.summary?.contributors ?? [])
+            .map((c) => initialsFor(c.name))
+            .slice(0, 4),
+        })),
+        totalProjects: items.length,
+        memberFirstNames: peopleOn(collection)
+          .map((p) => p.name.split(/\s+/)[0])
+          .slice(0, 3),
+      },
     });
+  };
 
   /** People seen on a collection: you plus the contributor union from the
    * projects' cached summaries. Derived, not a stored member list. */
@@ -1239,35 +1447,37 @@ export default function ProjectsHome({
     const inviteUrl = buildInviteUrl(collection);
     const copyKey = `collection:${collection.id}:invite`;
     return (
-      <div className="ph-menu ph-members" role="dialog" aria-label={`People on ${collection.name}`}>
-        <div className="ph-menu-label">
+      <div className="qh-menu qh-members" role="dialog" aria-label={`People on ${collection.name}`}>
+        <div className="qh-menu-label">
           {people.length <= 1
             ? 'ONLY YOU SO FAR'
             : `${people.length} PEOPLE SEEN ON THESE PROJECTS`}
         </div>
-        <div className="ph-members-list">
+        <div className="qh-members-list">
           {people.map((m, i) => (
-            <div key={`${m.initials}-${i}`} className="ph-member-row">
-              <span className="ph-face lg" style={{ backgroundColor: m.color }}>{m.initials}</span>
-              <span className="ph-member-name">
+            <div key={`${m.initials}-${i}`} className="qh-member-row">
+              <span className="qh-face lg" style={{ backgroundColor: m.color }}>{m.initials}</span>
+              <span className="qh-member-name qh-truncate">
                 {m.name}
-                {i === 0 && selfUser && <span className="ph-member-you"> (you)</span>}
+                {i === 0 && selfUser && <span className="qh-member-you"> (you)</span>}
               </span>
             </div>
           ))}
         </div>
-        <div className="ph-menu-divider" />
-        <div className="ph-menu-label">INVITE BY LINK</div>
-        <div className="ph-members-invite">
-          <span className="ph-invite-url mono" title={inviteUrl}>{inviteUrl.replace(/^https?:\/\//, '').slice(0, 34)}…</span>
+        <div className="qh-menu-divider" />
+        <div className="qh-menu-label">INVITE BY LINK</div>
+        <div className="qh-members-invite">
+          <Tooltip block content={inviteUrl}>
+            <span className="qh-invite-url mono qh-truncate">{inviteUrl.replace(/^https?:\/\//, '').slice(0, 34)}…</span>
+          </Tooltip>
           <button
-            className="ph-btn primary small-invite"
+            className="qh-btn primary small-invite"
             onClick={() => copyToClipboard(inviteUrl, copyKey)}
           >
             {copied === copyKey ? 'Copied!' : 'Copy link'}
           </button>
         </div>
-        <div className="ph-invite-note">
+        <div className="qh-invite-note">
           Anyone with this link can join this collection and add or remove projects.
           Its contents sync to them for real.
         </div>
@@ -1278,58 +1488,62 @@ export default function ProjectsHome({
   const renderCard = (item: ProjectItem) => (
     <div
       key={item.indexDocId}
-      className={`ph-card qh-menu-anchor ${draggingId === item.indexDocId ? 'dragging' : ''} ${peekFor === item.indexDocId ? 'peek-open' : ''}`}
+      className={`qh-card qh-menu-anchor ${draggingId === item.indexDocId ? 'dragging' : ''} ${peekFor === item.indexDocId ? 'peek-open' : ''}`}
       draggable
       onDragStart={handleDragStart(item)}
       onDragEnd={handleDragEnd}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        setMoveSubmenuOpen(false);
         setOpenMenu(openMenu === item.indexDocId ? null : item.indexDocId);
       }}
     >
-      <button className="ph-card-body" onClick={() => handleOpen(item)} title={item.description}>
-        <span className={`ph-card-name ${isUnnamed(item.description) ? 'unnamed' : ''}`}>
-          {item.description}
+      <button className="qh-card-body" onClick={() => handleOpen(item)}>
+        <span style={{ display: 'flex', alignItems: 'baseline', minWidth: 0 }}>
+          <span className={`qh-card-name qh-truncate ${isUnnamed(item.description) ? 'unnamed' : ''}`}>
+            {item.description}
+          </span>
+          {openingId === item.indexDocId && <em className="qh-opening">opening...</em>}
         </span>
-        <span className="ph-card-footer">
-          <span className="ph-card-meta">
+        <span className="qh-card-footer">
+          <span className="qh-card-meta">
             {item.summary ? `${item.summary.fileCount} ${item.summary.fileCount === 1 ? 'file' : 'files'} · ` : ''}
             opened {formatOpened(item.lastAccessed)}
           </span>
           {renderFacepile(contributorsFor(item), 'sm')}
         </span>
       </button>
-      <span className="ph-card-actions">
+      <span className="qh-card-actions">
         <span
-          className="ph-peek-anchor"
+          className="qh-peek-anchor"
           onMouseOver={() => openPeekHover(item.indexDocId)}
           onMouseOut={closePeekHoverSoon}
         >
           <button
-            className="ph-peek-btn"
-            title="Peek — see what's inside"
+            className="qh-peek-btn"
+            aria-label={`Peek — see what's inside ${item.description}`}
             onClick={(e) => { e.stopPropagation(); openPeekHover(item.indexDocId); }}
           >
             {peekIcon}
           </button>
           {peekFor === item.indexDocId && renderPeek(item)}
         </span>
+        <Tooltip content={`Duplicate "${item.description}" (fork a fresh copy)`}>
+          <button
+            className="qh-fork-btn"
+            aria-label={`Duplicate "${item.description}"`}
+            disabled={!!duplicatingId}
+            onClick={(e) => { e.stopPropagation(); openDuplicateDialog(item); }}
+          >
+            {forkIcon}
+          </button>
+        </Tooltip>
         <button
-          className="ph-fork-btn"
-          title={`Duplicate "${item.description}" (fork a fresh copy)`}
-          disabled={!!duplicatingId}
-          onClick={(e) => { e.stopPropagation(); openDuplicateDialog(item); }}
-        >
-          {forkIcon}
-        </button>
-        <button
-          className="ph-card-menu-btn"
-          title="Project actions"
+          className="qh-card-menu-btn"
+          aria-label={`Actions for ${item.description}`}
+          aria-haspopup="menu"
           onClick={(e) => {
             e.stopPropagation();
-            setMoveSubmenuOpen(false);
             setOpenMenu(openMenu === item.indexDocId ? null : item.indexDocId);
           }}
         >
@@ -1357,108 +1571,108 @@ export default function ProjectsHome({
     return (
       <section
         key={collection.id}
-        className={`ph-collection ${dropTarget === collection.id ? 'drop-target' : ''}`}
+        className={`qh-collection ${dropTarget === collection.id ? 'drop-target' : ''}`}
         {...dropZoneProps(collection.id)}
       >
-        <div className="ph-collection-header qh-menu-anchor">
-          <span className="ph-collection-name">{collection.name}</span>
-          <span className="ph-collection-count">{collectionItems.length}</span>
+        <div className="qh-collection-header qh-menu-anchor">
+          <span className="qh-collection-name">{collection.name}</span>
+          <span className="qh-collection-count">{collectionItems.length}</span>
           {(() => {
             const people = peopleOn(collection);
             const hasOthers = people.length > 1;
             return (
-              <button
-                className={`ph-collection-people ${hasOthers ? '' : 'private'}`}
-                title={hasOthers
+              <Tooltip
+                content={hasOthers
                   ? `${people.length} people seen on these projects — people & invite`
                   : 'Only you so far. Click to invite others.'}
+              >
+              <button
+                className={`qh-collection-people ${hasOthers ? '' : 'private'}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   setOpenMenu(null);
                   setMembersFor(membersFor === collection.id ? null : collection.id);
                 }}
               >
-                {hasOthers && (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <circle cx="9" cy="8" r="3.4" stroke="currentColor" strokeWidth="2" />
-                    <path d="M3 19c0-3 2.7-4.8 6-4.8s6 1.8 6 4.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                    <circle cx="17" cy="9" r="2.6" stroke="currentColor" strokeWidth="2" />
-                    <path d="M16.5 14.4c2.6.3 4.5 1.9 4.5 4.1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                )}
+                {hasOthers && <PeopleIcon />}
                 {renderFacepile(people, 'md', 3)}
               </button>
+              </Tooltip>
             );
           })()}
-          <span className="ph-flex-spacer" />
-          <span className="ph-collection-sort-anchor">
-            <button
-              className={`ph-icon-btn ph-collection-sort-btn ${collectionSort !== 'newest' ? 'active' : ''}`}
-              title={`Sort collection (${sortOrderLabel(collectionSort)})`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setMembersFor(null);
-                setOpenMenu(openMenu === sortMenuKey ? null : sortMenuKey);
-              }}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M7 4v14M7 18l-3.5-3.5M7 18l3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M17 20V6M17 6l-3.5 3.5M17 6l3.5 3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+          <span className="qh-flex-spacer" />
+          <span className="qh-collection-sort-anchor">
+            <Tooltip content={`Sort collection (${sortOrderLabel(collectionSort)})`}>
+              <button
+                className={`qh-icon-btn qh-collection-sort-btn ${collectionSort !== 'newest' ? 'active' : ''}`}
+                aria-label={`Sort collection (${sortOrderLabel(collectionSort)})`}
+                aria-haspopup="menu"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMembersFor(null);
+                  setOpenMenu(openMenu === sortMenuKey ? null : sortMenuKey);
+                }}
+              >
+                <SortIcon />
+              </button>
+            </Tooltip>
             {openMenu === sortMenuKey && (
-              <div className="ph-menu ph-menu-right" role="menu">
+              <Menu className="qh-menu-right" onClose={() => closeAllMenus()} ignoreOutsideSelector=".qh-menu-anchor, .qh-peek" aria-label="Sort collection">
                 {(['newest', 'oldest', 'name'] as SortOrder[]).map((o) => (
-                  <button
+                  <MenuItem
                     key={o}
-                    className={`ph-menu-item ${collectionSort === o ? 'strong' : ''}`}
-                    onClick={() => {
+                    strong={collectionSort === o}
+                    onSelect={() => {
                       setCollectionSorts((s) => ({ ...s, [collection.id]: o }));
                       setCollectionPages((p) => ({ ...p, [collection.id]: 0 }));
                       setOpenMenu(null);
                     }}
                   >
                     {o === 'newest' ? 'Newest first' : o === 'oldest' ? 'Oldest first' : 'A to Z'}
-                  </button>
+                  </MenuItem>
                 ))}
-              </div>
+              </Menu>
             )}
           </span>
-          <button
-            className="ph-icon-btn"
-            title="Collection actions"
-            onClick={(e) => {
-              e.stopPropagation();
-              setMembersFor(null);
-              setOpenMenu(openMenu === menuKey ? null : menuKey);
-            }}
-          >
-            ⋯
-          </button>
+          <Tooltip content="Collection actions">
+            <button
+              className="qh-icon-btn"
+              aria-label={`Actions for ${collection.name}`}
+              aria-haspopup="menu"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMembersFor(null);
+                setOpenMenu(openMenu === menuKey ? null : menuKey);
+              }}
+            >
+              ⋯
+            </button>
+          </Tooltip>
           {membersFor === collection.id && renderMembersPopover(collection)}
           {openMenu === menuKey && (
-            <div className="ph-menu ph-menu-right" role="menu">
-              <button
-                className="ph-menu-item"
-                onClick={() => { setOpenMenu(null); setMembersFor(collection.id); }}
-              >
+            <Menu className="qh-menu-right" onClose={() => closeAllMenus()} ignoreOutsideSelector=".qh-menu-anchor, .qh-peek" aria-label={`Actions for ${collection.name}`}>
+              {/* keepOpen: the activation must not reach the Menu root's
+                  closer — its onClose (closeAllMenus) also resets membersFor,
+                  which would cancel the popover in the same React batch it
+                  was requested. The onSelect closes the menu itself. */}
+              <MenuItem keepOpen onSelect={() => { setOpenMenu(null); setMembersFor(collection.id); }}>
                 People &amp; invite…
-              </button>
-              <button
-                className="ph-menu-item"
-                onClick={() => {
+              </MenuItem>
+              <MenuItem
+                subtext="Renames it for everyone subscribed"
+                onSelect={() => {
                   setRenameCollectionTarget(collection);
                   setRenameCollectionValue(collection.name);
                   closeAllMenus();
                 }}
               >
                 Rename collection…
-                <span className="ph-menu-subtext">Renames it for everyone subscribed</span>
-              </button>
-              <div className="ph-menu-divider" />
-              <button
-                className="ph-menu-item danger"
-                onClick={() => {
+              </MenuItem>
+              <MenuDivider />
+              <MenuItem
+                danger
+                subtext="Removes it from your view only"
+                onSelect={() => {
                   closeAllMenus();
                   setConfirmState({
                     title: `Leave "${collection.name}"?`,
@@ -1469,37 +1683,40 @@ export default function ProjectsHome({
                 }}
               >
                 Leave collection
-                <span className="ph-menu-subtext">Removes it from your view only</span>
-              </button>
-            </div>
+              </MenuItem>
+            </Menu>
           )}
         </div>
         {collectionItems.length === 0 ? (
-          <div className="ph-collection-empty">Empty collection — drag a project here, or use its ⋯ menu.</div>
+          <div className="qh-collection-empty">Empty collection — drag a project here, or use its ⋯ menu.</div>
         ) : (
-          <div className="ph-collection-row">
+          <div className="qh-collection-row">
             {page > 0 && (
-              <button
-                className="ph-pager"
-                title={collectionSort === 'newest' ? 'Newer projects' : collectionSort === 'oldest' ? 'Older projects' : 'Previous page'}
-                onClick={() => setCollectionPages((p) => ({ ...p, [collection.id]: page - 1 }))}
-              >
-                ‹
-              </button>
+              <Tooltip content={collectionSort === 'newest' ? 'Newer projects' : collectionSort === 'oldest' ? 'Older projects' : 'Previous page'}>
+                <button
+                  className="qh-pager"
+                  aria-label="Previous page"
+                  onClick={() => setCollectionPages((p) => ({ ...p, [collection.id]: page - 1 }))}
+                >
+                  ‹
+                </button>
+              </Tooltip>
             )}
-            <div className="ph-card-grid">{pageItems.map(renderCard)}</div>
+            <div className="qh-card-grid">{pageItems.map(renderCard)}</div>
             {page < pageCount - 1 ? (
-              <button
-                className="ph-pager"
-                title={collectionSort === 'newest' ? 'Older projects' : collectionSort === 'oldest' ? 'Newer projects' : 'Next page'}
-                onClick={() => setCollectionPages((p) => ({ ...p, [collection.id]: page + 1 }))}
-              >
-                ›
-                <span className="ph-pager-pos mono">{page + 1}/{pageCount}</span>
-              </button>
+              <Tooltip content={collectionSort === 'newest' ? 'Older projects' : collectionSort === 'oldest' ? 'Newer projects' : 'Next page'}>
+                <button
+                  className="qh-pager"
+                  aria-label="Next page"
+                  onClick={() => setCollectionPages((p) => ({ ...p, [collection.id]: page + 1 }))}
+                >
+                  ›
+                  <span className="qh-pager-pos mono">{page + 1}/{pageCount}</span>
+                </button>
+              </Tooltip>
             ) : pageCount > 1 ? (
-              <div className="ph-pager ph-pager-idle">
-                <span className="ph-pager-pos mono">{page + 1}/{pageCount}</span>
+              <div className="qh-pager qh-pager-idle">
+                <span className="qh-pager-pos mono">{page + 1}/{pageCount}</span>
               </div>
             ) : null}
           </div>
@@ -1510,16 +1727,19 @@ export default function ProjectsHome({
 
   return (
     <div className="projects-home">
-      <header className="ph-header">
-        <div className="ph-logo">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="3.5" rx="1" stroke="var(--posit-teal)" strokeWidth="1.8" />
-            <rect x="3" y="10.2" width="18" height="3.5" rx="1" stroke="var(--posit-teal)" strokeWidth="1.8" />
-            <rect x="3" y="16.5" width="11" height="3.5" rx="1" stroke="var(--posit-teal)" strokeWidth="1.8" />
-          </svg>
+      <header className="qh-header">
+        <div className="qh-logo">
+          <img
+            src="/quarto-icon.svg"
+            alt=""
+            width="20"
+            height="20"
+            style={{ filter: 'var(--logo-filter)' }}
+            aria-hidden="true"
+          />
           <span>Quarto Hub</span>
         </div>
-        <div className="ph-search">
+        <div className="qh-search">
           <input
             ref={searchRef}
             type="text"
@@ -1527,59 +1747,59 @@ export default function ProjectsHome({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <span className="ph-search-kbd mono">⌘K</span>
+          <span className="qh-search-kbd mono">⌘K</span>
         </div>
-        <div className="ph-flex-spacer" />
-        <div className="ph-header-actions">
-          <button className="ph-btn outline" onClick={() => { setAddDialogOpen(true); setAddTab('connect'); setFormError(null); }}>
+        <div className="qh-flex-spacer" />
+        <div className="qh-header-actions">
+          <button className="qh-btn outline" onClick={() => { setAddDialogOpen(true); setAddTab('connect'); setFormError(null); }}>
             Connect / Import ▾
           </button>
-          <div className="qh-menu-anchor ph-new-anchor">
-            <button className="ph-btn primary" onClick={() => setNewMenuOpen((v) => !v)}>
+          <div className="qh-menu-anchor qh-new-anchor">
+            <button className="qh-btn primary" onClick={() => setNewMenuOpen((v) => !v)}>
               ＋ New ▾
             </button>
             {newMenuOpen && (
-              <div className="ph-menu ph-menu-right" role="menu">
-                <div className="ph-menu-label">START FROM — QUARTO PROJECT TYPES</div>
-                {(projectChoices.length > 0
-                  ? projectChoices
-                  : [{ id: 'default', name: 'Default', description: 'A minimal Quarto project' }]
-                ).map((choice) => (
-                  <button key={choice.id} className="ph-menu-item two-line" onClick={() => openNewDialog(choice)}>
-                    <span className="strong">{choice.name}</span>
-                    <span className="ph-menu-subtext">{choice.description}</span>
-                  </button>
-                ))}
-              </div>
+              <Menu className="qh-menu-right" onClose={() => setNewMenuOpen(false)} ignoreOutsideSelector=".qh-menu-anchor" aria-label="New project">
+                <MenuLabel>START FROM</MenuLabel>
+                {renderChoiceTree(
+                  buildChoiceTree(
+                    projectChoices.length > 0
+                      ? projectChoices
+                      : [{ id: 'default', name: 'Default', description: 'A minimal Quarto project' }],
+                    projectChoiceGroups,
+                  ),
+                  openNewDialog,
+                )}
+              </Menu>
             )}
           </div>
-          <div className="qh-menu-anchor ph-avatar-anchor">
+          <div className="qh-menu-anchor qh-avatar-anchor">
             <button
-              className="ph-avatar"
+              className="qh-avatar"
               style={authPicture ? undefined : { backgroundColor: userSettings?.userColor ?? 'var(--posit-blue)' }}
               onClick={() => setAvatarMenuOpen((v) => !v)}
-              title={userSettings?.userName}
+              aria-label={userSettings?.userName ? `Account: ${userSettings.userName}` : 'Account'}
             >
               {authPicture ? (
-                <img src={authPicture} alt="" className="ph-avatar-img" referrerPolicy="no-referrer" />
+                <img src={authPicture} alt="" className="qh-avatar-img" referrerPolicy="no-referrer" />
               ) : (
                 initialsFor(userSettings?.userName ?? '')
               )}
             </button>
             {avatarMenuOpen && userSettings && (
-              <div className="ph-menu ph-menu-right ph-avatar-menu">
-                <div className="ph-avatar-menu-id">
-                  <span className="ph-avatar big" style={authPicture ? undefined : { backgroundColor: userSettings.userColor }}>
+              <div className="qh-menu qh-menu-right qh-avatar-menu">
+                <div className="qh-avatar-menu-id">
+                  <span className="qh-avatar big" style={authPicture ? undefined : { backgroundColor: userSettings.userColor }}>
                     {authPicture ? (
-                      <img src={authPicture} alt="" className="ph-avatar-img" referrerPolicy="no-referrer" />
+                      <img src={authPicture} alt="" className="qh-avatar-img" referrerPolicy="no-referrer" />
                     ) : (
                       initialsFor(userSettings.userName)
                     )}
                   </span>
-                  <div className="ph-avatar-menu-who">
+                  <div className="qh-avatar-menu-who">
                     {editingName ? (
                       <input
-                        className="ph-name-input"
+                        className="qh-name-input"
                         value={editNameValue}
                         onChange={(e) => setEditNameValue(e.target.value)}
                         onKeyDown={(e) => {
@@ -1590,54 +1810,55 @@ export default function ProjectsHome({
                         autoFocus
                       />
                     ) : (
-                      <div className="ph-avatar-menu-name">
+                      <div className="qh-avatar-menu-name">
                         <strong>{userSettings.userName}</strong>
                         <button
-                          className="ph-link"
+                          className="qh-link"
                           onClick={() => { setEditNameValue(userSettings.userName); setEditingName(true); }}
                         >
                           edit
                         </button>
                       </div>
                     )}
-                    <div className="ph-avatar-menu-mail">
+                    <div className="qh-avatar-menu-mail">
                       {authEmail ?? 'Not signed in'}
-                      {onSignOut && <> · <button className="ph-link" onClick={onSignOut}>Sign out</button></>}
+                      {onSignOut && <> · <button className="qh-link" onClick={onSignOut}>Sign out</button></>}
                     </div>
                   </div>
                 </div>
-                <div className="ph-menu-label">CURSOR COLOR</div>
-                <div className="ph-swatches">
+                <div className="qh-menu-label">CURSOR COLOR</div>
+                <div className="qh-swatches">
                   {COLOR_PALETTE.map((color) => (
-                    <button
-                      key={color}
-                      className={`ph-swatch ${userSettings.userColor === color ? 'selected' : ''}`}
-                      style={{ backgroundColor: color }}
-                      onClick={() => handleColorChange(color)}
-                      title={color}
-                    />
+                    <Tooltip key={color} content={color}>
+                      <button
+                        className={`qh-swatch ${userSettings.userColor === color ? 'selected' : ''}`}
+                        style={{ backgroundColor: color }}
+                        onClick={() => handleColorChange(color)}
+                        aria-label={`Cursor color ${color}`}
+                      />
+                    </Tooltip>
                   ))}
                 </div>
-                <div className="ph-menu-divider" />
+                <div className="qh-menu-divider" />
                 {projectSetLinkUrl && (
-                  <button className="ph-menu-item" onClick={() => { setShowLinkDialog(true); setAvatarMenuOpen(false); }}>
+                  <button className="qh-menu-item" onClick={() => { setShowLinkDialog(true); setAvatarMenuOpen(false); }}>
                     Link another browser…
                   </button>
                 )}
-                <button className="ph-menu-item" onClick={handleExportJson}>Export project list (JSON)…</button>
-                <button className="ph-menu-item" onClick={handleImportJson}>Import project list (JSON)…</button>
-                <button className="ph-menu-item with-hint" onClick={cycleColorScheme}>
+                <button className="qh-menu-item" onClick={handleExportJson}>Export project list (JSON)…</button>
+                <button className="qh-menu-item" onClick={handleImportJson}>Import project list (JSON)…</button>
+                <button className="qh-menu-item with-hint" onClick={cycleColorScheme}>
                   Theme
-                  <span className="ph-menu-hint">
+                  <span className="qh-menu-hint">
                     {colorScheme === 'auto' ? 'Auto' : colorScheme === 'dark' ? 'Dark' : 'Light'} ▾
                   </span>
                 </button>
                 {onSwitchToClassicUi && (
                   <>
-                    <div className="ph-menu-divider" />
-                    <button className="ph-menu-item" onClick={onSwitchToClassicUi}>
+                    <div className="qh-menu-divider" />
+                    <button className="qh-menu-item" onClick={onSwitchToClassicUi}>
                       Switch to classic UI
-                      <span className="ph-menu-subtext">Back to the current shipping project list</span>
+                      <span className="qh-menu-subtext">Back to the current shipping project list</span>
                     </button>
                   </>
                 )}
@@ -1648,18 +1869,35 @@ export default function ProjectsHome({
       </header>
 
       {(connectionError || formError) && !addDialogOpen && !newDialogChoice && (
-        <div className="ph-error">{connectionError || formError}</div>
+        <div className="qh-error">
+          {connectionError || formError}
+          {connectionError && onRetry && (
+            <button type="button" className="qh-error-action" onClick={onRetry}>
+              {common.retry}
+            </button>
+          )}
+        </div>
       )}
-      {isConnecting && <div className="ph-connecting">Connecting to sync server…</div>}
 
-      <main className="ph-main">
-        {items.length === 0 && collections.every((c) => c.entries.length === 0) ? (
-          <div className="ph-empty-state">
+      <main id="main-content" tabIndex={-1} className="qh-main">
+        {loadError ? (
+          <div className="qh-empty-state">
+            <h2>Couldn't load your projects</h2>
+            <p>{loadError}</p>
+            <div className="qh-empty-actions">
+              <button className="qh-btn outline" onClick={handleRetryLoad}>
+                {common.retry}
+              </button>
+            </div>
+          </div>
+        ) : items.length === 0 && collections.every((c) => c.entries.length === 0) ? (
+          <div className="qh-empty-state">
+            <div className="qh-empty-icon" aria-hidden="true"><FilePlusIcon size={24} /></div>
             <h2>No projects yet</h2>
             <p>Create your first Quarto project, or connect to one a collaborator shared.</p>
-            <div className="ph-empty-actions">
-              <button className="ph-btn primary" onClick={() => setNewMenuOpen(true)}>＋ New project</button>
-              <button className="ph-btn outline" onClick={() => { setAddDialogOpen(true); setAddTab('connect'); }}>
+            <div className="qh-empty-actions">
+              <button className="qh-btn primary" onClick={() => setNewMenuOpen(true)}>＋ New project</button>
+              <button className="qh-btn outline" onClick={() => { setAddDialogOpen(true); setAddTab('connect'); }}>
                 Connect / Import
               </button>
             </div>
@@ -1668,97 +1906,98 @@ export default function ProjectsHome({
           <>
             {collections.map(renderCollection)}
 
-            <div className="ph-new-collection-row">
-              <button className="ph-btn ghost-accent" onClick={() => openNewCollection()}>＋ New collection</button>
+            <div className="qh-new-collection-row">
+              <button className="qh-btn ghost-accent" onClick={() => openNewCollection()}>＋ New collection</button>
             </div>
 
             <section
-              className={`ph-rest ${dropTarget === 'unshelved' ? 'drop-target' : ''}`}
+              className={`qh-rest ${dropTarget === 'unshelved' ? 'drop-target' : ''}`}
               {...dropZoneProps('unshelved')}
             >
-              <div className="ph-rest-header qh-menu-anchor">
-                <span className="ph-rest-title">Everything else</span>
-                <span className="ph-rest-count">{everythingElse.length} · {sortLabel}</span>
-                <span className="ph-flex-spacer" />
-                <button className="ph-btn small outline" onClick={(e) => { e.stopPropagation(); setSortMenuOpen((v) => !v); }}>
-                  Sort <span className="ph-caret">▾</span>
+              <div className="qh-rest-header qh-menu-anchor">
+                <span className="qh-rest-title">Everything else</span>
+                <span className="qh-rest-count">{everythingElse.length} · {sortLabel}</span>
+                <span className="qh-flex-spacer" />
+                <button className="qh-btn small outline" onClick={(e) => { e.stopPropagation(); setSortMenuOpen((v) => !v); }}>
+                  Sort <span className="qh-caret">▾</span>
                 </button>
                 {sortMenuOpen && (
-                  <div className="ph-menu ph-menu-right">
+                  <Menu className="qh-menu-right" onClose={() => setSortMenuOpen(false)} ignoreOutsideSelector=".qh-menu-anchor" aria-label="Sort projects">
                     {(['newest', 'oldest', 'name'] as SortOrder[]).map((o) => (
-                      <button
+                      <MenuItem
                         key={o}
-                        className={`ph-menu-item ${sortOrder === o ? 'strong' : ''}`}
-                        onClick={() => { setSortOrder(o); setSortMenuOpen(false); }}
+                        strong={sortOrder === o}
+                        onSelect={() => { setSortOrder(o); setSortMenuOpen(false); }}
                       >
                         {o === 'newest' ? 'Newest first' : o === 'oldest' ? 'Oldest first' : 'A to Z'}
-                      </button>
+                      </MenuItem>
                     ))}
-                  </div>
+                  </Menu>
                 )}
               </div>
               {everythingElse.length === 0 ? (
-                <div className="ph-rest-empty">
+                <div className="qh-rest-empty">
                   {query ? 'No projects match your search.' : 'Everything is in a collection.'}
                 </div>
               ) : (
-                <div className="ph-rest-list">
+                <div className="qh-rest-list">
                   {everythingElse.map((item) => (
                     <div
                       key={item.indexDocId}
-                      className={`ph-row qh-menu-anchor ${draggingId === item.indexDocId ? 'dragging' : ''}`}
+                      className={`qh-row qh-menu-anchor ${draggingId === item.indexDocId ? 'dragging' : ''}`}
                       draggable
                       onDragStart={handleDragStart(item)}
                       onDragEnd={handleDragEnd}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        setMoveSubmenuOpen(false);
                         setOpenMenu(openMenu === item.indexDocId ? null : item.indexDocId);
                       }}
                     >
                       <button
-                        className={`ph-row-name ${isUnnamed(item.description) ? 'unnamed' : ''}`}
+                        className={`qh-row-name qh-truncate ${isUnnamed(item.description) ? 'unnamed' : ''}`}
                         onClick={() => handleOpen(item)}
-                        title={item.description}
                       >
                         {item.description}
                       </button>
+                      {openingId === item.indexDocId && <em className="qh-opening">opening...</em>}
                       {isUnnamed(item.description) && (
-                        <button className="ph-link" onClick={() => startRename(item)}>Rename</button>
+                        <button className="qh-link" onClick={() => startRename(item)}>Rename</button>
                       )}
-                      <span className="ph-row-meta">
+                      <span className="qh-row-meta">
                         {item.summary ? `${item.summary.fileCount} ${item.summary.fileCount === 1 ? 'file' : 'files'} · ` : ''}
                         opened {formatOpened(item.lastAccessed)}
                       </span>
                       <span
-                        className="ph-peek-anchor"
+                        className="qh-peek-anchor"
                         onMouseOver={() => openPeekHover(item.indexDocId)}
                         onMouseOut={closePeekHoverSoon}
                       >
                         <button
-                          className="ph-icon-btn ph-peek-btn"
-                          title="Peek — see what's inside"
+                          className="qh-icon-btn qh-peek-btn"
+                          aria-label={`Peek — see what's inside ${item.description}`}
                           onClick={(e) => { e.stopPropagation(); openPeekHover(item.indexDocId); }}
                         >
                           {peekIcon}
                         </button>
                         {peekFor === item.indexDocId && renderPeek(item)}
                       </span>
+                      <Tooltip content={`Duplicate "${item.description}" (fork a fresh copy)`}>
+                        <button
+                          className="qh-icon-btn qh-fork-btn"
+                          aria-label={`Duplicate "${item.description}"`}
+                          disabled={!!duplicatingId}
+                          onClick={(e) => { e.stopPropagation(); openDuplicateDialog(item); }}
+                        >
+                          {forkIcon}
+                        </button>
+                      </Tooltip>
                       <button
-                        className="ph-icon-btn ph-fork-btn"
-                        title={`Duplicate "${item.description}" (fork a fresh copy)`}
-                        disabled={!!duplicatingId}
-                        onClick={(e) => { e.stopPropagation(); openDuplicateDialog(item); }}
-                      >
-                        {forkIcon}
-                      </button>
-                      <button
-                        className="ph-icon-btn ph-row-menu-btn"
-                        title="Project actions"
+                        className="qh-icon-btn qh-row-menu-btn"
+                        aria-label={`Actions for ${item.description}`}
+                        aria-haspopup="menu"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setMoveSubmenuOpen(false);
                           setOpenMenu(openMenu === item.indexDocId ? null : item.indexDocId);
                         }}
                       >
@@ -1776,28 +2015,31 @@ export default function ProjectsHome({
 
       {/* Duplicate (fork) */}
       {duplicateFor && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => { if (!duplicatingId) setDuplicateFor(null); }}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Duplicate "{duplicateFor.description}"</h2>
-            <p className="ph-dialog-hint">
-              A fresh copy of all {duplicateFor.summary ? `${duplicateFor.summary.fileCount} ` : ''}files — no
-              edit history carries over.
-            </p>
-            {formError && <div className="ph-error inline">{formError}</div>}
-            <form onSubmit={(e) => { e.preventDefault(); handleDuplicate(); }}>
-              <label className="ph-field-label" htmlFor="ph-dup-name">Name</label>
+        <ModalDialog
+          title={`Duplicate "${duplicateFor.description}"`}
+          onClose={() => { if (!duplicatingId) setDuplicateFor(null); }}
+          className="qh-form-dialog"
+        >
+          <form onSubmit={(e) => { e.preventDefault(); handleDuplicate(); }}>
+            <div className="dialog-content">
+              <p className="qh-dialog-hint">
+                A fresh copy of all {duplicateFor.summary ? `${duplicateFor.summary.fileCount} ` : ''}files — no
+                edit history carries over.
+              </p>
+              {formError && <div className="qh-error inline">{formError}</div>}
+              <label className="qh-field-label" htmlFor="qh-dup-name">Name</label>
               <input
-                id="ph-dup-name"
-                className="ph-input focus-accent"
+                id="qh-dup-name"
+                className="qh-input focus-accent"
                 value={duplicateName}
                 onChange={(e) => setDuplicateName(e.target.value)}
                 autoFocus
                 onFocus={(e) => e.target.select()}
               />
-              <label className="ph-field-label" htmlFor="ph-dup-collection">Add to collection</label>
+              <label className="qh-field-label" htmlFor="qh-dup-collection">Add to collection</label>
               <select
-                id="ph-dup-collection"
-                className="ph-input"
+                id="qh-dup-collection"
+                className="qh-input"
                 value={duplicateCollectionId}
                 onChange={(e) => setDuplicateCollectionId(e.target.value)}
               >
@@ -1806,113 +2048,125 @@ export default function ProjectsHome({
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
-              <div className="ph-dialog-actions">
-                <button type="button" className="ph-btn outline" disabled={!!duplicatingId} onClick={() => setDuplicateFor(null)}>
-                  Cancel
-                </button>
-                <button type="submit" className="ph-btn primary" disabled={!!duplicatingId || !duplicateName.trim()}>
-                  {duplicatingId ? 'Duplicating…' : 'Duplicate'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="qh-btn outline" disabled={!!duplicatingId} onClick={() => setDuplicateFor(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="qh-btn primary" disabled={!!duplicatingId || !duplicateName.trim()}>
+                {duplicatingId ? 'Duplicating…' : 'Duplicate'}
+              </button>
+            </div>
+          </form>
+        </ModalDialog>
       )}
 
       {/* New collection */}
       {newCollectionDialog && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setNewCollectionDialog(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>New collection</h2>
-            {newCollectionDialog.forProject && (
-              <p className="ph-dialog-hint">The project will be moved onto it.</p>
-            )}
-            <form onSubmit={(e) => { e.preventDefault(); commitNewCollection(); }}>
-              <label className="ph-field-label" htmlFor="ph-new-collection-name">Name</label>
+        <ModalDialog
+          title="New collection"
+          onClose={() => setNewCollectionDialog(null)}
+          className="qh-form-dialog"
+        >
+          <form onSubmit={(e) => { e.preventDefault(); commitNewCollection(); }}>
+            <div className="dialog-content">
+              {newCollectionDialog.forProject && (
+                <p className="qh-dialog-hint">The project will be moved onto it.</p>
+              )}
+              <label className="qh-field-label" htmlFor="qh-new-collection-name">Name</label>
               <input
-                id="ph-new-collection-name"
-                className="ph-input focus-accent"
+                id="qh-new-collection-name"
+                className="qh-input focus-accent"
                 value={newCollectionName}
                 onChange={(e) => setNewCollectionName(e.target.value)}
                 placeholder="e.g. Board prep"
                 autoFocus
               />
-              <div className="ph-dialog-actions">
-                <button type="button" className="ph-btn outline" onClick={() => setNewCollectionDialog(null)}>Cancel</button>
-                <button type="submit" className="ph-btn primary" disabled={!newCollectionName.trim()}>Create</button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="qh-btn outline" onClick={() => setNewCollectionDialog(null)}>Cancel</button>
+              <button type="submit" className="qh-btn primary" disabled={!newCollectionName.trim()}>Create</button>
+            </div>
+          </form>
+        </ModalDialog>
       )}
 
       {/* Rename collection */}
       {renameCollectionTarget && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setRenameCollectionTarget(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Rename collection</h2>
-            <p className="ph-dialog-hint">Renames it for everyone subscribed to it.</p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (renameCollectionValue.trim()) {
-                  onRenameCollection?.(renameCollectionTarget.id, renameCollectionValue.trim());
-                }
-                setRenameCollectionTarget(null);
-              }}
-            >
-              <label className="ph-field-label" htmlFor="ph-rename-collection">Name</label>
+        <ModalDialog
+          title="Rename collection"
+          onClose={() => setRenameCollectionTarget(null)}
+          className="qh-form-dialog"
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (renameCollectionValue.trim()) {
+                onRenameCollection?.(renameCollectionTarget.id, renameCollectionValue.trim());
+              }
+              setRenameCollectionTarget(null);
+            }}
+          >
+            <div className="dialog-content">
+              <p className="qh-dialog-hint">Renames it for everyone subscribed to it.</p>
+              <label className="qh-field-label" htmlFor="qh-rename-collection">Name</label>
               <input
-                id="ph-rename-collection"
-                className="ph-input focus-accent"
+                id="qh-rename-collection"
+                className="qh-input focus-accent"
                 value={renameCollectionValue}
                 onChange={(e) => setRenameCollectionValue(e.target.value)}
                 autoFocus
               />
-              <div className="ph-dialog-actions">
-                <button type="button" className="ph-btn outline" onClick={() => setRenameCollectionTarget(null)}>Cancel</button>
-                <button type="submit" className="ph-btn primary" disabled={!renameCollectionValue.trim()}>Rename</button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="qh-btn outline" onClick={() => setRenameCollectionTarget(null)}>Cancel</button>
+              <button type="submit" className="qh-btn primary" disabled={!renameCollectionValue.trim()}>Rename</button>
+            </div>
+          </form>
+        </ModalDialog>
       )}
 
       {/* Generic destructive confirmation */}
       {confirmState && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setConfirmState(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>{confirmState.title}</h2>
-            <p className="ph-dialog-hint">{confirmState.body}</p>
-            <div className="ph-dialog-actions">
-              <button type="button" className="ph-btn outline" onClick={() => setConfirmState(null)} autoFocus>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="ph-btn danger"
-                onClick={() => { confirmState.action(); setConfirmState(null); }}
-              >
-                {confirmState.confirmLabel}
-              </button>
-            </div>
+        <ModalDialog
+          title={confirmState.title}
+          onClose={() => setConfirmState(null)}
+          className="qh-form-dialog"
+        >
+          <div className="dialog-content">
+            <p className="qh-dialog-hint">{confirmState.body}</p>
           </div>
-        </div>
+          <div className="dialog-actions">
+            <button type="button" className="qh-btn outline" onClick={() => setConfirmState(null)} autoFocus>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="qh-btn danger"
+              onClick={() => { confirmState.action(); setConfirmState(null); }}
+            >
+              {confirmState.confirmLabel}
+            </button>
+          </div>
+        </ModalDialog>
       )}
 
       {/* Shared-collection move warning */}
       {pendingMove && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setPendingMove(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Move "{pendingMove.name}" out of {pendingMove.fromName}?</h2>
-            <p className="ph-dialog-hint">
+        <ModalDialog
+          title={`Move "${pendingMove.name}" out of ${pendingMove.fromName}?`}
+          onClose={() => setPendingMove(null)}
+          className="qh-form-dialog"
+        >
+          <div className="dialog-content">
+            <p className="qh-dialog-hint">
               Please note you're changing {pendingMove.othersCount === 1
                 ? "another person's"
                 : `${pendingMove.othersCount} other people's`} view of this collection — it will
               no longer appear in {pendingMove.fromName} for them. The project itself isn't
               deleted or changed.
             </p>
-            <label className="ph-checkbox-row">
+            <label className="qh-checkbox-row">
               <input
                 type="checkbox"
                 checked={moveWarnChecked}
@@ -1920,72 +2174,78 @@ export default function ProjectsHome({
               />
               Don't show this again
             </label>
-            <div className="ph-dialog-actions">
-              <button type="button" className="ph-btn outline" onClick={() => setPendingMove(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="ph-btn primary"
-                onClick={() => {
-                  if (moveWarnChecked) localStorage.setItem(MOVE_WARNING_KEY, '1');
-                  moveProject(pendingMove.indexDocId, pendingMove.target);
-                  setPendingMove(null);
-                }}
-                autoFocus
-              >
-                Move it
-              </button>
-            </div>
           </div>
-        </div>
+          <div className="dialog-actions">
+            <button type="button" className="qh-btn outline" onClick={() => setPendingMove(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="qh-btn primary"
+              onClick={() => {
+                if (moveWarnChecked) localStorage.setItem(MOVE_WARNING_KEY, '1');
+                moveProject(pendingMove.indexDocId, pendingMove.target);
+                setPendingMove(null);
+              }}
+              autoFocus
+            >
+              Move it
+            </button>
+          </div>
+        </ModalDialog>
       )}
 
       {/* Rename dialog */}
       {renameFor && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setRenameFor(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Rename project</h2>
-            <form onSubmit={(e) => { e.preventDefault(); commitRename(); }}>
-              <label className="ph-field-label" htmlFor="ph-rename">Name</label>
+        <ModalDialog
+          title="Rename project"
+          onClose={() => setRenameFor(null)}
+          className="qh-form-dialog"
+        >
+          <form onSubmit={(e) => { e.preventDefault(); commitRename(); }}>
+            <div className="dialog-content">
+              <label className="qh-field-label" htmlFor="qh-rename">Name</label>
               <input
-                id="ph-rename"
-                className="ph-input focus-accent"
+                id="qh-rename"
+                className="qh-input focus-accent"
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
                 placeholder="e.g. Lab retreat agenda"
                 autoFocus
               />
-              <div className="ph-dialog-actions">
-                <button type="button" className="ph-btn outline" onClick={() => setRenameFor(null)}>Cancel</button>
-                <button type="submit" className="ph-btn primary" disabled={!renameValue.trim()}>Rename</button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="qh-btn outline" onClick={() => setRenameFor(null)}>Cancel</button>
+              <button type="submit" className="qh-btn primary" disabled={!renameValue.trim()}>Rename</button>
+            </div>
+          </form>
+        </ModalDialog>
       )}
 
       {/* New project dialog */}
       {newDialogChoice && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setNewDialogChoice(null)}>
-          <div className="ph-dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>New {newDialogChoice.name.toLowerCase()}</h2>
-            <p className="ph-dialog-hint">Starter files will be created for you</p>
-            {formError && <div className="ph-error inline">{formError}</div>}
-            <form onSubmit={handleCreate}>
-              <label className="ph-field-label" htmlFor="ph-new-name">Name</label>
+        <ModalDialog
+          title={`New ${newDialogChoice.name.toLowerCase()}`}
+          onClose={() => setNewDialogChoice(null)}
+          className="qh-form-dialog"
+        >
+          <form onSubmit={handleCreate}>
+            <div className="dialog-content">
+              <p className="qh-dialog-hint">Starter files will be created for you</p>
+              {formError && <div className="qh-error inline">{formError}</div>}
+              <label className="qh-field-label" htmlFor="qh-new-name">Name</label>
               <input
-                id="ph-new-name"
-                className="ph-input focus-accent"
+                id="qh-new-name"
+                className="qh-input focus-accent"
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
                 placeholder="Q3 all-hands deck"
                 autoFocus
               />
-              <label className="ph-field-label" htmlFor="ph-new-collection">Add to collection (optional)</label>
+              <label className="qh-field-label" htmlFor="qh-new-collection">Add to collection (optional)</label>
               <select
-                id="ph-new-collection"
-                className="ph-input"
+                id="qh-new-collection"
+                className="qh-input"
                 value={newCollectionId}
                 onChange={(e) => setNewCollectionId(e.target.value)}
               >
@@ -1996,57 +2256,60 @@ export default function ProjectsHome({
               </select>
               {showServerField ? (
                 <>
-                  <label className="ph-field-label" htmlFor="ph-new-server">Sync server</label>
+                  <label className="qh-field-label" htmlFor="qh-new-server">Sync server</label>
                   <input
-                    id="ph-new-server"
-                    className="ph-input mono"
+                    id="qh-new-server"
+                    className="qh-input mono"
                     value={newServer}
                     onChange={(e) => setNewServer(e.target.value)}
                   />
                 </>
               ) : (
-                <div className="ph-server-line">
+                <div className="qh-server-line">
                   Syncs to {serverHost(newServer)}{' '}
-                  <button type="button" className="ph-link" onClick={() => setShowServerField(true)}>Change…</button>
+                  <button type="button" className="qh-link" onClick={() => setShowServerField(true)}>Change…</button>
                 </div>
               )}
-              <div className="ph-dialog-actions">
-                <button type="button" className="ph-btn outline" onClick={() => setNewDialogChoice(null)}>Cancel</button>
-                <button type="submit" className="ph-btn primary" disabled={isCreating || !newTitle.trim()}>
-                  {isCreating ? 'Creating…' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="qh-btn outline" onClick={() => setNewDialogChoice(null)}>Cancel</button>
+              <button type="submit" className="qh-btn primary" disabled={isCreating || !newTitle.trim()}>
+                {isCreating ? 'Creating…' : 'Create'}
+              </button>
+            </div>
+          </form>
+        </ModalDialog>
       )}
 
       {/* Connect / Import dialog */}
       {addDialogOpen && (
-        <div className="ph-dialog-backdrop" onMouseDown={() => setAddDialogOpen(false)}>
-          <div className="ph-dialog wide" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Add an existing project</h2>
-            <div className="ph-tabs">
+        <ModalDialog
+          title="Add an existing project"
+          onClose={() => setAddDialogOpen(false)}
+          className="qh-form-dialog wide"
+        >
+          <div className="dialog-content">
+            <div className="qh-tabs">
               <button
-                className={`ph-tab ${addTab === 'connect' ? 'active' : ''}`}
+                className={`qh-tab ${addTab === 'connect' ? 'active' : ''}`}
                 onClick={() => { setAddTab('connect'); setFormError(null); }}
               >
                 Connect by link or ID
               </button>
               <button
-                className={`ph-tab ${addTab === 'import' ? 'active' : ''}`}
+                className={`qh-tab ${addTab === 'import' ? 'active' : ''}`}
                 onClick={() => { setAddTab('import'); setFormError(null); }}
               >
                 Import from ZIP
               </button>
             </div>
-            {formError && <div className="ph-error inline">{formError}</div>}
+            {formError && <div className="qh-error inline">{formError}</div>}
             {addTab === 'connect' ? (
               <form onSubmit={handleConnect}>
-                <label className="ph-field-label" htmlFor="ph-connect-input">Paste a share link or project ID</label>
+                <label className="qh-field-label" htmlFor="qh-connect-input">Paste a share link or project ID</label>
                 <input
-                  id="ph-connect-input"
-                  className="ph-input mono focus-accent"
+                  id="qh-connect-input"
+                  className="qh-input mono focus-accent"
                   value={connectInput}
                   onChange={(e) => setConnectInput(e.target.value)}
                   placeholder="https://quarto-hub.com/#/share/… or bs58 ID"
@@ -2054,41 +2317,41 @@ export default function ProjectsHome({
                 />
                 {showConnectServer ? (
                   <>
-                    <label className="ph-field-label" htmlFor="ph-connect-server">Sync server</label>
+                    <label className="qh-field-label" htmlFor="qh-connect-server">Sync server</label>
                     <input
-                      id="ph-connect-server"
-                      className="ph-input mono"
+                      id="qh-connect-server"
+                      className="qh-input mono"
                       value={connectServer}
                       onChange={(e) => setConnectServer(e.target.value)}
                     />
                   </>
                 ) : (
-                  <div className="ph-server-line">
+                  <div className="qh-server-line">
                     Server is read from the link · advanced:{' '}
-                    <button type="button" className="ph-link" onClick={() => setShowConnectServer(true)}>
+                    <button type="button" className="qh-link" onClick={() => setShowConnectServer(true)}>
                       set server manually
                     </button>
                   </div>
                 )}
-                <label className="ph-field-label" htmlFor="ph-connect-name">Name it for your list (optional)</label>
+                <label className="qh-field-label" htmlFor="qh-connect-name">Name it for your list (optional)</label>
                 <input
-                  id="ph-connect-name"
-                  className="ph-input"
+                  id="qh-connect-name"
+                  className="qh-input"
                   value={connectName}
                   onChange={(e) => setConnectName(e.target.value)}
                   placeholder="e.g. Lab retreat agenda"
                 />
-                <div className="ph-dialog-actions">
-                  <button type="button" className="ph-btn outline" onClick={() => setAddDialogOpen(false)}>Cancel</button>
-                  <button type="submit" className="ph-btn primary" disabled={!connectInput.trim()}>Connect</button>
+                <div className="dialog-actions">
+                  <button type="button" className="qh-btn outline" onClick={() => setAddDialogOpen(false)}>Cancel</button>
+                  <button type="submit" className="qh-btn primary" disabled={!connectInput.trim()}>Connect</button>
                 </div>
               </form>
             ) : (
               <form onSubmit={handleImportZip}>
-                <label className="ph-field-label" htmlFor="ph-import-file">ZIP file</label>
+                <label className="qh-field-label" htmlFor="qh-import-file">ZIP file</label>
                 <input
-                  id="ph-import-file"
-                  className="ph-input"
+                  id="qh-import-file"
+                  className="qh-input"
                   type="file"
                   accept=".zip,application/zip"
                   onChange={(e) => {
@@ -2099,24 +2362,24 @@ export default function ProjectsHome({
                     }
                   }}
                 />
-                <label className="ph-field-label" htmlFor="ph-import-title">Name</label>
+                <label className="qh-field-label" htmlFor="qh-import-title">Name</label>
                 <input
-                  id="ph-import-title"
-                  className="ph-input"
+                  id="qh-import-title"
+                  className="qh-input"
                   value={importTitle}
                   onChange={(e) => setImportTitle(e.target.value)}
                   placeholder="My imported project"
                 />
-                <div className="ph-dialog-actions">
-                  <button type="button" className="ph-btn outline" onClick={() => setAddDialogOpen(false)}>Cancel</button>
-                  <button type="submit" className="ph-btn primary" disabled={isImporting || !importFile}>
+                <div className="dialog-actions">
+                  <button type="button" className="qh-btn outline" onClick={() => setAddDialogOpen(false)}>Cancel</button>
+                  <button type="submit" className="qh-btn primary" disabled={isImporting || !importFile}>
                     {isImporting ? 'Importing…' : 'Import'}
                   </button>
                 </div>
               </form>
             )}
           </div>
-        </div>
+        </ModalDialog>
       )}
 
       <ShareDialog
@@ -2125,11 +2388,13 @@ export default function ProjectsHome({
         onClose={() => setShowLinkDialog(false)}
       />
 
-      <footer className="ph-footer">
-        <span className="mono" title={`Built: ${__BUILD_TIME__}\nCommit date: ${__GIT_COMMIT_DATE__}`}>
-          {__GIT_COMMIT_HASH__}
-        </span>
-        <span className="ph-footer-note">collections UI exploration</span>
+      <footer className="qh-footer">
+        <Tooltip content={`Built: ${__BUILD_TIME__} · Commit date: ${__GIT_COMMIT_DATE__}`}>
+          <span className="mono" tabIndex={0}>
+            {__GIT_COMMIT_HASH__}
+          </span>
+        </Tooltip>
+        <span className="qh-footer-note">collections UI exploration</span>
       </footer>
     </div>
   );

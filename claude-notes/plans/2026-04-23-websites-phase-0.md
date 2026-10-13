@@ -1,9 +1,14 @@
-# Phase 0 — Foundations: DocumentProfile, Pipeline Checkpoint, Naming
+---
+title: 'Phase 0 — Foundations: DocumentProfile, Pipeline Checkpoint, Naming'
+date: 2026-04-23
+description: 'Lays the foundation for website projects with a serializable static `DocumentProfile` snapshot taken after metadata merge, a named pipeline checkpoint for it, and a contract document, with no user-visible change.'
+status: draft  # Draft — awaiting user review on open questions at the end.
+braid:
+  strand: bd-f3jc  # phase; parent bd-0tr6 (website epic)
+  priority: P1
+---
 
-**Date:** 2026-04-23
-**Beads:** `bd-f3jc` (phase); parent `bd-0tr6` (website epic).
 **Parent plan:** `claude-notes/plans/2026-04-23-website-project-epic.md`
-**Status:** Draft — awaiting user review on open questions at the end.
 
 ## Goal of this phase
 
@@ -539,15 +544,15 @@ find it.
       `npm install` once from the worktree root per hub-client
       conventions.)
 - [x] End-to-end: `cargo run --bin q2 -- render <fixture>.qmd`
-      on 3 synthetic fixtures (title-only, headings+author+categories,
-      full frontmatter with code block). MD5 of each rendered HTML
-      matches between `feature/websites` (pre-change) and
-      `feature/websites-phase-0` (post-change):
-      - `65d0bf7fa6978659d2bde67acfcbf5cb` (test-basic: title+subtitle+author+python)
-      - `d95941f74c232939bf75f5f533ce1b69` (fix2: minimal title)
-      - `88f0a5d8af4d23d4052a1eea9511890c` (fix3: categories, multi-author)
+  on 3 synthetic fixtures (title-only, headings+author+categories,
+  full frontmatter with code block). MD5 of each rendered HTML
+  matches between `feature/websites` (pre-change) and
+  `feature/websites-phase-0` (post-change):
+  - `65d0bf7fa6978659d2bde67acfcbf5cb` (test-basic: title+subtitle+author+python)
+  - `d95941f74c232939bf75f5f533ce1b69` (fix2: minimal title)
+  - `88f0a5d8af4d23d4052a1eea9511890c` (fix3: categories, multi-author)
 
-      **The Phase-0 change is behaviorally invisible at the CLI.**
+  **The Phase-0 change is behaviorally invisible at the CLI.**
 - [ ] `br update bd-f3jc --status closed` with reason.
 - [ ] `br sync --flush-only && git add .beads/ && git commit`.
 - [ ] Stop and request permission before pushing to remote, per

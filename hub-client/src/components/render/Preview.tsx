@@ -58,7 +58,7 @@ interface PreviewProps {
    * Path → recorded engine capture sidecar entry (bd-uy4uygha). The active
    * file's capture (if any) is fetched and spliced into the html render so a
    * document executed by a connected `q2 provide-hub` shows its output in the
-   * default `format: html` preview.
+   * full-DOM `format: q2-html-render` preview as well as in q2-preview.
    */
   captures?: Record<string, CaptureRef>;
   /** Callback to register scrollToLine function for external use */
@@ -250,7 +250,7 @@ export default function Preview({
   );
 
   // Scroll synchronization between editor and preview
-  const { handlePreviewScroll, handlePreviewClick } = useScrollSync({
+  const { handlePreviewScroll, handlePreviewClick, revealEditorLine } = useScrollSync({
     editorRef,
     scrollPreviewToLine: (line: number) => {
       doubleBufferedIframeRef.current?.scrollToLine(line);
@@ -262,11 +262,17 @@ export default function Preview({
     editorHasFocusRef,
   });
 
-  // Selection synchronization between preview and editor
+  // Selection synchronization between preview and editor. Threads
+  // `revealEditorLine` from the `useScrollSync` call above (2026-08-22
+  // click-align-editor-y plan, Phase 2, decision A7) rather than
+  // re-implementing the alignment arithmetic here — that keeps the reveal
+  // bracketed by `useScrollSync`'s own `isSyncingRef`, the flag its
+  // ratio-sync overwrite-race guard actually reads.
   const { handlePreviewSelection } = useSelectionSync({
     editorRef,
     previewRef: doubleBufferedIframeRef,
     enabled: scrollSyncEnabled && editorReady,
+    revealEditorLine,
   });
 
   // Set scroll sync via runtime metadata when the prop changes

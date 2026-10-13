@@ -1,8 +1,12 @@
-# q2 preview: hierarchical block navigator + breadcrumb/toolbar overlap
-
-**Strand:** bd-9x3zbuj8
-**Date:** 2026-06-25
-**Status:** DRAFT — awaiting user review before implementation
+---
+title: 'q2 preview: hierarchical block navigator + breadcrumb/toolbar overlap'
+date: 2026-06-25
+description: 'Turns the hierarchical block breadcrumb navigator on by default for `q2 preview --allow-edit`, and moves it beside the rich-text toolbar for rich-text blocks so the two no longer overlap.'
+status: draft  # DRAFT — awaiting user review before implementation
+braid:
+  strand: bd-9x3zbuj8
+  priority: P2
+---
 
 ## Overview
 
@@ -191,7 +195,7 @@ pinned at the block's left edge regardless of breadcrumb width.
      (e.g. `ctx.richEditorActive` state). Simpler to wire but risks a
      one-frame flash of the standalone chip before the flag lands.
 
-4. **Styling.** The inline breadcrumb sits in `.q2-rt-toolbar`'s solid pill, so
+4. **Styling.** The inline breadcrumb sits in `.q2-rt-toolbar`\'s solid pill, so
    the standalone chip's opaque-pill / shadow / `z-index` styling is not needed
    inline — just spacing (a separator + small gap). Keep the crumb category
    colors (`.q2-crumb-cat-*`).

@@ -2,17 +2,16 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import type * as Monaco from 'monaco-editor';
 import type { FileEntry } from '@quarto/preview-renderer/types/project';
-import type { Diagnostic, PreviewNodeEditPayload } from '@quarto/preview-renderer/types/diagnostic';
+import type { Diagnostic, PreviewNodeEditPayload, RenderComment } from '@quarto/preview-renderer/types/diagnostic';
 import type { ActorIdentity, CaptureRef } from '@quarto/preview-runtime';
 import {
   parseQmdToAstWithAttribution,
   renderPageInProjectWithAttribution,
-  renderPageForPreview,
   isWasmReady,
   incrementalWriteQmd,
   applyNodeEdit,
   parseQmdContentSync,
-  getActorId,
+  getAuthorId,
   regenerateNestedBuffers,
 } from '@quarto/preview-runtime';
 import { pipelineKindForFormat } from '@quarto/preview-runtime';
@@ -91,6 +90,15 @@ interface PreviewProps {
   onFileChange: (file: FileEntry, anchor?: string) => void;
   onOpenNewFileDialog: (initialFilename: string) => void;
   onDiagnosticsChange: (diagnostics: Diagnostic[]) => void;
+  /**
+   * Reports the active page's outstanding editorial comments
+   * (bd-0rsk07il, GH #445) after each successful preview-pipeline
+   * render, from `RenderResponse.comments` (absent on the wire means
+   * zero — an empty array is reported). Not called for parse-only
+   * formats (q2-debug), which never compute the summary, nor on
+   * render failures (last-good count is preserved, matching the AST).
+   */
+  onCommentsChange?: (comments: RenderComment[]) => void;
   onAstChange?: (astJson: string | null) => void;
   currentSlideIndex?: number;
   onSlideChange?: (slideIndex: number) => void;
@@ -163,6 +171,14 @@ type RenderResult = {
    * transient errors (see `setThemeFingerprint` call site).
    */
   themeFingerprint?: string | null;
+  /**
+   * Outstanding editorial comments on the active page from the
+   * document's Pass-1 profile (bd-0rsk07il). Present exactly when the
+   * render went through the preview pipeline (RenderResponse carries
+   * the summary; wire-absent means zero, mapped to `[]` here). Omitted
+   * for parse-only formats, where the count is unknown.
+   */
+  comments?: RenderComment[];
 } | {
   success: false;
   error: string;
@@ -232,17 +248,6 @@ async function doRender(
     };
   }
 
-  // Convergence (bd-vwp4y5ku): `format: revealjs` renders through the
-  // q2-preview pipeline too — via `renderPageForPreview`, the same WASM
-  // entry the `q2 preview` SPA uses. That entry applies `quarto preview`'s
-  // format substitution (`revealjs` → the `q2-slides` pseudo-format), so
-  // the full transform pipeline runs (incl. `CompileThemeCssStage`) and
-  // the returned AST carries the document's compiled reveal theme +
-  // `theme_fingerprint`. Without it, revealjs fell through to the
-  // parse-only path below — a raw AST the hand-rolled deck rendered with
-  // reveal's stock `white.css` (uppercase headings, centered content).
-  const isSlidesPreview = options.format === 'revealjs';
-
   if (usesPreviewPipeline(options.format)) {
     if (!options.documentPath) {
       return {
@@ -252,20 +257,31 @@ async function doRender(
       };
     }
 
-    // q2-preview threads author attribution through
-    // `renderPageInProjectWithAttribution` (`attributionJson` is produced
-    // by `useAttribution`; `null` is byte-identical to the no-attribution
-    // path). The revealjs slides path uses `renderPageForPreview`, which
-    // performs the preview format substitution but does not yet thread
-    // attribution — slides have no attribution overlay today (follow-up).
-    const result = isSlidesPreview
-      ? await renderPageForPreview(options.documentPath, undefined, options.captureGzJson)
-      : await renderPageInProjectWithAttribution(
-          options.documentPath,
-          undefined,
-          options.attributionJson,
-          options.captureGzJson,
-        );
+    // One entry point for every preview-pipeline format (bd-kltzdhle, D3):
+    // `renderPageInProjectWithAttribution` with `preferPreviewFormat = true`.
+    //
+    // The WASM re-detects the format from the file's own front matter, so
+    // the flag is what makes the router's decision stick: a plain document
+    // (no `format:` key, which the WASM reports as `html`) reaches us as
+    // `q2-preview` from `getQ2Format`, and the flag applies the same
+    // `html → q2-preview` substitution inside the pipeline so the response
+    // carries `ast_json` rather than `html`. The same flag maps
+    // `revealjs → q2-slides` (convergence, bd-vwp4y5ku): the full transform
+    // pipeline runs (incl. `CompileThemeCssStage`) and the returned AST
+    // carries the compiled reveal theme + `theme_fingerprint`. Previously
+    // the revealjs branch went through the SPA-only `renderPageForPreview`,
+    // which hard-codes the native-preview render host (suppressing Q-5-12)
+    // and takes no attribution; decks now get both.
+    //
+    // `attributionJson` is produced by `useAttribution`; `null` is
+    // byte-identical to the no-attribution path.
+    const result = await renderPageInProjectWithAttribution(
+      options.documentPath,
+      undefined,
+      options.attributionJson,
+      options.captureGzJson,
+      true,
+    );
     const allDiagnostics: Diagnostic[] = [
       ...(result.diagnostics ?? []),
       ...(result.warnings ?? []),
@@ -293,6 +309,7 @@ async function doRender(
         untransformedAstJson: result.untransformed_ast_json,
         diagnostics: allDiagnostics,
         themeFingerprint,
+        comments: result.comments ?? [],
       };
     } else {
       const errorMsg =
@@ -459,6 +476,7 @@ export default function ReactPreview({
   onFileChange,
   onOpenNewFileDialog,
   onDiagnosticsChange,
+  onCommentsChange,
   onAstChange,
   currentSlideIndex,
   onSlideChange,
@@ -487,6 +505,10 @@ export default function ReactPreview({
   // q2-preview iframe so editable paragraphs/headings open the tiptap editor
   // instead of the monospaced textarea.
   const [richText] = usePreference('richText');
+  // bd-ew0vak6b: the bottom-bar Edit pill. Off ⇒ the iframe runs read-only
+  // (`editingDisabled`), and `handleSetAst` below drops any edit payload
+  // that still arrives (defense in depth, mirroring the q2-preview SPA).
+  const [previewEditing] = usePreference('previewEditing');
   // Track previewState in a ref for use in callbacks
   const previewStateRef = useRef<PreviewState>('START');
   useEffect(() => {
@@ -522,12 +544,18 @@ export default function ReactPreview({
 
   // Scroll sync (editor ↔ preview). Mirrors `Preview.tsx`: the q2-preview
   // iframe exposes `scrollToLine` / `getScrollRatio` via this handle, and
-  // forwards its own scroll/click events through `handlePreviewScroll` /
-  // `handlePreviewClick`. Only the q2-preview format wires this; other
-  // React formats (q2-debug, slides) leave the handle unattached.
+  // forwards its own scroll event through `handlePreviewScroll`. Preview→
+  // editor clicks use `revealEditorLine` instead of `handlePreviewClick`'s
+  // scroll-ratio path (click-to-editor-scroll, D1/D3): q2-preview's click
+  // opens an inline editor in the preview itself, so this is a plain
+  // scroll-into-view keyed off `data-loc`, not a focus-gated ratio match.
+  // `handlePreviewClick` stays in `useScrollSync` for the HTML preview
+  // (`Preview.tsx`), which keeps wiring it unchanged. Only the q2-preview
+  // format wires this hook at all; other React formats (q2-debug, slides)
+  // leave the handle unattached.
   const previewScrollRef = useRef<Q2PreviewIframeHandle>(null);
 
-  const { handlePreviewScroll, handlePreviewClick, handleAstRendered, scrollToLineDeferred } = useScrollSync({
+  const { handlePreviewScroll, revealEditorLine, handleAstRendered, scrollToLineDeferred } = useScrollSync({
     editorRef,
     scrollPreviewToLine: (line: number) => {
       previewScrollRef.current?.scrollToLine(line);
@@ -712,6 +740,12 @@ export default function ReactPreview({
       if (result.themeFingerprint !== undefined) {
         setThemeFingerprint(result.themeFingerprint);
       }
+      // Outstanding-comment count for the toolbar badge. Only
+      // preview-pipeline renders carry the field; failures and
+      // parse-only formats leave the last-good count in place.
+      if (result.comments !== undefined) {
+        onCommentsChange?.(result.comments);
+      }
       // Notify parent of AST change
       onAstChange?.(result.astJson);
     } else {
@@ -728,7 +762,7 @@ export default function ReactPreview({
         setPreviewState('ERROR_FROM_GOOD');
       }
     }
-  }, [scrollSyncEnabled, onDiagnosticsChange, onAstChange, format, attributionPayload, captureBytes]);
+  }, [scrollSyncEnabled, onDiagnosticsChange, onCommentsChange, onAstChange, format, attributionPayload, captureBytes]);
 
   // Immediate render update (no debounce)
   const updatePreview = useCallback((newContent: string, documentPath?: string) => {
@@ -791,6 +825,10 @@ export default function ReactPreview({
           );
           return;
         }
+        // bd-ew0vak6b: read-only mode never writes. The iframe renders no
+        // edit surface while editing is off, but a payload can still be in
+        // flight from a session that was open when the pill was flipped.
+        if (!previewEditing) return;
         if (!rendered.untransformedAstJson) {
           console.warn(
             'q2-preview setAst: no untransformedAstJson retained; render first',
@@ -842,7 +880,7 @@ export default function ReactPreview({
         console.error('Failed to write AST back to QMD:', err);
       }
     },
-    [content, onContentRewrite, format, rendered.untransformedAstJson, rendered.renderedContent, beginCommitStatus, settleCommitStatus],
+    [content, onContentRewrite, format, rendered.untransformedAstJson, rendered.renderedContent, beginCommitStatus, settleCommitStatus, previewEditing],
   );
 
   return (
@@ -850,7 +888,7 @@ export default function ReactPreview({
       {/* Bulb lives in the same bottom-right corner as the error pill; while a
           commit error is showing, the pill replaces the bulb (bulb → idle). */}
       <CommitStatusBulb status={commitError ? 'idle' : commitStatus} />
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#f4f4f4' }}>
         {rendered.astJson && (previewState === 'GOOD' || previewState === 'ERROR_FROM_GOOD') ? (
           <ReactRenderer
             astJson={rendered.astJson}
@@ -865,14 +903,15 @@ export default function ReactPreview({
             themeFingerprint={themeFingerprint}
             renderedContent={rendered.renderedContent}
             untransformedAstJson={rendered.untransformedAstJson}
-            currentActor={getActorId()}
+            currentActor={getAuthorId()}
             commentsMode={commentsMode}
             unlockNestingCursor={unlockNestingCursor}
             richText={richText}
+            editingDisabled={!previewEditing}
             nestedEditBuffers={nestedEditBuffers}
             scrollHandleRef={previewScrollRef}
             onPreviewScroll={handlePreviewScroll}
-            onPreviewClick={handlePreviewClick}
+            onPreviewClickAtLine={revealEditorLine}
             onAstRendered={handleAstRendered}
           />
         ) : previewState === 'ERROR_AT_START' && currentError ? (
@@ -882,11 +921,7 @@ export default function ReactPreview({
               {stripAnsi(currentError.message)}
             </pre>
           </div>
-        ) : (
-          <div style={{ padding: '20px', color: '#666' }}>
-            Loading preview...
-          </div>
-        )}
+        ) : undefined}
       </div>
       {/* Error overlay shown when error occurs after successful render */}
       <PreviewErrorOverlay

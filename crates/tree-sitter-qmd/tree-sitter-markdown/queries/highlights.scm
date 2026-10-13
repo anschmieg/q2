@@ -8,9 +8,10 @@
 ;
 ; INVARIANT: never emit a token covering the interior of a code cell
 ; (`code_fence_content`) or the frontmatter (`metadata`) — those are left to
-; the embedded layer (zones 2/3). The `metadata` node is opaque (no child
-; nodes for the `---` fences), so the frontmatter delimiters are synthesized
-; in the extractor, not matched here.
+; the embedded layer (zones 2/3). The `metadata` node exposes its YAML as the
+; `body: (yaml)` child but has no child nodes for the `---` fences themselves,
+; so the frontmatter delimiters are synthesized in the extractor, not matched
+; here.
 
 ; --- Headings (ATX only; this grammar has no setext_heading) -----------------
 ; Capture the whole heading per level; the marker child (narrower) wins
@@ -85,6 +86,17 @@
   (comment)
   (edit_comment)
 ] @markup.comment
+
+; --- Block-level editorial marks (`::: ++`, `::: --`, `::: >>`, `::: !!`) -----
+; Only the marker: the body is ordinary blocks (possibly code cells, whose
+; interior must stay uncovered), so the whole node is not captured.
+(editorial_div
+  [
+    (insert_delimiter)
+    (delete_delimiter)
+    (edit_comment_delimiter)
+    (highlight_delimiter)
+  ] @punctuation.special)
 
 ; --- Fenced code: delimiter + info string (interior left to zone 3) ----------
 (fenced_code_block_delimiter) @punctuation.delimiter.fence

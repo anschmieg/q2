@@ -7,7 +7,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
   font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   overflow-y: auto;
 }
@@ -18,7 +18,7 @@
   padding: 32px;
   max-width: 500px;
   width: 90%;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px var(--alpha-black-50);
   border: 1px solid var(--border-color);
   margin: 32px auto;
 }
@@ -118,12 +118,15 @@
   margin: 0 0 24px;
   font-size: 24px;
   font-weight: 600;
+  /* Was inherited from the global h1 rule (index.css) before the Vite
+     scaffold was removed. */
+  line-height: 1.1;
   color: var(--text-primary);
 }
 
 .project-selector h2 {
   margin: 0 0 12px;
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
@@ -144,11 +147,8 @@
   font-weight: 500;
 }
 
-.project-selector .loading {
-  color: var(--text-secondary);
-  text-align: center;
-  padding: 32px;
-}
+/* (.loading removed in Phase 3 — the shared LoadingIndicator /
+   .qh-loading from ui.css replaced it.) */
 
 .project-selector .empty {
   color: var(--text-muted);
@@ -173,14 +173,14 @@
   transition: all 0.2s ease;
   border: 1px solid transparent;
   border-left: 4px solid var(--posit-blue);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 4px var(--alpha-black-10);
 }
 
 .projects-list li:hover {
   background: var(--bg-card-hover);
   border-color: var(--posit-blue-light-3);
   border-left-color: var(--posit-orange);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 8px var(--alpha-black-15);
 }
 
 .project-info {
@@ -200,8 +200,8 @@
 }
 
 :root.light .projects-list li:hover {
-  background: #BACAD8;
-  border-left-color: #4A6A32;
+  background: var(--selector-accent-subtle);
+  border-left-color: var(--selector-success);
 }
 
 .project-meta {
@@ -216,7 +216,7 @@
 
 .project-docid {
   color: var(--text-secondary);
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   cursor: help;
 }
 
@@ -290,7 +290,7 @@
   background: var(--bg-card-hover);
   border-color: var(--posit-blue-light-3);
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 12px var(--alpha-black-20);
 }
 
 .action-btn:hover .action-btn-title {
@@ -333,17 +333,17 @@
 .action-btn.create-btn .action-btn-title,
 .action-btn.create-btn .action-btn-hint,
 .action-btn.create-btn .action-btn-icon {
-  color: #ffffff;
+  color: var(--text-on-accent);
 }
 
 .action-btn.create-btn:hover {
-  background: #5ab5b8;
-  border-color: #5ab5b8;
+  background: var(--selector-accent);
+  border-color: var(--selector-accent);
 }
 
 
 .action-btn.create-btn .action-btn-icon {
-  color: #ffffff;
+  color: var(--text-on-accent);
 }
 
 .action-btn.connect-btn {
@@ -358,7 +358,7 @@
 :root.light .action-btn.connect-btn .action-btn-title,
 :root.light .action-btn.connect-btn .action-btn-hint,
 :root.light .action-btn.connect-btn .action-btn-icon {
-  color: #ffffff;
+  color: var(--text-on-accent);
 }
 
 :root.light .action-btn.connect-btn:hover {
@@ -403,7 +403,7 @@
   background: var(--bg-card);
   border: 1px solid transparent;
   border-left: 4px solid var(--posit-blue);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 4px var(--alpha-black-10);
   transition: all 0.2s ease;
 }
 
@@ -411,7 +411,7 @@
   background: var(--bg-card-hover);
   border-color: var(--posit-blue-light-3);
   border-left-color: var(--posit-orange);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 8px var(--alpha-black-15);
 }
 
 /* Light mode overrides for create form - matches project cards */
@@ -421,9 +421,9 @@
 }
 
 :root.light .add-form.create-form:hover {
-  background: #BACAD8;
+  background: var(--selector-accent-subtle);
   border-color: var(--posit-blue-light-3);
-  border-left-color: #4A6A32;
+  border-left-color: var(--selector-success);
 }
 
 .add-form h2 {
@@ -456,7 +456,7 @@
 
 .form-group label {
   display: block;
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
@@ -490,7 +490,7 @@
 :root.light .form-group input,
 :root.light .form-group select {
   border-color: var(--posit-blue-light-3);
-  background: #ffffff;
+  background: var(--bg-input);
 }
 
 :root.light .form-group input:hover,
@@ -500,10 +500,14 @@
 
 .form-group input:focus,
 .form-group select:focus {
-  outline: none;
   border-color: var(--posit-green);
   background: var(--input-bg-alpha-hover);
-  box-shadow: 0 0 0 3px rgba(114, 153, 78, 0.25);
+}
+
+.form-group input:focus-visible,
+.form-group select:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .form-group input::placeholder {
@@ -597,10 +601,10 @@
 }
 
 .form-actions button.primary:hover {
-  background: #5AB5B8;
-  border-color: #5AB5B8;
+  background: var(--selector-accent);
+  border-color: var(--selector-accent);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(65, 149, 153, 0.3);
+  box-shadow: 0 4px 12px var(--posit-teal-alpha-30);
 }
 
 
@@ -651,13 +655,21 @@
 
 .project-selector .connecting {
   background: var(--input-bg-alpha);
-  color: var(--posit-teal);
+  color: var(--accent-action-text);
   padding: 12px;
   border-radius: 6px;
   margin-bottom: 16px;
   text-align: center;
   border: 1px solid var(--posit-teal);
   font-weight: 500;
+}
+
+/* --accent-action-text (#2E6E71) is 3.89:1 on this banner's light
+   background (input-alpha over the 95% bg-overlay composite);
+   --selector-connecting-text clears WCAG 1.4.3 at 4.76:1. Dark passes
+   as-is (5.27:1). */
+:root.light .project-selector .connecting {
+  color: var(--selector-connecting-text);
 }
 
 /* User Identity Section */
@@ -730,7 +742,7 @@
   border-radius: 8px;
   margin-bottom: 12px;
   border: 1px solid var(--border-color);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 4px var(--alpha-black-10);
 }
 
 .identity-color-dot {
@@ -783,9 +795,12 @@
 }
 
 .identity-name-edit input:focus {
-  outline: none;
   border-color: var(--posit-blue);
-  box-shadow: 0 0 0 2px rgba(68, 112, 153, 0.2);
+}
+
+.identity-name-edit input:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .identity-name-edit button {
@@ -844,7 +859,7 @@
 
 .color-picker label {
   display: block;
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
@@ -887,7 +902,7 @@
 }
 
 .version-info .commit-hash {
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
   background: var(--bg-card);
@@ -897,9 +912,8 @@
   border: 1px solid var(--border-color);
 }
 
-:root.light .version-info .commit-hash {
-  color: var(--posit-blue);
-}
+/* No light-only color override: --posit-blue is 3.72:1 on the --bg-card
+   chip background (WCAG 1.4.3 failure); --text-secondary is 5.45:1. */
 
 /* Project Set Info */
 
@@ -925,7 +939,7 @@
 }
 
 .project-set-id {
-  font-family: 'Source Code Pro', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-input);

@@ -37,17 +37,38 @@ pub fn process_commonmark_attribute(
                 // Skip other node types
             }
             PandocNativeIntermediate::IntermediateKeyValueSpec(spec) => {
-                // spec is Vec<(key, value, key_range, value_range)>
-                for (key, value, key_range, value_range) in spec {
-                    attr.2.insert(key, value);
-                    // Convert ranges to SourceInfo
-                    let key_source =
-                        Some(SourceInfo::from_range(context.current_file_id(), key_range));
-                    let value_source = Some(SourceInfo::from_range(
-                        context.current_file_id(),
-                        value_range,
-                    ));
-                    attr_source.attributes.push((key_source, value_source));
+                // spec is Vec<(key, value, key_range, value_content_source)>.
+                // The value slot already *is* a `SourceInfo`: it carries the
+                // decoded value's content provenance, which cannot be
+                // expressed as a raw `Range` once an escape has collapsed.
+                for (key, value, key_range, value_content_source) in spec {
+                    // Pandoc reserves the `id` and `class` keys: they fill the
+                    // identifier and classes slots instead of the kv map, and
+                    // the last id (of either form) wins. Processing here, in
+                    // child order, preserves that positional semantics.
+                    match key.as_str() {
+                        "id" => {
+                            attr.0 = value;
+                            attr_source.id = Some(value_content_source);
+                        }
+                        "class" => {
+                            // Whitespace-separated words, each its own class.
+                            // All source entries point at the whole quoted
+                            // value (per-word sub-spans: bd-0vfgz2cl).
+                            for word in value.split_whitespace() {
+                                attr.1.push(word.to_string());
+                                attr_source.classes.push(Some(value_content_source.clone()));
+                            }
+                        }
+                        _ => {
+                            attr.2.insert(key, value);
+                            let key_source =
+                                Some(SourceInfo::from_range(context.current_file_id(), key_range));
+                            attr_source
+                                .attributes
+                                .push((key_source, Some(value_content_source)));
+                        }
+                    }
                 }
             }
             _ => {

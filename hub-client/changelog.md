@@ -23,6 +23,220 @@ WASM rebuild is needed for a changelog-only edit.
 
 -->
 
+### 2026-10-06
+
+- [`b151baf25`](https://github.com/quarto-dev/q2/commits/b151baf25): In the rich-text editor, the highlight, delete and insert buttons are disabled until text is selected; selecting exactly a marked stretch enables only its own button, and pressing it removes the mark.
+- [`4e3a823a8`](https://github.com/quarto-dev/q2/commits/4e3a823a8): Highlighted, deleted and inserted text (`[!! ]`, `[-- ]`, `[++ ]`) is now edited in place in the rich-text editor, with the brackets hidden and the same colors as the rendered marks.
+- [`8282647d2`](https://github.com/quarto-dev/q2/commits/8282647d2): Added highlight, delete and insert buttons to the rich-text editor's toolbar, which mark the selected text as an editorial change.
+
+### 2026-10-04
+
+- [`709346482`](https://github.com/quarto-dev/q2/commits/709346482): The "Download as" status panel (its finished message and warnings) and the Render Error popup each have a copy button, so you can copy the text.
+- [`9b287020a`](https://github.com/quarto-dev/q2/commits/9b287020a): "Download as" Word now carries your editorial marks as real Word markup: `[++ ]` and `[-- ]` become tracked insertions and deletions, `[!! ]` a highlight, and `[>> ]` a comment (with its author and date: the ones you give, otherwise the name of whoever wrote it and when, taken from the document's history, and "unknown" only when neither is available), including comments on a stretch of text with their replies. PowerPoint downloads show each mark as formatted text.
+- [`0cd56d431`](https://github.com/quarto-dev/q2/commits/0cd56d431): Added Import to the Files sidebar, next to "Add asset": choose a Word (.docx), OpenDocument (.odt), RTF, EPUB or PowerPoint (.pptx) file, or drop one anywhere in the hub window, and it is converted to a Quarto document in the browser. A dialog proposes the folder and name and never overwrites (a taken name moves on to "name 2"); the images go into a `name_media` folder beside the document; tracked changes and Word comments become editorial marks; and a report lists anything that could not be carried over. Files up to 25 MB are accepted, the first import fetches the converter (about 16 MB, kept for next time), and files dropped inside a folder or into the "Add asset" dialog are still stored as they are.
+- [`0cd56d431`](https://github.com/quarto-dev/q2/commits/0cd56d431): Fixed images in the preview and slides when the image path has a space or other percent-encoded character (for example the `name 2_media` folder an import creates when a name is already taken); previously they showed as broken images.
+
+### 2026-10-03
+
+- [`d73843424`](https://github.com/quarto-dev/q2/commits/d73843424): The PDF preview now keeps two warm pandoc workers ready and lets a newer edit start while an older render finishes, so the preview refreshes in about 270 ms (Chromium) or 320 ms (Safari engine) after the pause in typing instead of about 380 or 580 ms, and a slow render is no longer thrown away when you keep typing. Download as PDF is unchanged.
+- [`a0397b781`](https://github.com/quarto-dev/q2/commits/a0397b781): "Download as" now covers books: on a chapter of a book project, Typst, PDF and EPUB offer "Download book as" (every chapter in one file, named after the book, with "Rendering chapter i of N" progress and a "Book downloaded" summary) and "This chapter only"; Word and PowerPoint still download the open chapter, and a page outside the book downloads alone. The menu also gains PowerPoint, EPUB and Typst source, and documents inside a `_quarto.yml` project download.
+
+### 2026-10-02
+
+- [`6d84607ac`](https://github.com/quarto-dev/q2/commits/6d84607ac): A document whose format is `pdf` now previews as a PDF in the preview pane, in a built-in viewer: choose "Show PDF preview" once (the first use fetches about 33 MB), and the PDF recompiles shortly after you stop typing, keeping your page and zoom. If a change breaks the build, the last good PDF stays on screen under an error message.
+- [`5e4495cb8`](https://github.com/quarto-dev/q2/commits/5e4495cb8): Added PDF to the "Download as" menu: the document is converted to Typst and compiled to a PDF in the browser, with progress and cancel across both steps and a note that the first PDF fetches about 33 MB of converter and fonts.
+- [`5985b2a3b`](https://github.com/quarto-dev/q2/commits/5985b2a3b): Added a "Download as" button to the document top bar: choose Word and the open document is converted to a .docx file in the browser, with a progress panel, a cancel button and a summary of any warnings. A document whose own format is Word shows a click-only "Download Word" button in place of the preview, and formats that cannot be previewed or downloaded disable the button and explain why.
+
+### 2026-09-30
+
+- [`b6795880f`](https://github.com/quarto-dev/q2/commits/b6795880f): Added an end-to-end suite that signs two users in against a real authenticated hub and proves every edit is credited to the right author, two tabs of one account can no longer collide, and documents written before the author-ID transition still show continuous credit.
+- [`d2e3773b8`](https://github.com/quarto-dev/q2/commits/d2e3773b8): The Authors overlay and history replay now show one continuous identity for each person across documents edited before and after the author-ID transition — older edits keep their original credit, and the "me" highlight matches your steps from both eras.
+- [`9da27a917`](https://github.com/quarto-dev/q2/commits/9da27a917): Your edits now carry a stable per-project author identity that stays credited to you across tabs and devices, and two tabs of the same account editing at once can no longer wedge a document with a duplicate-sequence conflict.
+
+### 2026-09-28
+
+- [`e474421`](https://github.com/quarto-dev/q2/commits/e474421): The browser tab title now returns to "Quarto Hub" after leaving a project, instead of keeping the last-opened file and project name on the project selector.
+- [`9fff3e98`](https://github.com/quarto-dev/q2/commits/9fff3e98): Live updates now recover on their own after the computer wakes from sleep or the network changes: the sync connection force-reconnects and open files catch up without a page refresh.
+- [`4d1181fd`](https://github.com/quarto-dev/q2/commits/4d1181fd): Math in the preview now renders with KaTeX 0.18.7, which adds `\reflectbox` and `\mapsfrom` and keeps equation tags on an empty final row of an array.
+
+### 2026-09-24
+
+- [`dce0c5a5`](https://github.com/quarto-dev/q2/commits/dce0c5a5): Listing pages whose posts declare a front-matter `image:` (for example the Blog template's `index.qmd`) now render in the preview instead of failing with "output destination ... is not under any allowed root".
+- [`3ab4cdc0`](https://github.com/quarto-dev/q2/commits/3ab4cdc0): Menu rows highlight more visibly on hover and for the current keyboard item.
+- [`d3a87667`](https://github.com/quarto-dev/q2/commits/d3a87667): The ＋ New menu's Templates and Examples groups now say what they hold, only one group is open at a time, the current item is tinted, and a group stays open while the pointer moves into it.
+- [`e4342b12`](https://github.com/quarto-dev/q2/commits/e4342b12): Submenus under ＋ New open to the left when they would otherwise run off the right edge of the window.
+- [`8af953fc`](https://github.com/quarto-dev/q2/commits/8af953fc): The ＋ New menu is now grouped into Templates (skeletons: Default, Website, Blog, and a new Presentation deck) and Examples (the welcome tour and the four seeded example projects), each in its own submenu.
+
+### 2026-09-22
+
+- [`0ca6449`](https://github.com/quarto-dev/q2/commits/0ca6449): Upgrade KaTeX to 0.18.5 in the preview and rendered output
+
+### 2026-09-19
+
+- [`32a96ec6`](https://github.com/quarto-dev/q2/commits/32a96ec6): New users now start with an "Examples / Templates" collection: four example projects (Meeting Notes, Website, Article, Presentation) are created on first run as your own editable copies, each ending with a link to the getting started guide.
+
+### 2026-09-18
+
+- [`0c0fcde`](https://github.com/quarto-dev/q2/commits/0c0fcde): Hephaestus plot documents (`.hep`) render live in q2-preview documents and revealjs decks, laid out at the width they get and re-flowing on resize (bd-sxiv2tio)
+
+### 2026-09-17
+
+- [`d0b3994`](https://github.com/quarto-dev/q2/commits/d0b3994): Sync stack moves to automerge-repo 2.6.0-alpha.5: a collection the sync server lacks is reported as "not found" again (rather than "sync unreachable"), and the debug page's document badge shows "unavailable" for docs the server does not have (bd-d08gpqvu)
+- [`07b2112`](https://github.com/quarto-dev/q2/commits/07b2112): Upgrade @automerge/automerge to 3.5.0 (bd-d08gpqvu)
+
+### 2026-09-15
+
+- [`267d24f`](https://github.com/quarto-dev/q2/commits/267d24f): Sass cache validates `@import`ed partials, so editing one recompiles the theme instead of serving stale CSS (bd-m3hga05o)
+- [`440098e41`](https://github.com/quarto-dev/q2/commits/440098e41): New users go straight from sign-in to their (empty) project list — the project set is created automatically, and the "Create New Project Set" screen is gone; a connection failure shows a Try again card instead
+- [`837bba995`](https://github.com/quarto-dev/q2/commits/837bba995): The invite landing cards carry the same disclaimer as the landing page, and the About tab's "More information" now opens with it.
+- [`17541e5e1`](https://github.com/quarto-dev/q2/commits/17541e5e1): The quarto-hub.com landing page now carries a disclaimer above the sign-in button: use test data, not real data, and nothing entered in the demo is protected or returned.
+
+### 2026-09-11
+
+- [`80a4e8c5`](https://github.com/quarto-dev/q2/commits/80a4e8c5): The quarto-hub.com landing page now says what Quarto Hub is instead of showing only a sign-in button, every "Learn more" points at the Quarto Hub site and opens in a new tab, and the card reads as raised off the page in dark mode again.
+
+### 2026-09-10
+
+- [`14de97b62`](https://github.com/quarto-dev/q2/commits/14de97b62): The sandboxed preview now validates the sender of every cross-frame message, so other windows can't inject content into the preview or the document.
+- [`9f7efd8a9`](https://github.com/quarto-dev/q2/commits/9f7efd8a9): Custom render-components (user TSX overrides) and the code-copy button now work in the sandboxed preview.
+- [`0d5967f2a`](https://github.com/quarto-dev/q2/commits/0d5967f2a): The sandboxed preview now supports editor-preview scroll sync, click-to-source navigation, document links, slide navigation, and live editing — matching the standard preview.
+- [`0f17a8b2c`](https://github.com/quarto-dev/q2/commits/0f17a8b2c): q2-preview task lists: the checkbox and its item text render on one line again, and loose (blank-line-separated) task items now get checkboxes too
+- [`8f2e5802`](https://github.com/quarto-dev/q2/commits/8f2e5802): Comment bubbles in the live preview no longer wrap each block in an extra element, so theme styling of blockquote headings, callout bodies, list items and tabsets now matches the rendered site; bubbles keep their font on slide decks and are slightly larger there
+- [`42d91ad9`](https://github.com/quarto-dev/q2/commits/42d91ad9): Draft pages (`draft: true`) now show the "Draft" banner in the live preview, localized like the rendered site
+
+### 2026-09-09
+
+- [`6d0aa438`](https://github.com/quarto-dev/q2/commits/6d0aa438): The live preview now renders every plain document (no `format:` key, or `format: html`) through the q2-preview renderer, the same one `q2 preview` uses, so comments, the Edit pill, Authors, and the printable version are available without opting in; add `format: q2-html-render` to a document to keep the previous full-page HTML preview instead
+- [`93b146c`](https://github.com/quarto-dev/q2/commits/93b146c): Edit pill in the document bottom bar turns q2-preview block editing on/off (off makes links plain links); the choice persists
+- [`0242ab91`](https://github.com/quarto-dev/q2/commits/0242ab91): Resolving the last comment on a block in the q2-preview no longer leaves an empty bubble behind or a block glow that never clears
+
+### 2026-09-08
+
+- [`113f4a34`](https://github.com/quarto-dev/q2/commits/113f4a34): A collection invite no longer claims "0 files" for a project the sender has never opened locally — those rows now show the project name on its own, since a zero there means the file count simply isn't known yet.
+- [`4b8bc49c`](https://github.com/quarto-dev/q2/commits/4b8bc49c): Invite cards now name Quarto Hub on the top line so recipients can see where the link leads, drop the redundant "Join to collaborate on …" line above the Google button, and copying a project's share link fetches its file summary first when one isn't cached — so invites for projects you haven't opened locally no longer arrive with an empty preview.
+- [`c2f1a1ef`](https://github.com/quarto-dev/q2/commits/c2f1a1ef): Invite cards now read "<name> invites you to collaborate on …" for both collections and projects, and the "New to Quarto Hub?" explainer is a small footnote with a "Learn more" link below the button rather than a panel above it.
+- [`c0a6230e`](https://github.com/quarto-dev/q2/commits/c0a6230e): WASM tests that render now wire the dart-sass VFS importer, since a theme compile failure is a hard error (Q-14-6) instead of a silent fallback to default CSS
+
+### 2026-09-03
+
+- [`6a3e535e`](https://github.com/quarto-dev/q2/commits/6a3e535e): A share link is now presented as an invitation to the whole project rather than to one document: the card says "project invitation", names the project in its call to action, and lists the project's contents in place of the empty ruled-paper thumbnail — which is omitted entirely when the project holds a single file. File counts also read "1 file" rather than "1 files".
+- [`ea9b46ec`](https://github.com/quarto-dev/q2/commits/ea9b46ec): Invite cards and the editor welcome banner now render correctly in dark mode — the preview box's dividers were drawn in a light-only brand color, which showed as near-white grid lines on the dark card, and several surfaces were painted with translucent tints.
+- [`546fdd37`](https://github.com/quarto-dev/q2/commits/546fdd37): The sandboxed preview bundle is rebuilt from its current sources — math rendering there is back on KaTeX 0.18.4, which a later bundle rebuild had quietly reverted to 0.18.2, and the preview's service worker no longer caches assets for offline use.
+
+### 2026-09-02
+
+- [`ee47e8ec`](https://github.com/quarto-dev/q2/commits/ee47e8ec): Fix `render-components:` custom TSX overrides silently not loading for revealjs presentations.
+
+### 2026-09-01
+
+- [`027b4d15`](https://github.com/quarto-dev/q2/commits/027b4d15): The "People & invite…" item in a collection's actions menu now opens the members and invite popover; previously the click was silently swallowed.
+- [`2fe033f6`](https://github.com/quarto-dev/q2/commits/2fe033f6): The projects home header now shows the real Quarto logo instead of a placeholder stacked-bars mark.
+- [`40a4a5e2`](https://github.com/quarto-dev/q2/commits/40a4a5e2): Invite cards now say "Join to collaborate on …" above the Google sign-in button when you're signed out, and simply "Open …" when you're already signed in.
+- [`f0b5ac14`](https://github.com/quarto-dev/q2/commits/f0b5ac14): Joining a collection invite now lands on the projects home screen with the joined collection at the top, instead of opening a document's editor; the welcome banner appears on the first project you open from that collection.
+- [`1b07531b`](https://github.com/quarto-dev/q2/commits/1b07531b): Adding a project to a collection now carries its cached file counts and contributors along, so collection cards and invite previews no longer show "0 files" for a populated project until its next open.
+- [`720c263e`](https://github.com/quarto-dev/q2/commits/720c263e): Collection and document invite links now land on a unified invitation card showing who invited you and a preview of what you're joining, with one click to join or open; document links no longer open the editor silently, joining uses your Google identity instead of a name form, and a one-time welcome banner orients you in the editor.
+- [`e7f9fcc2a`](https://github.com/quarto-dev/q2/commits/e7f9fcc2a): Images and theme fonts now load correctly in the sandboxed preview, including same-named images in different folders and pictures in subdirectories.
+- [`5684cfead`](https://github.com/quarto-dev/q2/commits/5684cfead): The `q2-sandboxed-preview` format now renders documents with the real preview renderer (headers, paragraphs, math, code highlighting, theme CSS) instead of the placeholder box view.
+- [`a4c3fb9c`](https://github.com/quarto-dev/q2/commits/a4c3fb9c): The experimental branch bar's Merge button now uses the app's standard accent color in both themes, and its branch-name input shows the standard keyboard focus ring.
+- [`41da392c`](https://github.com/quarto-dev/q2/commits/41da392c): Branch chips in the experimental branch bar now activate on click and via the keyboard, and deleting a branch no longer also switches to it.
+- [`e4a72819`](https://github.com/quarto-dev/q2/commits/e4a72819): Math rendering upgraded to KaTeX 0.18.4 everywhere — the sandboxed preview bundle, the hub client, and the CDN link rendering emits for `html-math-method: katex` stay aligned on one version.
+
+### 2026-08-31
+
+- [`1bb90e78`](https://github.com/quarto-dev/q2/commits/1bb90e78): Pressing Enter in the New File dialog no longer reopens the dialog after creating the file, and pressing Enter on its Cancel button no longer creates the file.
+- [`ccaa8cc9`](https://github.com/quarto-dev/q2/commits/ccaa8cc9): Math rendering now uses KaTeX 0.18.2 everywhere — the sandboxed preview bundle, the hub client, and the CDN link rendering emits for `html-math-method: katex` were all realigned onto one version.
+- [`ec152307`](https://github.com/quarto-dev/q2/commits/ec152307): The "opening…" label beside a project name now uses a writing-direction-aware offset, so it will sit on the correct side under right-to-left languages.
+
+### 2026-08-28
+
+- [`6f2ca7ff`](https://github.com/quarto-dev/q2/commits/6f2ca7ff1): The keyboard focus ring in dark mode is now clearly visible on every surface — it was previously too close in color to dark backgrounds to see on dialogs and cards.
+- [`99846282`](https://github.com/quarto-dev/q2/commits/99846282b): More text now meets WCAG AA contrast in both themes — error and warning text in the editor's diagnostics banner, preview status line, and render-error overlay; teal accent text in menus, buttons, and the join screen; links and outline buttons in dark-mode dialogs; and the replay attribution pill's hover state.
+- [`7308c973`](https://github.com/quarto-dev/q2/commits/7308c9730): Buttons, status messages, and muted label text throughout the app now meet WCAG AA contrast guidelines in both themes — primary actions use a darker teal, danger buttons a deeper red, and status/warning/success text uses purpose-built shades — and the accessibility baseline is now completely clean (zero accepted violations).
+- [`0c08f15d`](https://github.com/quarto-dev/q2/commits/0c08f15d4): The dev-harness test suite now runs against the production bundle (about 10x faster in CI), and the dev-harness code is no longer included in production builds or the preview app embedded in the q2 binary.
+- [`4c137558`](https://github.com/quarto-dev/q2/commits/4c137558b): Fixed a test-harness race that could stall app boot on a fresh profile — the cause of the intermittent beforeEach timeouts in CI.
+- [`5599a22d`](https://github.com/quarto-dev/q2/commits/5599a22d): The dev-harness test suite no longer floods CI logs with connection-refused proxy errors — the dev server now skips the hub proxy entirely when no hub is running.
+- [`28afc1e1`](https://github.com/quarto-dev/q2/commits/28afc1e1): The inline diff in the connection-status dialog now highlights deleted and inserted text with the app's Posit red and green tints instead of off-palette colours.
+- [`5e7278cf`](https://github.com/quarto-dev/q2/commits/5e7278cf): Setup screens are easier to read in dark mode — the tagline and backup-hint text, and the red error banner shown when the sync server can't be reached during migration, now meet contrast guidelines.
+
+### 2026-08-27
+
+- [`ff9896c7`](https://github.com/quarto-dev/q2/commits/ff9896c7): The changelog and more-info viewer now follows the app's colour scheme — in dark mode the text is readable light-on-dark (and links use the app's blue) instead of near-invisible dark text on the dark dialog.
+- [`e3a86d05`](https://github.com/quarto-dev/q2/commits/e3a86d05): Small-window header tidied up: at the smallest widths the view-mode switcher is hidden (the Preview button covers switching) and Share + Preview stay as plain buttons instead of a "..." menu. The sidebar toggle is now a grey chip in the sidebar's own colour, clearly separate from the title-bar buttons, and the switch-project icon is teal to mark it as the way out to your projects.
+- [`38922590`](https://github.com/quarto-dev/q2/commits/38922590): A sidebar toggle button now sits at the left of the editor header at every window size — click it to hide or show the sidebar (in narrow windows it opens the sidebar as an overlay drawer). The button is muted grey so it reads as sidebar chrome, not a title-bar action.
+- [`c5c5f23d`](https://github.com/quarto-dev/q2/commits/c5c5f23d): Corners are now consistent across the app — buttons, menus, cards, and dialogs share one radius scale (buttons and cards are slightly rounder).
+- [`b95d5e18`](https://github.com/quarto-dev/q2/commits/b95d5e18): Narrow windows now get a designed layout: the sidebar becomes an overlay drawer (open it from the new header button, dismiss with Escape or by clicking outside), split view collapses to the editor when the window is too narrow for two panes, and the header's Share and Preview actions move into a "More actions" menu.
+- [`0c751c75`](https://github.com/quarto-dev/q2/commits/0c751c75): The projects home now shows a skeleton of the page while projects load (instead of a spinner), and empty states ("No projects yet", "No files yet") gained a guiding icon.
+- [`c552ff92`](https://github.com/quarto-dev/q2/commits/c552ff92): Dialogs, menus, tooltips, and toasts now animate in with a quick, subtle fade/rise — all motion respects your system's reduced-motion setting.
+- [`b7f32163`](https://github.com/quarto-dev/q2/commits/b7f32163): Buttons now respond to being pressed (a small darken on click), and hover states share one consistent timing.
+- [`00e57708`](https://github.com/quarto-dev/q2/commits/00e57708): Outline panel icons (headers, code cells, functions) and the replay drawer's "you" chip now use Posit brand colors instead of off-palette ones.
+- [`e0e2d2bbc`](https://github.com/quarto-dev/q2/commits/e0e2d2bbc): Paste images directly into the source editor — Cmd/Ctrl-V with an image on the clipboard (a screenshot, a copied image, or a copied image file) uploads it next to the current document under an automatic content-based name and inserts the image reference at the cursor, with no dialog; selected text becomes the alt text. Text pastes and text-plus-image pastes (like spreadsheet cells) behave exactly as before, and SVG files still go through the upload dialog.
+- [`e279bc9c9`](https://github.com/quarto-dev/q2/commits/e279bc9c9): `local-prod:nginx` now accepts `--port` like plain `local-prod`, and starts correctly when `OIDC_CLIENT_ID` in your shell enables hub auth — the readiness check previously failed on the hub's 401 even though the hub was up.
+
+### 2026-08-26
+
+- [`ca959a67`](https://github.com/quarto-dev/q2/commits/ca959a67): Comment bubbles now render comments richly — emphasis, inline code, quotes, links (external links open in a new tab, document links navigate the preview), and images (clamped to the bubble). Content that has no sensible bubble form, like nested editorial marks, shows an explicit "unsupported content" chip instead of rendering incorrectly.
+- [`00e0617a`](https://github.com/quarto-dev/q2/commits/00e0617a): Comment bubbles now show the comment's full text — quoted words, emphasis, and inline code inside a comment were previously dropped from the bubble.
+- [`20fa2ba9a`](https://github.com/quarto-dev/q2/commits/20fa2ba9a): Small and narrow windows now degrade gracefully: dialogs cap their height and scroll internally instead of clipping their buttons, menus and popovers never exceed the window width, the projects-home header and editor header wrap onto two rows, and project names in the list keep a readable minimum width instead of being squeezed away.
+- [`83c818f5c`](https://github.com/quarto-dev/q2/commits/83c818f5c): Failed loads now offer a working retry — a project list that fails to load or a project that fails to open shows "Try again", and a failed renderer boot offers Reload. Loading screens show a proper spinner instead of bare text.
+- [`83c818f5c`](https://github.com/quarto-dev/q2/commits/83c818f5c): The app now honors the system "reduce motion" accessibility setting, collapsing all transitions and animations throughout.
+- [`7a7398200`](https://github.com/quarto-dev/q2/commits/7a7398200): Copy cleanup across the app chrome: consistent sentence case ("Copy link", "Share project"), proper ellipsis characters, and one verb per concept — the sidebar's asset button is now "Add asset", matching the dialog it opens.
+- [`7a7398200`](https://github.com/quarto-dev/q2/commits/7a7398200): The About tab gains a Keyboard Shortcuts reference listing every shortcut in the app.
+- [`7a7398200`](https://github.com/quarto-dev/q2/commits/7a7398200): Every interactive control now shows a visible focus ring when navigated by keyboard, and Windows High Contrast mode keeps visible boundaries on buttons, menus, dialogs, and notifications.
+- [`7a7398200`](https://github.com/quarto-dev/q2/commits/7a7398200): The file tree is fully keyboard-operable: Tab moves into it once, arrow keys/Home/End navigate, folders expand and collapse with the arrow keys, typing a name jumps to it, Enter opens, and Shift+F10 opens the row's actions menu. Search results work the same way.
+- [`1ccb9cc99`](https://github.com/quarto-dev/q2/commits/1ccb9cc99): All project-list dialogs (new project, rename, duplicate, connect/import, and friends) now share the accessible dialog chrome: Escape closes, Tab stays inside the dialog, and focus returns to the button that opened it.
+- [`1ccb9cc99`](https://github.com/quarto-dev/q2/commits/1ccb9cc99): Tooltips are now styled and keyboard-accessible throughout — hover shows them after a short delay, keyboard focus shows them immediately, and Escape dismisses.
+- [`1ccb9cc99`](https://github.com/quarto-dev/q2/commits/1ccb9cc99): File rows in the sidebar gain a visible ⋯ actions button (on hover or keyboard focus), and all menus are now fully keyboard-operable: arrow keys, Home/End, type-ahead, submenus, and Escape.
+
+### 2026-08-25
+
+- [`d124b72f`](https://github.com/quarto-dev/q2/commits/d124b72f): The comment-display toggle in the bottom bar now shows a count badge with the number of outstanding comments on the current document, so you can see at a glance whether a page has open comments without scanning it.
+
+### 2026-08-22
+
+- [`0de96cd7a`](https://github.com/quarto-dev/q2/commits/0de96cd7a): Clicking in either preview pane now lines the source editor up with what you clicked: the first line of that block's source sits at the same height on screen as the block itself, so the two panes read side by side. Previously the q2-preview did nothing at all when you clicked a block, and the HTML preview scrolled your line to the middle of the editor. Selecting text that came from an included file also no longer moves your cursor to an unrelated line of the file you are editing.
+
+### 2026-08-21
+
+- [`837de60b`](https://github.com/quarto-dev/q2/commits/837de60b): Fix deleted projects reappearing on the next page load — deleting a project now records a tombstone that syncs with the project set, so the on-load reconciler purges the stale local copy instead of resurrecting it, on every browser.
+
+### 2026-08-19
+
+- [`6ddab98b`](https://github.com/quarto-dev/q2/commits/6ddab98b): Fix the hub app getting stuck on old versions (GH #447) — the app now checks for updates hourly and whenever a backgrounded tab is revisited, hidden tabs reload themselves onto the new version automatically, and visible tabs get an "Update available" toast with a Reload button instead of being reloaded mid-edit. Offline caching is slimmer too: the install-time cache drops from about 56 MB to about 14 MB because the WASM parser, Monaco editor workers, and the sass compiler now live in on-demand caches, so updates are far less likely to fail to install.
+- [`b62746e7`](https://github.com/quarto-dev/q2/commits/b62746e7): Sidebar cleanup — the Project tab no longer duplicates the header's switch-project button, Screenshot Preview moves from Settings to the Project tab next to Export ZIP, the Settings tab drops its Editor/Preview section headings so the toggles read as one flat list, and the Files header's New, Upload, and Print actions become equal-width icon buttons that always share one row (Print last).
+- [`e71b1ac5`](https://github.com/quarto-dev/q2/commits/e71b1ac5): WCAG 2.2 accessibility pass — dialogs are announced as dialogs with titles, Tab stays inside an open dialog and focus returns to the button that opened it, a "Skip to main content" link leads the tab order, view-toggle and dialog close buttons meet the 24px minimum target size, and keyboard focus is always visible.
+- [`63f2a178`](https://github.com/quarto-dev/q2/commits/63f2a178): Tint the editor file sidebar with the same posit-blue alpha family as the other editor bars, so it no longer reads neutral gray next to them.
+
+### 2026-08-18
+
+- [`a8944df3`](https://github.com/quarto-dev/q2/commits/a8944df3): Fix the `q2-sandboxed-preview` pane in dark mode — its document paints no background of its own, so the newly theme-following preview pane turned its canvas dark and hid the text; the iframe now keeps a light canvas in both themes.
+- [`af0161a5`](https://github.com/quarto-dev/q2/commits/af0161a5): Align the editor UI with the projects-home visual language — white surfaces with hairline borders in light mode, a desaturated slate ramp in dark mode, teal primary actions, blue secondary links, and soft error treatments replace the filled blue-gray chrome and off-brand indigo/purple accents.
+- [`510b3ae7`](https://github.com/quarto-dev/q2/commits/510b3ae7): q2-preview render components now receive headings wrapped in section Divs, matching the rest of the pipeline; the bundled `kanban_rc.jsx` sample and the component README were updated to read that shape.
+
+### 2026-08-14
+
+- [`9b60bbe2`](https://github.com/quarto-dev/q2/commits/9b60bbe2): Keep the WASM-driven theme/SASS cache in memory during `q2 preview` sessions (viewer and editor alike), so preview origins leave no IndexedDB databases behind at all.
+- [`f2db6bce`](https://github.com/quarto-dev/q2/commits/f2db6bce): Keep all browser storage in memory for `q2 preview --ui editor` sessions, so each ephemeral preview origin no longer accumulates a stale IndexedDB document cache and project entries; reloading the editor now rebuilds the session from the preview server's boot config.
+
+### 2026-08-12
+
+- [`e5769e5b`](https://github.com/quarto-dev/q2/commits/e5769e5b): Bump the samod sync library to 0.13.0 and the JS automerge package to 3.4.1.
+
+### 2026-08-09
+
+- [`6ffe5211`](https://github.com/quarto-dev/q2/commits/6ffe5211): The ephemeral-session banner's config fetch now retries once on a transient network failure, so a dropped first request (for example a `--join` guest's tunnel mid-handshake) no longer hides the banner for the whole session.
+- [`4111452f`](https://github.com/quarto-dev/q2/commits/4111452f): The editor shows a persistent "Ephemeral session — edits won't be saved to disk" banner when the serving `q2 preview` was started without `--allow-edit`; guests of a shared session see it too.
+- [`bcfbb47f`](https://github.com/quarto-dev/q2/commits/bcfbb47f): `q2 preview --ui editor` boots skip the project-set setup and migration screens and land straight in the previewed document.
+- [`9dfce50e`](https://github.com/quarto-dev/q2/commits/9dfce50e): `q2 preview --ui editor` serves the full collaborative editor (Monaco, file sidebar, live preview pane) from the preview server, to the host and any `--join` guests alike.
+
+### 2026-08-07
+
+- [`279d7e5e`](https://github.com/quarto-dev/q2/commits/279d7e5e): `.md` files are now first-class source files: they sync into hub projects, get live preview, outline, folding, diagnostics, and qmd highlighting in the editor, and cross-document links into `.md` pages navigate like `.qmd` ones.
+
+### 2026-08-04
+
+- [`2c21233c`](https://github.com/quarto-dev/q2/commits/2c21233c): Importing a project list now shows the projects immediately — previously "Imported 30 project(s)" displayed nothing until the page was reloaded.
+- [`2c21233c`](https://github.com/quarto-dev/q2/commits/2c21233c): The project-list export now includes your collections, and importing it restores them — the file records each collection's synced-document pointer, so an import re-joins the collection and its name and membership sync back automatically.
+
 ### 2026-08-03
 
 - [`bd8f5206`](https://github.com/quarto-dev/q2/commits/bd8f5206): The session-expiry re-check now schedules only from the server-reported expiry; `/auth/me` gained a `credential` field distinguishing sliding sessions from fixed-expiry Bearer tokens, and the obsolete 1-hour fallback lifetime was removed.

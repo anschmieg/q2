@@ -1,0 +1,683 @@
+/* Shared UI primitives in the QH-ProjectManagement-July26 "Short term" visual
+   language: hairline borders, teal primary actions, subtle hovers, soft error
+   treatments. Extracted verbatim from ProjectsHome.css so the editor chrome
+   and dialogs share the same rules; classes use the .qh-* (Quarto Hub)
+   prefix. Colors route through theme.css tokens so dark mode keeps
+   working. */
+
+/* ---- shared utilities ----
+   Documented single-purpose classes for patterns that would otherwise be
+   re-invented per component. Adopt at exact-match sites; if a component
+   needs something different, that's a design decision, not a fork. */
+
+/* Single-line truncation: ellipsis instead of wrapping. The element (or a
+   flex ancestor) needs a min-width: 0 for the ellipsis to engage. */
+.qh-truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Standard row hover for list/tree rows in the sidebar chrome. */
+.qh-row-hover {
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+.qh-row-hover:hover {
+  background: var(--sidebar-border);
+}
+
+/* Active-accent row: the sidebar's selected-row treatment — teal
+   leading-edge accent over the accent background. Uses an always-present
+   transparent border (not a margin offset) so selection causes no layout
+   shift. Logical property keeps the accent on the leading edge in RTL. */
+.qh-active-accent-row {
+  border-inline-start: 2px solid transparent;
+}
+
+.qh-active-accent-row.active {
+  background: var(--editor-accent-bg);
+  border-inline-start-color: var(--sidebar-active-accent);
+}
+
+/* ---- buttons ----
+   One button system, two sizes:
+   - .qh-btn        default text button; variants: .primary .outline
+                    .danger .ghost-accent
+   - .qh-btn.small  compact text button
+   - .qh-icon-btn   icon-only button (inline-size fit); .boxed gives a
+                    fixed 28x28 target (header chrome)
+   - .qh-link       inline link-styled action
+   States are defined once on the base class (hover per variant,
+   disabled and focus-visible shared). Deliberately NOT part of this
+   system: .view-toggle-btn (a segmented-control member with an active
+   state, not a button look) and .qh-pager (a vertical navigation strip).
+   Radii/paddings stay on their current
+   values until the Phase 5 grid-alignment pass. */
+
+.qh-btn {
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-semibold);
+  /* Buttons don't inherit color (UA stylesheet) — the base must declare
+     it, or bare .qh-btn renders black-on-dark in the dark theme. */
+  color: var(--text-primary);
+  /* inline-flex + centering so a future icon next to the label is
+     optically aligned by construction (no per-button fixes). */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  background: none;
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.qh-btn:disabled { opacity: 0.5; cursor: default; }
+
+.qh-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.qh-btn.primary {
+  background: var(--accent-action-bg);
+  color: var(--text-on-accent);
+}
+
+.qh-btn.primary:hover { background: var(--btn-accent-hover-bg); }
+.qh-btn.primary:active { background: var(--btn-accent-active-bg); }
+
+.qh-btn.outline {
+  border-color: var(--border-color);
+  color: var(--accent-secondary);
+}
+
+.qh-btn.outline:hover { background: var(--input-bg-alpha); }
+.qh-btn.outline:active { background: var(--input-bg-alpha-hover); }
+
+.qh-btn.danger {
+  background: var(--btn-danger-bg);
+  color: var(--text-on-accent);
+}
+
+.qh-btn.danger:hover { background: var(--btn-danger-hover-bg); }
+.qh-btn.danger:active { background: var(--btn-danger-active-bg); }
+
+.qh-btn.ghost-accent {
+  border: 1px solid var(--posit-teal);
+  color: var(--accent-action-text);
+  font-size: var(--text-base);
+  padding: 7px 14px;
+}
+
+.qh-btn.ghost-accent:hover { background: var(--posit-teal-alpha-08); }
+
+.qh-btn.small {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-normal);
+  padding: 5px 11px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.qh-caret { font-size: 9px; }
+
+.qh-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--accent-secondary);
+  cursor: pointer;
+}
+
+.qh-link:hover { text-decoration: underline; }
+.qh-link.muted { color: var(--text-secondary); font-weight: var(--font-weight-normal); }
+.qh-link.danger { color: var(--error-text); }
+
+.qh-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px 8px;
+  font-size: 15px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.qh-icon-btn:hover { background: var(--input-bg-alpha); color: var(--text-primary); }
+.qh-icon-btn:disabled { opacity: 0.5; cursor: default; }
+
+.qh-icon-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Fixed 28x28 target for header chrome (WCAG 2.5.8 floor is 24px). */
+.qh-icon-btn.boxed {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+/* ---- menus ---- */
+
+.qh-menu-anchor { position: relative; }
+
+.qh-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 250px;
+  /* Never wider than the viewport, with margin for the content-box
+     padding/border and the anchor's own inset (a right-anchored menu
+     opens leftward from its trigger, which sits inside the header's
+     padding — .qh-avatar-menu's 320px otherwise clips the left edge of a
+     320px window). Matches the dialog margin convention (100vw - 48px).
+     Where min-width and max-width conflict, the minimum wins — menus
+     keep their 250px floor. */
+  max-width: calc(100vw - 48px);
+  background: var(--context-menu-bg);
+  border: 1px solid var(--context-menu-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px var(--context-menu-shadow);
+  padding: 6px;
+  z-index: var(--z-dropdown);
+  animation: qh-pop-in var(--duration-fast) var(--ease-out);
+  transform-origin: top left;
+  display: flex;
+  flex-direction: column;
+}
+
+.qh-menu-right { left: auto; right: 0; transform-origin: top right; }
+
+/* Context-menu placement at cursor coordinates (fixed instead of
+   anchor-relative); the Menu component flips at viewport edges. */
+.qh-menu-fixed {
+  position: fixed;
+  top: auto;
+  left: auto;
+  min-width: 180px;
+  z-index: var(--z-modal);
+}
+
+.qh-menu-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: 7px 11px 5px;
+}
+
+.qh-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  box-sizing: border-box;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+/* Pointer hover and the keyboard's current item share one tint, so the
+   leaf a submenu focuses on open (APG) is visibly "current". */
+.qh-menu-item:hover,
+.qh-menu-item:focus { background: var(--context-menu-hover); }
+.qh-menu-item:focus:not(:focus-visible) { outline: none; }
+.qh-menu-item[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.qh-menu-item[aria-disabled="true"]:hover { background: none; }
+.qh-menu-item.strong { font-weight: 600; }
+.qh-menu-item.accent { color: var(--accent-action-text); font-weight: 600; }
+.qh-menu-item.danger { color: var(--error-text); }
+
+/* Optional leading icon inside the label. */
+.qh-menu-item-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.qh-menu-item-icon {
+  display: inline-flex;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.qh-menu-item.with-hint {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.qh-menu-hint { font-size: var(--text-xs); color: var(--menu-hint-text); }
+
+.qh-menu-subtext {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.qh-menu-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 5px 8px;
+}
+
+.qh-submenu-parent { position: relative; padding: 0; }
+
+.qh-menu-item-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  box-sizing: border-box;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+/* A group item stays tinted while its submenu is open, so the path
+   from the root to the hovered leaf reads as one highlighted trail. */
+.qh-menu-item-inner:hover,
+.qh-menu-item-inner:focus,
+.qh-menu-item-inner[aria-expanded="true"] { background: var(--context-menu-hover); }
+.qh-menu-item-inner:focus:not(:focus-visible) { outline: none; }
+.qh-menu-item-inner.strong .qh-menu-item-label { font-weight: 600; }
+.qh-menu-item-inner-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+}
+.qh-submenu-arrow { color: var(--text-secondary); margin-inline-start: 12px; }
+
+.qh-submenu {
+  top: -6px;
+  left: calc(100% + 4px);
+  min-width: 180px;
+}
+
+/* Invisible bridge over the 4px gap to the parent item, so a pointer
+   crossing into the submenu never counts as having left it. */
+.qh-submenu::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: -4px;
+  width: 4px;
+}
+.qh-submenu.qh-submenu-left::before {
+  inset-inline-start: auto;
+  inset-inline-end: -4px;
+}
+
+/* MenuSubmenu measures itself on open and adds this when the default
+   rightward placement would leave the viewport (e.g. under the
+   right-pinned ＋ New menu). */
+.qh-submenu.qh-submenu-left {
+  inset-inline-start: auto;
+  inset-inline-end: calc(100% + 4px);
+  transform-origin: top right;
+}
+
+/* ---- dialogs ---- */
+
+.qh-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Dialogs portal to <body>, so they must clear every in-app fixed
+     surface on their own: .projects-home is itself a fixed --z-modal
+     layer, and the editor chrome's floating layer is --z-modal too.
+     Body-level and later in DOM, the backdrop wins ties. */
+  z-index: var(--z-modal);
+  animation: qh-fade-in var(--duration-base) var(--ease-out);
+}
+
+.qh-dialog {
+  width: 520px;
+  max-width: calc(100vw - 48px);
+  /* Small/short windows: cap the height and let the content section
+     scroll internally. The backdrop centers the dialog, so overflowing
+     the viewport would clip the header and actions past both edges. */
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  background: var(--dialog-bg);
+  border-radius: var(--radius-lg);
+  padding: 26px 30px;
+  box-shadow: var(--modal-shadow);
+  box-sizing: border-box;
+  animation: qh-rise-in var(--duration-base) var(--ease-out);
+}
+
+.qh-dialog.wide { width: 560px; }
+
+.qh-dialog h2 {
+  margin: 0 0 4px;
+  font-size: 19px;
+  color: var(--text-primary);
+}
+
+.qh-dialog-hint {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.qh-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+/* ---- forms ----
+   .qh-input is the canonical text input/select. Focus is a border-color
+   change (the established pattern — no additional ring). Validation: one
+   pattern — the input gets aria-invalid="true" and error text is wired
+   via aria-describedby (inline, field-level); form-level failures use
+   .qh-error.inline below the fields. See the gallery's Form controls
+   section for both. */
+
+.qh-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 16px 0 6px;
+}
+
+.qh-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 15px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--dialog-input-border);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+.qh-input:focus { border-color: var(--border-focus); }
+.qh-input.focus-accent:focus { border-color: var(--posit-teal); }
+
+/* WCAG 2.4.7: border-color alone is too subtle a focus indicator —
+   keyboard focus gets the token ring. */
+.qh-input:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.qh-input:disabled { opacity: 0.5; cursor: default; }
+
+.qh-input[aria-invalid="true"],
+.qh-input[aria-invalid="true"]:focus {
+  border-color: var(--error-text);
+}
+
+select.qh-input { appearance: auto; }
+
+.qh-tabs {
+  display: flex;
+  background: var(--input-bg-alpha);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  margin-top: 12px;
+}
+
+.qh-tab {
+  flex: 1;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.qh-tab.active {
+  background: var(--bg-modal);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px var(--alpha-black-08);
+}
+
+/* ---- loading indicator ----
+   The one loading indicator (Phase 3): spinner + label, announced
+   politely to screen readers (role="status" via components/Loading.tsx).
+   The spin is covered by the global prefers-reduced-motion rule below. */
+
+.qh-loading,
+.qh-connecting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.qh-spinner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-secondary);
+  border-radius: 50%;
+  animation: qh-spin 0.8s linear infinite;
+}
+
+/* Entrance motion (Phase 5): transform/opacity only, token-timed. The
+   global prefers-reduced-motion rule collapses these to 0.01ms; never
+   add per-component reduced-motion overrides. `from`-only keyframes
+   animate to the element's natural end state. */
+@keyframes qh-fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes qh-rise-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes qh-pop-in {
+  from { opacity: 0; transform: scale(0.97); }
+}
+
+/* Skeleton loading blocks (Phase 5): content-shaped placeholders for
+   async surfaces. Opacity pulse only (transform/opacity motion rule);
+   the global reduced-motion rule stills the pulse. Usage: wrap in a
+   role="status" container with an aria-label — the bars themselves are
+   decorative. */
+.qh-skeleton {
+  border-radius: var(--radius-sm);
+  background: var(--input-bg-alpha);
+  animation: qh-skeleton-pulse 1.6s var(--ease-standard) infinite;
+}
+
+@keyframes qh-skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@keyframes qh-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- errors ---- */
+
+.qh-error {
+  margin: 14px 30px 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--error-bg-subtle);
+  color: var(--error-text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.qh-error.inline { margin: 12px 0 0; }
+
+/* Recovery action inside an error banner (e.g. "Sign in again" on an
+   expired-session join failure, "Try again" on a failed load). Colors
+   inherit from the banner so the same class works on app-theme and
+   editor-theme error surfaces. */
+.qh-error-action {
+  display: block;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.qh-error-action:hover {
+  background: var(--error-bg-subtle);
+}
+
+/* ---- editor dialog chrome ----
+   Shared by the editor's NewFile/Share/NewAsset dialogs: a sectioned layout
+   (hairline header/footer) on top of the .qh-dialog surface. The container
+   gets class="qh-dialog <name>-dialog"; the local class supplies width and
+   padding: 0 so the header/footer hairlines span edge to edge. */
+
+/* Editor chrome stacks floating elements up to z-index 1000 (context menu,
+   preview error overlay), so dialogs in the editor keep the higher level. */
+.dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--dialog-border);
+  flex-shrink: 0;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--editor-text);
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: var(--editor-text-muted);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: color 0.2s;
+  /* WCAG 2.5.8: the × glyph alone is narrower than the 24x24 CSS px
+     minimum target size; give the button a real 24x24 box. */
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.close-btn:hover {
+  color: var(--editor-text);
+}
+
+/* WCAG 2.4.7: visible focus indicator (the button has no border or
+   background change on focus otherwise). */
+.close-btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.dialog-content {
+  padding: 20px;
+  /* Scrolls internally when the dialog hits its viewport-capped
+     max-height, keeping the header and actions on screen. */
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ProjectsHome form dialogs on the shared ModalDialog chrome: zero the
+   .qh-dialog padding so the header/footer hairlines span edge to edge,
+   matching the editor dialogs. */
+.qh-dialog.qh-form-dialog {
+  padding: 0;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--dialog-border);
+  flex-shrink: 0;
+}
+
+/* Reduced motion (Phase 3): collapse every transition and animation to
+   effectively-instant for users who request reduced motion. Global by
+   design — any motion added later (Phase 5 transitions, micro-states) is
+   covered automatically. Do not add per-component reduced-motion blocks;
+   0.01ms (not `none`) so transitionend/animationend listeners still fire. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Forced colors (Windows High Contrast): the platform strips backgrounds
+   and box shadows, so surfaces that rely on them for their boundary get
+   system-color borders here. (.qh-btn/.qh-input keep boundaries via the
+   UA's forced button/input borders; .qh-menu already has a hairline
+   border, forced to CanvasText.) */
+@media (forced-colors: active) {
+  .qh-icon-btn {
+    border: 1px solid ButtonBorder;
+  }
+
+  .qh-dialog {
+    border: 1px solid CanvasText;
+  }
+}

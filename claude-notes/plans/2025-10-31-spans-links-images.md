@@ -1,6 +1,9 @@
-# Spans, Links, and Images Implementation Plan
+---
+title: 'Spans, Links, and Images Implementation Plan'
+date: 2025-10-31  # (REVISED after testing)
+description: 'Adds handlers for `pandoc_span` and `pandoc_image` nodes so bracketed text becomes Pandoc Span, Link or Image inlines, with `[text]` deliberately producing a Span rather than Pandoc''s literal brackets.'
+---
 
-**Date**: 2025-10-31 (REVISED after testing)
 **Context**: Implement `pandoc_span` and `pandoc_image` handlers to support spans, links, and images
 
 ## CRITICAL CORRECTION
@@ -390,7 +393,7 @@ Test cases needed:
 - ✅ Spans parse correctly with attributes
 - ✅ Images parse as `!` + Link (matching Pandoc)
 - ✅ All existing tests still pass
-- ✅ No "[TOP-LEVEL MISSING NODE]" warnings for these nodes
+- ✅ No "\[TOP-LEVEL MISSING NODE\]" warnings for these nodes
 - ✅ Output matches Pandoc native format exactly
 
 ## Estimate
@@ -401,7 +404,7 @@ Test cases needed:
 - Phase 4 (pandoc_span handler): 30 minutes
 - Phase 5 (pandoc_image handler): 20 minutes
 - Phase 6 (testing): 60 minutes
-- **Total**: ~2.5-3 hours
+- **Total**: \~2.5-3 hours
 
 ## Notes
 

@@ -65,9 +65,9 @@ The known producer kinds, defined in
 | Constructor                  | Line | `kind` string             | Purpose                                                                       | Atomic? |
 |------------------------------|------|---------------------------|-------------------------------------------------------------------------------|---------|
 | `By::filter(path, line)`     | 458  | `"filter"`                | Typed Inline/Block constructed inside a user Lua filter (auto-attached).      | yes     |
-| `By::sectionize()`           | 470  | `"sectionize"`            | `SectionizeTransform`'s synthesized section `Div`.                            | no      |
+| `By::sectionize()`           | 470  | `"sectionize"`            | `SectionizeTransform`\'s synthesized section `Div`.                            | no      |
 | `By::user_edit()`            | 479  | `"user-edit"`             | **Dormant.** Was React-constructed edit content; the `stampUserEdits` stamping path was removed and the current write-back model (`target-incremental-writes.md`) does not stamp edits. Constructor retained, currently unused in production. | no      |
-| `By::shortcode(name)`        | 494  | `"shortcode"`             | Result of resolving a `{{< name … >}}` token. **Requires an `Invocation`.**   | yes     |
+| `By::shortcode(name)`        | 494  | `"shortcode"`             | Result of resolving a `{{{< name … >}}}` token. **Requires an `Invocation`.**   | yes     |
 | `By::include()`              | 505  | `"include"`               | **Dormant.** Was for a planned `IncludeExpansion` wrapper; that design (Plan 8) is abandoned — `IncludeExpansionStage` splices flat and includes round-trip without a wrapper (see Plan 8 tombstone). Constructor retained, currently unused. | n/a |
 | `By::title_block()`          | 513  | `"title-block"`           | Title-block stage's synthesized title `h1`.                                   | yes     |
 | `By::footnotes()`            | 521  | `"footnotes"`             | Footnotes stage's container `Div` chrome.                                     | no      |
@@ -307,7 +307,7 @@ flow through the dispatch funnel:**
 - [`make_error_inline`](../../crates/quarto-core/src/transforms/shortcode_resolve.rs)
   (`:1352`) — `?key` Strong wrapping the unknown-shortcode message.
 - [`shortcode_to_literal`](../../crates/quarto-core/src/transforms/shortcode_resolve.rs)
-  (`:1368`) — `{{</ … >}}` escaped-shortcode literal text.
+  (`:1368`) — `{{{</ … >}}}` escaped-shortcode literal text.
 
 Both branches consume their `shortcode_owned.source_info` directly
 and emit an `Original` (the user-visible bytes belong to the token,
@@ -389,6 +389,49 @@ Use `tight_source_info_for_node(node, ctx)` and
 `leading_whitespace_source_info(&whole, &tight)` from `location.rs` when
 peeling a leading `Space`.
 
+**Also implemented** (2026-08-22, bd-1d6io): the attribute key path — the
+`"key_value_key"` arm in `treesitter.rs`. It records a `Range`, not a
+`SourceInfo`, so it uses `tight_node_location(node, input_bytes)` (the
+`Range` counterpart, added alongside `node_location`). Reach for that helper
+whenever a handler stores a `Range` over a whitespace-absorbing external
+token; it trims with `str::trim` semantics so a caller that records
+`node.utf8_text(..).trim()` keeps text and range in lockstep.
+
+**P1 *is* auditor-enforced — and now corpus-driven.** `check_tightness` in the
+Plan 7g auditor implements P1/P3, and `audit_attr_source` applies it to every
+attr-key and attr-val range. It was already correct when bd-1d6io was filed:
+pointed at the defect, it reports
+`TightnessViolation: attr-key [251..262] has leading space/tab byte`. The bug
+survived a year because **nothing ran the auditor over real documents** — its
+only driver was eleven hand-written snippets in `tiling_phase3_tests.rs`, none
+containing a multi-kv attribute.
+
+`tests/integration/tiling_corpus_tests.rs` (added 2026-08-22, bd-1d6io) is that
+driver: it runs `audit_source_range_tiling` over \~170 real documents and asserts
+zero findings, with a `KNOWN` list that must cite a strand per entry. **When you
+add a corpus of documents or a new handler, that test is the safety net — prefer
+extending it over writing a bespoke check.**
+
+Two lessons worth keeping:
+
+- **Do not assert `source[range] == text`.** The tempting exhaustive invariant
+  is wrong: text legitimately diverges from source bytes by design — the
+  abbreviation handler substitutes NBSP for a source space, attribute values are
+  stored unescaped/unquoted, YAML scalars are decoded. P1's *structural*
+  formulation (boundary bytes, containment, disjointness) is what makes it
+  robust.
+- **The abbreviation NBSP substitution is excluded** from the tightness check
+  (`check_tightness`\'s `own_text` parameter). Pandoc-parity abbreviation
+  handling absorbs the `Space` after an abbreviation into the preceding `Str`
+  as U+00A0 so it cannot be separated from its referent, so `e.g. ` gives
+  `Str("e.g.\u{a0}")` a range over five source bytes that really are its own
+  (`postprocess.rs`, the `ends_with_abbreviation` branch; `\<space>` in
+  `text_helpers.rs` does the same). The exclusion is keyed to **exactly** that:
+  boundary characters must be U+00A0, **in matching quantity** with the source
+  space/tab bytes. A `Str` retaining a *plain* space is still reported, and a
+  range absorbing two spaces against one NBSP is still reported. Attr
+  keys/values pass `None` and stay strict.
+
 ### P2 — Whitespace ownership (producer obligation, not auditor-checked)
 
 Inter-token ASCII whitespace belongs to a `Space` node (or block structure)
@@ -408,7 +451,7 @@ Sibling leaf ranges are disjoint, and a parent's range contains its children's.
 No source byte is claimed by two sibling nodes, qualified by two refinements:
 
 1. **(Intra-node — NOT a sibling-disjointness exception) the `Concat` hull.**
-   A `Concat`'s pieces tile internally and the node presents as one unit to its
+   A `Concat`\'s pieces tile internally and the node presents as one unit to its
    siblings — exactly one claim, never two. A *contiguous* `Concat` presents
    its hull; a *non-contiguous* one makes no contiguous claim (`preimage_in`
    → `None`). Use `contiguous_hull_for_run` (in `postprocess.rs`) to produce

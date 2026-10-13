@@ -2,9 +2,12 @@
 //!
 //! Runs all build and test steps to ensure the entire project is healthy,
 //! matching the CI environment as closely as possible:
-//! 1. Run custom lint checks
+//! 0. Preflight: the `node` on PATH satisfies `engines.node` (see
+//!    `node_version.rs`; skipped only when every npm-driven step is off)
+//! 1. Run custom lint checks, hub-client `lint:css`, and clippy
 //! 2. Check Rust formatting (cargo fmt --check)
-//! 3. Build all Rust crates (with -D warnings, matching CI)
+//! 3. Build all Rust crates (with -D warnings, matching CI), then render
+//!    claude-notes with `q2 render --strict` (matching CI's test-suite step)
 //! 4. Test tree-sitter grammars
 //! 5. Run all Rust tests (with -D warnings, matching CI)
 //! 6. Build ts-packages workspaces + quarto-hub-mcp smoke check
@@ -26,6 +29,16 @@ use crate::lint;
 use crate::test;
 
 const TOTAL_STEPS: u32 = 14;
+
+/// The hub-client CSS lint, exactly as CI's `Lint hub-client CSS` step in
+/// `.github/workflows/ts-test-suite.yml` runs it (from the repo root, via the
+/// npm workspace). Kept as a constant so a test can hold the two in sync.
+const CSS_LINT_ARGS: [&str; 4] = ["run", "lint:css", "-w", "hub-client"];
+
+/// The q2 args of CI's `Render claude-notes (warnings are errors)` step in
+/// `.github/workflows/test-suite.yml`. Kept as a constant so a test can hold
+/// the two in sync (bd-zn87vwi8).
+const CLAUDE_NOTES_RENDER_ARGS: [&str; 3] = ["render", "--strict", "claude-notes"];
 
 /// Configuration for the verify command.
 #[derive(Default)]
@@ -54,10 +67,84 @@ pub struct VerifyConfig {
     pub skip_q2_preview_spa_build: bool,
     /// Skip the quarto-sync-client + quarto-hub-mcp package tests.
     pub skip_hub_mcp_tests: bool,
+    /// Skip the hub-client CSS lint (`npm run lint:css`).
+    pub skip_css_lint: bool,
+    /// Skip the strict claude-notes render (`q2 render --strict claude-notes`).
+    pub skip_claude_notes_render: bool,
     /// Run hub-client e2e tests (slower, requires browser).
     pub include_e2e: bool,
     /// Do not set RUSTFLAGS="-D warnings" (allows warnings during iteration).
     pub no_deny_warnings: bool,
+}
+
+/// Whether step 1 runs the hub-client CSS lint. Deliberately independent of
+/// `skip_hub_build`: a CSS-only change verified with `--skip-hub-build` is
+/// exactly the case that slipped past the local gate in PR #667
+/// (bd-4bu7vwi5).
+fn runs_css_lint(config: &VerifyConfig) -> bool {
+    !config.skip_css_lint
+}
+
+/// Whether step 3 renders claude-notes. Off under `--skip-rust-build` too:
+/// the render goes through `cargo run`, which would otherwise build the q2
+/// the caller asked not to build.
+fn runs_claude_notes_render(config: &VerifyConfig) -> bool {
+    !config.skip_claude_notes_render && !config.skip_rust_build
+}
+
+/// Whether any npm-driven step is enabled, so the Node preflight has
+/// something to protect. Must list every step that shells out to `npm` or
+/// `node`; a step missing here can run under a mismatched Node unannounced.
+fn needs_node(config: &VerifyConfig) -> bool {
+    runs_css_lint(config)
+        || !(config.skip_ts_packages_build
+            && config.skip_hub_build
+            && config.skip_hub_tests
+            && config.skip_trace_viewer_build
+            && config.skip_trace_viewer_tests
+            && config.skip_shared_package_tests
+            && config.skip_q2_preview_spa_build
+            && config.skip_hub_mcp_tests)
+}
+
+/// The Pandoc-hybrid `L`-tier tests in `quarto-core` (Task 7, P4) are part
+/// of `cargo nextest run --workspace`, so they need pandoc whenever Rust
+/// tests run at all.
+fn needs_pandoc(config: &VerifyConfig) -> bool {
+    !config.skip_rust_tests
+}
+
+/// The pandoc preflight's gate logic, pure and unit-testable: `found` is
+/// `pandoc --version`'s stdout (or `None` if the subprocess couldn't be
+/// spawned at all). Mirrors `quarto_core::pandoc_filters::version::gate`,
+/// but duplicated rather than imported — `xtask` cannot depend on
+/// `quarto-core` (a large crate; `xtask` is meant to build fast) — see
+/// `crates/quarto-core/src/pandoc_filters/version.rs`'s own doc comment on
+/// this same tradeoff.
+fn pandoc_preflight(found: Option<&str>) -> Result<()> {
+    let floor = crate::dev_setup::PANDOC_HYBRID_MIN_VERSION;
+    match found {
+        None => bail!(
+            "pandoc not found on PATH. The Pandoc-hybrid `L`-tier tests in `quarto-core` \
+             require it (floor {}.{}). Install from https://pandoc.org/installing.html",
+            floor.0,
+            floor.1
+        ),
+        Some(version_str) => {
+            if crate::dev_setup::pandoc_version_at_least(version_str, floor.0, floor.1) {
+                Ok(())
+            } else {
+                let first_line = version_str.lines().next().unwrap_or("unknown version");
+                bail!(
+                    "{first_line} detected, but the Pandoc-hybrid `L`-tier tests in \
+                     `quarto-core` require {}.{}+. Update from \
+                     https://pandoc.org/installing.html",
+                    floor.0,
+                    floor.1
+                )
+            }
+        }
+    }
 }
 
 /// Run the verify command.
@@ -70,10 +157,44 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
         Some("-D warnings")
     };
 
-    // Step 1: Custom lint checks + clippy gate
+    // Preflight: Node toolchain. Every npm-driven step below (the css lint
+    // in step 1, then 6–14) runs whatever `node` is first on PATH, and the
+    // repo pins a Node major in `engines.node` / `.nvmrc`. Drift surfaces
+    // late and misleadingly (23 unrelated-looking vitest failures under Node
+    // 26 — bd-lh30hlvd), so check first: a mismatch fails in seconds, before
+    // the Rust build, with the cause named. Nothing to check when every
+    // npm-driven step is disabled.
+    println!("\n━━━ Preflight: Node toolchain ━━━\n");
+    if needs_node(config) {
+        crate::node_version::preflight_verify(&project_root)?;
+    } else {
+        println!("  (skipped — every npm-driven step is disabled)");
+    }
+
+    // Preflight: pandoc toolchain. The Pandoc-hybrid `L`-tier tests in
+    // `quarto-core` (P4) hard-panic if pandoc is absent or below the floor,
+    // but only once nextest reaches them deep into step 5 — check first, so
+    // a missing/stale pandoc fails in seconds with the cause named, exactly
+    // like the Node preflight above.
+    println!("\n━━━ Preflight: pandoc toolchain ━━━\n");
+    if needs_pandoc(config) {
+        let version_output = std::process::Command::new("pandoc")
+            .arg("--version")
+            .output();
+        let stdout = version_output
+            .as_ref()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        pandoc_preflight(stdout.as_deref())?;
+        println!("  pandoc — suitable version detected");
+    } else {
+        println!("  (skipped — Rust tests are disabled)");
+    }
+
+    // Step 1: Custom lint checks + hub-client css lint + clippy gate
     {
         println!(
-            "\n━━━ Step 1/{}: Running custom lints + clippy ━━━\n",
+            "\n━━━ Step 1/{}: Running custom lints + lint:css + clippy ━━━\n",
             TOTAL_STEPS
         );
         let lint_config = lint::LintConfig {
@@ -81,6 +202,25 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
             quiet: false,
         };
         lint::run_check(&lint_config)?;
+
+        // hub-client CSS lint (design-system.md's token / logical-property
+        // rules). CI runs it right after `npm ci`, before the WASM build;
+        // it takes ~0.2 s, so it belongs with the fail-fast lints rather
+        // than the hub-client leg. Added after PR #667 passed the whole
+        // local gate and failed CI on a `margin-left: 0` (bd-4bu7vwi5).
+        if runs_css_lint(config) {
+            println!("  ↳ hub-client lint:css...");
+            run_command(
+                "npm",
+                &CSS_LINT_ARGS,
+                &project_root,
+                None,
+                "hub-client lint:css failed (see hub-client/design-system.md)",
+            )?;
+            println!("  ✓ hub-client lint:css clean");
+        } else {
+            println!("  ↳ Skipping hub-client lint:css");
+        }
 
         // Clippy gate (matches the CI step in test-suite.yml). The workspace
         // policy lives in the root Cargo.toml `[workspace.lints.clippy]` table;
@@ -164,20 +304,51 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
         println!("\n━━━ Step 3/{}: Skipping Rust build ━━━\n", TOTAL_STEPS);
     }
 
+    // claude-notes is a q2 website, and CI renders it with `--strict`
+    // (test-suite.yml, bd-7v3trpxn), so a note that fails to parse or warns
+    // fails the PR. Nearly every branch adds a plan note, so run it here,
+    // right after the build that produced q2 and before the long test
+    // steps: a note typo fails in seconds (bd-zn87vwi8). The same
+    // `rustflags` as the build keep `cargo run` link-only; a different
+    // value would rebuild the whole tree (CI hit this in PR #809).
+    if runs_claude_notes_render(config) {
+        println!("  ↳ claude-notes render (q2 render --strict claude-notes)...");
+        let mut render_args = vec!["run", "--bin", "q2", "--"];
+        render_args.extend_from_slice(&CLAUDE_NOTES_RENDER_ARGS);
+        run_command(
+            "cargo",
+            &render_args,
+            &project_root,
+            rustflags,
+            "claude-notes render failed (see claude-notes/instructions/writing-notes.md)",
+        )?;
+        println!("  ✓ claude-notes render clean");
+    } else {
+        let reason = if config.skip_rust_build {
+            "--skip-rust-build"
+        } else {
+            "--skip-claude-notes-render"
+        };
+        println!("  ↳ Skipping claude-notes render ({})", reason);
+    }
+
     // Step 4: Tree-sitter grammar tests
     if !config.skip_treesitter_tests {
         println!(
             "\n━━━ Step 4/{}: Testing tree-sitter grammars ━━━\n",
             TOTAL_STEPS
         );
-        let ts_dir = project_root.join("crates/tree-sitter-qmd/tree-sitter-markdown");
-        run_command(
-            "tree-sitter",
-            &["test"],
-            &ts_dir,
-            None,
-            "Tree-sitter grammar tests failed",
-        )?;
+        // Pin the compiled-grammar cache to this checkout; the default
+        // ~/.cache/tree-sitter/lib is shared by every checkout (bd-agsgrbfn).
+        let ts_dir = crate::tree_sitter::Grammar::Qmd.dir(&project_root);
+        let status = crate::tree_sitter::command(&crate::tree_sitter::libdir(&project_root))
+            .arg("test")
+            .current_dir(&ts_dir)
+            .status()
+            .context("Failed to run tree-sitter test")?;
+        if !status.success() {
+            bail!("Tree-sitter grammar tests failed");
+        }
         println!("✓ Tree-sitter grammar tests complete");
 
         if !config.skip_treesitter_crlf_tests {
@@ -317,6 +488,23 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
             "\n━━━ Step 8/{}: Running hub-client tests ({}) ━━━\n",
             TOTAL_STEPS, test_script
         );
+        // The real-wasm pandoc-host tests need the pinned pandoc.wasm (verified
+        // download, cached) and the semantic output comparer; --require makes a
+        // missing asset a failure here, as in CI.
+        run_command(
+            "node",
+            &["../scripts/fetch-pandoc-wasm.mjs", "--require"],
+            &hub_client_dir,
+            None,
+            "fetching pandoc.wasm failed",
+        )?;
+        run_command(
+            "cargo",
+            &["build", "-p", "quarto-output-extract"],
+            &project_root,
+            None,
+            "building quarto-output-extract failed",
+        )?;
         run_command(
             "npm",
             &["run", test_script],
@@ -442,6 +630,50 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
             None,
             "preview-runtime tests failed",
         )?;
+        // @quarto/pandoc-host (host core; its real-wasm tests run in hub-client, step 8).
+        let pandoc_host_dir = project_root.join("ts-packages/pandoc-host");
+        if pandoc_host_dir.join("package.json").is_file() {
+            run_command(
+                "npm",
+                &["run", "typecheck:tests"],
+                &pandoc_host_dir,
+                None,
+                "pandoc-host test typecheck failed",
+            )?;
+            run_command(
+                "npm",
+                &["test"],
+                &pandoc_host_dir,
+                None,
+                "pandoc-host tests failed",
+            )?;
+        }
+        // @quarto/typst-host (typst compiler core, host phase H7). Its tests run the real typst.ts
+        // wasm from node_modules and need the default fonts the fetch script caches.
+        let typst_host_dir = project_root.join("ts-packages/typst-host");
+        if typst_host_dir.join("package.json").is_file() {
+            run_command(
+                "node",
+                &["scripts/fetch-pandoc-wasm.mjs", "--require"],
+                &project_root,
+                None,
+                "fetching the typst assets failed",
+            )?;
+            run_command(
+                "npm",
+                &["run", "typecheck:tests"],
+                &typst_host_dir,
+                None,
+                "typst-host test typecheck failed",
+            )?;
+            run_command(
+                "npm",
+                &["test"],
+                &typst_host_dir,
+                None,
+                "typst-host tests failed",
+            )?;
+        }
         println!("✓ Shared package tests complete");
     } else if !have_shared_packages {
         println!(
@@ -590,7 +822,7 @@ pub fn run(config: &VerifyConfig) -> Result<()> {
 }
 
 /// Find the project root directory (where Cargo.toml with [workspace] lives).
-fn find_project_root() -> Result<std::path::PathBuf> {
+pub(crate) fn find_project_root() -> Result<std::path::PathBuf> {
     let mut dir = std::env::current_dir().context("Failed to get current directory")?;
 
     loop {
@@ -641,4 +873,147 @@ fn run_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every npm-driven step disabled, css lint included.
+    fn all_npm_steps_skipped() -> VerifyConfig {
+        VerifyConfig {
+            skip_ts_packages_build: true,
+            skip_hub_build: true,
+            skip_hub_tests: true,
+            skip_trace_viewer_build: true,
+            skip_trace_viewer_tests: true,
+            skip_shared_package_tests: true,
+            skip_q2_preview_spa_build: true,
+            skip_hub_mcp_tests: true,
+            skip_css_lint: true,
+            ..VerifyConfig::default()
+        }
+    }
+
+    #[test]
+    fn css_lint_runs_by_default_and_honours_skip_flag() {
+        assert!(runs_css_lint(&VerifyConfig::default()));
+        assert!(!runs_css_lint(&VerifyConfig {
+            skip_css_lint: true,
+            ..VerifyConfig::default()
+        }));
+        // --skip-hub-build alone must NOT disable it: that was the hole in
+        // bd-4bu7vwi5 (CSS-only change, Rust-only local gate, red CI).
+        assert!(runs_css_lint(&VerifyConfig {
+            skip_hub_build: true,
+            ..VerifyConfig::default()
+        }));
+    }
+
+    #[test]
+    fn node_preflight_counts_css_lint_as_npm_driven() {
+        assert!(needs_node(&VerifyConfig::default()));
+        assert!(!needs_node(&all_npm_steps_skipped()));
+        // Only the css lint left on: still needs Node.
+        let only_css_lint = VerifyConfig {
+            skip_css_lint: false,
+            ..all_npm_steps_skipped()
+        };
+        assert!(needs_node(&only_css_lint));
+    }
+
+    /// The local step must run the same command CI runs, so the two gates
+    /// cannot drift apart silently again (bd-4bu7vwi5: CI got the step in
+    /// 28afc1e14, verify did not).
+    #[test]
+    fn css_lint_command_matches_ci_workflow() {
+        let workflow = include_str!("../../../.github/workflows/ts-test-suite.yml");
+        let local = format!("npm {}", CSS_LINT_ARGS.join(" "));
+        assert!(
+            workflow.contains(&format!("run: {local}")),
+            "ts-test-suite.yml has no `run: {local}` step; keep CI and verify in sync"
+        );
+    }
+
+    /// Same guard for the strict claude-notes render (bd-zn87vwi8: CI got
+    /// the step via bd-7v3trpxn, verify did not). Matches only the q2 args,
+    /// not the cargo line, since CI builds under `--profile ci`.
+    #[test]
+    fn claude_notes_render_command_matches_ci_workflow() {
+        let workflow = include_str!("../../../.github/workflows/test-suite.yml");
+        let local = format!("--bin q2 -- {}", CLAUDE_NOTES_RENDER_ARGS.join(" "));
+        assert!(
+            workflow
+                .lines()
+                .any(|line| line.trim_start().starts_with("run: cargo run")
+                    && line.trim_end().ends_with(&local)),
+            "test-suite.yml has no `run: cargo run … {local}` step; keep CI and verify in sync"
+        );
+    }
+
+    #[test]
+    fn claude_notes_render_runs_by_default_and_honours_skip_flags() {
+        assert!(runs_claude_notes_render(&VerifyConfig::default()));
+        assert!(!runs_claude_notes_render(&VerifyConfig {
+            skip_claude_notes_render: true,
+            ..VerifyConfig::default()
+        }));
+        // No q2 build was asked for, so don't let `cargo run` build one.
+        assert!(!runs_claude_notes_render(&VerifyConfig {
+            skip_rust_build: true,
+            ..VerifyConfig::default()
+        }));
+        assert!(runs_claude_notes_render(&VerifyConfig {
+            skip_rust_tests: true,
+            ..VerifyConfig::default()
+        }));
+    }
+
+    /// A test of the args constant alone survives deleting the step from
+    /// `run`; assert the wiring, as `pandoc_preflight_is_wired_into_run` does.
+    #[test]
+    fn claude_notes_render_is_wired_into_run() {
+        let source = include_str!("verify.rs");
+        assert!(
+            source.contains("if runs_claude_notes_render(config) {"),
+            "`run` no longer gates a step on `runs_claude_notes_render`"
+        );
+        assert!(
+            source.contains("render_args.extend_from_slice(&CLAUDE_NOTES_RENDER_ARGS);"),
+            "`run` no longer passes CLAUDE_NOTES_RENDER_ARGS to q2"
+        );
+    }
+
+    /// T7.5: the pandoc preflight helper, injected version strings.
+    #[test]
+    fn test_verify_pandoc_preflight() {
+        assert!(pandoc_preflight(Some("pandoc 3.6.0\n...")).is_err());
+        assert!(pandoc_preflight(Some("pandoc 3.10\n...")).is_err());
+        assert!(pandoc_preflight(Some("pandoc 3.11\n...")).is_ok());
+        assert!(pandoc_preflight(None).is_err());
+    }
+
+    #[test]
+    fn needs_pandoc_follows_skip_rust_tests() {
+        assert!(needs_pandoc(&VerifyConfig::default()));
+        assert!(!needs_pandoc(&VerifyConfig {
+            skip_rust_tests: true,
+            ..VerifyConfig::default()
+        }));
+    }
+
+    /// T7.5's vacuity note: a test of `pandoc_preflight` alone survives
+    /// removing its call from `run` entirely (the CSS-lint-in-CI failure
+    /// mode this repo already had once, bd-4bu7vwi5). Assert the wiring
+    /// itself, the same way `css_lint_command_matches_ci_workflow` guards
+    /// its own step's presence.
+    #[test]
+    fn pandoc_preflight_is_wired_into_run() {
+        let source = include_str!("verify.rs");
+        assert!(
+            source.contains("pandoc_preflight(stdout.as_deref())?"),
+            "`run` no longer calls `pandoc_preflight` — the preflight helper is untested \
+             by any wiring-reachability check if this call is removed"
+        );
+    }
 }
