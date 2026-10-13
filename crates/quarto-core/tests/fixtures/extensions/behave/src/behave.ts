@@ -11,7 +11,7 @@
  * `claude-notes/plans/2026-07-01-plan4b-shadow-engine-features.md`, Phase
  * 4b-A). Each branch is reached by a DIFFERENT fixture document hitting a
  * different sentinel, mirroring echo-engine's `QUARTO_ECHO_CRASH` +
- * `Deno.exit(1)` precedent (`echo-engine.ts:165-180`). Sentinels never
+ * `process.exit(1)` precedent (`echo-engine.ts:165-180`). Sentinels never
  * collide because Phase 4b-D/F drive each branch with its own document.
  *
  * Task A2 (this file) only binds the DEFAULT branch (see
@@ -25,6 +25,8 @@
  * which is expected (see the module comment on `behave_engine_e2e.rs`).
  */
 
+import { readFileSync } from "node:fs";
+import process from "node:process";
 import type {
   ExecutionEngineDiscovery,
   ExecutionEngineInstance,
@@ -105,7 +107,7 @@ const behaveEngine: ExecutionEngineDiscovery = {
       canFreeze: false,
 
       async markdownForFile(file: string) {
-        const text = Deno.readTextFileSync(file);
+        const text = readFileSync(file, "utf8");
         return _quarto!.mappedString.fromString(text, file);
       },
 
@@ -145,12 +147,12 @@ const behaveEngine: ExecutionEngineDiscovery = {
         // BEHAVE_CRASH: crash mid-execute (mirrors echo-engine's
         // QUARTO_ECHO_CRASH). Bound in Phase 4b-F's F-crash relaunch e2e.
         // Writes an identifiable marker to stderr, THEN crashes via
-        // Deno.exit(1) BEFORE returning any ExecuteResult.
+        // process.exit(1) BEFORE returning any ExecuteResult.
         if (input.includes("BEHAVE_CRASH")) {
           console.error(
             "BEHAVE_CRASH_MARKER: intentional crash for Phase 4b-F crash-path e2e",
           );
-          Deno.exit(1);
+          process.exit(1);
         }
 
         // QUARTO_SLOW: the long/cancellable path. Bound in Phase 4b-F's

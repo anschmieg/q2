@@ -140,10 +140,10 @@ Host is still Deno, which accepts esbuild's neutral ESM output.
 
 ### P3a: port the 12 fixtures to `node:` (still under the Deno host)
 
-- [ ] Port `Deno.readTextFileSync`, `Deno.exit`, `Deno.stdout.writeSync` to `node:fs`/`node:process` in the **10** hermetic engines `crates/quarto-core/tests/fixtures/extensions/{alpha,beta,behave,content-claim,echo-engine,echo-legacy,fallback-univ,interop-r,mismatch,whenclass-marimo}/src/*.ts`; import `process`/`Buffer` explicitly. Marimo's two `Deno.` files are replaced by the P0/P4 re-sync: do not hand-port them. `legacy-python/dist/legacy-python.js` is a 901-byte hand-written stub (no source, no `Deno.`): leave it unchanged.
-- [ ] Hermetic bundles keep being rebuilt at test time via `ensure_bundle` (not committed).
-- [ ] Done check: `grep -rn 'Deno\.' crates/quarto-core/tests/fixtures/extensions --include='*.ts'` is empty except marimo.
-- [ ] Gate: all engine e2e green under the Deno host.
+- [x] Port `Deno.readTextFileSync`, `Deno.exit`, `Deno.stdout.writeSync` to `node:fs`/`node:process` in the **10** hermetic engines `crates/quarto-core/tests/fixtures/extensions/{alpha,beta,behave,content-claim,echo-engine,echo-legacy,fallback-univ,interop-r,mismatch,whenclass-marimo}/src/*.ts`; import `process`/`Buffer` explicitly. Marimo's two `Deno.` files are replaced by the P0/P4 re-sync: do not hand-port them. `legacy-python/dist/legacy-python.js` is a 901-byte hand-written stub (no source, no `Deno.`): leave it unchanged.
+- [x] Hermetic bundles keep being rebuilt at test time via `ensure_bundle` (not committed).
+- [x] Done check: `grep -rn 'Deno\.' crates/quarto-core/tests/fixtures/extensions --include='*.ts'` is empty except marimo.
+- [x] Gate: all engine e2e green under the Deno host.
 
 ### P4: marimo port (fork first, then re-sync fixture)
 
