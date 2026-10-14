@@ -2779,6 +2779,7 @@ const PANDOC_TRANSFORM_EXCLUDED: &[&str] = &[
     "secondary-nav-render",
     "breadcrumbs-render",
     "quarto-nav-js",
+    "search-ui",
     "page-nav-generate",
     "page-nav-render",
     "toc-generate",
@@ -2990,6 +2991,9 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     ("breadcrumbs-render", Bucket::B4),
     ("secondary-nav-render", Bucket::B4),
     ("quarto-nav-js", Bucket::B4),
+    // Website search UI: options JSON + offset meta + search scripts
+    // (bd-eip0naf4). Website chrome, like quarto-nav-js.
+    ("search-ui", Bucket::B4),
     ("page-nav-render", Bucket::B4),
     ("footer-render", Bucket::B4),
     // The HTML writer's copy of the renderer trinity. `crossref-render` is
@@ -3559,8 +3563,8 @@ mod tests {
         // MathMlStage after the post filters (bd-vlhi2zkj, bd-3evfzwal),
         // plus LmdDesugarStage before the engine and LmdExecuteStage before
         // the user pre-filters (bd-lmd-exploration-jqv2nbl4), plus
-        // ListingResolveStage before lmd-execute (bd-2oqen84t): 30.
-        assert_eq!(stages.len(), 30);
+        // ListingResolveStage before lmd-execute (bd-2oqen84t), plus SearchCaptureStage (bd-eip0naf4): 31.
+        assert_eq!(stages.len(), 31);
         // Pre-parse file-claim/convert (Task 10).
         assert_eq!(stages[0].name(), "source-conversion");
         assert_eq!(stages[1].name(), "parse-document");
@@ -3633,7 +3637,10 @@ mod tests {
         // filters, the `\tag{N}` equation-number encoding) is visible.
         assert_eq!(stages[27].name(), "math-js");
         assert_eq!(stages[28].name(), "render-html-body");
-        assert_eq!(stages[29].name(), "apply-template");
+        // Website search capture (bd-eip0naf4): records the rendered
+        // body before the template wraps it.
+        assert_eq!(stages[29].name(), "search-capture");
+        assert_eq!(stages[30].name(), "apply-template");
     }
 
     #[test]
@@ -3642,9 +3649,9 @@ mod tests {
         // Merged pipeline carries both SourceConversionStage (Task 10, branch)
         // LanguageResolveStage and TabsetsJsStage (main), plus
         // EquationNumberStage and MathMlStage, plus LmdDesugarStage and
-        // LmdExecuteStage, plus ListingResolveStage (bd-2oqen84t) → 30
-        // stages.
-        assert_eq!(pipeline.len(), 30);
+        // LmdExecuteStage, plus ListingResolveStage (bd-2oqen84t), plus
+        // SearchCaptureStage (bd-eip0naf4) → 31 stages.
+        assert_eq!(pipeline.len(), 31);
     }
 
     #[test]
@@ -5559,6 +5566,7 @@ mod tests {
             "compile-theme-css",
             "code-highlight",
             "render-html-body",
+            "search-capture",
             "apply-template",
         ] {
             assert!(
@@ -5616,6 +5624,7 @@ mod tests {
                 "code-highlight",
                 "math-js",
                 "render-html-body",
+                "search-capture",
                 "apply-template",
             ]
         );
@@ -6438,6 +6447,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",
@@ -6529,6 +6539,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "reveal-footer-logo",
                 "link-rewrite",
@@ -6624,8 +6635,8 @@ mod tests {
 
         assert_eq!(
             nav_names.len(),
-            20,
-            "expected exactly 20 Navigation-phase transforms in the HTML pipeline; got: \
+            21,
+            "expected exactly 21 Navigation-phase transforms in the HTML pipeline; got: \
              {nav_names:?}",
         );
         assert!(
@@ -6903,6 +6914,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",
