@@ -123,10 +123,14 @@ export interface Touched {
      * exactly these nodes' children and leaves everything else alone.
      */
     relisted: unknown[];
+    /** A text leaf split in two: `node` keeps chars `[0, at)`, `second` gets the rest. */
+    textSplits: { node: unknown; second: unknown; at: number }[];
+    /** A text leaf merged into the one before it: `absorbed`'s text now starts at `at` in `node`. */
+    textMerges: { node: unknown; absorbed: unknown; at: number }[];
 }
 
 export function emptyTouched(): Touched {
-    return { insertedSubtrees: [], createdNodes: [], changedNodes: [], removedNodes: [], removedFrom: [], textChanges: [], removedText: [], relisted: [] };
+    return { insertedSubtrees: [], createdNodes: [], changedNodes: [], removedNodes: [], removedFrom: [], textChanges: [], removedText: [], relisted: [], textSplits: [], textMerges: [] };
 }
 
 function textOf(node: unknown): string {
@@ -233,6 +237,7 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
                 describe(second, elem).text!.set(chars.slice(op.at).join(''));
                 list.splice(index + 1, 0, second);
                 touched.createdNodes.push(second);
+                touched.textSplits.push({ node, second, at: op.at });
                 return touched;
             }
             if (desc.main === null) throw new Error(`astdiff: split ${desc.kind}, which has no main slot`);
@@ -260,7 +265,9 @@ export function applyOp(root: PandocAST, op: Op, touched: Touched = emptyTouched
             touched.changedNodes.push(node);
             touched.relisted.push(node, parentOf(root, op.path));
             if (desc.text && nextDesc.text) {
-                desc.text.set(String(desc.text.get()) + String(nextDesc.text.get()));
+                const own = String(desc.text.get());
+                desc.text.set(own + String(nextDesc.text.get()));
+                touched.textMerges.push({ node, absorbed: next, at: Array.from(own).length });
                 return touched;
             }
             if (desc.main === null || nextDesc.main === null) throw new Error(`astdiff: merge ${desc.kind} without main slot`);
@@ -315,5 +322,7 @@ export function applyOps(root: PandocAST, ops: Op[]): Touched {
         textChanges: touched.textChanges.filter((c) => present.has(c.node)),
         removedText: touched.removedText,
         relisted: keep(touched.relisted),
+        textSplits: touched.textSplits,
+        textMerges: touched.textMerges,
     };
 }

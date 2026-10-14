@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { getUserIdentity } from '../../../services/userSettings';
 
 interface Q2DebugIframeProps {
   astJson: string;
@@ -22,6 +23,16 @@ export function Q2DebugIframe({
 }: Q2DebugIframeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeReady, setIframeReady] = useState(false);
+  // The user's name and colour, for the AST caret's flag in the iframe.
+  const [user, setUser] = useState<{ name: string; color: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getUserIdentity()
+      .then((s) => { if (!cancelled) setUser({ name: s.userName, color: s.userColor }); })
+      .catch(() => { /* no identity: the caret shows without a flag */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // Handle messages from the iframe
   useEffect(() => {
@@ -65,11 +76,12 @@ export function Q2DebugIframe({
         payload: {
           astJson,
           currentFilePath,
+          user,
         },
       },
       '*'
     );
-  }, [iframeReady, astJson, currentFilePath]);
+  }, [iframeReady, astJson, currentFilePath, user]);
 
   return (
     <iframe

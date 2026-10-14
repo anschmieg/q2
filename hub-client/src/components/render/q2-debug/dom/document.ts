@@ -30,6 +30,8 @@ const HIGHLIGHT_MS = 1000;
 const FLASH_CLASSES = ['q2-flash-inserted', 'q2-flash-changed', 'q2-flash-removed'];
 const GHOST_ATTR = 'data-q2-ghost';
 const RUN_ATTR = 'data-q2-run';
+/** Marks an element whose text content is AST text (a run's text, a code leaf's text). */
+export const TEXT_HOST_ATTR = 'data-q2-text';
 
 /** Solid colour held for the highlight duration. Two identical keyframes on purpose: one would fade in. */
 function hold(el: Element, style: Keyframe): Animation | null {
@@ -45,16 +47,27 @@ interface RunRecord {
 
 export class DebugDocument {
     private readonly container: HTMLElement;
+    /** Where the document's boxes live; the container itself is left to overlays (caret, status). */
+    private readonly content: HTMLElement;
     private ast: PandocAST | null = null;
     private readonly roots = new WeakMap<object, HTMLElement>();
     private readonly slots = new WeakMap<object, Record<string, HTMLElement>>();
     private readonly elems = new WeakMap<object, Elem>();
     private readonly runKeyOf = new WeakMap<object, object>();
     private readonly runs = new WeakMap<object, RunRecord>();
+    /** Text-bearing node → the element holding its text (see `TEXT_HOST_ATTR`). */
+    private readonly hostOfNode = new WeakMap<object, HTMLElement>();
+    /** Text host → the nodes whose text it holds, in order. */
+    private readonly nodesOfHost = new WeakMap<HTMLElement, unknown[]>();
     private ledger: TextChangeLedger = emptyLedger();
+    /** Called after every update with the report, e.g. to migrate a caret. */
+    onUpdated: ((result: ReconcileResult) => void) | null = null;
 
     constructor(container: HTMLElement) {
         this.container = container;
+        this.content = document.createElement('div');
+        this.content.className = 'q2-debug-content';
+        container.append(this.content);
         container.addEventListener('animationend', (e) => {
             if (e.target instanceof Element) e.target.classList.remove(...FLASH_CLASSES);
         });
@@ -63,7 +76,7 @@ export class DebugDocument {
     /** Forget the retained AST; the next update renders from scratch. */
     reset(): void {
         this.ast = null;
-        this.container.replaceChildren();
+        this.content.replaceChildren();
     }
 
     update(fresh: PandocAST): ReconcileResult {
@@ -71,21 +84,50 @@ export class DebugDocument {
         this.ast = result.ast;
         if (!result.reused) {
             this.ledger = emptyLedger();
-            this.container.replaceChildren();
-            this.placeList(this.container, this.ast.blocks, 'block');
-            return result;
+            this.content.replaceChildren();
+            this.placeList(this.content, this.ast.blocks, 'block');
+        } else {
+            this.ledger = ledgerFrom(result.touched);
+            this.ghost(result.touched.removedNodes);
+            this.patch(result.touched);
+            this.paint(result.touched);
         }
-        this.ledger = ledgerFrom(result.touched);
-        this.ghost(result.touched.removedNodes);
-        this.patch(result.touched);
-        this.paint(result.touched);
+        this.onUpdated?.(result);
         return result;
+    }
+
+    get element(): HTMLElement {
+        return this.container;
+    }
+
+    /** The element holding the document's boxes (no overlays). */
+    get contentElement(): HTMLElement {
+        return this.content;
     }
 
     /** The box element of `node`, if rendered. */
     boxOf(node: unknown): HTMLElement | undefined {
-        if (node === this.ast) return this.container;
+        if (node === this.ast) return this.content;
         return node !== null && typeof node === 'object' ? this.roots.get(node) : undefined;
+    }
+
+    /** The element holding `node`'s text, if `node` is text-bearing and currently on screen. */
+    textHostOf(node: unknown): HTMLElement | undefined {
+        if (node === null || typeof node !== 'object') return undefined;
+        const host = this.hostOfNode.get(node);
+        // Entries are never cleared; a node that left the document (deleted
+        // with its subtree) still maps to a detached element.
+        return host && host.isConnected && !host.closest(`[${GHOST_ATTR}]`) ? host : undefined;
+    }
+
+    /** The nodes whose text `host` holds, in order. */
+    nodesOf(host: HTMLElement): unknown[] {
+        return this.nodesOfHost.get(host) ?? [];
+    }
+
+    /** All text hosts, in document order. */
+    textHosts(): HTMLElement[] {
+        return Array.from(this.content.querySelectorAll<HTMLElement>(`[${TEXT_HOST_ATTR}]`)).filter((h) => !h.closest(`[${GHOST_ATTR}]`));
     }
 
     // --- building and placing -------------------------------------------
@@ -98,8 +140,16 @@ export class DebugDocument {
         this.roots.set(key, root);
         this.slots.set(key, slots);
         this.elems.set(key, elem);
+        this.registerTextHost(node, root);
         this.placeChildren(node);
         return root;
+    }
+
+    private registerTextHost(node: unknown, root: HTMLElement): void {
+        const host = root.querySelector<HTMLElement>(`:scope > [${TEXT_HOST_ATTR}]`);
+        if (!host) return;
+        this.hostOfNode.set(node as object, host);
+        this.nodesOfHost.set(host, [node]);
     }
 
     /** Update `node`'s own markup in place and re-place its children. */
@@ -116,7 +166,7 @@ export class DebugDocument {
     /** Re-place `node`'s children from the AST into its slot containers. */
     private placeChildren(node: unknown): void {
         if (node === this.ast) {
-            this.placeList(this.container, this.ast!.blocks, 'block');
+            this.placeList(this.content, this.ast!.blocks, 'block');
             return;
         }
         const key = node as object;
@@ -181,6 +231,9 @@ export class DebugDocument {
         }
         const el = buildRun(segmentsFromLedger(nodes, this.ledger), text);
         this.runs.set(key, { el, nodes: nodes.slice(), text });
+        const host = el.querySelector<HTMLElement>(`[${TEXT_HOST_ATTR}]`)!;
+        for (const n of nodes) this.hostOfNode.set(n as object, host);
+        this.nodesOfHost.set(host, nodes.slice());
         return el;
     }
 
@@ -270,25 +323,28 @@ function buildRun(segs: Seg[], text: string): HTMLElement {
     el.setAttribute(RUN_ATTR, '');
     const label = document.createElement('strong');
     label.className = 'label';
-    label.textContent = 'Text:';
-    el.append(label, ' ');
+    label.textContent = 'Text: ';
+    const host = document.createElement('span');
+    host.className = 'run-text';
+    host.setAttribute(TEXT_HOST_ATTR, '');
+    el.append(label, host);
     let marked = false;
     for (const seg of segs) {
         if (seg.kind === 'eq') {
-            el.append(seg.text);
+            host.append(seg.text);
             continue;
         }
         marked = true;
         const span = document.createElement('span');
         span.className = seg.kind === 'ins' ? 'q2-ins' : 'q2-del';
         span.textContent = seg.text;
-        el.append(span);
+        host.append(span);
         hold(span, { backgroundColor: seg.kind === 'ins' ? '#8ee6a0' : '#f29b9b' });
     }
     if (marked) {
         // Collapse to plain text when the highlight ends: removed characters
         // go, inserted ones lose their span.
-        window.setTimeout(() => el.replaceChildren(label, ' ', text), HIGHLIGHT_MS);
+        window.setTimeout(() => host.replaceChildren(text), HIGHLIGHT_MS);
     }
     return el;
 }

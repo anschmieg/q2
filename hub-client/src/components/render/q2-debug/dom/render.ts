@@ -85,6 +85,7 @@ export function renderNode(node: unknown, elem: Elem): Rendered {
     if (desc.text) {
         const code = document.createElement('code');
         code.className = 'text';
+        code.setAttribute('data-q2-text', '');
         code.textContent = String(desc.text.get());
         root.append(' ', code);
     }

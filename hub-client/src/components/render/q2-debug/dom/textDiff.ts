@@ -124,3 +124,34 @@ export function segmentsFromLedger(nodes: unknown[], ledger: TextChangeLedger): 
     }
     return segs;
 }
+
+/**
+ * Map a caret offset in `oldText` to the corresponding offset in `newText`,
+ * like an editor cursor: text inserted before it shifts it right, text
+ * deleted before it shifts it left, a deletion spanning it collapses it to
+ * the deletion's start, and an insertion exactly at it leaves it after the
+ * inserted text (it sticks to the character on its right, consistent with
+ * boundaries attaching to the following node).
+ */
+export function mapOffsetThroughChange(oldText: string, newText: string, offset: number): number {
+    let oldPos = 0;
+    let newPos = 0;
+    for (const seg of charDiff(oldText, newText)) {
+        const len = Array.from(seg.text).length;
+        switch (seg.kind) {
+            case 'eq':
+                if (offset < oldPos + len) return newPos + (offset - oldPos);
+                oldPos += len;
+                newPos += len;
+                break;
+            case 'del':
+                if (offset < oldPos + len) return newPos;
+                oldPos += len;
+                break;
+            case 'ins':
+                newPos += len;
+                break;
+        }
+    }
+    return newPos;
+}

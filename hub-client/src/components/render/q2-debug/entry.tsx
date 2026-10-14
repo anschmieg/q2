@@ -6,7 +6,9 @@
  * fresh parse is diffed against the AST already on screen, the edit script
  * is applied to that AST in place, and the DOM is patched to match —
  * see `dom/document.ts`. Untouched nodes keep both their AST objects and
- * their DOM, and every highlight is derived from the script.
+ * their DOM, and every highlight is derived from the script. An AST caret
+ * (`dom/caret.ts`) rides on that stability: click text to place it on a
+ * node, use the arrow keys to move it, and watch it stay put across edits.
  */
 
 import './dom/debug.css';
@@ -17,10 +19,13 @@ import {
     type IframeMessage,
 } from '../iframeMessageDispatch';
 import { DebugDocument } from './dom/document';
+import { AstCaret } from './dom/caret';
 
 interface UpdateAstPayload {
   astJson: string;
   currentFilePath: string;
+  /** The current user, for the caret's flag. */
+  user?: { name: string; color: string } | null;
 }
 
 /** Last edit script applied, exposed for debugging / e2e inspection. */
@@ -31,6 +36,7 @@ declare global {
 }
 
 let doc: DebugDocument | null = null;
+let caret: AstCaret | null = null;
 let currentPath: string | null = null;
 
 // Shared dispatcher gates UPDATE_AST on the in-flight LOAD_CUSTOM_COMPONENTS
@@ -53,7 +59,7 @@ window.addEventListener('message', (event) => {
 });
 
 function updateAst(payload: UpdateAstPayload) {
-  const { astJson, currentFilePath } = payload;
+  const { astJson, currentFilePath, user } = payload;
   const rootElement = document.getElementById('root');
   if (!rootElement) {
     console.error('Root element not found');
@@ -71,12 +77,17 @@ function updateAst(payload: UpdateAstPayload) {
       container.className = 'pandoc-content-debug';
       rootElement.replaceChildren(container);
       doc = new DebugDocument(container);
+      // Click to place, arrows to move; attached to an AST node + offset,
+      // and migrated through edits by the applier's report (dom/caret.ts).
+      caret = new AstCaret(doc);
+      (window as unknown as { __Q2_DEBUG_CARET__?: AstCaret }).__Q2_DEBUG_CARET__ = caret;
     }
     if (currentPath !== currentFilePath) {
       // A diff against a different document would be large and meaningless.
       doc.reset();
       currentPath = currentFilePath;
     }
+    caret?.setUser(user ?? null);
     const result = doc.update(fresh);
     window.__Q2_DEBUG_AST_OPS__ = result.ops;
     if (result.reused) {
@@ -85,6 +96,7 @@ function updateAst(payload: UpdateAstPayload) {
   } catch (err) {
     console.error('Failed to render AST:', err);
     doc = null;
+    caret = null;
     rootElement.innerHTML = `
       <div style="padding: 20px; color: red;">
         <strong>Render Error:</strong>
