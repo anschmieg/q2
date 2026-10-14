@@ -6655,6 +6655,7 @@ dependencies = [
  "clap",
  "css-inline",
  "cssparser 0.36.0",
+ "ego-tree",
  "flate2",
  "fontique",
  "futures",

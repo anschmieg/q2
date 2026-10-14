@@ -616,6 +616,19 @@ impl ProjectType for WebsiteProjectType {
                 runtime,
                 diagnostics,
             )?;
+            // Website search (bd-eip0naf4): Pagefind bundle under
+            // `<lib_dir>/quarto-search/`, its manifest, and the
+            // Quarto 1-shaped `search.json`, from the captures
+            // `SearchCaptureStage` deposited. Same late slot as llms:
+            // every page has rendered and every resource has landed.
+            super::search::writer::write_search_index(
+                project,
+                index,
+                project_artifacts,
+                &self.lib_dir(),
+                runtime,
+                diagnostics,
+            )?;
         }
         #[cfg(target_arch = "wasm32")]
         {

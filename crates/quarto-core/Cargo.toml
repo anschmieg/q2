@@ -178,6 +178,9 @@ pagefind = { version = "1.5.2", default-features = false }
 # section ids onto their headings so Pagefind forms per-heading
 # sub-results). Same crate pagefind uses internally, so no new tree.
 lol_html = "2"
+# Tree walker behind `scraper` (already in the native tree through it);
+# the search.json record extractor walks captured HTML node by node.
+ego-tree = "0.11"
 
 # Jupyter engine dependencies (native only)
 runtimelib = { version = "2.0", features = ["tokio-runtime"] }

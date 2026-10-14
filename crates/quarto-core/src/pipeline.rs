@@ -445,6 +445,12 @@ pub fn build_html_pipeline_stages_with_options(
     // WASM pipelines — see math_js.rs module docs for the rationale.
     stages.push(Box::new(MathJsStage::new()));
     stages.push(Box::new(RenderHtmlBodyStage::new()));
+    // Website search capture (bd-eip0naf4): records the rendered body
+    // before the template wraps it. Native-only, like the JS stages:
+    // the index is written by the native post-render hooks, and the
+    // q2-preview pipeline drops render-html-body anyway.
+    #[cfg(not(target_arch = "wasm32"))]
+    stages.push(Box::new(crate::stage::stages::SearchCaptureStage::new()));
     let apply_stage = match apply_config {
         Some(cfg) => ApplyTemplateStage::with_config(cfg),
         None => ApplyTemplateStage::new(),

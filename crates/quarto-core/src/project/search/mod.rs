@@ -36,9 +36,15 @@
 //!
 //! [Pagefind]: https://pagefind.app
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capture;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod index_writer;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod records;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod writer;
 
 pub use config::{
     FederatedSite, ItemContext, SearchLocation, SearchOptions, SearchType, has_navbar,

@@ -103,6 +103,20 @@ pub fn build_bundle(pages: Vec<IndexPage>) -> Result<Bundle, String> {
         .map_err(|_| "the search indexer thread panicked".to_string())?
 }
 
+/// Pagefind ships its own UIs and highlighter with every bundle
+/// (`pagefind-ui.*`, `pagefind-modular-ui.*`, `pagefind-component-ui.*`,
+/// `pagefind-highlight.js`; ~300 KB). Quarto has its own search UI and
+/// its own target-page highlighter, so none of these are served.
+/// Kept: `pagefind.js`, `pagefind-worker.js`, the wasm runtimes, the
+/// entry/meta files, and the index/fragment/filter chunks.
+fn is_pagefind_ui_asset(path: &std::path::Path) -> bool {
+    let name = path.to_string_lossy();
+    name.starts_with("pagefind-ui.")
+        || name.starts_with("pagefind-modular-ui.")
+        || name.starts_with("pagefind-component-ui.")
+        || name == "pagefind-highlight.js"
+}
+
 async fn build_bundle_async(pages: Vec<IndexPage>) -> Result<Bundle, String> {
     let config = pagefind::options::PagefindServiceConfig::builder()
         // Quarto 1 hrefs keep `index.html`; `search.json` and the
@@ -131,6 +145,7 @@ async fn build_bundle_async(pages: Vec<IndexPage>) -> Result<Bundle, String> {
         .map_err(|e| format!("could not build the search index: {e}"))?;
     let files: Vec<BundleFile> = files
         .into_iter()
+        .filter(|f| !is_pagefind_ui_asset(&f.filename))
         .map(|f| BundleFile {
             path: f.filename,
             contents: f.contents,
@@ -190,6 +205,9 @@ mod tests {
         assert!(bundle.stats.words > 0);
         assert!(has_file(&bundle, |p| p == "pagefind-entry.json"));
         assert!(has_file(&bundle, |p| p == "pagefind.js"));
+        assert!(has_file(&bundle, |p| p == "pagefind-worker.js"));
+        assert!(!has_file(&bundle, |p| p.starts_with("pagefind-ui.")));
+        assert!(!has_file(&bundle, |p| p == "pagefind-highlight.js"));
         assert!(has_file(&bundle, |p| p == "wasm.en.pagefind"));
         assert!(has_file(&bundle, |p| p.ends_with(".pf_meta")));
         assert!(has_file(&bundle, |p| p.starts_with("index/")
