@@ -9,6 +9,11 @@ H0, H1 and H3 all read `recordings/`; do not fork it.
 cargo xtask capture-pandoc-recordings   # Unix only; needs the pinned native pandoc on PATH
 ```
 
+Capture is a dev-only step, never run by `cargo xtask verify` or CI, and Unix-only by
+design: it goes through a POSIX shell wrapper, and replay uses a fixed `/tmp` path that is
+baked into the reference bytes. Tests that read the recordings run on every platform; on
+Windows, regenerate them from macOS or Linux (the command exits with an error there).
+
 It builds `q2`, renders every fixture in `crates/xtask/src/capture_pandoc_recordings.rs`
 (`FIXTURES`) to docx, pptx, epub and typst with `QUARTO_PANDOC=scripts/pandoc-capture.sh`
 and `SOURCE_DATE_EPOCH=1700000000`, then normalizes each capture with
