@@ -519,8 +519,13 @@ pub async fn render_qmd_to_pandoc(
 /// (`q2_preview_stage_excluded_names_exist_in_html_pipeline`)
 /// fails the test suite if any name here is not an actual stage in
 /// the full HTML pipeline (typo / rename guard).
-const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] =
-    &["math-ml", "math-js", "render-html-body", "apply-template"];
+const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] = &[
+    "math-ml",
+    "math-js",
+    "render-html-body",
+    "search-capture",
+    "apply-template",
+];
 
 /// Build the q2-preview pipeline stages (Plan 1).
 ///
@@ -581,6 +586,9 @@ pub fn build_q2_preview_pipeline_stages(
 /// validator.
 const PANDOC_STAGE_EXCLUDED: &[&str] = &[
     "compile-theme-css",
+    // Website search captures rendered HTML bodies; a Pandoc-writer
+    // format has none (bd-eip0naf4).
+    "search-capture",
     "bootstrap-js",
     "clipboard-js",
     "tabsets-js",
