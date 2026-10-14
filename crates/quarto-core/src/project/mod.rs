@@ -37,6 +37,7 @@ pub mod pass2_renderer;
 pub mod profile_cache;
 pub mod project_profile;
 pub mod render_scripts;
+pub mod search;
 pub mod sidebar_membership;
 pub mod website_config;
 // Every hook in this module is native-only (`#[cfg(not(wasm32))]`

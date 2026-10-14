@@ -2,14 +2,14 @@
 title: 'Client-side full-text search for Quarto 2 websites: Quarto 1 port + engine survey (bd-eip0naf4)'
 date: 2026-10-14
 description: 'Assessment for porting Quarto 1 website search to Quarto 2 with a modern engine in place of Fuse.js + monolithic search.json: what Quarto 1 does, what q2 already has, measured index sizes, a survey of client-side search engines in 2026, and a recommended architecture (Pagefind as a native Rust library) with open design questions.'
-status: draft  # Exploration — pending design alignment with user; do not implement before the go-ahead
+status: in-progress  # Go-ahead given 2026-10-14; phases/todo below are the living checklist
 braid:
   strand: bd-eip0naf4
 ---
 
 **Strand:** bd-eip0naf4 (epic; child of the websites epic bd-0tr6; related: bd-mdet0yoy hub-client FTS, bd-ulgr JS dependency design, bd-6cme sidebar search).
 **Branch:** `braid/bd-eip0naf4-website-search` (topic branch in the main checkout, based on `main` @ `80faa63f4`; no worktree).
-**Status (2026-10-14, second pass):** the seven design questions are settled (§ Design decisions); a new federated-search requirement was added (§ Federated search across sites) and the wasm32 fork question was sized (§ wasm32 fork feasibility). **Do not start implementation until the user gives the go-ahead.**
+**Status (2026-10-14, implementation started):** the seven design questions are settled (§ Design decisions), federated search is in scope with the config sketch in § Federated search across sites (the user chose to start from it and adjust in early prereleases), and the wasm32 fork question is sized (§ wasm32 fork feasibility). The go-ahead was given on 2026-10-14; § Phases and todo is the living checklist, updated as work lands.
 
 Investigation artifacts (all under `claude-notes/plans/website-search-investigation/`):
 
@@ -144,15 +144,51 @@ page assets: js:search:* (pagefind.js, quarto-search.js[, autocomplete]),
 5. **UI.** Port `quarto-search.js` from Fuse to Pagefind's API; wire `navbar.search`, `sidebar.search`, secondary-nav button, `window.quartoOpenSearch()`.
 6. **Compatibility artifact.** Optionally keep emitting `search.json` in Quarto 1's shape (cheap: it is just the records) for users who upload it to Algolia or consume it themselves (open question 4).
 
-## Proposed phases (draft)
+## Phases and todo (living checklist)
 
-- **Phase 0 — Spike in-tree + test plan.** Add `pagefind` (default-features off, cfg-gated to native) to `quarto-core`; measure compile time and `q2` binary delta on macOS/Linux/Windows; confirm `get_files()` + `SystemRuntime` writing (the wasm32 fork feasibility check is already done at design time, § wasm32 fork feasibility, and is not repeated here); write the failing tests: index records for a fixture site (page + sections + crumbs + `search: false` + drafts), Subset-render manifest behaviour, navbar/sidebar HTML, options JSON.
-- **Phase 1 — Config + capture + emit.** `website.search` resolution; capture transform; `write_search_index`; `.quarto/search/` manifest; diagnostics for misconfiguration.
-- **Phase 2 — Assets + UI.** Vendored runtime via artifacts; `quarto-search.js` port (overlay + textbox, grouping, collapse-after, crumbs/`show-item-context`, keyboard shortcut, copy button, `?q=` highlighting, tabset opening); SCSS layer incl. dark mode; language terms; sidebar search (bd-6cme). Federation-readiness items from § Federated search: one construction site for the Pagefind instance with explicit `basePath`/`baseUrl`; a per-result site-context slot in the result renderer; `manifest.json` next to the bundle.
-- **Phase 3 — Books, preview, incremental.** Book projects; `q2 preview --static` reload interaction (and `Access-Control-Allow-Origin: *` on `site_libs/quarto-search/` so a federated parent can be developed against previewed children); no search box in hub-client preview formats (decision 3).
-- **Phase 4 — Algolia opt-in.** Port `algolia.*` options and the insights/consent wiring.
-- **Phase 5 — Docs + migration notes.** `website.search` reference; differences from Quarto 1 (no fuzzy, CSP, `file://`); `search.json` compatibility note; `docs/errors/` pages.
-- **Later, separate strands:** bd-d88bj5r1 (own overlay, a11y); federated search (§ below; strand to be filed once the config sketch is agreed); profile-only search in the hub-client preview (optional, unfiled).
+Work proceeds phase by phase on `braid/bd-eip0naf4-website-search`; each item is checked off in the commit that lands it. `[~]` marks an item in progress.
+
+### Phase 0 — in-tree spike + test plan
+
+- [x] Add `pagefind` (default-features off) to quarto-core's native-only dependencies; `cargo check` native; confirm the wasm32 dependency tree is unchanged (`cargo tree --target wasm32-unknown-unknown` shows no pagefind).
+- [x] `project/search/` module skeleton with `index_writer.rs`: `build_bundle(pages) -> Bundle` (files relative to the bundle dir, stats, the pagefind version read back from `pagefind-entry.json`); `keep_index_url` on so URLs stay verbatim; unit tests cover runtime/index/fragment files, verbatim `index.html` URLs, and the empty-input case.
+- [x] Executor bridging: pagefind's api layer uses `spawn_blocking`; `q2 render` drives the pipeline with pollster and `q2 preview` with a tokio runtime. The indexer runs on a dedicated thread with its own current-thread runtime so both callers work; unit-tested from a plain thread and from inside a tokio multi-thread runtime.
+- [~] Measure compile-time and `q2` binary delta on macOS (debug baseline: 186,444,736 bytes at `3b1c55613`, 36 s warm `cargo build -p quarto`). First reading with the crate linked but `build_bundle` not yet called from the binary: 186,669,248 bytes (+224 KB; the embedded runtime assets are dead-stripped until Phase 1 wires the call), `cargo check -p quarto-core` +20 s cold for the new crates. Re-measure after Phase 1; Linux/Windows via CI on the PR.
+- [ ] Failing integration tests in `tests/integration/website_search.rs` that fix the output contract: bundle emitted for a fixture site; `search: false` page, drafts, and 404 excluded; `search.json` records in Quarto 1 shape; `manifest.json`; Subset render keeps skipped pages; navbar/sidebar HTML; options JSON.
+
+### Phase 1 — config + capture + emit
+
+- [ ] `resolve_website_search(meta) -> Option<SearchOptions>`: bool/object; defaults per Quarto 1 (`location` by navbar presence, `type` by location, `limit` 50, `collapse-after` 3, `copy-button` false, `keyboard-shortcut` f / s, `show-item-context` false, `merge-navbar-crumbs` true); `federate:` list; `algolia:` carried through for Phase 4; `navbar.search` / `sidebar.search` overrides.
+- [ ] `SearchCaptureStage` between `RenderHtmlBodyStage` and `ApplyTemplateStage` (native only): per-page path-less Project artifact holding href, title, lang, crumbs, and the body HTML; skipped for `search: false`, drafts, the 404 page, non-HTML formats.
+- [ ] `write_search_index` in `WebsiteProjectType::post_resources`: captures plus the `.quarto/search/pages/` cache for pages skipped this run; Pagefind bundle at `site_libs/quarto-search/pagefind/`; `site_libs/quarto-search/manifest.json`; `search.json` in Quarto 1 shape; prune pages that left the project.
+- [ ] Diagnostics for misconfiguration (unknown keys, bad enum values) with codes in the error catalog and `docs/errors/` pages.
+- [ ] Book projects: `book.search` reaches the same resolver.
+
+### Phase 2 — assets + UI
+
+- [ ] Vendor `autocomplete.umd.js` 1.19.1 (MIT) under `resources/search/`; port `quarto-search.js` from Fuse to `pagefind.search()` + `result.data()`, with one construction site for the Pagefind instance (explicit `basePath`/`baseUrl`, lazy `import()` of the bundle's `pagefind.js`); register `js:search:*` artifacts.
+- [ ] Options JSON (`<script id="quarto-search-options" type="application/json">`) and `<meta name="quarto:offset">` from the head partial; language terms included.
+- [ ] `quarto-search.scss` as a quarto-sass layer (dark mode via theme variables); README updates for `resources/js` and `resources/scss`.
+- [ ] Navbar `#quarto-search` placement (overlay / textbox), `sidebar.search` parsing and placement (closes bd-6cme), secondary-nav search button + `window.quartoOpenSearch()`.
+- [ ] Result grouping by document, `collapse-after`, crumbs / `show-item-context`, keyboard shortcut, copy button, per-result site-context slot (empty for local hits).
+- [ ] `?q=` target-page highlighting and tabset opening (Quarto 1 port, not pagefind-highlight.js).
+- [ ] Browser test (Playwright, headless) for open-overlay, result rendering, target highlighting, tabsets.
+
+### Phase 3 — federation, preview, incremental
+
+- [ ] `website.search.federate`: read each child `manifest.json`, skip and report children whose pagefind version differs, `mergeIndex` with `baseUrl`, `indexWeight`, and a `mergeFilter` site tag; show the site in result cards.
+- [ ] `q2 preview --static`: `Access-Control-Allow-Origin: *` on `site_libs/quarto-search/`; reload interaction checked.
+- [ ] Incremental / Subset renders end to end: cache, manifest, pruning; no stale anchors (the Quarto 1 bug).
+- [ ] Hub-client preview: no search box; a site with `navbar.search: true` previews cleanly.
+
+### Phase 4 — Algolia opt-in
+
+- [ ] `algolia.*` options, CDN scripts with cookie-consent gating, insights plugin, logo; same result pipeline as Quarto 1.
+
+### Phase 5 — docs + migration notes
+
+- [ ] `website.search` reference including `federate`; differences from Quarto 1 (no fuzzy matching, CSP `wasm-unsafe-eval`, no `file://`); CORS note for cross-origin children; `search.json` compatibility note; error pages.
+- [ ] Later, separate strand: bd-d88bj5r1 (Quarto-owned overlay, a11y). Optional, unfiled: profile-only search in the hub-client preview.
 
 ## Design decisions (settled with the user, 2026-10-14)
 
@@ -210,7 +246,7 @@ website:
 - Give the result renderer a site-context field per result and per group.
 - Keep the `--static` preview CORS header as a small Phase 3 item.
 
-**Verdict:** federated search is possible with Pagefind with modest implementation effort (mostly UI and config, no engine work), and the architecture in this plan does not have to change to allow it. The one real risk is the format-version coupling across sites, which the manifest check and q2's single-crate pinning contain. A strand will be filed once the config sketch is agreed.
+**Verdict:** federated search is possible with Pagefind with modest implementation effort (mostly UI and config, no engine work), and the architecture in this plan does not have to change to allow it. The one real risk is the format-version coupling across sites, which the manifest check and q2's single-crate pinning contain. The user chose (2026-10-14) to ship the config sketch above in the port and adjust it during early prereleases; it is Phase 3 work in § Phases and todo.
 
 ## wasm32 fork feasibility (decision 6, check-only)
 
