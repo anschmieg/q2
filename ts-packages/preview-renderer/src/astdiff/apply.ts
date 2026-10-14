@@ -62,12 +62,19 @@ function listOf(root: PandocAST, path: Path): { list: unknown[]; index: number; 
     return { list: slot.write(), index: last.index, elem: slot.elem };
 }
 
-/** Shallow copy of a node that shares no container with the original. */
+/**
+ * Copy of a node that shares no *container* with the original: the node,
+ * its `c`, and any array directly inside `c` (list attributes, link
+ * targets, captions) are fresh, so setting a property on the copy never
+ * writes through to the original. Child nodes themselves are shared — the
+ * caller replaces the main child list anyway.
+ */
 function cloneShell(value: unknown): unknown {
-    if (Array.isArray(value)) return value.slice();
+    const sliceInner = (arr: unknown[]) => arr.map((x) => (Array.isArray(x) ? x.slice() : x));
+    if (Array.isArray(value)) return sliceInner(value);
     const obj = value as Record<string, unknown>;
     const copy: Record<string, unknown> = { ...obj };
-    if (Array.isArray(obj.c)) copy.c = (obj.c as unknown[]).slice();
+    if (Array.isArray(obj.c)) copy.c = sliceInner(obj.c as unknown[]);
     return copy;
 }
 
