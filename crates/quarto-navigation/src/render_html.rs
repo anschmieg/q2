@@ -377,10 +377,14 @@ pub fn secondary_nav_to_html(
     // Q1 `nav-before-body.ejs:83-87`: when the sidebar carries the
     // search box, the collapsed bar gets a button that opens it
     // (`window.quartoOpenSearch`, defined by `quarto-search.js`).
+    // Guarded like the headroom hooks above: the hub-client preview
+    // renders this chrome without the search scripts, where an
+    // unguarded call would throw on click.
     if let Some(search_label) = search_label {
         html.push_str(&format!(
             "    <button type=\"button\" class=\"btn quarto-search-button\" aria-label=\"{}\" \
-             onclick=\"window.quartoOpenSearch();\">\n      <i class=\"bi bi-search\"></i>\n    </button>\n",
+             onclick=\"if (window.quartoOpenSearch) {{ window.quartoOpenSearch(); }}\">\n      \
+             <i class=\"bi bi-search\"></i>\n    </button>\n",
             escape_attr(search_label)
         ));
     }
@@ -3393,7 +3397,7 @@ mod secondary_nav_tests {
         assert!(
             html.contains(
                 "<button type=\"button\" class=\"btn quarto-search-button\" aria-label=\"Search\" \
-                 onclick=\"window.quartoOpenSearch();\">"
+                 onclick=\"if (window.quartoOpenSearch) { window.quartoOpenSearch(); }\">"
             ),
             "got: {html}"
         );
