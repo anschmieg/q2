@@ -315,6 +315,13 @@ jobs:
             crates/wasm-qmd-parser/pkg-nodejs
           retention-days: 7
           if-no-files-found: error
+          # pkg-nodejs/.build-stamp is a dotfile, and upload-artifact
+          # drops hidden files by default. Without the stamp, every
+          # downstream `npm run bundle` sees the pkg as stale and tries
+          # to rebuild it with wasm-pack, which only this job installs
+          # (dry-run nightly 38625518489). None of the other staged
+          # dirs contain hidden files.
+          include-hidden-files: true
 
   # Standalone hub MCP server bundle (bd-sca6g1tu): the same
   # ts-packages/quarto-hub-mcp dist-bundle that gets embedded into q2,
