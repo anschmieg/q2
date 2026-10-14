@@ -1,7 +1,8 @@
-import { useContext, useMemo } from 'react';
+import { useContext, useLayoutEffect, useMemo, useRef } from 'react';
 import { dataLocProps } from '../../framework';
 import type { NodeArgs, RawBlock as RawBlockType } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
+import { acquireHosted, bindHosted, needsStableHost, releaseHosted } from '../rawHtmlHost';
 
 /**
  * RawBlock semantics:
@@ -29,6 +30,33 @@ function rootHasClass(html: string, cls: string): boolean {
     return m != null && m[1].split(/\s+/).includes(cls);
 }
 
+/**
+ * Hosted path for raw HTML that embeds an <iframe>: the HTML lives in a
+ * never-detached wrapper under a body-level host (see `rawHtmlHost.ts`)
+ * and this placeholder reserves its space in flow. Survives React
+ * remounts of this block — the iframe never reloads.
+ */
+const HostedRawHtml = ({
+    content,
+    attrs,
+}: {
+    content: string;
+    attrs: Record<string, unknown>;
+}) => {
+    const ref = useRef<HTMLDivElement>(null);
+    useLayoutEffect(() => {
+        const placeholder = ref.current;
+        if (placeholder === null) return;
+        const hosted = acquireHosted(content);
+        const unbind = bindHosted(placeholder, hosted);
+        return () => {
+            unbind();
+            releaseHosted(content, hosted);
+        };
+    }, [content]);
+    return <div ref={ref} className="q2-raw-placeholder" {...attrs} />;
+};
+
 export const RawBlock = ({ node }: NodeArgs<RawBlockType>) => {
     const ctx = useContext(PreviewContext);
     const poolId = (node as any).s as string | number | undefined;
@@ -45,7 +73,13 @@ export const RawBlock = ({ node }: NodeArgs<RawBlockType>) => {
     // object per content string so unchanged raw HTML keeps its DOM.
     const innerHtml = useMemo(() => ({ __html: content }), [content]);
     if (format === 'html' || format === 'html5') {
-        const className = rootHasClass(content, 'r-stretch') ? 'r-stretch' : undefined;
+        const stretch = rootHasClass(content, 'r-stretch');
+        // reveal's stretch needs the iframe as a real descendant of the
+        // slide, so stretched blocks keep the inline path.
+        if (stretch === false && needsStableHost(content)) {
+            return <HostedRawHtml content={content} attrs={{ ...affordanceAttr, ...locProps }} />;
+        }
+        const className = stretch ? 'r-stretch' : undefined;
         return <div className={className} {...affordanceAttr} {...locProps} dangerouslySetInnerHTML={innerHtml} />;
     }
     return <pre {...affordanceAttr} {...locProps}>{content}</pre>;

@@ -6,7 +6,7 @@ import type {
     NodeArgs,
     ParaBlock,
 } from '../../framework';
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
 import { PROOF } from '../quartoClasses';
 import { makeSlotSetter } from '../utils';
@@ -107,9 +107,9 @@ export const Proof = ({ node, onNavigateToDocument, setLocalAst }: NodeArgs<Cust
                 <em>
                     {titleInlines ? (
                         <>
-                            {titleInlines.map((inl, i) => (
+                            {mapKeyed(titleInlines, (inl, i, key) => (
                                 <Node
-                                    key={i}
+                                    key={key}
                                     node={inl}
                                     onNavigateToDocument={onNavigateToDocument}
                                     setLocalAst={setTitleInline(i)}
@@ -122,18 +122,18 @@ export const Proof = ({ node, onNavigateToDocument, setLocalAst }: NodeArgs<Cust
                     )}
                 </em>
                 {' '}
-                {firstParaInlines.map((inl, i) => (
+                {mapKeyed(firstParaInlines, (inl, i, key) => (
                     <Node
-                        key={i}
+                        key={key}
                         node={inl}
                         onNavigateToDocument={onNavigateToDocument}
                         setLocalAst={setFirstParaInline(i)}
                     />
                 ))}
             </p>
-            {remaining.map((b, i) => (
+            {mapKeyed(remaining, (b, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={b}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={setRemainingBlock(i)}

@@ -1,4 +1,4 @@
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import type { BlockNode, CiteInline, InlineNode, NodeArgs } from '../../framework';
 
 /**
@@ -12,9 +12,9 @@ export const Cite = (args: NodeArgs<CiteInline>) => {
     const [citations, inlines] = node.c;
     return (
         <>
-            {inlines.map((inl, i) => (
+            {mapKeyed(inlines, (inl, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={inl}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={(newInl: BlockNode | InlineNode) => {

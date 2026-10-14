@@ -46,7 +46,7 @@
  */
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { AttributionLookupContext, Node as AstNode, RegistryContext } from '../../framework';
+import { AttributionLookupContext, Node as AstNode, RegistryContext, mapKeyed } from '../../framework';
 import type {
     BlockNode,
     DivBlock,
@@ -237,9 +237,9 @@ const CommentSpanContent = ({
 
     return (
         <RegistryContext.Provider value={bubbleValue}>
-            {(span as SpanInline).c[1].map((inline, i) => (
+            {mapKeyed((span as SpanInline).c[1], (inline, _i, key) => (
                 <AstNode
-                    key={i}
+                    key={key}
                     node={inline}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={NOOP_SET_LOCAL_AST}

@@ -1,5 +1,5 @@
 import { useContext } from 'react';
-import { Node, liItemAttrProps, dataLocProps } from '../../framework';
+import { Node, liItemAttrProps, dataLocProps, mapKeyed, mapItemsKeyed } from '../../framework';
 import type { NodeArgs, OrderedListBlock } from '../../framework';
 import { IncrementalContext } from '../IncrementalContext';
 import { PreviewContext } from '../PreviewContext';
@@ -50,11 +50,11 @@ export const OrderedList = (args: NodeArgs<OrderedListBlock>) => {
     if (enabled) {
         return (
             <ol {...olProps} {...dataLocProps(args.node)}>
-                {args.node.c[1].map((item, i) => (
-                    <PlainHost as="li" key={i} {...liItemAttrProps(args.node.itemAttr?.[i], incremental)}>
-                        {item.map((block, j) => (
+                {mapItemsKeyed(args.node.c[1], (item, i, itemKey) => (
+                    <PlainHost as="li" key={itemKey} {...liItemAttrProps(args.node.itemAttr?.[i], incremental)}>
+                        {mapKeyed(item, (block, _j, key) => (
                             <Node
-                                key={`${i}:${j}`}
+                                key={key}
                                 node={block}
                                 onNavigateToDocument={args.onNavigateToDocument}
                                 setLocalAst={NOOP}
@@ -72,12 +72,12 @@ export const OrderedList = (args: NodeArgs<OrderedListBlock>) => {
     }
     return (
         <ol {...olProps} {...dataLocProps(args.node)}>
-            {args.node.c[1].map((item, i) => {
+            {mapItemsKeyed(args.node.c[1], (item, i, itemKey) => {
                 // Per-item block attr (bd-aeyss6p5) applies to every <li>.
                 const itemAttrProps = liItemAttrProps(args.node.itemAttr?.[i], false);
                 // Empty-item guard: render a bare <li> to avoid accessing item[0].s on an empty array.
                 if (item.length === 0) {
-                    return <li key={i} {...itemAttrProps} />;
+                    return <li key={itemKey} {...itemAttrProps} />;
                 }
                 // Borrow gate (Amendment A1): only borrow if the leading block is a Plain
                 // and it is editable. A Para-leading (loose) item must NOT borrow.
@@ -93,7 +93,7 @@ export const OrderedList = (args: NodeArgs<OrderedListBlock>) => {
                 const checked = taskItemChecked(item);
                 if (checked !== null) {
                     return (
-                        <PlainHost as="li" key={i} {...itemAttrProps} {...liProps}>
+                        <PlainHost as="li" key={itemKey} {...itemAttrProps} {...liProps}>
                             <TaskItemBlocks
                                 item={item}
                                 checked={checked}
@@ -104,10 +104,10 @@ export const OrderedList = (args: NodeArgs<OrderedListBlock>) => {
                     );
                 }
                 return (
-                    <PlainHost as="li" key={i} {...itemAttrProps} {...liProps}>
-                        {item.map((block, j) => (
+                    <PlainHost as="li" key={itemKey} {...itemAttrProps} {...liProps}>
+                        {mapKeyed(item, (block, _j, key) => (
                             <Node
-                                key={`${i}:${j}`}
+                                key={key}
                                 node={block}
                                 onNavigateToDocument={args.onNavigateToDocument}
                                 setLocalAst={NOOP}

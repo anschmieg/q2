@@ -33,7 +33,7 @@ import type {
     Slot,
 } from '../framework';
 import type { Attr } from '../framework';
-import { Node } from '../framework';
+import { Node, mapKeyed } from '../framework';
 
 // --- asset URL lookup ------------------------------------------------
 
@@ -187,9 +187,9 @@ export function renderSlot(
                 />
             );
         case 'blocks':
-            return slot.value.map((b, i) => (
+            return mapKeyed(slot.value, (b, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={b}
                     onNavigateToDocument={ctx.onNavigateToDocument}
                     setLocalAst={(n) => {
@@ -200,9 +200,9 @@ export function renderSlot(
                 />
             ));
         case 'inlines':
-            return slot.value.map((inl, i) => (
+            return mapKeyed(slot.value, (inl, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={inl}
                     onNavigateToDocument={ctx.onNavigateToDocument}
                     setLocalAst={(n) => {

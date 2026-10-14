@@ -1,5 +1,5 @@
 import { useContext } from 'react';
-import { Node, dataLocProps } from '../../framework';
+import { Node, dataLocProps, mapKeyed } from '../../framework';
 import type { BlockNode, InlineNode, NodeArgs, TableBlock } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
 
@@ -78,8 +78,8 @@ function CellNode({
     if (colSpan && colSpan > 1) spanProps.colSpan = colSpan;
     return (
         <Tag {...props} {...spanProps}>
-            {blocks.map((b, i) => (
-                <Node key={i} node={b} setLocalAst={NOOP} onNavigateToDocument={onNavigateToDocument} />
+            {mapKeyed(blocks, (b, _i, key) => (
+                <Node key={key} node={b} setLocalAst={NOOP} onNavigateToDocument={onNavigateToDocument} />
             ))}
         </Tag>
     );
@@ -145,9 +145,9 @@ export const Table = (args: NodeArgs<TableBlock>) => {
         <table {...attrToProps(attr)} {...affordanceAttr} {...dataLocProps(node)}>
             {captionBlocks && captionBlocks.length > 0 && (
                 <caption>
-                    {captionBlocks.map((b, i) => (
+                    {mapKeyed(captionBlocks, (b, _i, key) => (
                         <Node
-                            key={i}
+                            key={key}
                             node={b}
                             setLocalAst={NOOP}
                             onNavigateToDocument={onNavigateToDocument}

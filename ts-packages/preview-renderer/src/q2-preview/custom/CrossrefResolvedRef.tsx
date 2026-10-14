@@ -5,7 +5,7 @@ import type {
     InlineNode,
     NodeArgs,
 } from '../../framework';
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import { QUARTO_XREF } from '../quartoClasses';
 
 /**
@@ -151,9 +151,9 @@ export const CrossrefResolvedRef = ({
             <a className={QUARTO_XREF} href={`#${identifier}`} onClick={handleClick}>
                 {linkText}
             </a>
-            {suffixInlines.map((inl, i) => (
+            {mapKeyed(suffixInlines, (inl, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={inl}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={setSuffixInline(i)}

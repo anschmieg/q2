@@ -7,7 +7,7 @@ import type {
     ParaBlock,
     PlainBlock,
 } from '../../framework';
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
 import { makeSlotSetter } from '../utils';
 
@@ -134,9 +134,9 @@ export const FloatRefTarget = ({
     const firstCaptionInlinesJsx = firstCaptionBlock ? (
         <>
             {prefixText}
-            {firstCaptionBlock.c.map((inl, i) => (
+            {mapKeyed(firstCaptionBlock.c, (inl, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={inl}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={setFirstCaptionInline(i)}
@@ -152,9 +152,9 @@ export const FloatRefTarget = ({
                 ) : (
                     firstCaptionInlinesJsx
                 )}
-                {remainingCaptionBlocks.map((b, i) => (
+                {mapKeyed(remainingCaptionBlocks, (b, i, key) => (
                     <Node
-                        key={i}
+                        key={key}
                         node={b}
                         onNavigateToDocument={onNavigateToDocument}
                         setLocalAst={setRemainingCaptionBlock(i)}
@@ -163,9 +163,9 @@ export const FloatRefTarget = ({
             </>
         );
 
-    const bodyJsx = contentBlocks.map((b, i) => (
+    const bodyJsx =mapKeyed(contentBlocks, (b, i, key) => (
         <Node
-            key={i}
+            key={key}
             node={b}
             onNavigateToDocument={onNavigateToDocument}
             setLocalAst={setContentBlock(i)}

@@ -8,6 +8,7 @@ import { CommentInline } from './custom/CommentSpan';
 import { MermaidCodeBlock } from './blocks/MermaidCodeBlock';
 import { HepImage } from './inlines/HepImage';
 import { PreviewDocument } from './PreviewDocument';
+import { withChurnColor, withChurnColors, isSectionDiv } from './debugChurnColor';
 
 /**
  * q2-preview format registry. The framework reserves the keys 'Ast',
@@ -39,23 +40,45 @@ import { PreviewDocument } from './PreviewDocument';
  * / etc. wins over the built-in.
  */
 export const previewRegistry: FormatRegistry = {
-    ...Blocks,
-    ...Inlines,
-    ...Custom, // Callout, Theorem, Proof, FloatRefTarget, Equation, CrossrefResolvedRef, Fallback, PreviewTitleBlock
+    // TEMPORARY (debugChurnColor.tsx): every leaf render component is
+    // wrapped so each mounted instance paints a random background.
+    // Blocks get a <div> box, inlines a <span>; the CustomNode set is
+    // split by hand since it mixes both levels.
+    ...withChurnColors(Blocks, 'div'),
+    // Sections (`<section>` Divs) stay unpainted so they don't tint the
+    // whole page behind their children.
+    Div: withChurnColor(Blocks.Div, 'div', isSectionDiv),
+    ...withChurnColors(Inlines, 'span'),
+    ...withChurnColors(
+        {
+            Callout: Custom.Callout,
+            Theorem: Custom.Theorem,
+            Proof: Custom.Proof,
+            FloatRefTarget: Custom.FloatRefTarget,
+        },
+        'div',
+    ),
+    ...withChurnColors(
+        {
+            Equation: Custom.Equation,
+            CrossrefResolvedRef: Custom.CrossrefResolvedRef,
+        },
+        'span',
+    ),
     // bd-5m4ga0s1: mermaid-aware CodeBlock wrapper — renders
     // ```mermaid blocks as diagrams (CDN mermaid.js), delegates
     // everything else to Blocks.CodeBlock. Overrides the plain entry
     // from the `...Blocks` spread; user render-components overrides
     // of `CodeBlock` still layer on top via mergedPreviewRegistry.
-    CodeBlock: MermaidCodeBlock,
+    CodeBlock: withChurnColor(MermaidCodeBlock, 'div'),
     // bd-sxiv2tio: hephaestus-aware Image wrapper — mounts a local
     // `.hep` plot document as a live SVG via the npm hephaestus-svg-wasm
     // client, delegates every other target to Inlines.Image. Overrides
     // the plain entry from the `...Inlines` spread; user render-components
     // overrides of `Image` still layer on top via mergedPreviewRegistry.
-    Image: HepImage,
-    __fallback__: Custom.Fallback,
-    __title_block__: Custom.PreviewTitleBlock,
+    Image: withChurnColor(HepImage, 'span'),
+    __fallback__: withChurnColor(Custom.Fallback, 'div'),
+    __title_block__: withChurnColor(Custom.PreviewTitleBlock, 'div'),
     // Default comment/reaction chrome (custom/CommentBlock.tsx): wraps
     // the dispatchers.tsx Block dispatcher, extracting
     // `quarto-edit-comment` spans into corner chrome. A user

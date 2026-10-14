@@ -1,5 +1,5 @@
 import React, { useContext } from 'react';
-import { Node, dataLocProps } from '../../framework';
+import { Node, dataLocProps, mapKeyed, nodeIdentity } from '../../framework';
 import type {
     BlockNode,
     DefinitionListBlock,
@@ -31,11 +31,14 @@ export const DefinitionList = (args: NodeArgs<DefinitionListBlock>) => {
     return (
         <dl {...affordanceAttr} {...dataLocProps(node)}>
             {node.c.flatMap(([term, defs], i) => {
+                // Item identity: the term's inlines (bounded-prefix hash) plus the
+                // position as a tiebreak for repeated terms.
+                const itemKey = `${term.map(nodeIdentity).join('+')}@${i}`;
                 const dt = (
-                    <dt key={`dt-${i}`}>
-                        {term.map((inl, j) => (
+                    <dt key={`dt-${itemKey}`}>
+                        {mapKeyed(term, (inl, j, key) => (
                             <Node
-                                key={j}
+                                key={key}
                                 node={inl}
                                 onNavigateToDocument={onNavigateToDocument}
                                 setLocalAst={(newInl: BlockNode | InlineNode) => {
@@ -60,10 +63,10 @@ export const DefinitionList = (args: NodeArgs<DefinitionListBlock>) => {
                         ? { 'data-block-pool-id': borrowPoolId, tabIndex: -1 as const }
                         : {};
                     return (
-                        <PlainHost as="dd" key={`dd--`} {...ddProps}>
-                            {blocks.map((b, m) => (
+                        <PlainHost as="dd" key={`dd-${itemKey}-${k}`} {...ddProps}>
+                            {mapKeyed(blocks, (b, m, key) => (
                                 <Node
-                                    key={m}
+                                    key={key}
                                     node={b}
                                     onNavigateToDocument={onNavigateToDocument}
                                     setLocalAst={(newBlock: BlockNode | InlineNode) => {

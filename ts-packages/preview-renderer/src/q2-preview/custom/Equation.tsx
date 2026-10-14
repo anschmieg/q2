@@ -5,7 +5,7 @@ import type {
     MathInline,
     NodeArgs,
 } from '../../framework';
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import { makeSlotSetter } from '../utils';
 
 /**
@@ -138,9 +138,9 @@ export const Equation = ({
 
     return (
         <span id={id || undefined}>
-            {inlines.map((inl, i) => (
+            {mapKeyed(inlines, (inl, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={inl}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={setInlineAt(i) as (n: InlineNode | BlockNode) => void}

@@ -1,5 +1,5 @@
 import { useContext } from 'react';
-import { Node, dataLocProps } from '../../framework';
+import { Node, dataLocProps, mapKeyed } from '../../framework';
 import type { BlockNode, FigureBlock, InlineNode, NodeArgs } from '../../framework';
 import { PreviewContext } from '../PreviewContext';
 
@@ -51,9 +51,9 @@ export const Figure = (args: NodeArgs<FigureBlock>) => {
         figcaptionProps.className = captionClasses;
     }
 
-    const body = bodyBlocks.map((b, i) => (
+    const body = mapKeyed(bodyBlocks, (b, i, key) => (
         <Node
-            key={i}
+            key={key}
             node={b}
             onNavigateToDocument={onNavigateToDocument}
             setLocalAst={(newBlock: BlockNode | InlineNode) => {
@@ -65,9 +65,9 @@ export const Figure = (args: NodeArgs<FigureBlock>) => {
     ));
     const figcaption = captionBlocks.length > 0 && (
         <figcaption {...figcaptionProps}>
-            {captionBlocks.map((b, i) => (
+            {mapKeyed(captionBlocks, (b, i, key) => (
                 <Node
-                    key={i}
+                    key={key}
                     node={b}
                     onNavigateToDocument={onNavigateToDocument}
                     setLocalAst={(newBlock: BlockNode | InlineNode) => {

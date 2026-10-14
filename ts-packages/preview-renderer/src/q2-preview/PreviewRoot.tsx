@@ -28,6 +28,9 @@ import { buildByteLineMap } from '../utils/byteLineMap';
 import { normalizeLineEndings } from '../utils/normalizeLineEndings';
 import { AssetManifestContext } from './AssetManifestContext';
 import { NoteNumberingContext } from './NoteNumberingContext';
+import { DebugBar } from './DebugBar';
+import { useDebugSettings } from './debugSettings';
+import { startDomFlash } from './domFlash';
 import { RevealDeck } from './RevealDeck';
 import { installLinkHandlers } from '../utils/iframeLinkHandlers';
 import { installCodeCopy } from '../utils/codeCopy';
@@ -257,6 +260,17 @@ const RELAND_BACKSTOP_MS = 250;
 const FADE_WATCHDOG_MS = 1000;
 
 export function PreviewRoot(props: PreviewRootProps) {
+    // TEMPORARY (DebugBar): flipping a render-affecting switch changes
+    // `debugTreeKey`; keying the document on it rebuilds the tree under the
+    // new mode. The DOM-flash switch is an observer, not a render mode, so
+    // it is deliberately left out of the key.
+    const debug = useDebugSettings();
+    const debugTreeKey = `${debug.contentKeys}-${debug.churnColors}`;
+    useEffect(() => {
+        if (debug.domFlash === false) return;
+        const root = document.body;
+        return startDomFlash(root);
+    }, [debug.domFlash]);
     const [editTarget, setEditTargetRaw] = useState<{
         anchorR0: number;
         anchorR1: number;
@@ -1599,11 +1613,13 @@ export function PreviewRoot(props: PreviewRootProps) {
                 query outer blocks from other parts of the page. The div is a
                 transparent pass-through with no visual effect. */}
             <div ref={previewHostRef} style={{ display: 'contents' }}>
+                <DebugBar />
                 <CurrentActorContext.Provider value={props.currentActor ?? null}>
                     <AssetManifestContext.Provider value={props.assetManifest}>
                         <NoteNumberingContext.Provider value={noteNumbers}>
                             {isSlides && parsed ? (
                                 <RevealDeck
+                                    key={debugTreeKey}
                                     ast={parsed}
                                     registry={mergedPreviewRegistry}
                                     currentFilePath={props.currentFilePath}
@@ -1613,6 +1629,7 @@ export function PreviewRoot(props: PreviewRootProps) {
                                 />
                             ) : (
                                 <Ast
+                                    key={debugTreeKey}
                                     {...astProps}
                                     currentFilePath={props.currentFilePath}
                                     onNavigateToDocument={props.onNavigateToDocument}

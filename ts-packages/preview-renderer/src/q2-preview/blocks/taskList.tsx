@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
-import { Node } from '../../framework';
+import { Node, mapKeyed } from '../../framework';
 import type { BlockNode, InlineNode } from '../../framework';
 import type { PreviewContextValue } from '../PreviewContext';
 import type { ResolvedSource } from '../sourceIndex';
@@ -124,8 +124,8 @@ export function TaskItemBlocks(props: {
             <TaskItemContext.Provider value={{ checked, onToggle }}>
                 <Node node={item[0]} onNavigateToDocument={onNavigateToDocument} setLocalAst={noop} />
             </TaskItemContext.Provider>
-            {item.slice(1).map((block, j) => (
-                <Node key={j} node={block} onNavigateToDocument={onNavigateToDocument} setLocalAst={noop} />
+            {mapKeyed(item.slice(1), (block, _j, key) => (
+                <Node key={key} node={block} onNavigateToDocument={onNavigateToDocument} setLocalAst={noop} />
             ))}
         </>
     );
