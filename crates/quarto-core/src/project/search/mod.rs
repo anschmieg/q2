@@ -48,8 +48,8 @@ pub mod ui;
 pub mod writer;
 
 pub use config::{
-    FederatedSite, ItemContext, SearchLocation, SearchOptions, SearchType, has_navbar,
-    page_search_enabled, resolve_website_search,
+    AlgoliaOptions, FederatedSite, ItemContext, SearchLocation, SearchOptions, SearchType,
+    has_navbar, page_search_enabled, resolve_website_search,
 };
 
 /// Directory under the project lib dir (`site_libs/`) that holds the

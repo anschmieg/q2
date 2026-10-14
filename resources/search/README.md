@@ -32,6 +32,15 @@ wins. Reads its options from `<script id="quarto-search-options">`
 (see `search_ui.rs::options_json`) and the site-root offset from
 `<meta name="quarto:offset">`.
 
+## `autocomplete-preset-algolia.umd.js`, `search-by-algolia.svg`
+
+The Algolia backend (`website.search.algolia`): the Autocomplete
+preset that queries an Algolia index (`@algolia/autocomplete-preset-algolia`,
+MIT; 6,352 bytes) and the "Search by Algolia" logo shown with
+`show-logo: true`. Both byte-identical to Quarto 1's copies in the
+same directory. Shipped only when the Algolia block is complete; the
+`algoliasearch` client itself loads from the CDN (Quarto 1 parity).
+
 ## Styling
 
 `resources/scss/html/templates/quarto-search.scss`, compiled as a Sass

@@ -107,6 +107,24 @@ pub struct FederatedSite {
     pub bundle: Option<String>,
 }
 
+/// `website.search.algolia`: the opt-in Algolia backend (Quarto 1's
+/// `algoliaOptions`). Only complete configurations survive resolution:
+/// a block missing any of the three required keys is reported (Q-5-40)
+/// and dropped, so the page falls back to the built-in index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlgoliaOptions {
+    pub application_id: String,
+    pub search_only_api_key: String,
+    pub index_name: String,
+    /// Extra Algolia query parameters, passed through verbatim.
+    pub params: Option<ConfigValue>,
+    /// Field-name remapping (`href`, `section`, `title`, `text`) for
+    /// indexes whose records use other names.
+    pub index_fields: Option<ConfigValue>,
+    pub analytics_events: bool,
+    pub show_logo: bool,
+}
+
 /// Resolved `website.search` options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchOptions {
@@ -120,9 +138,8 @@ pub struct SearchOptions {
     pub show_item_context: ItemContext,
     pub merge_navbar_crumbs: bool,
     pub federate: Vec<FederatedSite>,
-    /// The raw `algolia:` map, carried through untouched for the
-    /// Algolia backend (Phase 4).
-    pub algolia: Option<ConfigValue>,
+    /// The Algolia backend, when fully configured.
+    pub algolia: Option<AlgoliaOptions>,
 }
 
 pub const DEFAULT_LIMIT: u32 = 50;
@@ -284,7 +301,7 @@ pub fn resolve_website_search(
             },
             "algolia" => {
                 if v.as_map_entries().is_some() {
-                    opts.algolia = Some(v.clone());
+                    opts.algolia = resolve_algolia(v, diagnostics);
                 } else {
                     diagnostics.push(invalid_value(key, "a map of Algolia settings", v));
                 }
@@ -297,6 +314,65 @@ pub fn resolve_website_search(
     }
     opts.kind = explicit_type.unwrap_or_else(|| default_type_for(opts.location));
     Some(opts)
+}
+
+fn resolve_algolia(
+    value: &ConfigValue,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> Option<AlgoliaOptions> {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(string_of)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let flag = |key: &str| value.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    for entry in value.as_map_entries().unwrap_or_default() {
+        match entry.key.as_str() {
+            "application-id"
+            | "search-only-api-key"
+            | "index-name"
+            | "params"
+            | "index-fields"
+            | "analytics-events"
+            | "show-logo" => {}
+            other => diagnostics.push(unknown_key(&format!("algolia.{other}"), entry)),
+        }
+    }
+    let (Some(application_id), Some(search_only_api_key), Some(index_name)) = (
+        text("application-id"),
+        text("search-only-api-key"),
+        text("index-name"),
+    ) else {
+        diagnostics.push(
+            DiagnosticMessageBuilder::warning("Algolia search is misconfigured")
+                .with_code("Q-5-40")
+                .problem(
+                    "`website.search.algolia` needs `application-id`, `search-only-api-key`, \
+                     and `index-name`; the Algolia settings are ignored and the built-in \
+                     search index is used instead.",
+                )
+                .with_location(value.source_info.clone())
+                .build(),
+        );
+        return None;
+    };
+    Some(AlgoliaOptions {
+        application_id,
+        search_only_api_key,
+        index_name,
+        params: value
+            .get("params")
+            .filter(|v| v.as_map_entries().is_some())
+            .cloned(),
+        index_fields: value
+            .get("index-fields")
+            .filter(|v| v.as_map_entries().is_some())
+            .cloned(),
+        analytics_events: flag("analytics-events"),
+        show_logo: flag("show-logo"),
+    })
 }
 
 fn resolve_federated_site(
@@ -575,17 +651,38 @@ mod tests {
     }
 
     #[test]
-    fn algolia_map_is_carried_through() {
-        let (opts, _) = resolve(
-            "website:\n  search:\n    algolia:\n      index-name: idx\n      application-id: app\n",
+    fn algolia_complete_config_is_resolved() {
+        let (opts, diags) = resolve(
+            "website:\n  search:\n    algolia:\n      index-name: idx\n      application-id: app\n\
+             \x20     search-only-api-key: key\n      analytics-events: true\n      show-logo: true\n\
+             \x20     params:\n        hitsPerPage: 5\n      index-fields:\n        text: body\n",
         );
-        let algolia = opts.unwrap().algolia.expect("algolia carried");
+        assert!(diags.is_empty(), "{diags:?}");
+        let algolia = opts.unwrap().algolia.expect("algolia resolved");
+        assert_eq!(algolia.index_name, "idx");
+        assert_eq!(algolia.application_id, "app");
+        assert_eq!(algolia.search_only_api_key, "key");
+        assert!(algolia.analytics_events);
+        assert!(algolia.show_logo);
+        assert!(algolia.params.is_some());
         assert_eq!(
             algolia
-                .get("index-name")
+                .index_fields
+                .as_ref()
+                .and_then(|f| f.get("text"))
                 .and_then(|v| v.as_plain_text())
                 .as_deref(),
-            Some("idx")
+            Some("body")
         );
+    }
+
+    #[test]
+    fn algolia_missing_key_warns_and_is_dropped() {
+        let (opts, diags) = resolve(
+            "website:\n  search:\n    algolia:\n      index-name: idx\n      application-id: app\n",
+        );
+        assert!(opts.unwrap().algolia.is_none());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code.as_deref(), Some("Q-5-40"));
     }
 }

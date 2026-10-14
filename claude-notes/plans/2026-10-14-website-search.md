@@ -166,28 +166,28 @@ Work proceeds phase by phase on `braid/bd-eip0naf4-website-search`; each item is
 
 ### Phase 2 — assets + UI
 
-- [ ] Vendor `autocomplete.umd.js` 1.19.1 (MIT) under `resources/search/`; port `quarto-search.js` from Fuse to `pagefind.search()` + `result.data()`, with one construction site for the Pagefind instance (explicit `basePath`/`baseUrl`, lazy `import()` of the bundle's `pagefind.js`); register `js:search:*` artifacts.
-- [ ] Options JSON (`<script id="quarto-search-options" type="application/json">`) and `<meta name="quarto:offset">` from the head partial; language terms included.
-- [ ] `quarto-search.scss` as a quarto-sass layer (dark mode via theme variables); README updates for `resources/js` and `resources/scss`.
-- [ ] Navbar `#quarto-search` placement (overlay / textbox), `sidebar.search` parsing and placement (closes bd-6cme), secondary-nav search button + `window.quartoOpenSearch()`.
-- [ ] Result grouping by document, `collapse-after`, crumbs / `show-item-context`, keyboard shortcut, copy button, per-result site-context slot (empty for local hits).
-- [ ] `?q=` target-page highlighting and tabset opening (Quarto 1 port, not pagefind-highlight.js).
-- [ ] Browser test (Playwright, headless) for open-overlay, result rendering, target highlighting, tabsets.
+- [x] Vendored `autocomplete.umd.js` 1.19.1 under `resources/search/` (README with provenance); `quarto-search.js` ported from Fuse to `pagefind.search()` + `result.data()` with sub-results as section items, one construction site (explicit `basePath`/`baseUrl`, lazy `import()` warmed on focus), excerpts' `<mark>` mapped to `mark.search-match`; `SearchUiTransform` registers the `js:search:*` artifacts.
+- [x] Options JSON and `<meta name="quarto:offset">` via `rendered.search.head` in the full HTML template (JSON `<`/`>`/`&` escaped as `\uXXXX`); the 11 `search-*` language terms included with English fallbacks; `#quarto-search-results` container emitted before the header.
+- [x] `quarto-search.scss` as a quarto-sass layer in all five theme assemblies (Quarto 1 file plus the placement rules from `quarto-nav.scss`, `med` typo fixed, federated-site label style); READMEs updated.
+- [x] Navbar `#quarto-search` before the toggler (collapsing) or after the menu, label from `search-label`; `navbar.search` / `sidebar.search` tri-state with Quarto 1's `navbarEjsData` / `sidebarEjsData` resolution (`project/search/ui.rs`); sidebar textbox / overlay-tool markup; secondary-nav search button calling `window.quartoOpenSearch()` (bd-6cme closes when this lands).
+- [x] Result grouping by document, `collapse-after`, crumbs / `show-item-context` (crumbs ride as Pagefind metadata), keyboard shortcut, copy button (ClipboardJS or `navigator.clipboard`), per-result site label for federated hits.
+- [x] `?q=` target-page highlighting and tabset opening (Quarto 1 code kept; `bootstrap.Tab` guarded).
+- [~] Browser check (Playwright, headless, scratchpad script) passes on a rendered sample site: overlay opens, Pagefind returns the document with its matching section and highlighted excerpt, following a result lands with the `?q=` marks on the page, the keyboard shortcut reopens the overlay, no console errors. A repo-resident test is pending a decision on where browser tests for rendered sites live.
 
 ### Phase 3 — federation, preview, incremental
 
-- [ ] `website.search.federate`: read each child `manifest.json`, skip and report children whose pagefind version differs, `mergeIndex` with `baseUrl`, `indexWeight`, and a `mergeFilter` site tag; show the site in result cards.
-- [ ] `q2 preview --static`: `Access-Control-Allow-Origin: *` on `site_libs/quarto-search/`; reload interaction checked.
-- [ ] Incremental / Subset renders end to end: cache, manifest, pruning; no stale anchors (the Quarto 1 bug).
-- [ ] Hub-client preview: no search box; a site with `navbar.search: true` previews cleanly.
+- [x] `website.search.federate`: `quarto-search.js` reads each child `manifest.json`, skips (console warning) children whose pagefind version differs, calls `mergeIndex` with `baseUrl`, `indexWeight`, and a `mergeFilter` site tag, and shows the site title on child result cards. Verified in a headless browser with a parent and child site served under one origin.
+- [x] `q2 preview --static`: `Access-Control-Allow-Origin: *` on files under `site_libs/quarto-search/` only (integration test). Reload: the index is rewritten by the render the preview triggers; the no-store policy means the browser refetches it.
+- [x] Incremental / Subset renders end to end: cache, manifest, pruning, no stale anchors (two integration tests). Pages neither rendered nor cached produce one *info* note with a count, not a warning per page: a warning would fail `--strict` once per page on every `q2 render page.qmd` in a never-fully-rendered site (observed on the docs site: 347 pages).
+- [~] Hub-client preview: the WASM crate builds with the new transforms (`SearchUiTransform` runs there but its output is unused; the JS artifacts are cfg-gated out). The navbar carries an empty `#quarto-search` div in the preview, which renders as nothing without the scripts. Not yet exercised in a running hub-client.
 
 ### Phase 4 — Algolia opt-in
 
-- [ ] `algolia.*` options, CDN scripts with cookie-consent gating, insights plugin, logo; same result pipeline as Quarto 1.
+- [x] `algolia.*` options resolved into `AlgoliaOptions` (incomplete block → Q-5-40 and the built-in backend); options JSON carries the settings plus `libDir`; head loads `algoliasearch@4.5.1` from the CDN and, with `analytics-events`, the insights loader and plugin (no cookie-consent gating: q2 has no consent feature yet, documented); preset script and logo vendored from Quarto 1 and shipped from the lib dir; `search.json` still written for upload. Two integration tests.
 
 ### Phase 5 — docs + migration notes
 
-- [ ] `website.search` reference including `federate`; differences from Quarto 1 (no fuzzy matching, CSP `wasm-unsafe-eval`, no `file://`); CORS note for cross-origin children; `search.json` compatibility note; error pages.
+- [x] `docs/guides/projects/website-search.qmd` (options table, what is indexed, output files, federation with its two requirements, Algolia, hosting notes incl. CSP and `file://`, differences from Quarto 1) registered in the docs sidebar; error pages Q-5-38, Q-5-39, Q-5-40 registered too; strict-rendered clean.
 - [ ] Later, separate strand: bd-d88bj5r1 (Quarto-owned overlay, a11y). Optional, unfiled: profile-only search in the hub-client preview.
 
 ## Design decisions (settled with the user, 2026-10-14)

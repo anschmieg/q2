@@ -36,8 +36,8 @@
 //!   cache file;
 //! - cache files for pages no longer in the project are deleted.
 //!
-//! A page that was neither rendered nor cached is reported (it joins
-//! the index on the next full render), mirroring llms.txt.
+//! Pages that were neither rendered nor cached are summarized in one
+//! informational note (they join the index on the next full render).
 //!
 //! ## Turning search off
 //!
@@ -194,6 +194,11 @@ pub(crate) fn write_search_index(
     let cache = cache_dir(project);
     let mut pages: Vec<PageCapture> = Vec::new();
     let mut live_cache_files: Vec<PathBuf> = Vec::new();
+    // Pages neither rendered this run nor cached: expected on a Subset
+    // render of a site that has never been fully rendered, so this is
+    // one informational note, not a warning per page (a warning would
+    // fail `--strict` hundreds of times over on `q2 render page.qmd`).
+    let mut missing: Vec<String> = Vec::new();
     for profile in index.profiles() {
         let href = &profile.output_href;
         let cache_file = cache_file_for(project, href);
@@ -227,20 +232,32 @@ pub(crate) fn write_search_index(
                         live_cache_files.push(cache_file);
                         pages.push(page);
                     }
-                    _ => diagnostics.push(
-                        DiagnosticMessageBuilder::warning(format!(
-                            "No search capture for `{href}`"
-                        ))
-                        .problem(
-                            "The page was not rendered this run and no previous capture \
-                             exists; it is missing from the search index until the next \
-                             full render.",
-                        )
-                        .build(),
-                    ),
+                    _ => missing.push(href.clone()),
                 }
             }
         }
+    }
+    if !missing.is_empty() {
+        let shown: Vec<&str> = missing.iter().take(3).map(String::as_str).collect();
+        let more = missing.len().saturating_sub(shown.len());
+        diagnostics.push(
+            DiagnosticMessageBuilder::info(format!(
+                "Search index is missing {} page{} not rendered in this run",
+                missing.len(),
+                if missing.len() == 1 { "" } else { "s" }
+            ))
+            .problem(format!(
+                "{}{} were neither rendered this run nor captured by a previous one; \
+                 they join the index on the next full render.",
+                shown.join(", "),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ))
+            .build(),
+        );
     }
     // Prune cache files for pages that left the project.
     if let Ok(entries) = runtime.dir_list(&cache) {

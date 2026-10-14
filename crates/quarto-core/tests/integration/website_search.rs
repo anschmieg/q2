@@ -714,3 +714,99 @@ fn book_project_gets_a_search_index() {
     let html = read(&project_dir.join("_site/ch1.html"));
     assert_contains(&html, "quarto-search-options", "book page wiring");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Algolia backend
+// ═══════════════════════════════════════════════════════════════════
+
+/// A complete `algolia` block switches the page's backend: the options
+/// JSON carries the Algolia settings (plus `libDir`), the head loads
+/// the Algolia client from the CDN, the Autocomplete preset ships from
+/// the lib dir, and the logo is copied when `show-logo` is on. The
+/// built-in index is still written (`search.json` is what users
+/// upload to Algolia).
+#[test]
+fn algolia_config_wires_client_preset_and_logo() {
+    let project_dir = render_project(|dir| {
+        search_site(dir);
+        let yml = read(&dir.join("_quarto.yml"));
+        write(
+            &dir.join("_quarto.yml"),
+            &yml.replace(
+                "website:\n  title: \"Test Site\"\n",
+                "website:\n  title: \"Test Site\"\n  search:\n    algolia:\n\
+                 \x20     index-name: idx\n      application-id: app\n      search-only-api-key: key\n\
+                 \x20     show-logo: true\n      analytics-events: true\n      params:\n        hitsPerPage: 5\n",
+            ),
+        );
+    });
+    let html = read(&project_dir.join("_site/index.html"));
+    let opts = options_json(&html);
+    assert_eq!(opts["algolia"]["index-name"].as_str(), Some("idx"));
+    assert_eq!(opts["algolia"]["application-id"].as_str(), Some("app"));
+    assert_eq!(opts["algolia"]["search-only-api-key"].as_str(), Some("key"));
+    assert_eq!(opts["algolia"]["show-logo"].as_bool(), Some(true));
+    assert_eq!(opts["algolia"]["libDir"].as_str(), Some("site_libs"));
+    assert_eq!(opts["algolia"]["params"]["hitsPerPage"].as_u64(), Some(5));
+    assert_contains(
+        &html,
+        "https://cdn.jsdelivr.net/npm/algoliasearch@4.5.1/dist/algoliasearch-lite.umd.js",
+        "algolia client",
+    );
+    assert_contains(&html, "search-insights.iife.min.js", "insights loader");
+    assert_contains(
+        &html,
+        "site_libs/quarto-search/autocomplete-preset-algolia.umd.js",
+        "preset script",
+    );
+    assert!(
+        project_dir
+            .join("_site/site_libs/quarto-search/search-by-algolia.svg")
+            .exists()
+    );
+    assert!(
+        project_dir.join(SEARCH_JSON).exists(),
+        "search.json still written"
+    );
+}
+
+/// An incomplete `algolia` block is reported and ignored; the page
+/// keeps the built-in backend.
+#[test]
+fn algolia_misconfigured_falls_back_to_builtin_search() {
+    let temp = TempDir::new().unwrap();
+    let project_dir = canonical(temp.path());
+    search_site(&project_dir);
+    let yml = read(&project_dir.join("_quarto.yml"));
+    write(
+        &project_dir.join("_quarto.yml"),
+        &yml.replace(
+            "website:\n  title: \"Test Site\"\n",
+            "website:\n  title: \"Test Site\"\n  search:\n    algolia:\n      index-name: idx\n",
+        ),
+    );
+    let summary = render_in(&project_dir, RenderMode::Full).expect("render succeeds");
+    assert_clean(&summary);
+    let warned = summary
+        .project_diagnostics
+        .iter()
+        .any(|d| d.code.as_deref() == Some("Q-5-40"));
+    assert!(
+        warned,
+        "Q-5-40 reported; diagnostics: {:?}",
+        summary.project_diagnostics
+    );
+    let html = read(&project_dir.join("_site/index.html"));
+    let opts = options_json(&html);
+    assert!(
+        opts.get("algolia").is_none(),
+        "algolia dropped from options"
+    );
+    assert_not_contains(&html, "algoliasearch-lite", "no CDN client");
+    assert!(
+        !project_dir
+            .join("_site/site_libs/quarto-search/autocomplete-preset-algolia.umd.js")
+            .exists()
+    );
+    std::mem::forget(temp);
+}

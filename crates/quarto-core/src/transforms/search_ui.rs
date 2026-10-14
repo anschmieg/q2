@@ -35,7 +35,7 @@ use quarto_source_map::{By, SourceInfo};
 
 use crate::Result;
 use crate::project::ProjectKind;
-use crate::project::search::config::{ItemContext, SearchOptions};
+use crate::project::search::config::{AlgoliaOptions, ItemContext, SearchOptions};
 use crate::project::search::ui::SEARCH_TERMS;
 use crate::project::search::{PAGEFIND_BUNDLE_SUBDIR, SEARCH_LIB_SUBDIR, resolve_website_search};
 use crate::render::RenderContext;
@@ -54,6 +54,21 @@ const AUTOCOMPLETE_REL_PATH: &str = "quarto-search/autocomplete.umd.js";
 const QUARTO_SEARCH_KEY: &str = "js:search:quarto-search.js";
 #[cfg(not(target_arch = "wasm32"))]
 const QUARTO_SEARCH_REL_PATH: &str = "quarto-search/quarto-search.js";
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_PRESET_JS: &[u8] =
+    include_bytes!("../../../../resources/search/autocomplete-preset-algolia.umd.js");
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_PRESET_KEY: &str = "js:search:z-autocomplete-preset-algolia.umd.js";
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_PRESET_REL_PATH: &str = "quarto-search/autocomplete-preset-algolia.umd.js";
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_LOGO_SVG: &[u8] =
+    include_bytes!("../../../../resources/search/search-by-algolia.svg");
+/// Not a `js:`/`css:` key: flushed as a file, never linked from the head.
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_LOGO_KEY: &str = "search:search-by-algolia.svg";
+#[cfg(not(target_arch = "wasm32"))]
+const ALGOLIA_LOGO_REL_PATH: &str = "quarto-search/search-by-algolia.svg";
 
 pub struct SearchUiTransform;
 
@@ -126,12 +141,86 @@ pub fn options_json(opts: &SearchOptions, meta: &ConfigValue, bundle: &str) -> s
         "bundle": bundle,
         "federate": federate,
     });
-    if let Some(algolia) = &opts.algolia
-        && let Ok(value) = serde_json::to_value(algolia)
-    {
-        json["algolia"] = value;
+    if let Some(algolia) = &opts.algolia {
+        json["algolia"] = algolia_json(algolia, lib_dir_of(bundle));
     }
     json
+}
+
+/// The `algolia` object of the options JSON (Quarto 1's
+/// `algoliaOptions` plus the `libDir` the logo is served from and the
+/// cookie-consent flag, which is always `false` here: q2 has no
+/// cookie-consent feature yet, so the insights scripts load unguarded).
+fn algolia_json(algolia: &AlgoliaOptions, lib_dir: &str) -> serde_json::Value {
+    serde_json::json!({
+        "application-id": algolia.application_id,
+        "search-only-api-key": algolia.search_only_api_key,
+        "index-name": algolia.index_name,
+        "params": algolia.params.as_ref().map(config_value_to_json),
+        "index-fields": algolia.index_fields.as_ref().map(config_value_to_json),
+        "analytics-events": algolia.analytics_events,
+        "show-logo": algolia.show_logo,
+        "libDir": lib_dir,
+        "cookie-consent-enabled": false,
+    })
+}
+
+/// The lib dir is the first segment of the bundle path
+/// (`site_libs/quarto-search/pagefind/` → `site_libs`).
+fn lib_dir_of(bundle: &str) -> &str {
+    bundle.split('/').next().unwrap_or(bundle)
+}
+
+/// Plain JSON for a configuration subtree (scalars, arrays, maps;
+/// parsed inline text flattens to a string).
+fn config_value_to_json(cv: &ConfigValue) -> serde_json::Value {
+    use quarto_pandoc_types::ConfigValueKind;
+    use yaml_rust2::Yaml;
+    match &cv.value {
+        ConfigValueKind::Scalar { yaml, .. } => match yaml {
+            Yaml::Boolean(b) => serde_json::json!(b),
+            Yaml::Integer(i) => serde_json::json!(i),
+            Yaml::Real(r) => r
+                .parse::<f64>()
+                .map(|f| serde_json::json!(f))
+                .unwrap_or_else(|_| serde_json::json!(r)),
+            Yaml::Null => serde_json::Value::Null,
+            other => serde_json::json!(other.as_str().map(str::to_owned).unwrap_or_default()),
+        },
+        ConfigValueKind::Array(items) => {
+            serde_json::Value::Array(items.iter().map(config_value_to_json).collect())
+        }
+        ConfigValueKind::Map(entries) => serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|e| (e.key.clone(), config_value_to_json(&e.value)))
+                .collect(),
+        ),
+        _ => serde_json::json!(cv.as_plain_text().unwrap_or_default()),
+    }
+}
+
+/// Head markup for the Algolia backend (Quarto 1's
+/// `websiteSearchIncludeInHeader`): the search client from the CDN and,
+/// with `analytics-events`, the insights loader and the Autocomplete
+/// insights plugin. Versions follow Quarto 1's `configuration` pins
+/// where it had one (`algoliasearch@4.5.1`); the two insights scripts
+/// are unpinned there too.
+fn algolia_head_html(algolia: &AlgoliaOptions) -> String {
+    let mut head = String::from(
+        "<script src=\"https://cdn.jsdelivr.net/npm/algoliasearch@4.5.1/dist/algoliasearch-lite.umd.js\"></script>\n",
+    );
+    if algolia.analytics_events {
+        head.push_str(
+            "<script>var ALGOLIA_INSIGHTS_SRC = \"https://cdn.jsdelivr.net/npm/search-insights/dist/search-insights.iife.min.js\";\n\
+             !function(e,a,t,n,s,i,c){e.AlgoliaAnalyticsObject=s,e[s]=e[s]||function(){\n\
+             (e[s].queue=e[s].queue||[]).push(arguments)},i=a.createElement(t),c=a.getElementsByTagName(t)[0],\n\
+             i.async=1,i.src=n,c.parentNode.insertBefore(i,c)\n\
+             }(window,document,\"script\",ALGOLIA_INSIGHTS_SRC,\"aa\");</script>\n\
+             <script src=\"https://cdn.jsdelivr.net/npm/@algolia/autocomplete-plugin-algolia-insights\"></script>\n",
+        );
+    }
+    head
 }
 
 /// `<meta name="quarto:offset">` + the options script, as one block.
@@ -190,12 +279,14 @@ impl AstTransform for SearchUiTransform {
             .as_ref()
             .map_or_else(|| "./".to_string(), |r| r.page_url_for_site_root_dir());
         let json = options_json(&opts, &ast.meta, &bundle);
+        let mut head = head_html(&json, &offset);
+        if let Some(algolia) = &opts.algolia {
+            head.push('\n');
+            head.push_str(algolia_head_html(algolia).trim_end());
+        }
         ast.meta.insert_path(
             &["rendered", "search", "head"],
-            ConfigValue::new_string(
-                head_html(&json, &offset),
-                SourceInfo::generated(By::programmatic_config()),
-            ),
+            ConfigValue::new_string(head, SourceInfo::generated(By::programmatic_config())),
         );
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -213,6 +304,24 @@ impl AstTransform for SearchUiTransform {
                     .with_path(QUARTO_SEARCH_REL_PATH)
                     .with_scope(ArtifactScope::Project),
             );
+            if let Some(algolia) = &opts.algolia {
+                // Sorts after `quarto-search.js`, which is fine: the
+                // preset is only called from inside a search.
+                ctx.artifacts.store(
+                    ALGOLIA_PRESET_KEY,
+                    Artifact::from_bytes(ALGOLIA_PRESET_JS.to_vec(), "text/javascript")
+                        .with_path(ALGOLIA_PRESET_REL_PATH)
+                        .with_scope(ArtifactScope::Project),
+                );
+                if algolia.show_logo {
+                    ctx.artifacts.store(
+                        ALGOLIA_LOGO_KEY,
+                        Artifact::from_bytes(ALGOLIA_LOGO_SVG.to_vec(), "image/svg+xml")
+                            .with_path(ALGOLIA_LOGO_REL_PATH)
+                            .with_scope(ArtifactScope::Project),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -267,6 +376,32 @@ mod tests {
         assert_eq!(json["collapse-after"], false);
         assert_eq!(json["show-item-context"], "parent");
         assert_eq!(json["panel-placement"], "start");
+    }
+
+    #[test]
+    fn algolia_options_serialize_with_lib_dir_and_consent_flag() {
+        let mut opts = SearchOptions::defaults(true);
+        opts.algolia = Some(AlgoliaOptions {
+            application_id: "app".into(),
+            search_only_api_key: "key".into(),
+            index_name: "idx".into(),
+            params: None,
+            index_fields: None,
+            analytics_events: true,
+            show_logo: true,
+        });
+        let meta = ConfigValue::null(SourceInfo::for_test());
+        let json = options_json(&opts, &meta, "site_libs/quarto-search/pagefind/");
+        assert_eq!(json["algolia"]["application-id"], "app");
+        assert_eq!(json["algolia"]["index-name"], "idx");
+        assert_eq!(json["algolia"]["libDir"], "site_libs");
+        assert_eq!(json["algolia"]["cookie-consent-enabled"], false);
+        assert_eq!(json["algolia"]["analytics-events"], true);
+        assert_eq!(json["algolia"]["params"], serde_json::Value::Null);
+        let head = algolia_head_html(opts.algolia.as_ref().unwrap());
+        assert!(head.contains("algoliasearch@4.5.1/dist/algoliasearch-lite.umd.js"));
+        assert!(head.contains("search-insights.iife.min.js"));
+        assert!(head.contains("autocomplete-plugin-algolia-insights"));
     }
 
     #[test]
