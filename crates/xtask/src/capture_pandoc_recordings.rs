@@ -129,63 +129,61 @@ fn stage(fixture: &Fixture, work: &Path) -> Result<PathBuf> {
 }
 
 pub fn run() -> Result<()> {
-    #[cfg(not(unix))]
-    {
+    // Runtime guard, not #[cfg]: keeps the helpers (and their portable
+    // unit tests) compiled and used on every platform.
+    if !cfg!(unix) {
         bail!(
             "capture-pandoc-recordings is Unix-only (the capture wrapper is a POSIX shell script)"
         );
     }
-    #[cfg(unix)]
-    {
-        let root = current_worktree_root()?;
-        std::env::set_current_dir(&root)?;
-        let pandoc = check_pandoc(&pinned_version(&root)?)?;
+    let root = current_worktree_root()?;
+    std::env::set_current_dir(&root)?;
+    let pandoc = check_pandoc(&pinned_version(&root)?)?;
 
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "q2"])
-            .status()?;
-        if !status.success() {
-            bail!("cargo build --bin q2 failed");
-        }
-        let q2 = root.join("target/debug/q2");
-        let wrapper = root.join("scripts/pandoc-capture.sh");
-        let recordings = root.join(RECORDINGS_DIR);
-        let rewrite_pandoc = pandoc.clone();
-
-        let scratch = tempfile::tempdir()?;
-        for fixture in FIXTURES {
-            for format in FORMATS {
-                let name = recording_name(fixture, format);
-                println!("Capturing {name}");
-                let work = scratch.path().join("docs").join(&name);
-                let qmd = stage(fixture, &work)?;
-                let cap = scratch.path().join("cap").join(&name);
-                let status = Command::new(&q2)
-                    .current_dir(qmd.parent().expect("staged qmd has a parent"))
-                    .arg("render")
-                    .arg(qmd.file_name().expect("file name"))
-                    .args(["--to", format])
-                    .env("QUARTO_PANDOC", &wrapper)
-                    .env("PANDOC_CAPTURE_DIR", &cap)
-                    .env("PANDOC_CAPTURE_REAL", &pandoc)
-                    .env("SOURCE_DATE_EPOCH", SOURCE_DATE_EPOCH)
-                    .status()
-                    .with_context(|| format!("spawning q2 render for {name}"))?;
-                if !status.success() {
-                    bail!("`q2 render {} --to {format}` failed", fixture.qmd);
-                }
-                quarto_pandoc_recording::rewrite::rewrite_run(
-                    &cap.join("run-1"),
-                    &recordings,
-                    &name,
-                    Some(&rewrite_pandoc),
-                )
-                .with_context(|| format!("rewriting {name}"))?;
-            }
-        }
-        println!("Wrote recordings to {}", recordings.display());
-        Ok(())
+    let status = Command::new("cargo")
+        .args(["build", "--bin", "q2"])
+        .status()?;
+    if !status.success() {
+        bail!("cargo build --bin q2 failed");
     }
+    let q2 = root.join("target/debug/q2");
+    let wrapper = root.join("scripts/pandoc-capture.sh");
+    let recordings = root.join(RECORDINGS_DIR);
+    let rewrite_pandoc = pandoc.clone();
+
+    let scratch = tempfile::tempdir()?;
+    for fixture in FIXTURES {
+        for format in FORMATS {
+            let name = recording_name(fixture, format);
+            println!("Capturing {name}");
+            let work = scratch.path().join("docs").join(&name);
+            let qmd = stage(fixture, &work)?;
+            let cap = scratch.path().join("cap").join(&name);
+            let status = Command::new(&q2)
+                .current_dir(qmd.parent().expect("staged qmd has a parent"))
+                .arg("render")
+                .arg(qmd.file_name().expect("file name"))
+                .args(["--to", format])
+                .env("QUARTO_PANDOC", &wrapper)
+                .env("PANDOC_CAPTURE_DIR", &cap)
+                .env("PANDOC_CAPTURE_REAL", &pandoc)
+                .env("SOURCE_DATE_EPOCH", SOURCE_DATE_EPOCH)
+                .status()
+                .with_context(|| format!("spawning q2 render for {name}"))?;
+            if !status.success() {
+                bail!("`q2 render {} --to {format}` failed", fixture.qmd);
+            }
+            quarto_pandoc_recording::rewrite::rewrite_run(
+                &cap.join("run-1"),
+                &recordings,
+                &name,
+                Some(&rewrite_pandoc),
+            )
+            .with_context(|| format!("rewriting {name}"))?;
+        }
+    }
+    println!("Wrote recordings to {}", recordings.display());
+    Ok(())
 }
 
 #[cfg(test)]

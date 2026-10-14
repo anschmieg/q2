@@ -71,3 +71,21 @@ imports in `ts-packages/preview-renderer/src/q2-preview/entry.tsx`
 Slated for replacement by the `position: sticky` +
 `--quarto-header-height` redesign (bd-pt1wxeq2); keep changes here
 minimal and self-contained.
+
+## `react/`
+
+React 19 as four browser ES modules (`react`, `react/jsx-runtime`,
+`react-dom`, `react-dom/client`), built from the workspace `node_modules`
+by `cargo xtask vendor-react` and shipped under `site_libs/quarto-react/`
+through the page's import map when a document binds a component
+(bd-react-components-a8flgldm). Unlike the other directories here these
+files are *built*, not fetched: see `react/README.md` for why, and for the
+version pin against `build-info.json`.
+
+## `quarto-components/`
+
+The client runtime for components bound to document elements
+(`quarto-components.js`, hand-written, not minified). Registered by the
+`components-resolve` transform in `crates/quarto-core/src/components/`
+rather than by a stage, because the same transform decides which pages
+need it. See `quarto-components/README.md`.

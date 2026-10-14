@@ -1,0 +1,11 @@
+---
+title: "React components on static pages"
+date: 2026-10-13
+categories: [react, release]
+description: "Bind a component to a div; the markdown is the no-script version."
+---
+
+Bind a component to a div; the markdown is the no-script version.
+
+This post is part of the interactive-listing example; its tags are
+`react`, `release`.

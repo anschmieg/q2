@@ -27,7 +27,109 @@ pub fn register_quarto_api(lua: &Lua) -> Result<()> {
     register_quarto_json(lua, &quarto)?;
     register_quarto_log(lua, &quarto)?;
     register_quarto_utils(lua, &quarto)?;
+    register_quarto_component(lua, &quarto)?;
 
+    Ok(())
+}
+
+/// `quarto.component(name, props, content)` — an element bound to a
+/// component (bd-react-components-a8flgldm), for Lua filters and lmd
+/// cells that build markup.
+///
+/// Returns a `Div` whose attributes carry `data-quarto-component=name`,
+/// holding `content` (blocks: a `Block`, a `Blocks`, a plain list, a
+/// `Nodes`, or nil) preceded by a `<script type="application/json"
+/// class="quarto-component-props">` raw block with `props` encoded by
+/// `pandoc.json.encode` (so `Inlines` values become their text and `meta`
+/// proxies their plain JSON). When `content` is inline (a string, an
+/// `Inline`, or an `Inlines`) the result is a `Span` with a raw inline
+/// instead. `props` may be nil. The static content is the no-script
+/// version; the page runtime mounts the component over it and reads the
+/// props script. The `components:` metadata must declare `name`, or the
+/// transform reports Q-25-7 at the element.
+fn register_quarto_component(lua: &Lua, quarto: &Table) -> Result<()> {
+    use super::types::{
+        LuaBlock, LuaInline, filter_source_info, peek_blocks_fuzzy, peek_inlines_fuzzy,
+    };
+    use crate::pandoc::{AttrSourceInfo, Block, Div, Inline, RawBlock, RawInline, Span};
+    use hashlink::LinkedHashMap;
+
+    quarto.set(
+        "component",
+        lua.create_function(|lua, (name, props, content): (String, Value, Value)| {
+            if name.trim().is_empty() {
+                return Err(mlua::Error::runtime(
+                    "quarto.component: the component name must be a non-empty string",
+                ));
+            }
+            let json = match props {
+                Value::Nil => "{}".to_string(),
+                v => {
+                    let pandoc: Table = lua.globals().get("pandoc")?;
+                    let json_ns: Table = pandoc.get("json")?;
+                    let encode: mlua::Function = json_ns.get("encode")?;
+                    let encoded: String = encode.call(v)?;
+                    if !encoded.trim_start().starts_with('{') {
+                        return Err(mlua::Error::runtime(format!(
+                            "quarto.component: props for `{name}` must encode to a JSON object, got {encoded}"
+                        )));
+                    }
+                    encoded
+                }
+            };
+            // The same escape as the page-side `script_json`: no `<`, `>`
+            // or `&` can end the script element or start a comment.
+            let json = json
+                .replace('<', "\\u003c")
+                .replace('>', "\\u003e")
+                .replace('&', "\\u0026");
+            let script = format!(
+                "<script type=\"application/json\" class=\"quarto-component-props\">{json}</script>"
+            );
+            let mut kvs = LinkedHashMap::new();
+            kvs.insert("data-quarto-component".to_string(), name.clone());
+            let attr = (String::new(), Vec::new(), kvs);
+            let source_info = filter_source_info(lua);
+
+            let inline = match &content {
+                Value::String(_) => true,
+                Value::UserData(ud) => ud.is::<LuaInline>(),
+                Value::Table(t) => t
+                    .metatable()
+                    .and_then(|mt| mt.get::<String>("__name").ok())
+                    .is_some_and(|n| n == "Inlines"),
+                _ => false,
+            };
+            if inline {
+                let mut inlines = vec![Inline::RawInline(RawInline {
+                    format: "html".to_string(),
+                    text: script,
+                    source_info: source_info.clone(),
+                })];
+                inlines.extend(peek_inlines_fuzzy(lua, content)?);
+                return lua.create_userdata(LuaInline::new(Inline::Span(Span {
+                    attr,
+                    content: inlines,
+                    source_info,
+                    attr_source: AttrSourceInfo::empty(),
+                })));
+            }
+            let mut blocks = vec![Block::RawBlock(RawBlock {
+                format: "html".to_string(),
+                text: script,
+                source_info: source_info.clone(),
+            })];
+            if !matches!(content, Value::Nil) {
+                blocks.extend(peek_blocks_fuzzy(lua, content)?);
+            }
+            lua.create_userdata(LuaBlock::new(Block::Div(Div {
+                attr,
+                content: blocks,
+                source_info,
+                attr_source: AttrSourceInfo::empty(),
+            })))
+        })?,
+    )?;
     Ok(())
 }
 
@@ -719,6 +821,142 @@ mod tests {
         register_pandoc_namespace(&lua, runtime, create_shared_mediabag()).unwrap();
         register_quarto_api(&lua).unwrap();
         lua
+    }
+
+    // =========================================================================
+    // quarto.component tests (bd-react-components-a8flgldm)
+    // =========================================================================
+
+    fn component_div(lua: &Lua, code: &str) -> crate::pandoc::Block {
+        let v: Value = lua.load(code).eval().unwrap();
+        match v {
+            Value::UserData(ud) => ud
+                .borrow::<crate::lua::types::LuaBlock>()
+                .unwrap()
+                .borrow_block()
+                .clone(),
+            other => panic!("expected a block userdata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quarto_component_builds_a_div_with_host_attr_and_props_script() {
+        let lua = create_test_lua();
+        let block = component_div(
+            &lua,
+            r#"return quarto.component("table", { rows = { { title = "A", n = 1 } }, label = "x<y" }, { pandoc.Para({ pandoc.Str("fallback") }) })"#,
+        );
+        let crate::pandoc::Block::Div(div) = block else {
+            panic!("not a div")
+        };
+        assert_eq!(div.attr.0, "");
+        assert_eq!(
+            div.attr.2.get("data-quarto-component").map(String::as_str),
+            Some("table")
+        );
+        assert_eq!(div.content.len(), 2);
+        let crate::pandoc::Block::RawBlock(raw) = &div.content[0] else {
+            panic!("first child is the props script")
+        };
+        assert_eq!(raw.format, "html");
+        assert!(
+            raw.text
+                .starts_with("<script type=\"application/json\" class=\"quarto-component-props\">"),
+            "{}",
+            raw.text
+        );
+        assert!(raw.text.contains("\"rows\":[{"), "{}", raw.text);
+        assert!(
+            raw.text.contains("x\\u003cy"),
+            "markup characters are escaped: {}",
+            raw.text
+        );
+        assert!(matches!(div.content[1], crate::pandoc::Block::Paragraph(_)));
+    }
+
+    #[test]
+    fn quarto_component_accepts_nil_props_and_nil_content() {
+        let lua = create_test_lua();
+        let block = component_div(&lua, r#"return quarto.component("x", nil, nil)"#);
+        let crate::pandoc::Block::Div(div) = block else {
+            panic!("not a div")
+        };
+        assert_eq!(div.content.len(), 1);
+        let crate::pandoc::Block::RawBlock(raw) = &div.content[0] else {
+            panic!()
+        };
+        assert!(raw.text.contains(">{}</script>"), "{}", raw.text);
+    }
+
+    #[test]
+    fn quarto_component_with_inline_content_builds_a_span() {
+        let lua = create_test_lua();
+        let v: Value = lua
+            .load(r#"return quarto.component("spark", { values = { 1, 2 } }, pandoc.Inlines({ pandoc.Str("1 2") }))"#)
+            .eval()
+            .unwrap();
+        let Value::UserData(ud) = v else { panic!() };
+        let inline = ud
+            .borrow::<crate::lua::types::LuaInline>()
+            .unwrap()
+            .borrow_inline()
+            .clone();
+        let crate::pandoc::Inline::Span(span) = inline else {
+            panic!("not a span")
+        };
+        assert_eq!(
+            span.attr.2.get("data-quarto-component").map(String::as_str),
+            Some("spark")
+        );
+        assert!(matches!(
+            span.content[0],
+            crate::pandoc::Inline::RawInline(_)
+        ));
+        assert_eq!(span.content.len(), 2);
+
+        // A bare string is inline content too.
+        let v: Value = lua
+            .load(r#"return quarto.component("spark", nil, "1 2 3")"#)
+            .eval()
+            .unwrap();
+        let Value::UserData(ud) = v else { panic!() };
+        assert!(ud.is::<crate::lua::types::LuaInline>());
+    }
+
+    #[test]
+    fn quarto_component_rejects_bad_name_and_non_object_props() {
+        let lua = create_test_lua();
+        let err = lua
+            .load(r#"return quarto.component("", nil, nil)"#)
+            .eval::<Value>()
+            .unwrap_err();
+        assert!(err.to_string().contains("non-empty"), "{err}");
+        let err = lua
+            .load(r#"return quarto.component("x", { 1, 2 }, nil)"#)
+            .eval::<Value>()
+            .unwrap_err();
+        assert!(err.to_string().contains("JSON object"), "{err}");
+    }
+
+    #[test]
+    fn quarto_component_props_encode_inlines_as_text() {
+        let lua = create_test_lua();
+        let block = component_div(
+            &lua,
+            r#"return quarto.component("t", { title = pandoc.Inlines({ pandoc.Str("Hello"), pandoc.Space(), pandoc.Emph({ pandoc.Str("there") }) }), node = pandoc.Str("one") }, nil)"#,
+        );
+        let crate::pandoc::Block::Div(div) = block else {
+            panic!()
+        };
+        let crate::pandoc::Block::RawBlock(raw) = &div.content[0] else {
+            panic!()
+        };
+        assert!(
+            raw.text.contains("\"title\":\"Hello there\""),
+            "{}",
+            raw.text
+        );
+        assert!(raw.text.contains("\"node\":\"one\""), "{}", raw.text);
     }
 
     // =========================================================================

@@ -1,4 +1,4 @@
-# 09-federated-search — One search box, three websites
+# 10-federated-search — One search box, three websites
 
 Demonstrates federated website search: an umbrella site whose search
 box also queries two separately rendered product sites.
@@ -30,14 +30,14 @@ not required; any order works):
 ```bash
 cargo build --bin q2
 for site in product-a product-b umbrella; do
-  cargo run --bin q2 -- render examples/websites/09-federated-search/$site
+  cargo run --bin q2 -- render examples/websites/10-federated-search/$site
 done
 ```
 
 Serve the shared tree with any static server, for example:
 
 ```bash
-cd examples/websites/09-federated-search/www
+cd examples/websites/10-federated-search/www
 python3 -m http.server 8000
 ```
 

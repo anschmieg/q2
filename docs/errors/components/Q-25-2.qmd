@@ -1,0 +1,38 @@
+---
+title: "Component module outside the project"
+description: "A component's `src` resolves to a file outside the project, so it cannot be copied into the output. The element keeps its static content."
+code: Q-25-2
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-2` — Component module outside the project
+
+> A component's `src` resolves to a file outside the project, so it cannot be copied into the output. The element keeps its static content.
+
+## What this means
+
+A component's module is copied under the output's `site_libs/` directory
+and linked from the page, the way a `css:` stylesheet is. A `src` such as
+`../../shared/counter.js` that escapes the project root has no place in
+the output tree, so Quarto warns and ships nothing for that component. The
+bound element still renders as plain markup.
+
+## Why this happens
+
+- `src:` climbs out of the project with `..`.
+- The project root is not where you think it is (the directory with
+  `_quarto.yml`, or the document's directory for a single-file render).
+
+## How to fix
+
+Move the module into the project, or symlink it there, and point `src:`
+at that location.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

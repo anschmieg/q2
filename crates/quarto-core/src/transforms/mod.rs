@@ -12,6 +12,7 @@
 //! - [`AppendixStructureTransform`] - Consolidates appendix content into single container
 //! - [`CalloutTransform`] - Converts callout Divs to CustomNodes
 //! - [`CalloutResolveTransform`] - Resolves Callout CustomNodes to standard Div structure
+//! - [`ComponentsResolveTransform`] - Binds `components:` declarations to elements and ships the client runtime
 //! - [`EditorialMarksOoxmlTransform`] - Renders editorial marks to Word and PowerPoint (docx, pptx)
 //! - [`FooterGenerateTransform`] - Resolves `page-footer:` YAML into `navigation.footer`
 //! - [`FooterRenderTransform`] - Renders `navigation.footer` to HTML
@@ -61,6 +62,7 @@ mod callout_resolve;
 mod categories_sidebar;
 mod code_block_generate;
 mod code_block_render;
+mod components_resolve;
 mod conditional_content;
 mod config;
 mod config_markdown;
@@ -149,6 +151,7 @@ pub use code_block_generate::{
     resolve_default_copy_mode,
 };
 pub use code_block_render::CodeBlockRenderTransform;
+pub use components_resolve::ComponentsResolveTransform;
 pub use conditional_content::ConditionalContentTransform;
 pub use config::{
     AppendixStyle, ReferenceLocation, TitleBlockStyle, is_feature_disabled, page_has_navbar,

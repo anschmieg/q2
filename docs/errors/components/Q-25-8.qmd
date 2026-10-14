@@ -1,0 +1,42 @@
+---
+title: "`component-props` is not a JSON object"
+description: "An element's `component-props` attribute is not a JSON object literal. The value is dropped; the component gets only the props declared in metadata."
+code: Q-25-8
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-8` — `component-props` is not a JSON object
+
+> An element's `component-props` attribute is not a JSON object literal. The value is dropped; the component gets only the props declared in metadata.
+
+## What this means
+
+`component-props` carries per-element props to the component as JSON,
+on top of the `props:` declared in metadata. It has to be an object
+literal, for example `component-props='{"interval": 3000}'`. Any other
+value (invalid JSON, an array, a bare number) is this warning, and the
+attribute is dropped.
+
+## Why this happens
+
+- The JSON uses single quotes inside, or is missing quotes around keys.
+- The attribute value was written with double quotes outside and inside
+  (`component-props="{"a": 1}"`), which ends the attribute early. Use
+  single quotes around the JSON.
+- The value is an array or a scalar rather than an object.
+
+## How to fix
+
+Write the attribute as `component-props='{"key": value}'`, with the whole
+JSON object in single quotes and double-quoted keys inside. For larger
+payloads, build the element with `quarto.component` in a Lua filter or an
+lmd cell, which encodes the props for you.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

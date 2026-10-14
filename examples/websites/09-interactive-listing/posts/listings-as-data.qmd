@@ -1,0 +1,11 @@
+---
+title: "Listings as data"
+date: 2026-05-20
+categories: [lua, release]
+description: "A listing can resolve its items and render nothing; the markup is yours."
+---
+
+A listing can resolve its items and render nothing; the markup is yours.
+
+This post is part of the interactive-listing example; its tags are
+`lua`, `release`.

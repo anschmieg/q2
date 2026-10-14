@@ -14,7 +14,10 @@ cargo xtask capture-import-recordings            # run native pandoc over source
 ```
 
 Unix only; needs the pinned native pandoc on `PATH` (the version in
-`resources/pandoc-wasm.json`). Both run with `SOURCE_DATE_EPOCH=1700000000` and are
+`resources/pandoc-wasm.json`). Like `capture-pandoc-recordings`, this is a dev-only step that
+`cargo xtask verify` and CI never run, and it shares that command's Unix path and relocation
+assumptions. Tests that read the recordings run on every platform; on Windows, regenerate them
+from macOS or Linux (the command exits with an error there). Both run with `SOURCE_DATE_EPOCH=1700000000` and are
 byte-identical on re-run. Capture reads only the checked-in `source.<ext>`; it never
 deletes, lists or hashes `expected.qmd`, which P3 adds to each fixture directory.
 

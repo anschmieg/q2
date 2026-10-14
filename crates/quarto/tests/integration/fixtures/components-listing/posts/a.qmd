@@ -1,0 +1,8 @@
+---
+title: "Alpha release"
+date: 2026-01-10
+categories: [release]
+description: "The first one."
+---
+
+Body of a.

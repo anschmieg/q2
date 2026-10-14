@@ -623,33 +623,30 @@ fn generate(import_dir: &Path, pandoc: &Path) -> Result<()> {
 }
 
 pub fn run(generate_only: bool) -> Result<()> {
-    #[cfg(not(unix))]
-    {
-        let _ = generate_only;
+    // Runtime guard, not #[cfg]: keeps the helpers (and their portable
+    // unit tests) compiled and used on every platform.
+    if !cfg!(unix) {
         bail!("capture-import-recordings is Unix-only (like capture-pandoc-recordings)");
     }
-    #[cfg(unix)]
-    {
-        let root = current_worktree_root()?;
-        std::env::set_current_dir(&root)?;
-        let pandoc = check_pandoc(&pinned_version(&root)?)?;
-        let import_dir: PathBuf = root.join(IMPORT_DIR);
-        if generate_only {
-            return generate(&import_dir, &pandoc);
-        }
-        let canonical = format!("{}/import", share_root(&root)?);
-        for fixture in FIXTURES {
-            println!("Capturing {}", fixture.dir_name());
-            capture_one(
-                fixture,
-                &import_dir.join(fixture.dir_name()),
-                &pandoc,
-                &canonical,
-            )?;
-        }
-        println!("Wrote import recordings to {}", import_dir.display());
-        Ok(())
+    let root = current_worktree_root()?;
+    std::env::set_current_dir(&root)?;
+    let pandoc = check_pandoc(&pinned_version(&root)?)?;
+    let import_dir: PathBuf = root.join(IMPORT_DIR);
+    if generate_only {
+        return generate(&import_dir, &pandoc);
     }
+    let canonical = format!("{}/import", share_root(&root)?);
+    for fixture in FIXTURES {
+        println!("Capturing {}", fixture.dir_name());
+        capture_one(
+            fixture,
+            &import_dir.join(fixture.dir_name()),
+            &pandoc,
+            &canonical,
+        )?;
+    }
+    println!("Wrote import recordings to {}", import_dir.display());
+    Ok(())
 }
 
 #[cfg(test)]

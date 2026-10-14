@@ -372,6 +372,10 @@ The metadata is published for *every* listing type, not only
 `metadata`, so a filter can also read the items of a listing the page
 renders in the usual way.
 
+The same route makes a listing interactive: build the no-script markup in
+Lua and hand the items to a React component with `quarto.component`. See
+[Components](../authoring/components.qmd#building-the-element-from-lua).
+
 ### What a filter reads
 
 `posts.lua`:

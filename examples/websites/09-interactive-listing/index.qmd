@@ -1,0 +1,73 @@
+---
+title: "Posts"
+listing:
+  id: posts
+  type: metadata
+  contents: posts/*.qmd
+  sort: "date desc"
+components:
+  - name: tag-filter
+    src: tag-filter.tsx
+    content: none
+---
+
+Every post below carries one or more tags. With JavaScript, the tag
+buttons narrow the list; without it, the page shows the whole list,
+grouped by year, as the cell below wrote it.
+
+```{lmd}
+-- The listing resolved the posts and published them at
+-- `meta.listings.posts`; this cell turns the items into (1) plain data
+-- for the component and (2) the no-script markup.
+local items = meta.listings.posts.items
+
+local rows = items:map(function(it)
+  return {
+    title = pandoc.utils.stringify(it.title),
+    href = it["output-href"],
+    date = it.date,
+    year = it["date-iso"]:sub(1, 4),
+    tags = it.categories,
+    description = pandoc.utils.stringify(it.description or ""),
+  }
+end)
+
+-- Every tag once, most used first, then alphabetical.
+local counts = {}
+for _, it in ipairs(items) do
+  for _, tag in ipairs(it.categories) do
+    counts[tag] = (counts[tag] or 0) + 1
+  end
+end
+local tags = {}
+for tag, n in pairs(counts) do tags[#tags + 1] = { name = tag, count = n } end
+table.sort(tags, function(a, b)
+  if a.count ~= b.count then return a.count > b.count end
+  return a.name < b.name
+end)
+
+-- The no-script version: one section per year, newest first.
+local by_year, years = {}, {}
+for _, it in ipairs(items) do
+  local y = it["date-iso"]:sub(1, 4)
+  if not by_year[y] then
+    by_year[y] = {}
+    years[#years + 1] = y
+  end
+  table.insert(by_year[y], it)
+end
+
+local blocks = pandoc.Blocks({})
+for _, y in ipairs(years) do
+  blocks:extend({=:
+### `{lmd} y`
+:=})
+  blocks:insert(pandoc.BulletList(pandoc.List(by_year[y]):map(function(it)
+    return {=:
+`{lmd} pandoc.Link(it.title, it.path)` (`{lmd} it.date`; tagged `{lmd} table.concat(it.categories, ", ")`)
+:=}
+  end)))
+end
+
+return quarto.component("tag-filter", { posts = rows, tags = tags }, blocks)
+```

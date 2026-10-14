@@ -2070,5 +2070,68 @@
     "message_template": "Some Word comment markers had no matching start or end. A start without an end became a point comment; an end without a start was removed.",
     "docs_url": "https://quarto.org/docs/errors/import/Q-24-14",
     "since_version": "99.9.9"
+  },
+  "Q-25-1": {
+    "subsystem": "components",
+    "title": "Invalid components Entry",
+    "message_template": "A `components` entry is malformed (not a map, no `name`, no `src`, a duplicate name, or a `src` that is not a project file). The entry is skipped.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-1",
+    "since_version": "99.9.9"
+  },
+  "Q-25-2": {
+    "subsystem": "components",
+    "title": "Component Module Outside the Project",
+    "message_template": "A component's `src` resolves outside the project, so it cannot be copied into the output. The element keeps its static content.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-2",
+    "since_version": "99.9.9"
+  },
+  "Q-25-3": {
+    "subsystem": "components",
+    "title": "npm Component Sources Not Supported Yet",
+    "message_template": "A component's `src` is an `npm:` package specifier. Only project files are supported for now; the entry is skipped.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-3",
+    "since_version": "99.9.9"
+  },
+  "Q-25-4": {
+    "subsystem": "components",
+    "title": "Component Binds to No Element",
+    "message_template": "A component's `bind` selector (`#id` or `.class`) matches no Div or Span on the page, so the component was not shipped with it.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-4",
+    "since_version": "99.9.9"
+  },
+  "Q-25-5": {
+    "subsystem": "components",
+    "title": "Element Bound by Two Components",
+    "message_template": "Two `components` entries select the same element. The first declaration keeps it; the second is ignored for that element.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-5",
+    "since_version": "99.9.9"
+  },
+  "Q-25-6": {
+    "subsystem": "components",
+    "title": "Invalid Component Option Value",
+    "message_template": "A component's `bind` is not `#id` or `.class`, or its `content` is not `dom`, `ast` or `none`. The entry is skipped.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-6",
+    "since_version": "99.9.9"
+  },
+  "Q-25-7": {
+    "subsystem": "components",
+    "title": "Unknown Component Name on Element",
+    "message_template": "An element asks for a component (`component=<name>`, or `quarto.component` in Lua) that `components:` does not declare. The element keeps its static content.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-7",
+    "since_version": "99.9.9"
+  },
+  "Q-25-8": {
+    "subsystem": "components",
+    "title": "component-props Is Not a JSON Object",
+    "message_template": "An element's `component-props` attribute is not a JSON object literal. The value is dropped; the component gets only the props declared in metadata.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-8",
+    "since_version": "99.9.9"
+  },
+  "Q-25-9": {
+    "subsystem": "components",
+    "title": "Component Module Could Not Be Prepared",
+    "message_template": "A component's TypeScript or JSX module (or one it imports) failed to transpile, could not be read, or has an import that names no file. The component was not shipped; its element keeps the static content.",
+    "docs_url": "https://quarto.org/docs/errors/components/Q-25-9",
+    "since_version": "99.9.9"
   }
 }
