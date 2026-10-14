@@ -9,7 +9,7 @@ braid:
 
 **Strand:** bd-eip0naf4 (epic; child of the websites epic bd-0tr6; related: bd-mdet0yoy hub-client FTS, bd-ulgr JS dependency design, bd-6cme sidebar search).
 **Branch:** `braid/bd-eip0naf4-website-search` (topic branch in the main checkout, based on `main` @ `80faa63f4`; no worktree).
-**Do not start implementation until the user gives the go-ahead.**
+**Status (2026-10-14, second pass):** the seven design questions are settled (§ Design decisions); a new federated-search requirement was added (§ Federated search across sites) and the wasm32 fork question was sized (§ wasm32 fork feasibility). **Do not start implementation until the user gives the go-ahead.**
 
 Investigation artifacts (all under `claude-notes/plans/website-search-investigation/`):
 
@@ -33,6 +33,7 @@ Quarto 1 ships client-side website search built on Fuse.js. At render time it wr
 - **related: bd-mdet0yoy** (hub-client full-text search) — a *different* feature: in-editor search over project *sources* in hub-client, shipped on MiniSearch 7. Its deferred Phase B (bd-b5ub29xd) wants per-document plaintext extraction and DocumentProfile boosting, which overlaps with what a site index needs; the extractor could be shared.
 - **related: bd-ulgr** (JS dependency handling design, open P1) — its text explicitly lists search. The de facto answer today is the `js:*` project-artifact pattern used by Bootstrap/clipboard/tabsets/listjs; this plan follows it.
 - **related: bd-6cme** (sidebar search integration, open) — "depends on the separate search epic"; this is that epic. Sidebar `search:` is not parsed yet.
+- **child: bd-d88bj5r1** (replace Algolia Autocomplete with a Quarto-owned overlay) — filed at design time per decision 2; blocked on the port landing.
 - `book/config.rs:72` already lists `search` among the website keys books share, so books come along for free at the config layer.
 
 ## What Quarto 1 does (summary; details in `quarto1-search-implementation.md`)
@@ -113,7 +114,7 @@ Peers in 2026: Astro Starlight and Nextra 4 default to Pagefind; VitePress and J
 - *Hosting constraints.* The runtime needs `'wasm-unsafe-eval'` in CSP and does not work from `file://` (Quarto 1 did not either; it alerted).
 - *Dependency weight.* The crate adds `lol_html`, `minicbor`, `rayon`, and ~700 KB of embedded UI assets to the native binary; `default-features = false` is required (drops actix) and the consumer must enable tokio's `io-util` (build finding in the spike, worth an upstream PR). Exact binary/compile-time cost in the real tree is a Phase 0 measurement.
 
-**UI: Quarto's own, ported from Quarto 1.** Keep the overlay/textbox placement, grouping-by-document with `collapse-after`, crumbs, keyboard shortcuts, copy button, `?q=` target-page highlighting (Quarto 1's highlighter, which handles tabsets; not `pagefind-highlight.js`), and the language terms. Replace the Fuse calls with `pagefind.search()` + `result.data()`, using Pagefind's excerpts for snippets. Whether to keep Algolia Autocomplete as the widget framework is an open question (below).
+**UI: Quarto's own, ported from Quarto 1.** Keep the overlay/textbox placement, grouping-by-document with `collapse-after`, crumbs, keyboard shortcuts, copy button, `?q=` target-page highlighting (Quarto 1's highlighter, which handles tabsets; not `pagefind-highlight.js`), and the language terms. Replace the Fuse calls with `pagefind.search()` + `result.data()`, using Pagefind's excerpts for snippets. Algolia Autocomplete stays as the widget framework for the port (decision 2); its replacement is bd-d88bj5r1.
 
 **Algolia stays opt-in** and ports as-is in a later phase; the UI already abstracts over the two backends in Quarto 1.
 
@@ -145,22 +146,81 @@ page assets: js:search:* (pagefind.js, quarto-search.js[, autocomplete]),
 
 ## Proposed phases (draft)
 
-- **Phase 0 — Spike in-tree + test plan.** Add `pagefind` (default-features off, cfg-gated to native) to `quarto-core`; measure compile time and `q2` binary delta on macOS/Linux/Windows; confirm `get_files()` + `SystemRuntime` writing; write the failing tests: index records for a fixture site (page + sections + crumbs + `search: false` + drafts), Subset-render manifest behaviour, navbar/sidebar HTML, options JSON.
+- **Phase 0 — Spike in-tree + test plan.** Add `pagefind` (default-features off, cfg-gated to native) to `quarto-core`; measure compile time and `q2` binary delta on macOS/Linux/Windows; confirm `get_files()` + `SystemRuntime` writing (the wasm32 fork feasibility check is already done at design time, § wasm32 fork feasibility, and is not repeated here); write the failing tests: index records for a fixture site (page + sections + crumbs + `search: false` + drafts), Subset-render manifest behaviour, navbar/sidebar HTML, options JSON.
 - **Phase 1 — Config + capture + emit.** `website.search` resolution; capture transform; `write_search_index`; `.quarto/search/` manifest; diagnostics for misconfiguration.
-- **Phase 2 — Assets + UI.** Vendored runtime via artifacts; `quarto-search.js` port (overlay + textbox, grouping, collapse-after, crumbs/`show-item-context`, keyboard shortcut, copy button, `?q=` highlighting, tabset opening); SCSS layer incl. dark mode; language terms; sidebar search (bd-6cme).
-- **Phase 3 — Books, preview, incremental.** Book projects; `q2 preview --static` reload interaction; hub/WASM behaviour per open question 3.
+- **Phase 2 — Assets + UI.** Vendored runtime via artifacts; `quarto-search.js` port (overlay + textbox, grouping, collapse-after, crumbs/`show-item-context`, keyboard shortcut, copy button, `?q=` highlighting, tabset opening); SCSS layer incl. dark mode; language terms; sidebar search (bd-6cme). Federation-readiness items from § Federated search: one construction site for the Pagefind instance with explicit `basePath`/`baseUrl`; a per-result site-context slot in the result renderer; `manifest.json` next to the bundle.
+- **Phase 3 — Books, preview, incremental.** Book projects; `q2 preview --static` reload interaction (and `Access-Control-Allow-Origin: *` on `site_libs/quarto-search/` so a federated parent can be developed against previewed children); no search box in hub-client preview formats (decision 3).
 - **Phase 4 — Algolia opt-in.** Port `algolia.*` options and the insights/consent wiring.
-- **Phase 5 — Docs + migration notes.** `website.search` reference; differences from Quarto 1 (no fuzzy, CSP, `file://`); `docs/errors/` pages.
+- **Phase 5 — Docs + migration notes.** `website.search` reference; differences from Quarto 1 (no fuzzy, CSP, `file://`); `search.json` compatibility note; `docs/errors/` pages.
+- **Later, separate strands:** bd-d88bj5r1 (own overlay, a11y); federated search (§ below; strand to be filed once the config sketch is agreed); profile-only search in the hub-client preview (optional, unfiled).
 
-## Open design questions for the user
+## Design decisions (settled with the user, 2026-10-14)
 
-1. **What do we capture per page: rendered body HTML, or AST-derived records?** Rendered body HTML (captured after `RenderHtmlBody`, before the template) is closest to Quarto 1 (indexes what the reader sees, including engine output, tables, callouts) and lets Pagefind's own HTML parser do heading anchors and element weighting; cost is a second HTML pass over the body in `lol_html`. AST records (plaintext per section via pampa's plaintext writer) are engine-independent and reusable by hub-client Phase B, but the plaintext writer currently drops tables and definition lists, and we would synthesize HTML for Pagefind anyway. **Recommendation: rendered body HTML.**
-2. **Keep Algolia Autocomplete as the widget framework, or write a lean custom overlay?** Keeping it is the fastest faithful port (same DOM, same SCSS, same a11y behaviour) at ~120 KB of vendored JS; a custom overlay is smaller and ours to maintain but reopens every UI detail. **Recommendation: keep Autocomplete for the port, revisit later.**
-3. **What should the browser preview (hub-client, default `q2 preview`) show?** Options: (a) no search box in the preview (simplest; the box only works in rendered/published output); (b) a profile-only index (titles, headings, descriptions) built from `ProjectIndex` in WASM with MiniSearch, which is already in hub-client; (c) full-text via the existing hub-client source search. **Recommendation: (a) for the port, with (b) as a follow-up strand.**
-4. **Keep emitting `search.json`?** It is documented in Quarto 1 as uploadable to Algolia and some users read it. **Recommendation: yes, behind the same resolver, and say so in docs.**
-5. **Index location.** Pagefind's convention is `/pagefind/`; q2's is `site_libs/<lib>/`. The runtime locates the index relative to its own script URL, so `site_libs/quarto-search/pagefind/` works. Any reason to prefer the Pagefind convention (third-party tooling)?
-6. **Is a future WASM full-site render a requirement?** If yes, we should budget the fork/own-writer route (C1) now rather than later; if no, cfg-gating is enough.
-7. **Fuzzy matching.** Accept Pagefind's lack of typo tolerance, or layer a small title-only fuzzy pass (uFuzzy-class) in the UI for the "did you mean" case?
+The seven questions from the first draft are answered; the answers are now constraints on the implementation.
+
+1. **Capture rendered body HTML** (after `RenderHtmlBody`, before the template), wrapped with `lang`, title, and crumbs, and let Pagefind's own HTML parser do heading anchors and element weighting. AST-derived records are not pursued.
+2. **Keep Algolia Autocomplete for the port, and replace it afterwards.** Autocomplete has needed accessibility workarounds in Quarto 1, so the replacement is a real goal, not a maybe. Filed at design time as **bd-d88bj5r1** (child of this epic, blocked on the port). The port should therefore keep the Autocomplete-specific code in one module so the swap is contained.
+3. **No search box in hub-client preview formats.** `q2 preview --static` goes through `q2 render` and gets search for free; the default hub-client preview renders only the active page and simply omits the box. A profile-only MiniSearch index for the preview stays a possible later strand; nothing is filed.
+4. **Keep emitting `search.json`** in Quarto 1's record shape, behind the same resolver, documented as an Algolia-upload / third-party artifact.
+5. **Index location is `site_libs/quarto-search/pagefind/`.** Third-party Pagefind tooling that hardcodes `/pagefind/` is limited to the Pagefind CLI's own `--serve`, the stock Pagefind UI's default `bundlePath`, and the runtime's *default* `baseUrl` derivation (it strips a trailing `pagefind/` from the bundle path; for our path it would compute `…/site_libs/quarto-search/` as the site root, which is wrong). None of that matters for a q2 site, with one consequence: **q2's UI must always pass `basePath` and `baseUrl` explicitly**, never rely on the defaults. For federation (below) the fixed path means a parent only needs a child's site URL.
+6. **A wasm32 full-site render is nice-to-have, not a requirement.** Context from the user: full-*project* WASM renders are wanted so book previews can emit PDF through the typst wasm renderer, and an "export website .zip" from hub-client is a plausible future; neither needs the Pagefind writer today. Decision: cfg-gate the dependency now, do *not* fork, but establish with a check-only experiment that a fork would work (§ wasm32 fork feasibility).
+7. **Accept Pagefind's lack of typo tolerance.** No fuzzy layer in the port; document the difference from Quarto 1.
+
+## Federated search across sites (new requirement, design only)
+
+**The need.** Posit's technical writers want an umbrella documentation site (docs.posit.co, eventually a q2 website) whose search box also returns hits from roughly a dozen child sites (docs.posit.co/posit-team/, docs.posit.co/ide/server-pro/, docs.posit.co/connect/, …), each of which will also be a q2 website. This is an advanced feature, not for the first release, and the question for now is only whether the recommended engine and the architecture above leave room for it.
+
+**Pagefind supports exactly this, natively.** It is documented as "multisite search" (`pagefind.app/docs/multisite/`): after `pagefind.init()`, the page calls `pagefind.mergeIndex(bundlePath, options)` once per extra site, and subsequent `pagefind.search()` calls return one merged result set. Verified in the 1.5.2 runtime the crate embeds (`vendor/pagefind_public_search_api.1.5.2.js`):
+
+- Each merged index becomes a second `PagefindInstance` with its own `basePath` (an absolute cross-origin URL is fine; the runtime only strips the origin when it matches `window.location.origin`), its own `pagefind-entry.json`, meta, index-chunk and fragment fetches, and its own `indexWeight`, `mergeFilter`, `baseUrl`, `language`, `ranking`, `excerptLength` options.
+- `search()` fans out with `Promise.all` over every instance, concatenates results, re-sorts by `score × indexWeight`, and merges filter counts; `preload()` fans out the same way. The worker-mode wrapper (`pagefind_worker.js`) implements the same `mergeIndex`.
+- Result URLs are built by `fullUrl(raw)`: `baseUrl + "/" + raw` unless `raw` is already absolute. So a parent passes `baseUrl: "https://docs.posit.co/connect/"` per child and q2 keeps writing root-relative record URLs (as Quarto 1 does), which keeps each child bundle relocatable.
+- Per-document metadata (title, crumbs, section headings) travels in each child's fragments, so Quarto's grouping-by-document and sub-results work unchanged for merged hits.
+
+**Cost model.** For every query, each child costs one `pagefind-entry.json` (cached after the first), its meta file once, about one 33 KB index chunk per new query term, and a 2 KB fragment per displayed result; all children are fetched in parallel. With the quarto.org numbers from the spike that is roughly 150 KB per child on the first query and 33 KB per child afterwards, so a dozen children means on the order of 1.8 MB on the first query and 400 KB per later query. That is the "admittedly inefficient" the writers already accepted, it is still far below Quarto 1's single 591 KB gzip download per site, and `preload()` on focus hides most of the latency. It is fine for a dozen children and would not be fine for a hundred.
+
+**Constraints that shape the design now.**
+
+1. **One Pagefind format version across the federation.** Merged instances share the *parent's* wasm module: `this.backend` is the module-global `wasm_bindgen` glue, and `mergeIndex` initialises children with `load_wasm: false`. A version mismatch between a child's `pagefind-entry.json` and the parent's runtime only produces a `console.warn`; an actual format change would fail at decode time, silently. Pagefind's format is undocumented and versioned only by release. Loading a per-child wasm is *not* a one-line patch (the wasm-bindgen glue is a singleton), so the practical rule is: all sites in a federation are rendered by q2 releases that embed the same `pagefind` crate version. Design response: q2 writes a `manifest.json` next to the bundle (q2 version, pagefind version, site title, default language, bundle path), and the parent UI reads it before merging and skips any child whose pagefind version differs, reporting that in the console and, in preview, as a diagnostic. Pinning one crate version per q2 release, which the single-crate recommendation already implies, makes this a non-issue for sites that upgrade together.
+2. **Same-origin versus cross-origin.** The motivating case (docs.posit.co with children under sub-paths) is *same-origin*, so no CORS configuration is needed at all. Children on other origins must serve the bundle directory with `Access-Control-Allow-Origin` (q2 cannot set response headers; the docs must say so, and the parent's CSP `connect-src` must list the child origins). `q2 preview --static` should add `Access-Control-Allow-Origin: *` on `site_libs/quarto-search/` so a federated parent can be developed locally against previewed children on other ports.
+3. **Bundle discoverability.** With decision 5 the bundle path is fixed, so for a q2 child the parent only needs the child's site URL; for a non-q2 Pagefind site, an explicit bundle path override.
+4. **Language.** A child in another language is searched with the parent's stemmer (Pagefind's documented limitation). Acceptable; note it in docs.
+5. **Showing where a hit comes from.** Results must say which site they belong to. Pagefind's `mergeFilter` can tag every result from a child (e.g. `site: "Posit Connect"`) without the child tagging its pages, and the result renderer needs a per-result site-context slot (empty for local hits). Cross-site ranking is only adjustable through `indexWeight`; BM25 scores from different corpora are not strictly comparable, which is inherent and acceptable.
+6. **Algolia path is unaffected**; federation is Pagefind-only (an Algolia user federates through Algolia's own multi-index search).
+
+**Config sketch (not final; to be agreed before a strand is filed):**
+
+```yaml
+website:
+  search:
+    federate:
+      - url: https://docs.posit.co/connect/
+        title: Posit Connect        # shown as result context; defaults to the child manifest's title
+        weight: 0.8                 # Pagefind indexWeight, default 1
+      - url: https://docs.posit.co/ide/server-pro/
+      - url: https://example.org/other-pagefind-site/
+        bundle: pagefind/           # override for a non-q2 Pagefind site
+```
+
+**What the port does now so this stays cheap later** (all folded into Phase 2 / Phase 3 above):
+
+- Construct the Pagefind instance in exactly one place in `quarto-search.js`, always with explicit `basePath` and `baseUrl`, so adding `mergeIndex` calls is additive.
+- Emit `site_libs/quarto-search/manifest.json` (q2 version, pagefind version, title, language, bundle path).
+- Keep record URLs root-relative; never bake the site URL into the index.
+- Give the result renderer a site-context field per result and per group.
+- Keep the `--static` preview CORS header as a small Phase 3 item.
+
+**Verdict:** federated search is possible with Pagefind with modest implementation effort (mostly UI and config, no engine work), and the architecture in this plan does not have to change to allow it. The one real risk is the format-version coupling across sites, which the manifest check and q2's single-crate pinning contain. A strand will be filed once the config sketch is agreed.
+
+## wasm32 fork feasibility (decision 6, check-only)
+
+The question is how far the `pagefind` 1.5.2 crate's *indexing* core is from compiling for `wasm32-unknown-unknown`, so that a future "full-project render in the browser" can be budgeted with confidence. Read of the crate source (5.7k lines in `src/`):
+
+- **Core that must survive unchanged:** `fossick/` (HTML parsing via `lol_html`, splitting, stemming: 2.4k lines), `index/` (word/filter/meta encoding with `minicbor`: 0.9k), `fragments/`, `output/entry.rs`. Their imports are pure: `lol_html`, `pagefind_stem`, `regex`, `unicode-*`, `hashbrown`, `minicbor`, `serde`, `emojis`, `flate2`. Nothing platform-specific.
+- **Native-only touch points, all at the edges:** `rayon` `into_par_iter` at four sites (`lib.rs` fossick-many, `index/mod.rs` page processing, filter encoding, chunk encoding), trivially sequentialised; `tokio::fs` + `tokio::time::sleep` in `output/mod.rs`, used only by the write-to-disk path (the in-memory `write_files_to_memory` path, which `get_files()` uses, does not need them); `tokio::task::spawn_blocking` + `tokio::sync::Mutex` in `service/api.rs` (the library API), replaceable by direct calls; `std::fs::File::open` in `fossick/mod.rs` only for the file-based `add_html_file` path (the string-based path is already in-memory); `std::thread::spawn` in `service/mod.rs` (the Node-service transport), `serve.rs`, `runner.rs`, `main.rs` are CLI-only and would be cfg-gated out.
+- **Dependency tree:** `tokio` with `rt-multi-thread`/`fs`/`time` is the main blocker (tokio compiles on wasm32 with only `sync`/`macros`/`io-util`/`rt`); `rayon` must go; `actix-*`/`portpicker` are already behind the `serve` feature; `charabia` (CJK, `extended` feature) is optional; `console`, `twelf` (CLI config), `wax` (globs), `async-compression` are suspects to be confirmed by the check below. `include_dir!` of `vendor/wasm` (33 language runtimes) compiles anywhere but carries its size into any binary that embeds the crate.
+
+A check-only experiment (patched copy in the scratchpad, `cargo check --lib --no-default-features --target wasm32-unknown-unknown`, no fork committed anywhere) is being run to turn this read into a measured patch size; results are appended below when available.
 
 ## Risks / tradeoffs (draft)
 
@@ -169,4 +229,5 @@ page assets: js:search:* (pagefind.js, quarto-search.js[, autocomplete]),
 - **Binary size / compile time** of the new dependency tree; measured in Phase 0 before committing.
 - **Incremental renders** need the same manifest discipline as llms.txt; stale-anchor bugs from Quarto 1 should not be reproduced.
 - **CSP** (`wasm-unsafe-eval`, `worker-src blob:`) is a new requirement for some hosts; document and expose `noWorker`.
-- **No search in the hub preview** until question 3's follow-up lands; set expectations in the hub UI.
+- **No search in the hub preview** (decision 3); set expectations in the hub UI.
+- **Federated search couples sites to one Pagefind format version.** The parent's wasm decodes every child's chunks; a mismatch only logs a warning in stock Pagefind. Mitigated by the bundle `manifest.json` (the parent skips and reports children with a different format version) and by pinning one `pagefind` crate version per q2 release; see § Federated search across sites.
