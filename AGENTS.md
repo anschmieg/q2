@@ -68,6 +68,15 @@ We use plans for additional context and bookkeeping. Write plans to
 `claude-notes/plans/YYYY-MM-DD-<description>.md`, and reference the plan file
 in the strands.
 
+`claude-notes/` renders as a Quarto 2 website, so every note is a qmd
+document. Write qmd, not GitHub Markdown: no indented code blocks, escape an
+apostrophe after a code span (`` `a.rs`\'s ``), and so on. The list is in
+`claude-notes/instructions/writing-notes.md`; the user-facing page it points
+at is `q2 agents-info guides/authoring/migrating-markdown.md`. Check a note
+with `q2 render --strict <file>`; CI runs `q2 render --strict claude-notes`
+on every PR (a step of the test suite, `.github/workflows/test-suite.yml`),
+so a note that fails to parse or warns fails the PR.
+
 ### File Structure
 Plan files should include:
 
@@ -261,6 +270,7 @@ When fixing ANY bug:
 - `quarto-core`: core rendering infrastructure for Quarto
 - `quarto-util`: shared utilities for Quarto crates
 - `quarto-error-catalog`: Quarto's `Q-*` error-code catalog data + the `CatalogProvider` it installs into `quarto-error-reporting`
+- `quarto-wasm-embed`: embeds the `wasm-quarto-hub-client` render WASM exactly once into the `q2` binary (zstd-compressed, lazily decoded); `q2 preview` serves it over HTTP and `q2 mcp`'s launcher extracts it next to `wasm-host.mjs`. See `claude-notes/plans/2026-10-13-wasm-embed-dedupe.md`.
 
 **Externalized foundation crates** (published to crates.io from their own `posit-dev/` repos; consumed here as version deps, no longer in `crates/`):
 - `quarto-error-reporting`: uniform, helpful, beautiful error messages — now **catalog-agnostic** (the `Q-*` data lives in the in-tree `quarto-error-catalog`). Repo: `posit-dev/quarto-error-reporting`. The `json` wire shape is behind a default-off `json` feature; q2's wire-shape consumers enable it.
@@ -446,6 +456,13 @@ cargo xtask build-q2-preview-spa      # bundle WASM into q2-preview-spa/dist/
 cargo build --bin q2                  # re-embed dist/ via include_dir!
 ```
 
+Note: the ~36 MB `wasm_quarto_hub_client_bg-*.wasm` is no longer part
+of the preview's embedded archive itself — `quarto-preview`'s build.rs
+strips it and the server reads the bytes from the `quarto-wasm-embed`
+crate, which embeds the SPA dist's copy (so the chain above still
+refreshes it; `q2 mcp` draws from the same crate). The served bytes,
+hashed URL, and gzip behavior are unchanged.
+
 `cargo xtask verify` (without `--skip-hub-build`) runs steps 1 and 2
 as part of the hub-build leg; after it finishes you still need step 3
 manually if you want the next `q2 preview` invocation to be fresh.
@@ -466,6 +483,17 @@ whatever bundle was last built — after changing `quarto-hub-mcp`,
 cargo xtask build-hub-mcp-bundle      # rebuild dist-bundle/ from TS sources
 cargo build --bin q2                  # re-embed via include_dir!
 ```
+
+One file is NOT re-embedded from the bundle: when `build-info.json`
+carries `wasmSha256` (every fresh bundle does), the launcher strips
+`wasm_quarto_hub_client_bg.wasm` from its embed and extracts the
+`quarto-wasm-embed` crate's copy instead — the q2 binary carries the
+render WASM exactly once. After changing Rust code that flows into
+the WASM, rebuild BOTH payloads (`cargo xtask build-hub-mcp-bundle`
+for the bundle's glue + sha stamp, `cargo xtask build-q2-preview-spa`
+for the shared embed source) before `cargo build --bin q2`; a
+generation mismatch prints a stderr warning at `q2 mcp` launch naming
+both commands.
 
 `cargo xtask build-all` includes the bundle step (ordered before the
 Rust build). Diagnose staleness with `q2 mcp --launcher-info`, which
@@ -531,7 +559,11 @@ This runs:
    fail-fast lints (step 1 in the xtask's numbering). The CSS lint enforces
    `hub-client/design-system.md` and runs even under `--skip-hub-build`;
    disable it with `--skip-css-lint`.
-1. `cargo build --workspace` - Build all Rust crates
+1. `cargo build --workspace` - Build all Rust crates, then
+   `cargo run --bin q2 -- render --strict claude-notes` - render the notes
+   website the way CI does, so a note that fails to parse or warns fails
+   here too (seconds; skipped by `--skip-rust-build`, or alone with
+   `--skip-claude-notes-render`)
 2. `cargo nextest run --workspace` - Run all Rust tests
 3. `npm run build --if-present -w ts-packages/...` - Build the ts-packages
    workspaces, then smoke-check the quarto-hub-mcp server (`node
@@ -547,6 +579,7 @@ cargo xtask verify --skip-rust-tests    # Skip Rust tests
 cargo xtask verify --skip-hub-tests     # Skip hub-client tests
 cargo xtask verify --skip-hub-build     # Skip hub-client build entirely
 cargo xtask verify --skip-css-lint      # Skip the hub-client CSS lint
+cargo xtask verify --skip-claude-notes-render  # Skip the strict claude-notes render
 cargo xtask verify --e2e                # Include slower e2e browser tests
 ```
 
@@ -635,7 +668,7 @@ This repository has Claude Code hooks configured in `.claude/settings.json`.
 ## General Instructions
 
 - in Claude Code conversations, "Rust Quarto" means this project, and "TypeScript Quarto" or "TS Quarto" means the current version of Quarto in the quarto-dev/quarto-cli repository.
-- in this repository, "qmd" means "quarto markdown", the dialect of markdown we are developing. Although we aim to be largely compatible with Pandoc, discrepancies in the behavior might not be bugs.
+- in this repository, "qmd" means "quarto markdown", the dialect of markdown we are developing. Although we aim to be largely compatible with Pandoc, discrepancies in the behavior might not be bugs. The known differences are documented for users in `docs/guides/authoring/migrating-markdown.qmd` (`q2 agents-info guides/authoring/migrating-markdown.md`); keep that page current when a difference is added or removed.
 - the qmd format only supports the inline syntax for a link [link](./target.html), and not the reference-style syntax [link][1].
 - When fixing bugs, always try to isolate and fix one bug at a time.
 - If you need to fix parser bugs, you will find use in running the application with "-v", which will provide a large amount of information from the tree-sitter parsing process, including a print of the concrete syntax tree out to stderr.

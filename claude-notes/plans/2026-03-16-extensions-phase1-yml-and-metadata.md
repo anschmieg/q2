@@ -1,7 +1,10 @@
-# Extensions Phase 1: _extension.yml Parsing and Metadata Contributions
+---
+title: 'Extensions Phase 1: `_extension.yml` Parsing and Metadata Contributions'
+date: 2026-03-16
+description: 'Parses `_extension.yml` files into an extension data model and merges their format metadata into project and document configuration as a new layer in the metadata merge order.'
+status: done  # Complete (all phases done; 1.6 format-resources deferred)
+---
 
-**Created**: 2026-03-16
-**Status**: Complete (all phases done; 1.6 format-resources deferred)
 **Parent Plan**: `claude-notes/plans/2026-03-16-extensions-grand-plan.md`
 
 ## Codebase Context for New Agents
@@ -306,7 +309,7 @@ submodules for types, reading, and discovery.
 
 - [x] **1.1.4** Write basic tests for `ExtensionId` (Display, equality, etc.)
 
-### Phase 1.2: _extension.yml Parser
+### Phase 1.2: \_extension.yml Parser
 
 - [x] **1.2.1** Create `crates/quarto-core/src/extension/read.rs` with:
   ```rust
@@ -737,7 +740,7 @@ Extension format metadata is stored as `ConfigValue` directly. This means:
 
 ### How read_extension() should parse YAML
 
-Follow the pattern in `project.rs` (`parse_project_config`, line ~490):
+Follow the pattern in `project.rs` (`parse_project_config`, line \~490):
 
 ```rust
 pub fn read_extension(extension_file: &Path, runtime: &dyn SystemRuntime) -> Result<Extension> {

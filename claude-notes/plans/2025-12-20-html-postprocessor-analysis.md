@@ -1,8 +1,13 @@
-# HTML Postprocessor Analysis and Rust DOM API Design
+---
+title: 'HTML Postprocessor Analysis and Rust DOM API Design'
+date: 2025-12-20
+description: 'Surveys the DOM operations used by quarto-cli''s HTML postprocessors to define the Rust DOM API the Quarto Rust port needs for equivalent HTML manipulation.'
+status: draft  # Research Complete - API Design Pending
+braid:
+  strand: k-xol0
+  priority: P2
+---
 
-**Date**: 2025-12-20
-**Status**: Research Complete - API Design Pending
-**Issue**: k-xol0
 **Parent Epic**: k-xlko
 
 ## Executive Summary
@@ -397,7 +402,7 @@ Since `scraper` uses an immutable tree (ego-tree), we need a strategy for mutati
 4. Serialize back to HTML
 
 **Option B: Use html5ever + rcdom directly**
-1. Parse with html5ever into rcdom (already mutable via Rc<RefCell>)
+1. Parse with html5ever into rcdom (already mutable via `Rc<RefCell>`)
 2. Implement `selectors::Element` trait for rcdom nodes
 3. Build our DOM wrapper API on top
 4. Serialize with html5ever's serializer
@@ -442,7 +447,7 @@ let matches: Vec<_> = elements.iter()
     .collect();
 ```
 
-This is exactly what `scraper` does - it implements `selectors::Element` for ego-tree nodes. Surprisingly, no existing crate provides this adapter for rcdom, so we'll need to write it ourselves. The implementation is straightforward (~100-200 lines) since it's just delegation to rcdom's existing node inspection methods.
+This is exactly what `scraper` does - it implements `selectors::Element` for ego-tree nodes. Surprisingly, no existing crate provides this adapter for rcdom, so we'll need to write it ourselves. The implementation is straightforward (\~100-200 lines) since it's just delegation to rcdom's existing node inspection methods.
 
 ### Proposed Rust Traits
 

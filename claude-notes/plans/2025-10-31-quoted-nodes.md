@@ -1,6 +1,9 @@
-# Quoted Nodes Implementation Plan
+---
+title: 'Quoted Nodes Implementation Plan'
+date: 2025-10-31
+description: 'Adds handlers for `pandoc_single_quote` and `pandoc_double_quote` nodes so quoted text, which is currently dropped from the output, becomes Pandoc `Quoted` inlines with nested quotes supported.'
+---
 
-**Date**: 2025-10-31
 **Context**: Implement `pandoc_single_quote` and `pandoc_double_quote` node handlers
 
 ## Current Status
@@ -217,7 +220,7 @@ Test cases needed:
 - Phase 4 (imports): 2 minutes
 - Phase 5 (tests): 30 minutes
 - Phase 6 (verification): 5 minutes
-- **Total**: ~1 hour
+- **Total**: \~1 hour
 
 ## Notes
 
@@ -238,7 +241,7 @@ Test cases needed:
 
 | Feature | Emph | Strong | Quoted |
 |---------|------|--------|--------|
-| Delimiters | Yes (*/_) | Yes (**/__) | Yes ('/") |
+| Delimiters | Yes (\*/\_) | Yes (\*\*/\_\_) | Yes (\'/\") |
 | Content | Inlines | Inlines | Inlines |
 | Attributes | No | No | No |
 | Nesting | Yes | Yes | Yes |

@@ -1,4 +1,8 @@
-# Plan: `cargo xtask create-worktree` + CLAUDE.local.md worktree context
+---
+title: 'Plan: `cargo xtask create-worktree` + CLAUDE.local.md worktree context'
+date: 2026-05-07
+description: 'Adds a `cargo xtask create-worktree` command that replaces hand-copied git worktree steps in the skills and writes an idempotent worktree context section into `CLAUDE.local.md`.'
+---
 
 ## Context
 
@@ -253,7 +257,7 @@ Add `time = { version = "0.3", features = ["macros", "formatting"] }` as a direc
 
 Format using `time::OffsetDateTime::now_utc().format(&time::macros::format_description!("[year]-[month]-[day]"))`.
 
-Hand-rolling YYYY-MM-DD from `std::time::SystemTime` requires re-implementing Gregorian calendar conversion (epoch-seconds → year/month/day with leap-year + month-length math). ~50 lines of date arithmetic where `time` provides one well-tested function call. Not worth the dependency-zero principle in this case.
+Hand-rolling YYYY-MM-DD from `std::time::SystemTime` requires re-implementing Gregorian calendar conversion (epoch-seconds → year/month/day with leap-year + month-length math). \~50 lines of date arithmetic where `time` provides one well-tested function call. Not worth the dependency-zero principle in this case.
 
 ## main.rs changes
 

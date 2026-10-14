@@ -1,0 +1,43 @@
+---
+title: "Algolia Search Is Misconfigured"
+description: "`website.search.algolia` needs `application-id`, `search-only-api-key`, and `index-name`. The Algolia settings are ignored and the built-in search index is used instead."
+code: Q-5-40
+subsystem: project
+status: complete
+since: "99.9.9"
+categories:
+  - project
+---
+
+# `Q-5-40` — Algolia Search Is Misconfigured
+
+> `website.search.algolia` needs `application-id`,
+> `search-only-api-key`, and `index-name`. The Algolia settings are
+> ignored and the built-in search index is used instead.
+
+## What this means
+
+Using Algolia as the search backend requires three values so the
+browser can query your index:
+
+```yaml
+# _quarto.yml
+website:
+  search:
+    algolia:
+      index-name: my-site
+      application-id: ABC123DEF4
+      search-only-api-key: 0123456789abcdef0123456789abcdef
+```
+
+When one of them is missing, Quarto cannot build a working Algolia
+client, so it warns and renders the site with its own Pagefind-based
+search instead. Nothing else about the site changes. Quarto 1 emitted
+the same warning but still wired the Algolia scripts, which left the
+search box broken in the browser.
+
+## How to fix it
+
+Add the missing key, or remove the `algolia` block to use the built-in
+search. The search-only API key is safe to publish; never use an admin
+key here.

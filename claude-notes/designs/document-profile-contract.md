@@ -67,7 +67,9 @@ produced.
 | `resources` | `Vec<String>` of document-level `resources:` patterns from the merged frontmatter (`bd-o8pr`). Raw patterns; expansion happens at the post-render collector. The snapshot of what the author declared at frontmatter-freeze time — engines and Lua filters that run later contribute through a separate channel (`DocumentResourceReport`) and cannot retroactively shrink this list. Default empty. |
 | `categories_raw` | `Option<ConfigValue>` carrying the originating tagged value of the top-level `categories:` key (`bd-n8a4`). Mirrors `categories` but preserves `!prefer` / `!concat` merge tags so listings consumers can feed it (alongside `listing_item.categories_raw`) into `quarto_config::MergedConfig` for tag-aware merging. Most consumers should keep reading the flattened `categories`; only listings reach for the raw form. Default `None`. |
 | `listing_content_globs` | `Vec<crate::glob::GlobPattern>` expanded from the host page's `listing.*.contents:` declarations (`bd-xbnf`, listings L6). Flattened across all listings on the page. The dependency-graph builder expands these against `ProjectIndex` at graph-build time (host-relative first, project-relative fallback — matches L3's render-time rule) to add forward edges from each listing host to its content files; hosts with non-empty entries are also added to the graph's `force_render` set so Mode B (`quarto render posts/foo.qmd`) pulls in listing hosts when any of their content files is targeted. Since bd-listing-inline-contents-tyy446ze the entries also include the literal `path:` of each inline `contents:` record that names a project document, so editing that document re-renders the host. Resolution is **not** cached on the profile (the per-doc cache cannot represent dependency on the full project source set safely). Field type and `DOCUMENT_PROFILE_VERSION` unchanged. Default empty. |
-| `listing_item` | `ListingItemInfo` advertising per-document data for listings consumers (`bd-n8a4`). **Scoped feature surface — listings only**; non-listing consumers must use the corresponding top-level fields (`title`, `description`, `image`, …). Author-supplied values populate during `DocumentProfile::extract`; `ListingItemInfoStage` (`bd-izqh`, L1, landed) auto-fills holes pre-checkpoint for `description` (full first paragraph), `image` (first inline image's URL), `word_count` (Q1-parity tokenization, footnote text excluded), `reading_time_minutes` (`ceil(word_count / 200)`), and `date_modified` (filesystem mtime via `SystemRuntime::path_metadata` formatted as `YYYY-MM-DD` UTC). Author values always win — the stage strictly fills holes. The nested `extra: BTreeMap<String, ConfigValue>` is the **only** open-shape field in the profile and is forbidden to non-listing consumers — see §"Scoped feature surfaces". Default empty (`ListingItemInfo::is_empty()`). |
+| `listing_item` | `ListingItemInfo` advertising per-document data for listings consumers (`bd-n8a4`). **Scoped feature surface — listings only**; non-listing consumers must use the corresponding top-level fields (`title`, `description`, `image`, …). Author-supplied values populate during `DocumentProfile::extract`; `ListingItemInfoStage` (`bd-izqh`, L1) auto-fills holes pre-checkpoint for `word_count` (Q1-parity tokenization, footnote text excluded), `reading_time_minutes` (`ceil(word_count / 200)`), and `date_modified` (filesystem mtime via `SystemRuntime::path_metadata` formatted as `YYYY-MM-DD` UTC). Author values always win — the stage strictly fills holes. Since v15 `description` and `image` here are **author-supplied only**: L1 derives those into `derived_listing` instead, so listings can rank authored values first. The nested `extra: BTreeMap<String, ConfigValue>` is the **only** open-shape field in the profile and is forbidden to non-listing consumers — see §"Scoped feature surfaces". Default empty (`ListingItemInfo::is_empty()`). |
+| `derived_listing` | `DerivedListingValues { description, image }` that `ListingItemInfoStage` derives from the post-include body: the first non-empty paragraph's plain text (untruncated) and the first inline image's document-relative URL. Computed for every document, even when the author supplied a value, so consumers other than listings (search) can use it. Travels to the profile on the typed `DocumentAst::derived_listing` side-channel, drained by `DocumentProfileStage` (like `includes`), never through metadata. Listings use it last: `listing-item.description → description → abstract → derived`, `listing-item.image → image → derived` (bd-listing-description-precedence-x4bh6w3m). Default empty. |
+| `abstract` | `Option<Inlines>` from top-level `abstract:`, flattened to one inline run (no Q-12-26 record — an abstract isn't written for the listing). The listing description's fallback after `description` (Q1 parity). Default `None`. |
 | `engine_resolution` | `Option<ProfileEngineResolution>` (`engine-resolution.md` §9.1). `Some` only when the document's engine resolution is provably load-free at Pass-1 — the needs-no-load predicate in `engine-resolution.md` §3.3 (P1–P4) — and is then **complete**: `sequence` is the resolved engine names in run order, `ownership` is the language→engine map in insertion order. `None` means resolution fell through to Pass-2's existing (non-profiled) resolution — **not an error**; most documents may show `None` until every engine a project uses is static or tabled (`engine-resolution.md` §3.3, §12). Names only, no `ConfigValue` blobs. Default `None`. |
 | `comments` | `Vec<ProfileComment>` — every editorial comment (`[>> … ]` / `[…]{.quarto-edit-comment}`) in the document body, in source order (v13, bd-0rsk07il / GH #445). Each entry: `text` (plain-text projection of the comment content), `source` (the mark's span, for jump-to-comment and joining with out-of-band authorship such as the hub attribution overlay), typed `author` / `date` from the mark's in-band `author=` / `date=` attributes (`None` when unstamped — the stamping convention is ISO 8601 UTC dates and display-name identity), and `attributes` (remaining kvs, authored order). Comments in included files count toward the including document. "Outstanding" = present: resolving deletes the mark from source. Count is `comments.len()`; there is deliberately no separate count field. Default empty. |
 
@@ -94,7 +96,7 @@ What a profile **does not** contain:
   filters would introduce (Lua, JSON, citeproc).
 - **Theme CSS, code highlighting, rendered HTML body, applied
   template.** All of those are downstream of the checkpoint.
-- **Resolved shortcodes.** `{{< meta … >}}` and friends are resolved
+- **Resolved shortcodes.** `{{{< meta … >}}}` and friends are resolved
   during `AstTransformsStage`, after the checkpoint.
 - **Cross-document information.** A `DocumentProfile` describes a
   single file. Merged across siblings by Phase 1's `ProjectIndex`
@@ -159,10 +161,10 @@ must continue to use the typed top-level fields. If a future
 feature finds itself wanting to read `listing_item`, that is a
 **redesign trigger** — either widen the typed top-level field set
 with a versioned bump, or define a new scoped feature surface. Do
-not silently broaden listings' scope.
+not silently broaden listings\' scope.
 
 The discipline is enforced by code review, not the type system.
-The `listing_item` field is `pub` for serde and for listings' own
+The `listing_item` field is `pub` for serde and for listings\' own
 use; the contract above is the boundary that matters.
 
 This is the same discipline `bd-fegm` (Phase 8) used when it
@@ -402,7 +404,7 @@ Tracking: `bd-creo` (CLI strictness), `bd-mwtf` /
     feature surfaces".
   - `categories_raw: Option<ConfigValue>` — tagged form of the
     top-level `categories:` value, preserving `!prefer` /
-    `!concat` merge tags for listings consumers' tag-aware
+    `!concat` merge tags for listings consumers\' tag-aware
     merging via `quarto_config::MergedConfig`. Most consumers
     keep reading the flattened `categories: Vec<String>`;
     only listings reach for the raw form. Default `None`.
@@ -524,7 +526,7 @@ Tracking: `bd-creo` (CLI strictness), `bd-mwtf` /
   Plan: `claude-notes/plans/2026-08-12-aliases-redirect-stubs.md`.
 
 - **2026-08-13 — v11 (`bd-toc-smart-quotes-6nro57ed`).** Changes
-  `outline`'s entry titles from `String` to `Inlines`
+  `outline`\'s entry titles from `String` to `Inlines`
   (`pampa::toc::TocEntry::title`).
 
   The flattened title was lossy in a way that produced a visible
@@ -559,7 +561,7 @@ Tracking: `bd-creo` (CLI strictness), `bd-mwtf` /
   per-document engine resolution, additive at the on-disk layer
   (`skip_serializing_if` keeps default profiles compact), stamped only
   when Pass-1 can resolve it without loading an engine
-  (`engine-resolution.md`'s needs-no-load predicate, §3.3/§7/§9.1).
+  (`engine-resolution.md`\'s needs-no-load predicate, §3.3/§7/§9.1).
   `None` means the doc falls through to Pass-2's existing resolution —
   not an error. Names only, no `ConfigValue` blobs: `sequence` is the
   resolved engine names in run order, `ownership` is the
@@ -595,3 +597,18 @@ Tracking: `bd-creo` (CLI strictness), `bd-mwtf` /
   comment-toggle badge (outstanding-comment count for the active
   page). Plan:
   `claude-notes/plans/2026-08-25-document-profile-comments.md`.
+
+- **2026-10-09 — v15 (bd-listing-description-precedence-x4bh6w3m).**
+  Adds `abstract` and `derived_listing`, and narrows
+  `listing_item.description` / `listing_item.image` to author-supplied
+  values: L1 now writes its derived description and image to the
+  `DocumentAst::derived_listing` side-channel instead of filling them
+  into `meta.listing-item`. A cached v14 profile would carry derived
+  values in the authored slots — the misread the bump prevents.
+  Same change: Pass-1 now runs the full pipeline's head
+  (`pipeline::build_head_stages`, shared by both), so Pass-1 profiles
+  include `LanguageResolveStage`, `IncludeResolveStage` and
+  `ListingItemInfoStage` and equal the full render's profile; the
+  Pass-1 cache key gained the source modification date L1 records
+  (`PROFILE_KEY_VERSION` 3).
+  Plan: `claude-notes/plans/2026-10-09-listing-description-precedence.md`.

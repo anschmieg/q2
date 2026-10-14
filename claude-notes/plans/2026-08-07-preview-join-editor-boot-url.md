@@ -1,4 +1,8 @@
-# Editor boot URL for `q2 preview --join` guests (skip project-set setup)
+---
+title: 'Editor boot URL for `q2 preview --join` guests (skip project-set setup)'
+date: 2026-08-07
+description: 'Lets `q2 preview --join` guests land in the shared editor by fetching the host''s boot details from the config endpoint and building the same ephemeral share URL the host uses.'
+---
 
 Strand: bd-7htq16rx
 
@@ -196,7 +200,7 @@ change.)
    health. Printing before the probe would print the wrong (root) URL
    for editor hosts; so the probe becomes sequential, the final URL
    prints once, and the browser opens inline. Common case adds one
-   tunnel roundtrip (~ms); worst case (host still booting) waits out
+   tunnel roundtrip (\~ms); worst case (host still booting) waits out
    the same 15 s budget the spawned probe had.
 4. **`EditorBootInfo` is defined in `quarto-preview`** with both
    `Serialize` and `Deserialize`; the guest (`quarto` crate) reuses

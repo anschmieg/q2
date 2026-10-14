@@ -1,7 +1,10 @@
-# Write VFS-created files to disk under `--allow-edit` (WriteBack)
+---
+title: 'Write VFS-created files to disk under `--allow-edit` (WriteBack)'
+date: 2026-08-13
+description: 'Creates files on disk under `--allow-edit` when a guest makes a new file in the VFS, distinguishing them from deleted files by whether the hub has ever checkpointed that document.'
+status: done  # Complete — implemented and e2e-verified 2026-08-13 (bd-1kuiw7sx)
+---
 
-**Date:** 2026-08-13
-**Status:** Complete — implemented and e2e-verified 2026-08-13 (bd-1kuiw7sx)
 **Context:** In a `q2 preview --share --ui editor --allow-edit` session, a
 guest who creates a new file (New File dialog / asset upload) gets a
 VFS-only document: `createFile` (`ts-packages/quarto-sync-client/src/client.ts:1255`)
@@ -269,7 +272,7 @@ persists by design; behavior there is unchanged.
   472/472; `cargo xtask verify --skip-hub-build` all 14 steps green.
 - 2026-08-13: E2E verified with the real binary and a real iroh join.
   Host: `target/debug/q2 preview --no-browser --allow-edit --ui editor
-  --share --data-dir <tmp> <fixture>` (fixture: `_quarto.yml` +
+  --share --data-dir <tmp> <fixture>` (fixture: `\_quarto.yml` +
   `index.qmd`; `RUST_LOG=quarto_hub=info`). Guest: `q2 preview --join
   q2preview… --no-browser`, driven by headless Chromium (Playwright)
   through the guest's tunnel proxy port: New File dialog →

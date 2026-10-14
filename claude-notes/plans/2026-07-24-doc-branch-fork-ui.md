@@ -1,4 +1,8 @@
-# Per-document fork/branch UI in hub-client
+---
+title: 'Per-document fork/branch UI in hub-client'
+date: 2026-07-24
+description: 'Experiment adding per-document fork and branch controls to hub-client, where forked branches live only in localStorage, can be edited in Monaco, and merge back into the synced document through a CRDT merge.'
+---
 
 ## Overview
 
@@ -40,7 +44,7 @@ client's change path (VFS + Monaco + peers) like any other edit.
   `branchService.applyBranchEdits` instead of `onContentOperations`.
   `content` state follows the branch, so the preview pane previews the branch.
 - **`src/components/BranchBar.tsx`** (+ CSS) — bar inside
-  `div.pane.editor-pane` above the Monaco wrapper (Editor.tsx ~1073),
+  `div.pane.editor-pane` above the Monaco wrapper (Editor.tsx \~1073),
   modeled on PreviewStatusBar. Chips: `main` + branches; active highlighted;
   inline-input fork creation; per-branch delete; "Merge to main" when on a
   branch. Hidden for binary files; disabled during replay mode.
@@ -82,6 +86,6 @@ client's change path (VFS + Monaco + peers) like any other edit.
 - Branches are per-browser (localStorage), invisible to collaborators — by
   design.
 - Replay mode and branches are mutually exclusive (bar disabled in replay).
-- localStorage quota (~5MB) bounds branch count/size; fine for qmd text.
+- localStorage quota (\~5MB) bounds branch count/size; fine for qmd text.
 - Merging does not rebase the branch; it deletes it after merge (git-PR-like
   mental model).

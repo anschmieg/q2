@@ -167,7 +167,8 @@ enum Commands {
         attribution: Option<AttributionMode>,
 
         /// Emit diagnostics as one JSON object per line on stderr
-        /// instead of human-readable text.
+        /// instead of human-readable text. Implies `--quiet`, so stderr
+        /// carries nothing but JSON.
         #[arg(long = "json-errors")]
         json_errors: bool,
 
@@ -434,11 +435,6 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Inline `<style>` rules of the HTML on stdin into `style` attributes
-    /// (internal helper for the Pandoc filter chain)
-    #[command(name = "inline-css", hide = true)]
-    InlineCss,
-
     /// Run the version of Typst embedded within Quarto
     Typst {
         /// Arguments to pass to typst
@@ -680,6 +676,33 @@ enum Commands {
         #[arg(long = "peer", value_name = "URL")]
         peers: Vec<String>,
 
+        /// Listen exclusively on a unix domain socket instead of
+        /// TCP+WebSocket; no TCP listener is bound. With no value, uses
+        /// the convention path (<project>/.quarto/hub/hub.sock in project
+        /// mode, <data-dir>/hub.sock standalone). Connections are
+        /// unauthenticated local-trusted: filesystem permissions plus an
+        /// accept-time uid check are the access control. Browsers cannot
+        /// connect in this mode except through an operator-configured
+        /// proxy. Unix only.
+        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        socket_path: Option<Option<PathBuf>>,
+
+        /// Trusted-proxy shape: grant <group> access to the socket — the
+        /// parent dir becomes 0750 and the socket 0660, group-owned by
+        /// <group>. Requires --socket-path.
+        #[arg(long, value_name = "GROUP", requires = "socket_path")]
+        socket_group: Option<String>,
+
+        /// Trusted-proxy shape: accept connections from this uid at the
+        /// socket (repeatable) — extends the accept-time peer-uid
+        /// allowlist beyond the hub's own uid. Requires --socket-path.
+        #[arg(
+            long = "socket-allow-uid",
+            value_name = "UID",
+            requires = "socket_path"
+        )]
+        socket_allow_uid: Vec<u32>,
+
         /// Periodic filesystem sync interval in seconds.
         /// Set to 0 to disable periodic sync.
         #[arg(long, default_value = "30")]
@@ -800,23 +823,35 @@ struct DocsLlmsArgs {
     /// page count)
     #[arg(long = "embed-info", conflicts_with = "href")]
     embed_info: bool,
+
+    /// Emit machine-readable JSON (requires `--list` or `--embed-info`)
+    #[arg(long, conflicts_with_all = ["href", "full"])]
+    json: bool,
 }
 
 impl DocsLlmsArgs {
-    fn mode(self) -> commands::docs_llms::Mode {
+    fn mode(self) -> anyhow::Result<commands::docs_llms::Mode> {
         use commands::docs_llms::Mode;
+        // clap's group-`requires` does not propagate through the
+        // tuple-variant subcommand, so `--json`'s pairing rule is
+        // enforced here instead (rejected combos: bare index + --json;
+        // `conflicts` covers href/full).
+        anyhow::ensure!(
+            !self.json || self.list || self.embed_info,
+            "the argument '--json' requires '--list' or '--embed-info'"
+        );
         // clap enforces mutual exclusion; the order here is arbitrary.
-        if self.full {
+        Ok(if self.full {
             Mode::Full
         } else if self.list {
-            Mode::List
+            Mode::List { json: self.json }
         } else if self.embed_info {
-            Mode::EmbedInfo
+            Mode::EmbedInfo { json: self.json }
         } else if let Some(href) = self.href {
             Mode::Page(href)
         } else {
             Mode::Index
-        }
+        })
     }
 }
 
@@ -839,6 +874,10 @@ enum CallCommands {
         #[arg(long)]
         workspace: bool,
     },
+    /// Inline `<style>` rules of the HTML on stdin into `style` attributes
+    /// (internal helper for the Pandoc filter chain)
+    #[command(name = "inline-css", hide = true)]
+    InlineCss,
 }
 
 #[derive(Subcommand)]
@@ -1311,7 +1350,7 @@ fn main() -> Result<()> {
     quarto_error_catalog::install();
 
     // Let Pandoc filters call back into this binary (`quarto-cli-path`), e.g.
-    // `q2 inline-css` for raw HTML tables.
+    // `q2 call inline-css` for raw HTML tables.
     if let Ok(exe) = std::env::current_exe() {
         quarto_core::pandoc_filters::params::set_cli_path(exe);
     }
@@ -1462,7 +1501,6 @@ fn main() -> Result<()> {
         Commands::Remove { .. } => commands::remove::execute(),
         Commands::Convert { .. } => commands::convert::execute(),
         Commands::Pandoc { .. } => commands::pandoc::execute(),
-        Commands::InlineCss => commands::inline_css::execute(),
         Commands::Typst { .. } => commands::typst::execute(),
         Commands::Run { .. } => commands::run::execute(),
         Commands::List { .. } => commands::list::execute(),
@@ -1504,6 +1542,7 @@ fn main() -> Result<()> {
                     workspace,
                 },
             ),
+            CallCommands::InlineCss => commands::inline_css::execute(),
         },
         Commands::Lsp => commands::lsp::execute(),
         Commands::GetConfig {
@@ -1524,9 +1563,9 @@ fn main() -> Result<()> {
             profile,
         }),
         Commands::Docs { command } => match command {
-            DocsCommands::Llms(args) => commands::docs_llms::execute(args.mode()),
+            DocsCommands::Llms(args) => commands::docs_llms::execute(args.mode()?),
         },
-        Commands::AgentsInfo(args) => commands::docs_llms::execute(args.mode()),
+        Commands::AgentsInfo(args) => commands::docs_llms::execute(args.mode()?),
         Commands::Mcp { args } => commands::mcp::run(&args),
 
         Commands::ProvideHub {
@@ -1563,6 +1602,9 @@ fn main() -> Result<()> {
             allowed_emails,
             allowed_domains,
             additional_audiences,
+            socket_path,
+            socket_group,
+            socket_allow_uid,
         } => commands::hub::execute(commands::hub::HubArgs {
             project,
             no_project,
@@ -1581,6 +1623,9 @@ fn main() -> Result<()> {
             allowed_emails,
             allowed_domains,
             additional_audiences,
+            socket_path,
+            socket_group,
+            socket_allow_uid,
         }),
         Commands::Trace { command } => match command {
             TraceCommand::List { trace_dir } => {

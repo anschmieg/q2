@@ -1,13 +1,15 @@
-# Heading id written as {id="..."} emits two id attributes (bd-heading-id-attr-duplicated-xbpcmejr)
+---
+title: 'Heading id written as {id="..."} emits two id attributes (bd-heading-id-attr-duplicated-xbpcmejr)'
+date: 2026-08-18
+description: 'Promotes `id` and `class` given as key-value attributes to the real identifier and classes, so a heading written with `{id="..."}` no longer emits two id attributes.'
+status: done  # Merged and closed 2026-08-19 — PR #556 (`f387bd68`); strand bd-heading-id-attr-duplicated-xbpcmejr closed. Open follow-ups: bd-fffjzi5s (class-charset writer fallback, p3), bd-0vfgz2cl (per-word class source spans, p4), bd-9itqqqe6 (package-lock.json missing `@esbuild/*` platform entries, discovered during pre-flight).
+braid:
+  strand: bd-heading-id-attr-duplicated-xbpcmejr
+  priority: P2
+  labels: [markdown]
+---
 
-**Date:** 2026-08-18
-**Braid:** bd-heading-id-attr-duplicated-xbpcmejr (p2, bug, label `markdown`)
-**Checkout:** main checkout, branch `main` @ `0c3542d0`
-**Status:** Merged and closed 2026-08-19 — PR #556 (`f387bd68`); strand
-bd-heading-id-attr-duplicated-xbpcmejr closed. Open follow-ups:
-bd-fffjzi5s (class-charset writer fallback, p3), bd-0vfgz2cl (per-word
-class source spans, p4), bd-9itqqqe6 (package-lock.json missing
-`@esbuild/*` platform entries, discovered during pre-flight).
+**Checkout:** main checkout, branch `main` \@ `0c3542d0`
 
 ## Design decisions (user-aligned, 2026-08-19)
 
@@ -55,7 +57,7 @@ port fragment-parity goal described in the strand body.
 
 ## What the code looks like today
 
-All paths verified at `main` @ `0c3542d0`; symptom reproduced (see
+All paths verified at `main` \@ `0c3542d0`; symptom reproduced (see
 `heading-id-kv-attribute-investigation/observed-2026-08-18.md`).
 
 - **Single reader-side choke point exists.**

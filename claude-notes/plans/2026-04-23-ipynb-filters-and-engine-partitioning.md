@@ -1,6 +1,10 @@
-# Research Plan: ipynb-filters in q2
+---
+title: 'Research Plan: ipynb-filters in q2'
+date: 2026-04-23
+description: 'Researches how q2 should implement Quarto 1''s ipynb-filters, proposing that the Jupyter engine run filter chains inside `markdown_for_file` so filter-modified metadata and headings reach project profiles, instead of a separate partition method.'
+status: draft  # Research — future work, not part of the TS engine extensions project
+---
 
-**Status:** Research — future work, not part of the TS engine extensions project
 **Depends on:** TS engine extensions (Plans 1a/1b/1c), native Jupyter engine, and the website-project pipeline (DocumentProfile checkpoint, two-pass orchestrator) already on `main`.
 **Supersedes:** an earlier draft of this plan (in git history) that assumed Plans 1a/1b would ship a `partitioned_markdown` trait method and `PartitionedMarkdown` protocol message. That assumption was reversed during plan review on 2026-04-28; see "Why we changed approach" below. The earlier specifics are preserved in the file's git history if needed.
 
@@ -70,11 +74,11 @@ This work depends on Plans 0, 1a, 1b, 1c being complete, and the website project
 
 1. **Add the project-level filter list to the `markdown_for_file` plumbing.** Plan 1c-adjacent: extend the trait signature or pass a config struct. Built-in engines that don't run filters ignore it.
 
-2. **Implement filter execution in q2's Jupyter `markdown_for_file`.** Spawn the filter scripts via `SystemRuntime::execute`, pipe notebook JSON through, chain results. Cache by `(file mtime, filter script mtimes)`. Reuse the cache from execute()'s kernel-input path so filters don't run twice per file.
+2. **Implement filter execution in q2's Jupyter `markdown_for_file`.** Spawn the filter scripts via `SystemRuntime::execute`, pipe notebook JSON through, chain results. Cache by `(file mtime, filter script mtimes)`. Reuse the cache from execute()\'s kernel-input path so filters don't run twice per file.
 
 3. **Wire the filter cache into the Phase-8 profile cache invalidation logic.** Filter scripts are part of the cache key for `DocumentProfile` of files they affect.
 
-4. **Document the per-document constraint.** If `_quarto.yml`'s `execute.ipynb-filters` is project-level-only, document this and emit a warning if a frontmatter `ipynb-filters` is encountered.
+4. **Document the per-document constraint.** If `_quarto.yml`\'s `execute.ipynb-filters` is project-level-only, document this and emit a warning if a frontmatter `ipynb-filters` is encountered.
 
 5. **Test with nbdev fixtures.** The validation target.
 

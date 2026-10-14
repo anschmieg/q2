@@ -350,6 +350,15 @@ pub struct RenderContext<'a> {
     /// stays unchanged.
     pub resolved_listings: Vec<crate::project::listing::ResolvedListing>,
 
+    /// Whether listing resolution already ran for this page, upstream
+    /// of the transforms: the `listing-resolve` stage (bd-2oqen84t, M2)
+    /// sets it as it bridges `resolved_listings` in, so
+    /// `ListingGenerateTransform` does not resolve (and diagnose) a
+    /// second time — `resolved_listings.is_empty()` alone cannot tell
+    /// "not yet resolved" from "resolved, and the page's `listing:` was
+    /// unusable".
+    pub listings_resolved: bool,
+
     /// Code-block decorations produced by
     /// [`CodeBlockGenerateTransform`](crate::transforms::CodeBlockGenerateTransform)
     /// and consumed by
@@ -462,6 +471,24 @@ pub struct RenderContext<'a> {
     /// per-chapter ones.
     pub defer_citeproc: bool,
 
+    /// Host inputs to `PandocPrepareStage` (the wasm entry point sets the
+    /// share root as temp root, a click-time `SOURCE_DATE_EPOCH` and
+    /// `collect_resources`). `None` (native) means
+    /// `PrepareOptions::native(temp_dir)`. Input-only, like `defer_citeproc`:
+    /// bridged one way into the `StageContext`, which also gets its temp dir
+    /// pre-seeded from `temp_root`.
+    pub prepare_options: Option<crate::pandoc_request::PrepareOptions>,
+
+    /// The request `PandocPrepareStage` built, handed back out of the stage
+    /// context by `restore_render_context` (the `citation_manifest`
+    /// pattern). `None` until that stage has run.
+    pub pandoc_request: Option<crate::pandoc_request::PandocRequest>,
+
+    /// Engine cells that stayed unexecuted (no cached result), set by the
+    /// pandoc-request pipeline's `UnexecutedCellCountStage`; `0` when that
+    /// stage is not in the list. Output-only, like `pandoc_request`.
+    pub unexecuted_cells: usize,
+
     /// Project-wide crossref registry for multi-file books (book-projects
     /// P5): every chapter's crossref targets, keyed by identifier, built by
     /// aggregating all chapters' inventories after they pause post-Navigation
@@ -565,6 +592,7 @@ impl<'a> RenderContext<'a> {
             resource_report: crate::project_resources::DocumentResourceReport::new(),
             resource_copies: Vec::new(),
             resolved_listings: Vec::new(),
+            listings_resolved: false,
             code_block_decorations: std::collections::HashMap::new(),
             attribution_provider: None,
             attribution_data: None,
@@ -575,6 +603,9 @@ impl<'a> RenderContext<'a> {
             document_profile: None,
             chapter_seed: None,
             defer_citeproc: false,
+            prepare_options: None,
+            pandoc_request: None,
+            unexecuted_cells: 0,
             cross_chapter_crossref_registry: None,
             citation_manifest: None,
             suppress_book_bibliography: false,

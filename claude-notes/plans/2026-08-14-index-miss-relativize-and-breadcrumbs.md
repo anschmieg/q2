@@ -1,13 +1,20 @@
-# Index-miss href relativization (×2) + website breadcrumbs
+---
+title: 'Index-miss href relativization (×2) + website breadcrumbs'
+date: 2026-08-14
+description: 'Routes root-absolute and static-file links that miss the project index through the resource resolvers so they become page-relative, then adds website breadcrumbs to the page title block.'
+braid:
+  strand: bd-tef2lm9j
+  priority: P2
+  labels: [websites]
+---
 
-**Date:** 2026-08-14
 **Braid:**
 - bd-tef2lm9j — nav hrefs to static (non-document) files not page-relativized
 - bd-root-absolute-dir-link-58eh8834 — body links to directories not page-relativized
 - bd-breadcrumbs-missing-1vpuqh34 — website breadcrumbs not rendered (blocked on the two above; the blocks edges encode the required ordering)
 - bd-root-relative-paths-design-fc5pvkcv — parent design (related); its decisions 4/5 and helpers govern this session
 
-**Checkout:** main checkout, `main` @ 3ac596e0. User asked for all three fixes in this session, in the order encoded in the graph.
+**Checkout:** main checkout, `main` \@ 3ac596e0. User asked for all three fixes in this session, in the order encoded in the graph.
 
 ## Triage verdict
 
@@ -188,7 +195,7 @@ trail + renderer.
       without a sidebar. Second run green end to end.
 - [x] Snapshot-change inventory: no `.snap` files changed in either
       commit; the one baseline fixture change is itemized in
-      `66bd2284`'s message.
+      `66bd2284`\'s message.
 - [x] Report to user. **Nothing pushed** — awaiting approval.
 
 ### Final commits

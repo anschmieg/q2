@@ -1,13 +1,19 @@
-# Listings lose declared order of explicit `contents:` entries (bd-listing-declared-order-3ixcvc4o)
+---
+title: 'Listings lose declared order of explicit `contents:` entries (bd-listing-declared-order-3ixcvc4o)'
+date: 2026-08-09
+description: 'Makes listings with explicit `contents:` paths keep the order the author declared, by ordering matched items by their first matching pattern, instead of the project''s alphabetical index order.'
+status: draft  # Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+braid:
+  strand: bd-listing-declared-order-3ixcvc4o  # origin: `br-listing-declared-order-qodof0f6` in the connect-docs porting skein
+  priority: P1
+  labels: [listings]
+---
 
-**Date:** 2026-08-09
-**Braid:** bd-listing-declared-order-3ixcvc4o (origin: `br-listing-declared-order-qodof0f6` in the connect-docs porting skein)
 **Checkout:** main worktree (`/Users/cscheid/rooms/room-1/q2`, branch `main`)
-**Status:** Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
 
 ## Triage verdict
 
-**Ready to design.** The mechanism is fully understood, Q1's target semantics are pinned from source, the fix site is localized to `ListingGenerateTransform`'s item-collection loop, and a minimal repro exists (copied into `listing-declared-order-investigation/repro/`). A handful of scope questions below need answers before implementation.
+**Ready to design.** The mechanism is fully understood, Q1's target semantics are pinned from source, the fix site is localized to `ListingGenerateTransform`\'s item-collection loop, and a minimal repro exists (copied into `listing-declared-order-investigation/repro/`). A handful of scope questions below need answers before implementation.
 
 ## Issue context
 
@@ -43,7 +49,7 @@ reading source:
    `crate::glob::resolve_patterns`. Order of the *patterns* is preserved in
    `GlobResolution.globs`.
 2. **Matching** (`crates/quarto-core/src/transforms/listing_generate.rs`
-   ~lines 162–173): items are collected by iterating
+   \~lines 162–173): items are collected by iterating
    `ctx.project_index.profiles()` (Pass-1 insertion order — project input
    enumeration order) and testing each candidate against the compiled
    `PatternSet::matches`. **This is where declaration order is lost**: the
@@ -52,13 +58,13 @@ reading source:
    `sort.rs::apply_sort`): `sort: false` → `Some(vec![])` → `apply_sort`
    returns immediately (correct no-op), so the index order leaks through.
 
-Precedent already in-tree: `PatternSet::excluded` (`glob/matcher.rs` ~line
+Precedent already in-tree: `PatternSet::excluded` (`glob/matcher.rs` \~line
 171) exists precisely so `project.render` can walk its positive patterns in
 the author's listed order while keeping exclusions global. The listing fix
 can follow the same shape.
 
 Bonus per-pattern machinery already present: the Q-12-19 "matched nothing"
-diagnostic loop (`listing_generate.rs` ~lines 180–200) already compiles each
+diagnostic loop (`listing_generate.rs` \~lines 180–200) already compiles each
 positive pattern individually — first-matching-pattern-index computation can
 reuse (or share hoisted compiles with) that loop.
 
@@ -74,8 +80,8 @@ reuse (or share hoisted compiles with) that loop.
 - **Q1's default sort is NOT date-desc**: when `sort:` is absent, title is a
   hydrated field, and sources include document items, Q1 applies
   `[{field: "order", asc}, {field: "title", asc}]` (`website-listing-read.ts`
-  ~line 637). `order` is a front-matter field (`kFieldOrder`) authors use for
-  curated ordering. q2's `listing_generate.rs` ~line 207 applies **date
+  \~line 637). `order` is a front-matter field (`kFieldOrder`) authors use for
+  curated ordering. q2's `listing_generate.rs` \~line 207 applies **date
   desc** with a comment claiming it "Matches Q1 default" — that claim looks
   wrong against current Q1 source. Scope question below.
 - q2's `is_known_sort_field` also doesn't include `order` (nor does
@@ -86,7 +92,7 @@ reuse (or share hoisted compiles with) that loop.
 Minimal repro copied to
 `claude-notes/plans/listing-declared-order-investigation/repro/` (declares
 `contents: [./bravo/index.md, ./alpha/index.md]` with `sort: false`).
-Rendered with the HEAD binary (2026-08-09, `main` @ 2f2f4be3, v0.14.0):
+Rendered with the HEAD binary (2026-08-09, `main` \@ 2f2f4be3, v0.14.0):
 
 ```
 $ cd claude-notes/plans/listing-declared-order-investigation/repro
@@ -178,7 +184,7 @@ listings.
 - [x] **Discovered latent bug** (found because the first default-sort test
   fixture passed coincidentally): `compare_items` applies the `Desc` flip
   to the *whole* comparison, so missing-value items float to the TOP of
-  desc sorts — contradicting `compare_values`' documented "missing sorts
+  desc sorts — contradicting `compare_values`\' documented "missing sorts
   last regardless of direction" rule. Pinned by failing test
   `missing_dates_sort_to_end_in_desc_too`; fix folded into Phase 2.
 

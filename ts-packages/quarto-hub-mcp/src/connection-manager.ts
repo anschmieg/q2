@@ -27,8 +27,11 @@ import { createHash } from 'node:crypto';
 
 import {
   createSyncClient,
+  readProjectSetDoc,
   type AuthRejectionEvidence,
+  type CaptureRef,
   type DisconnectOptions,
+  type ProjectSetDocument,
   type SyncClient,
   type SyncClientCallbacks,
   type FilePayload,
@@ -36,16 +39,19 @@ import {
 } from '@quarto/quarto-sync-client';
 
 import type { CredentialStore } from './auth/credential-store.js';
+import type { DefaultProjectSetStore } from './default-project-set.js';
 import { ReauthRequired, type RefreshManager } from './auth/refresh-manager.js';
 import { redactTokens } from './auth/redact.js';
+import { PresenceTracker, type PresenceSnapshotEntry } from './presence-tracker.js';
+import { serversMatch } from './share-url.js';
 
 // ---------------------------------------------------------------------------
 // Public types / errors
 // ---------------------------------------------------------------------------
 
 /**
- * Observed hub auth-mode (process-local). Phase 7 consults this to
- * decide whether `authenticate` should short-circuit.
+ * Observed hub auth-mode (process-local). The auth tool's sign_in
+ * arm consults this to decide whether it should short-circuit.
  */
 export type ObservedAuthMode = 'no-auth' | 'requires-auth' | 'unknown';
 
@@ -53,7 +59,7 @@ export class AuthRequiredError extends Error {
   override readonly name = 'AuthRequiredError';
   constructor(
     message: string = 'This Quarto Hub requires authentication. ' +
-      'Ask me to call `authenticate` to sign in.',
+      'Ask me to call `auth` with `action: "sign_in"` to sign in.',
   ) {
     super(message);
   }
@@ -71,6 +77,26 @@ export class InsecureTransportError extends Error {
 }
 
 /**
+ * A share URL's `server=` named a hub that demands authentication
+ * (bd-qt7h8h5g). The configured hub's Bearer is audience-bound and is
+ * never replayed to a foreign origin, so there is no credential this
+ * MCP can offer the foreign hub today.
+ */
+export class ForeignHubAuthRequiredError extends Error {
+  override readonly name = 'ForeignHubAuthRequiredError';
+  constructor(foreignServer: string, configuredServer: string) {
+    super(
+      `This project is on ${foreignServer}, which requires authentication. ` +
+        `This MCP server's credentials are scoped to ${configuredServer} and ` +
+        'are never sent to another origin. Signing in to additional hubs is ' +
+        'not supported yet — ask the project owner to host the project on ' +
+        `${configuredServer}, or to share it from a hub that allows ` +
+        'unauthenticated access.',
+    );
+  }
+}
+
+/**
  * The hub returned 403 for our (valid) credentials: the identity is
  * denied — banned or not in the allowlist. Distinct from a 401 in that
  * re-authenticating with the same account cannot help, so the keyring
@@ -82,7 +108,7 @@ export class HubAccessDeniedError extends Error {
     message: string = 'Your account is not allowed on this Quarto Hub ' +
       '(it may be banned or not in the allowlist). Re-authenticating ' +
       'with the same account will not help — contact the hub operator, ' +
-      'or run authenticate_clear and sign in as a different account.',
+      'or run `auth` with `action: "clear"` and sign in as a different account.',
   ) {
     super(message);
   }
@@ -92,6 +118,12 @@ export interface ConnectionManagerDeps {
   readonly serverUrl: string;
   readonly credentialStore?: CredentialStore;
   readonly refreshManager?: RefreshManager;
+  /**
+   * The remembered-default store behind a bare `list_projects`
+   * (bd-3h5hbfdv). Optional so tests that never exercise the default can
+   * omit it; the handlers degrade to asking for an explicit `project_set`.
+   */
+  readonly defaultProjectSetStore?: DefaultProjectSetStore;
   /** Test seam. Defaults to `globalThis.fetch`. */
   readonly fetch?: typeof fetch;
   /** Test seam. Defaults to `process.env`. */
@@ -108,10 +140,81 @@ export interface ConnectionManagerDeps {
 /**
  * A one-shot listener registered by {@link ConnectionManager.waitForChange}.
  * Fired (and removed) the next time the watched `path` changes.
+ * `interrupt` settles the poll with an error instead — used by
+ * {@link ConnectionManager.disconnect} so a torn-down project never
+ * leaves a poll hanging until its timeout (HY-5).
  */
 interface ChangeWaiter {
   path: string;
   fire: (payload: FilePayload | null) => void;
+  interrupt?: (err: Error) => void;
+}
+
+/**
+ * Latest index-doc sidecar snapshots, mirrored from the sync client's
+ * `onCapturesChange` callback. Read by the `get_errors` tool for
+ * execution errors. A mutable holder (rather than fields on
+ * {@link ProjectState}) because the callbacks are wired before the
+ * state object exists and the initial fire happens during `connect`.
+ */
+interface SidecarState {
+  captures: Record<string, CaptureRef>;
+}
+
+/**
+ * One observed project-level change (CAP-18). `hash` is the sha256
+ * content hash (`sha256:<hex>`) after the change, null on removal.
+ */
+export interface ProjectChangeEvent {
+  path: string;
+  hash: string | null;
+  kind: 'added' | 'edited' | 'removed';
+}
+
+/**
+ * A file-level event in a connected project (BP-5): the raw material
+ * the MCP resources bridge turns into `notifications/resources/updated`
+ * and `notifications/resources/list_changed`. Fired for local and
+ * remote changes alike — the bridge's subscribers asked for both.
+ */
+export interface ProjectFileEvent {
+  kind: 'added' | 'changed' | 'removed';
+  serverUrl: string;
+  indexDocId: string;
+  path: string;
+}
+
+/**
+ * A project connection lifecycle event (BP-5): a connect makes a whole
+ * project's files enumerable as resources, a disconnect removes them —
+ * both are `resources/list_changed` semantics.
+ */
+export interface ProjectConnectionEvent {
+  kind: 'connected' | 'disconnected';
+  serverUrl: string;
+  indexDocId: string;
+}
+
+export type ProjectEvent = ProjectFileEvent | ProjectConnectionEvent;
+
+/**
+ * A project-wide listener registered by
+ * {@link ConnectionManager.waitForAnyChange}. Events accumulate
+ * (deduped by path) and the owner debounces: a sync batch touching many
+ * files resolves as one result, not one result per file.
+ */
+interface ProjectChangeWaiter {
+  /**
+   * Own-write exclusion (ERG-8): an event whose content hash matches is
+   * the echo of the caller's own write and is dropped — never fires,
+   * never joins `events`.
+   */
+  excludeHash?: string;
+  /** Accepted events so far, deduped by path (an 'added' kind sticks). */
+  events: ProjectChangeEvent[];
+  /** Called once per accepted event so the owner can (re)arm its settle timer. */
+  onEvent: () => void;
+  interrupt?: (err: Error) => void;
 }
 
 interface ProjectState {
@@ -119,6 +222,13 @@ interface ProjectState {
   files: Map<string, FilePayload>;
   /** Pending long-poll waiters, keyed implicitly by their `path` field. */
   waiters: Set<ChangeWaiter>;
+  sidecars: SidecarState;
+  /** Pending project-wide waiters (CAP-18). */
+  projectWaiters: Set<ProjectChangeWaiter>;
+  /** Passive presence observation (CAP-8) — never broadcasts (Q-3). */
+  presence: PresenceTracker;
+  /** The sync server this project is connected through (bd-qt7h8h5g). */
+  serverUrl: string;
 }
 
 /**
@@ -133,8 +243,21 @@ export interface ChangeResult {
   hash: string | null;
 }
 
-/** Content hash used for the long-poll gap-close check. */
-function hashPayload(p: FilePayload | undefined | null): string | null {
+/**
+ * Result of a {@link ConnectionManager.waitForAnyChange} project-wide
+ * long-poll (CAP-18). `changed: false` means the call timed out with
+ * nothing observed; `changes` is then empty.
+ */
+export interface ProjectChangeResult {
+  changed: boolean;
+  changes: ProjectChangeEvent[];
+}
+
+/**
+ * Content hash (`sha256:<hex>`) used for the long-poll gap-close check
+ * and the write tools' compare-and-swap (`expected_hash`, ERG-1).
+ */
+export function hashPayload(p: FilePayload | undefined | null): string | null {
   if (!p) return null;
   const h = createHash('sha256');
   if (p.type === 'text') h.update(p.text, 'utf8');
@@ -157,6 +280,89 @@ function fireWaiters(
       w.fire(payload);
     }
   }
+}
+
+/**
+ * Settle window for project-wide watches (CAP-18): the first accepted
+ * event starts the clock; events landing inside the window accumulate
+ * so a multi-file sync batch resolves as one result. 150 ms is far
+ * above a same-batch callback fan-out and far below anything an agent
+ * could perceive.
+ */
+export const PROJECT_WATCH_SETTLE_MS = 150;
+
+/**
+ * Offer a file event to every project-wide waiter. The waiter's own
+ * exclusion filter (ERG-8) drops the echo of its caller's own write;
+ * accepted events are deduped by path (a file 'added' then edited
+ * within the window stays 'added').
+ */
+function notifyProjectWaiters(
+  waiters: Set<ProjectChangeWaiter>,
+  path: string,
+  payload: FilePayload | null,
+  kind: ProjectChangeEvent['kind'],
+): void {
+  if (waiters.size === 0) return;
+  const hash = hashPayload(payload);
+  for (const w of [...waiters]) {
+    if (w.excludeHash !== undefined && hash !== null && hash === w.excludeHash) {
+      continue;
+    }
+    const i = w.events.findIndex((e) => e.path === path);
+    if (i >= 0) {
+      const prev = w.events[i]!;
+      w.events[i] = { path, hash, kind: prev.kind === 'added' ? 'added' : kind };
+    } else {
+      w.events.push({ path, hash, kind });
+    }
+    w.onEvent();
+  }
+}
+
+/**
+ * The file-event callbacks shared by {@link ConnectionManager}'s
+ * connect and createProject paths: update the files mirror, fire
+ * per-path waiters, and offer the event to project-wide waiters.
+ */
+function buildSyncCallbacks(
+  files: Map<string, FilePayload>,
+  waiters: Set<ChangeWaiter>,
+  projectWaiters: Set<ProjectChangeWaiter>,
+  sidecars: SidecarState,
+  emitFileEvent?: (kind: 'added' | 'changed' | 'removed', path: string) => void,
+): SyncClientCallbacks {
+  return {
+    onFileAdded(path: string, file: FilePayload) {
+      files.set(path, file);
+      fireWaiters(waiters, path, file);
+      notifyProjectWaiters(projectWaiters, path, file, 'added');
+      emitFileEvent?.('added', path);
+    },
+    onFileChanged(path: string, text: string, _patches: Patch[]) {
+      const payload: FilePayload = { type: 'text', text };
+      files.set(path, payload);
+      fireWaiters(waiters, path, payload);
+      notifyProjectWaiters(projectWaiters, path, payload, 'edited');
+      emitFileEvent?.('changed', path);
+    },
+    onBinaryChanged(path: string, data: Uint8Array, mimeType: string) {
+      const payload: FilePayload = { type: 'binary', data, mimeType };
+      files.set(path, payload);
+      fireWaiters(waiters, path, payload);
+      notifyProjectWaiters(projectWaiters, path, payload, 'edited');
+      emitFileEvent?.('changed', path);
+    },
+    onFileRemoved(path: string) {
+      files.delete(path);
+      fireWaiters(waiters, path, null);
+      notifyProjectWaiters(projectWaiters, path, null, 'removed');
+      emitFileEvent?.('removed', path);
+    },
+    onCapturesChange(captures) {
+      sidecars.captures = captures;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +410,8 @@ export class ConnectionManager {
   private readonly serverUrlParsed: URL;
   private readonly credentialStore: CredentialStore | undefined;
   private readonly refreshManager: RefreshManager | undefined;
+  /** Public: the tool handlers reach the remembered default through here. */
+  readonly defaultProjectSetStore: DefaultProjectSetStore | undefined;
   private readonly httpFetch: typeof fetch;
   private readonly env: NodeJS.ProcessEnv;
   private readonly syncClientFactory: (cbs: SyncClientCallbacks) => SyncClient;
@@ -226,6 +434,8 @@ export class ConnectionManager {
   // fires after a hub-wide event, but at most one forceRefresh+reprobe
   // cycle runs at a time.
   private authRecheckInflight: Promise<void> | undefined;
+  /** BP-5 resource-bridge listeners (see {@link onProjectEvent}). */
+  private readonly projectEventListeners = new Set<(e: ProjectEvent) => void>();
 
   constructor(deps: ConnectionManagerDeps | string) {
     // Backwards-compat: the prior signature was `new ConnectionManager(url)`.
@@ -235,6 +445,7 @@ export class ConnectionManager {
     this.serverUrlParsed = new URL(opts.serverUrl);
     this.credentialStore = opts.credentialStore;
     this.refreshManager = opts.refreshManager;
+    this.defaultProjectSetStore = opts.defaultProjectSetStore;
     this.httpFetch =
       opts.fetch ??
       ((input, init) => globalThis.fetch(input, init));
@@ -254,13 +465,93 @@ export class ConnectionManager {
   }
 
   /**
+   * Subscribe to project file/connection events (BP-5). The MCP
+   * resources bridge is the one consumer: it maps these onto
+   * `notifications/resources/updated` and
+   * `notifications/resources/list_changed`. Returns an unsubscribe
+   * function. Listeners must be fast and non-throwing — a throw is
+   * logged and swallowed so one bad listener can't break sync
+   * callbacks for the waiters sharing them.
+   */
+  onProjectEvent(listener: (e: ProjectEvent) => void): () => void {
+    this.projectEventListeners.add(listener);
+    return () => {
+      this.projectEventListeners.delete(listener);
+    };
+  }
+
+  /** Deliver a project event to every registered listener (BP-5). */
+  private emitProjectEvent(e: ProjectEvent): void {
+    for (const listener of this.projectEventListeners) {
+      try {
+        listener(e);
+      } catch (err) {
+        console.error(
+          '[hub-mcp] project-event listener threw:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
+  /** The cache key for {@link projects}: connection state is per (server, project) (bd-qt7h8h5g). */
+  private projectKey(serverUrl: string, indexDocId: string): string {
+    return `${serverUrl}\n${indexDocId}`;
+  }
+
+  /**
+   * Conformance-test seam (bd-f1dr7gs1, Phase 0): the number of pending
+   * `waitForChange` waiters registered for a project. This is the leak
+   * gauge for cancellation hygiene (BP-3): a cancelled long-poll must
+   * unregister its waiter, not leave it to its timeout. Production code
+   * has no reason to call this.
+   */
+  pendingWaiterCount(indexDocId: string): number {
+    return this.projects.get(this.projectKey(this.serverUrl, indexDocId))?.waiters.size ?? 0;
+  }
+
+  /**
+   * The project-wide counterpart of {@link pendingWaiterCount}
+   * (CAP-18): pending `waitForAnyChange` waiters. Same conformance-test
+   * seam — a cancelled project-wide poll must unregister promptly.
+   */
+  pendingProjectWaiterCount(indexDocId: string): number {
+    return (
+      this.projects.get(this.projectKey(this.serverUrl, indexDocId))?.projectWaiters.size ?? 0
+    );
+  }
+
+  /**
+   * Conformance-test seam (same family as {@link pendingWaiterCount}):
+   * the number of registered {@link onProjectEvent} listeners. Under
+   * one-server-per-request HTTP serving (CAP-16's loopback listener,
+   * Phase 6) every request constructs a fresh server — if the resource
+   * bridge's listener outlives its server, this count grows without
+   * bound. Production code has no reason to call this.
+   */
+  projectEventListenerCount(): number {
+    return this.projectEventListeners.size;
+  }
+
+  /**
    * Connect to a project. Walks the try-then-fallback auth policy,
    * then opens the sync client. Re-uses existing project state when
    * we've already connected.
+   *
+   * `options.server` (from a share URL's `server=`, bd-qt7h8h5g) routes
+   * the connect to a different hub: the configured hub's Bearer is
+   * audience-bound and is NEVER replayed to a foreign origin, so a
+   * foreign hub is probed no-auth and joined authorless (a 401/403
+   * there is a {@link ForeignHubAuthRequiredError}, not a credential
+   * leak).
    */
-  async connect(indexDocId: string): Promise<ProjectState> {
+  async connect(indexDocId: string, options?: { server?: string }): Promise<ProjectState> {
+    const server = options?.server ?? this.serverUrl;
+    if (!serversMatch(server, this.serverUrl)) {
+      return this.connectForeign(indexDocId, server);
+    }
     await this.gateAuthState();
-    const existing = this.projects.get(indexDocId);
+    const existing = this.projects.get(this.projectKey(this.serverUrl, indexDocId));
     if (existing) return existing;
 
     const auth = await this.resolveAuthForConnect();
@@ -273,27 +564,45 @@ export class ConnectionManager {
       ? await this.fetchAuthorId(indexDocId, auth.getBearer)
       : undefined;
 
+    return await this.openProject(this.serverUrl, indexDocId, auth, authorId);
+  }
+
+  /**
+   * Connect to a project on a hub other than the configured one —
+   * always authorless: credentials are audience-bound (bd-qt7h8h5g).
+   * A probe without credentials decides: open hub → join; 401/403 →
+   * {@link ForeignHubAuthRequiredError}.
+   */
+  private async connectForeign(indexDocId: string, server: string): Promise<ProjectState> {
+    const existing = this.projects.get(this.projectKey(server, indexDocId));
+    if (existing) return existing;
+
+    const status = await this.probeAuth(undefined, server);
+    if (status === 401 || status === 403) {
+      throw new ForeignHubAuthRequiredError(server, this.serverUrl);
+    }
+    return await this.openProject(server, indexDocId, undefined, undefined);
+  }
+
+  /**
+   * Open the sync client for a project on `serverUrl` and cache the
+   * state per (server, project). Shared by the configured-hub and
+   * foreign-hub connect paths.
+   */
+  private async openProject(
+    serverUrl: string,
+    indexDocId: string,
+    auth: { getBearer: () => Promise<string> } | undefined,
+    authorId: string | undefined,
+  ): Promise<ProjectState> {
     const files = new Map<string, FilePayload>();
     const waiters = new Set<ChangeWaiter>();
+    const projectWaiters = new Set<ProjectChangeWaiter>();
+    const sidecars: SidecarState = { captures: {} };
     const callbacks: SyncClientCallbacks = {
-      onFileAdded(path: string, file: FilePayload) {
-        files.set(path, file);
-        fireWaiters(waiters, path, file);
-      },
-      onFileChanged(path: string, text: string, _patches: Patch[]) {
-        const payload: FilePayload = { type: 'text', text };
-        files.set(path, payload);
-        fireWaiters(waiters, path, payload);
-      },
-      onBinaryChanged(path: string, data: Uint8Array, mimeType: string) {
-        const payload: FilePayload = { type: 'binary', data, mimeType };
-        files.set(path, payload);
-        fireWaiters(waiters, path, payload);
-      },
-      onFileRemoved(path: string) {
-        files.delete(path);
-        fireWaiters(waiters, path, null);
-      },
+      ...buildSyncCallbacks(files, waiters, projectWaiters, sidecars, (kind, path) =>
+        this.emitProjectEvent({ kind, serverUrl, indexDocId, path }),
+      ),
       onError(err: Error) {
         console.error(
           `[hub-mcp] Sync error for project ${indexDocId}:`,
@@ -305,7 +614,7 @@ export class ConnectionManager {
     const client = this.syncClientFactory(callbacks);
     // Pass auth iff we resolved a Bearer; otherwise the sync-client
     // uses the browser adapter (no header).
-    await client.connect(this.serverUrl, indexDocId, authorId, undefined, undefined, {
+    await client.connect(serverUrl, indexDocId, authorId, undefined, undefined, {
       auth,
       // Server-backed client with memory storage: offline mode would
       // be a silent data black hole — demand a live peer or fail
@@ -316,8 +625,11 @@ export class ConnectionManager {
       peerTimeoutMs: PEER_TIMEOUT_MS,
     });
 
-    const state: ProjectState = { client, files, waiters };
-    this.projects.set(indexDocId, state);
+    const presence = new PresenceTracker(client);
+    presence.attach();
+    const state: ProjectState = { client, files, waiters, sidecars, projectWaiters, presence, serverUrl };
+    this.projects.set(this.projectKey(serverUrl, indexDocId), state);
+    this.emitProjectEvent({ kind: 'connected', serverUrl, indexDocId });
     return state;
   }
 
@@ -329,17 +641,34 @@ export class ConnectionManager {
    * from the caller's last-known hash, the change is returned immediately
    * (so an edit that lands between two `waitForChange` calls is never
    * missed). Pass back the `hash` from the previous result each call.
+   *
+   * `options.signal` (the MCP request's cancellation signal, BP-3)
+   * unregisters the waiter promptly and rejects with an AbortError:
+   * without it a client-cancelled poll leaked its waiter (and timer)
+   * until the timeout fired.
    */
   async waitForChange(
     indexDocId: string,
     path: string,
     timeoutMs: number,
     sinceHash?: string,
+    options?: { signal?: AbortSignal; server?: string },
   ): Promise<ChangeResult> {
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+    }
+    const server = options?.server ?? this.serverUrl;
     // Register the waiter synchronously when already connected so an edit
     // arriving immediately after the call can't slip through the await gap.
     // (First-time connects still pay one await; `sinceHash` covers that gap.)
-    const state = this.projects.get(indexDocId) ?? (await this.connect(indexDocId));
+    const state =
+      this.projects.get(this.projectKey(server, indexDocId)) ??
+      (await this.connect(indexDocId, { server: options?.server }));
+    // The cancel may have landed during the connect await.
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+    }
 
     const current = state.files.get(path);
     const currentHash = hashPayload(current);
@@ -348,20 +677,111 @@ export class ConnectionManager {
       return { changed: true, payload: current ?? null, hash: currentHash };
     }
 
-    return await new Promise<ChangeResult>((resolve) => {
+    return await new Promise<ChangeResult>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => {
+        state.waiters.delete(waiter);
+        cleanup();
+        reject(signal!.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      };
       const waiter: ChangeWaiter = {
         path,
         fire: (payload) => {
-          clearTimeout(timer);
+          cleanup();
           resolve({ changed: true, payload, hash: hashPayload(payload) });
+        },
+        interrupt: (err) => {
+          state.waiters.delete(waiter);
+          cleanup();
+          reject(err);
         },
       };
       state.waiters.add(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
       timer = setTimeout(() => {
         state.waiters.delete(waiter);
+        cleanup();
         const latest = state.files.get(path);
         resolve({ changed: false, payload: latest ?? null, hash: hashPayload(latest) });
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Project-wide long-poll (CAP-18): resolve with the set of files
+   * added, edited, or removed by anyone, or after `timeoutMs` with
+   * `changed: false`. The first event starts a short settle window
+   * ({@link PROJECT_WATCH_SETTLE_MS}) so a multi-file sync batch lands
+   * as one result.
+   *
+   * `options.sinceHash` is an exclusion filter, not a baseline (ERG-8):
+   * pass the `hash` of your own just-completed write so its echo
+   * neither fires the watch nor joins the reported set. Unlike the
+   * per-path arm there is no gap-close — a first-time connect treats
+   * the freshly-synced state as the baseline (the agent has no prior
+   * view to diff against), and an already-connected call registers
+   * synchronously, so no event can slip through.
+   *
+   * `options.signal` is the BP-3 cancellation contract, same as the
+   * per-path arm.
+   */
+  async waitForAnyChange(
+    indexDocId: string,
+    timeoutMs: number,
+    options?: { sinceHash?: string; signal?: AbortSignal; server?: string },
+  ): Promise<ProjectChangeResult> {
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+    }
+    const server = options?.server ?? this.serverUrl;
+    const state =
+      this.projects.get(this.projectKey(server, indexDocId)) ??
+      (await this.connect(indexDocId, { server: options?.server }));
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+    }
+
+    return await new Promise<ProjectChangeResult>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      let settleTimer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (settleTimer !== undefined) clearTimeout(settleTimer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => {
+        state.projectWaiters.delete(waiter);
+        cleanup();
+        reject(signal!.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      };
+      const waiter: ProjectChangeWaiter = {
+        excludeHash: options?.sinceHash,
+        events: [],
+        onEvent: () => {
+          if (settleTimer !== undefined) clearTimeout(settleTimer);
+          settleTimer = setTimeout(() => {
+            state.projectWaiters.delete(waiter);
+            cleanup();
+            resolve({ changed: true, changes: waiter.events });
+          }, PROJECT_WATCH_SETTLE_MS);
+        },
+        interrupt: (err) => {
+          state.projectWaiters.delete(waiter);
+          cleanup();
+          reject(err);
+        },
+      };
+      state.projectWaiters.add(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      timer = setTimeout(() => {
+        state.projectWaiters.delete(waiter);
+        cleanup();
+        resolve({ changed: false, changes: [] });
       }, timeoutMs);
     });
   }
@@ -385,26 +805,23 @@ export class ConnectionManager {
 
     const tempFiles = new Map<string, FilePayload>();
     const waiters = new Set<ChangeWaiter>();
-    const callbacks: SyncClientCallbacks = {
-      onFileAdded(path: string, file: FilePayload) {
-        tempFiles.set(path, file);
-        fireWaiters(waiters, path, file);
-      },
-      onFileChanged(path: string, text: string, _patches: Patch[]) {
-        const payload: FilePayload = { type: 'text', text };
-        tempFiles.set(path, payload);
-        fireWaiters(waiters, path, payload);
-      },
-      onBinaryChanged(path: string, data: Uint8Array, mimeType: string) {
-        const payload: FilePayload = { type: 'binary', data, mimeType };
-        tempFiles.set(path, payload);
-        fireWaiters(waiters, path, payload);
-      },
-      onFileRemoved(path: string) {
-        tempFiles.delete(path);
-        fireWaiters(waiters, path, null);
-      },
-    };
+    const projectWaiters = new Set<ProjectChangeWaiter>();
+    const sidecars: SidecarState = { captures: {} };
+    // The index doc id is generated inside createNewProject, so the
+    // event bridge can't name the project until it resolves; events
+    // fired during creation (the initial file adds) are creation noise
+    // and deliberately dropped.
+    const createdId: { current?: string } = {};
+    const callbacks = buildSyncCallbacks(tempFiles, waiters, projectWaiters, sidecars, (kind, path) => {
+      if (createdId.current !== undefined) {
+        this.emitProjectEvent({
+          kind,
+          serverUrl: this.serverUrl,
+          indexDocId: createdId.current,
+          path,
+        });
+      }
+    });
 
     const client = this.syncClientFactory(callbacks);
     const result = await client.createNewProject(
@@ -427,22 +844,142 @@ export class ConnectionManager {
       resolveAuthorId,
     );
 
-    const state: ProjectState = { client, files: tempFiles, waiters };
-    this.projects.set(result.indexDocId, state);
+    const presence = new PresenceTracker(client);
+    presence.attach();
+    const state: ProjectState = {
+      client,
+      files: tempFiles,
+      waiters,
+      sidecars,
+      projectWaiters,
+      presence,
+      serverUrl: this.serverUrl,
+    };
+    this.projects.set(this.projectKey(this.serverUrl, result.indexDocId), state);
+    createdId.current = result.indexDocId;
+    this.emitProjectEvent({
+      kind: 'connected',
+      serverUrl: this.serverUrl,
+      indexDocId: result.indexDocId,
+    });
     return { indexDocId: result.indexDocId, files: result.files };
   }
 
+  /**
+   * Passive presence snapshot for get_project_info's presence arm
+   * (CAP-8; `list_presence` before Phase 7): every peer
+   * heard from recently, freshest first. Connects first if needed;
+   * observation starts at connect and never broadcasts anything (Q-3).
+   */
+  async observePresence(
+    indexDocId: string,
+    options?: { server?: string },
+  ): Promise<PresenceSnapshotEntry[]> {
+    const state = await this.connect(indexDocId, options);
+    return state.presence.snapshot();
+  }
+
+  /**
+   * Bounded delivery wait for the write tools (ERG-2): resolve `true`
+   * once the hub has acknowledged every document a write touched (the
+   * named file documents plus, always, the index document), `false`
+   * when the budget expires. The write itself is never rolled back —
+   * `false` means "not yet confirmed", not "lost".
+   */
+  async awaitDelivery(
+    indexDocId: string,
+    paths: string[],
+    timeoutMs: number,
+    options?: { server?: string },
+  ): Promise<boolean> {
+    const server = options?.server ?? this.serverUrl;
+    const state = this.projects.get(this.projectKey(server, indexDocId));
+    if (!state) return false;
+    return state.client.awaitDelivery(paths, timeoutMs);
+  }
+
+  /**
+   * Per-project teardown (HY-5): drop one project's websocket +
+   * in-memory-doc state without touching the others. The cache entry
+   * goes first (a concurrent connect must never reuse a dying client),
+   * pending waiters are interrupted with an honest error (never left to
+   * their timeout), and outbound sync gets a bounded drain — same
+   * delivery contract as the write tools. The next tool call
+   * transparently reconnects.
+   */
+  async disconnect(
+    indexDocId: string,
+    options?: { server?: string; drainMs?: number },
+  ): Promise<{ wasConnected: boolean; drained: boolean }> {
+    const server = options?.server ?? this.serverUrl;
+    const key = this.projectKey(server, indexDocId);
+    const state = this.projects.get(key);
+    if (!state) {
+      return { wasConnected: false, drained: true };
+    }
+    this.projects.delete(key);
+    this.emitProjectEvent({ kind: 'disconnected', serverUrl: server, indexDocId });
+    const interruptErr = () =>
+      new Error(
+        `project ${indexDocId} was disconnected (the project tool's disconnect arm) while this ` +
+          'poll was pending — re-call wait_for_change to keep watching (it reconnects).',
+      );
+    for (const w of [...state.waiters]) {
+      w.interrupt?.(interruptErr());
+    }
+    for (const w of [...state.projectWaiters]) {
+      w.interrupt?.(interruptErr());
+    }
+    state.presence.dispose();
+    const report = await state.client.disconnect({
+      drainMs: options?.drainMs ?? 0,
+    });
+    return { wasConnected: true, drained: report.drained };
+  }
+
+  /** The (server, project) pairs currently holding a connection — for actionable errors. */
+  connectedProjects(): Array<{ server: string; indexDocId: string }> {
+    return Array.from(this.projects.entries()).map(([key, s]) => ({
+      server: s.serverUrl,
+      indexDocId: key.slice(key.indexOf('\n') + 1),
+    }));
+  }
+
+  /**
+   * One-shot read of a project-set document (CAP-3): enumerate a user's
+   * collection without connecting a project. Auth mirrors connect():
+   * the configured hub's Bearer attaches here, a foreign hub (share
+   * URL's `server=`) is read authorless — 401/403 there is a
+   * {@link ForeignHubAuthRequiredError}, never a credential leak.
+   */
+  async readProjectSet(
+    docId: string,
+    options?: { server?: string },
+  ): Promise<ProjectSetDocument> {
+    const server = options?.server ?? this.serverUrl;
+    if (!serversMatch(server, this.serverUrl)) {
+      const status = await this.probeAuth(undefined, server);
+      if (status === 401 || status === 403) {
+        throw new ForeignHubAuthRequiredError(server, this.serverUrl);
+      }
+      return readProjectSetDoc({ serverUrl: server, docId });
+    }
+    await this.gateAuthState();
+    const auth = await this.resolveAuthForConnect();
+    return readProjectSetDoc({ serverUrl: this.serverUrl, docId, auth });
+  }
+
   /** Read-only accessor matching the prior API. */
-  get(indexDocId: string): ProjectState | undefined {
-    return this.projects.get(indexDocId);
+  get(indexDocId: string, options?: { server?: string }): ProjectState | undefined {
+    return this.projects.get(this.projectKey(options?.server ?? this.serverUrl, indexDocId));
   }
 
   /** Strict accessor matching the prior API. */
-  require(indexDocId: string): ProjectState {
-    const state = this.projects.get(indexDocId);
+  require(indexDocId: string, options?: { server?: string }): ProjectState {
+    const state = this.get(indexDocId, options);
     if (!state) {
       throw new Error(
-        `Not connected to project ${indexDocId}. Call connect_project first.`,
+        `Not connected to project ${indexDocId}. Call \`project\` with \`action: "connect"\` first.`,
       );
     }
     return state;
@@ -462,10 +999,18 @@ export class ConnectionManager {
    */
   async disconnectAll(options?: DisconnectOptions): Promise<void> {
     const results = await Promise.all(
-      Array.from(this.projects.entries()).map(async ([indexDocId, s]) => ({
-        indexDocId,
-        report: await s.client.disconnect(options),
-      })),
+      Array.from(this.projects.entries()).map(async ([indexDocId, s]) => {
+        s.presence.dispose();
+        this.emitProjectEvent({
+          kind: 'disconnected',
+          serverUrl: s.serverUrl,
+          indexDocId: indexDocId.slice(indexDocId.indexOf('\n') + 1),
+        });
+        return {
+          indexDocId,
+          report: await s.client.disconnect(options),
+        };
+      }),
     );
     for (const { indexDocId, report } of results) {
       if (!report.drained) {
@@ -682,7 +1227,7 @@ export class ConnectionManager {
     this.authConfirmed = false;
     console.error(
       '[hub-mcp] Quarto Hub rejected our credentials mid-session; ' +
-        're-authentication is required. Ask me to run `authenticate`.',
+        're-authentication is required. Ask me to run `auth` with `action: "sign_in"`.',
     );
     await this.dropDeadProjects();
   }
@@ -694,21 +1239,26 @@ export class ConnectionManager {
   }
 
   /**
-   * Disconnect and drop every project handle after a terminal auth
-   * event — their sockets are dead or doomed, and a dropped handle
-   * makes the next tool call re-enter `connect()` where the fast,
-   * clearly-messaged failure paths live.
+   * Disconnect and drop every project handle *on the configured hub*
+   * after a terminal auth event — their sockets are dead or doomed, and
+   * a dropped handle makes the next tool call re-enter `connect()`
+   * where the fast, clearly-messaged failure paths live. Foreign-hub
+   * projects (bd-qt7h8h5g) are authorless: an auth event on the
+   * configured hub says nothing about them, so they stay.
    */
   private async dropDeadProjects(): Promise<void> {
-    const entries = Array.from(this.projects.entries());
-    this.projects.clear();
+    const entries = Array.from(this.projects.entries()).filter(([, s]) =>
+      serversMatch(s.serverUrl, this.serverUrl),
+    );
+    for (const [key] of entries) this.projects.delete(key);
     await Promise.all(
-      entries.map(async ([indexDocId, s]) => {
+      entries.map(async ([, s]) => {
         try {
+          s.presence.dispose();
           await s.client.disconnect();
         } catch {
           console.error(
-            `[hub-mcp] error disconnecting project ${indexDocId} after ` +
+            `[hub-mcp] error disconnecting a project after ` +
               'an auth rejection (ignored)',
           );
         }
@@ -724,14 +1274,24 @@ export class ConnectionManager {
    * gate: any failure (network, non-OK status, malformed body) logs a
    * warning and yields `undefined`, so the connection proceeds
    * authorless (D8) instead of failing.
+   *
+   * The hub HMACs the `project` parameter verbatim, and its canonical
+   * spelling is the `automerge:`-prefixed URL form — the one the SPA
+   * stores and resolves authors over. hub-mcp's ids are bare
+   * ({@link parseProjectRef}), so without the prefix the same
+   * user+document mints a different author ID here than in the SPA and
+   * MCP edits surface as an unknown author (bd-9t8zsh98).
    */
   private async fetchAuthorId(
     projectId: string,
     getBearer: () => Promise<string>,
   ): Promise<string | undefined> {
+    const canonicalProjectId = projectId.startsWith('automerge:')
+      ? projectId
+      : `automerge:${projectId}`;
     const urlFor = (path: string) => {
       const url = new URL(path, toHttpUrl(this.serverUrlParsed));
-      url.searchParams.set('project', projectId);
+      url.searchParams.set('project', canonicalProjectId);
       return url.toString();
     };
     try {
@@ -776,11 +1336,16 @@ export class ConnectionManager {
    * Performs an HTTP GET against the configured probe path with the
    * given Bearer (if any). Returns the HTTP status code; throws on
    * network errors with `observedAuthMode` left unchanged.
+   *
+   * `serverOverride` probes a foreign hub (bd-qt7h8h5g multi-server
+   * routing) — always without a Bearer, so no call site can leak the
+   * configured hub's credentials to another origin.
    */
-  private async probeAuth(bearer: string | undefined): Promise<number> {
-    const url = new URL(this.probePath, toHttpUrl(this.serverUrlParsed));
+  private async probeAuth(bearer: string | undefined, serverOverride?: string): Promise<number> {
+    const base = serverOverride ? new URL(serverOverride) : this.serverUrlParsed;
+    const url = new URL(this.probePath, toHttpUrl(base));
     const headers: Record<string, string> = {};
-    if (bearer) headers.Authorization = `Bearer ${bearer}`;
+    if (bearer && !serverOverride) headers.Authorization = `Bearer ${bearer}`;
     try {
       const res = await this.httpFetch(url.toString(), {
         method: 'GET',

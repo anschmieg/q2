@@ -1,7 +1,9 @@
-# Session Handoff Notes
-
-**Date**: 2025-11-29
-**Status**: Ready for next session
+---
+title: 'Session Handoff Notes'
+date: 2025-11-29
+description: 'Records the page range and punctuation-in-quote fixes made in `quarto-citeproc` and sets out the year-suffix disambiguation work and other open patterns for the next session.'
+status: approved  # Ready for next session
+---
 
 ## Session Summary
 
@@ -28,7 +30,7 @@
    - Enabled 4 new tests
 
 ### Test Status
-- **Before session**: ~572 enabled tests
+- **Before session**: \~572 enabled tests
 - **After session**: 680 enabled tests (79.3% of 858 total)
 - All 680 tests pass
 

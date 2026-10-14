@@ -1,8 +1,12 @@
-# `q2 mcp` — embed & delegate to the TypeScript hub MCP server
-
-**Strand:** bd-81cfshmw
-**Status:** DESIGN — iterating with Carlos; do not start implementation
-until he gives the go-ahead.
+---
+title: '`q2 mcp` — embed & delegate to the TypeScript hub MCP server'
+date: 2026-06-11
+description: 'Designs `q2 mcp`, a thin Rust launcher that bundles the TypeScript hub MCP server and runs it under Node, so LLM apps can read and write quarto-hub documents as multiplayer participants.'
+status: draft  # DESIGN — iterating with Carlos; do not start implementation until he gives the go-ahead.
+braid:
+  strand: bd-81cfshmw
+  priority: P1
+---
 
 ## Overview
 
@@ -86,7 +90,7 @@ cannot inline it; `external`-izing it breaks the extracted bundle
 `index.mjs` + exactly one `keyring.<platform>.node`. esbuild's `.node`
 file-loader (or a tiny plugin) rewrites the addon require to a
 bundle-relative path. Since each `q2` binary is already
-platform-specific, it embeds only its own platform's addon (~hundreds
+platform-specific, it embeds only its own platform's addon (\~hundreds
 of KB). The npm channel is unaffected (normal npm resolution installs
 the right addon). Risk to verify in spike: napi-rs's runtime loader
 sometimes probes `node_modules` paths by package name — confirm the
@@ -175,7 +179,7 @@ leak upward, GC never fires. Instead, the cargo/rustup pattern —
   installed release alternate on one machine (keep-only-current
   would have each binary evicting the other's bundle). The risk-3
   build stamp inside the bundle is diagnostics, not policy.
-- Bounded blast radius either way: dirs are ~3–5 MB, one per distinct
+- Bounded blast radius either way: dirs are \~3–5 MB, one per distinct
   q2 build actually used; Windows can't delete in-use files at all,
   so a GC bug degrades to "skip". No further machinery (quotas,
   daemons) warranted.
@@ -201,7 +205,7 @@ own (e.g. `--launcher-info`).
   channel needs a public name (`quarto-hub-mcp`?), publish workflow,
   and the same bundling step. Separable from the q2-embed work but
   shares the bundler config.
-- **Binary size**: ~3–5 MB embedded (bundle + wasm + addon). Noise
+- **Binary size**: \~3–5 MB embedded (bundle + wasm + addon). Noise
   relative to q2.
 - **License notices**: bundling vendors dependencies into one file;
   generate a `THIRD_PARTY_LICENSES` file into the bundle dir as part
@@ -345,7 +349,7 @@ StdioServerTransport never watches EOF — explicit `stdin 'end'`
 watcher + guarded shutdown; hub-mcp test suite got 3× faster as a side
 effect), bd-2d8ur7e9 (entry-module guard failed under symlinked
 invocation paths because Node canonicalizes `import.meta.url` but
-argv[1] was compared verbatim — macOS `/tmp`→`/private/tmp` and npm
+`argv[1]` was compared verbatim — macOS `/tmp`→`/private/tmp` and npm
 `.bin` shims both hit this; `realpathSync` fix; this one would have
 broken the npx channel outright).
 

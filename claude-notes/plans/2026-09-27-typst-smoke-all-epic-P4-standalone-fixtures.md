@@ -1,6 +1,9 @@
-# P4 — Standalone validation fixtures: `pdf-text-position-test` + `marginalia-only-project`
+---
+title: 'P4 — Standalone validation fixtures: `pdf-text-position-test` + `marginalia-only-project`'
+date: 2026-09-27
+description: 'Adds two standalone Typst smoke fixtures, a single-file text-position test and a margin-only default project, to prove the new text-position predicates end to end before book-shaped fixtures.'
+---
 
-**Date:** 2026-09-27
 **Epic:** [`2026-09-27-typst-smoke-all-epic.md`](2026-09-27-typst-smoke-all-epic.md)
 **Depends on:** P1 (assertion vocabulary), P3 (`ensurePdfTextPositions` implementation).
 **Worktree:** `workspace-2` (Track A, sequential after P3 — see epic's "Parallel
@@ -69,7 +72,7 @@ needs no P6 harness change and can land before P6.
 
 - [x] Copy `pdf-text-position-test.qmd` verbatim into
       `crates/quarto/tests/smoke-all/typst/`. **Note:** Fixture copied verbatim as required, but test revealed Q2 produces different PDF layout than Q1 (header/footer on page 1, title/body on page 2 vs. all elements on same page in Q1). This is expected behavior that validates the end-to-end testing approach — the fixture successfully exposes Q1/Q2 layout differences as intended. Note:
-      `render_document`'s local `"typst" => "typ"` extension map
+      `render_document`\'s local `"typst" => "typ"` extension map
       (`crates/quarto-test/src/runner.rs:297`) is used only for the *error-path*
       fallback output name (when a render fails before producing a real path) — the
       real success-path output comes from `result.output_path` (`:329`). Don't read

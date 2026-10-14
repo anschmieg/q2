@@ -1,4 +1,10 @@
-# P6 — Category passthrough + numbering suppression
+---
+title: 'P6 — Category passthrough + numbering suppression'
+date: 2026-08-20
+date-modified: 2026-09-18
+description: 'Makes Quarto 1''s crossref category mechanisms recognize Quarto 2''s reference types and activates external numbering, so Quarto 1 renders Quarto 2''s cross-reference numbers without renumbering them.'
+status: draft  # Shape draft
+---
 
 **Date:** 2026-08-20  **Updated:** 2026-09-18 (round 4 review) — cross-referenced P5's corrected
 Callout `fail()`-fallback warning against this plan's own Finding 4 argument (both address the
@@ -19,7 +25,6 @@ bootstrap" to seed), closed the default-category-set drift check with a concrete
 and — with Gordon — resolved a real numbering gap in the frozen Route-L/R table (Callout), and
 found the "combined subfloat/panel" checklist item is currently dormant (the Q2 feature it
 depends on doesn't exist yet), not blocked.)
-**Status:** Shape draft
 **Design (authoritative):** [`../designs/pandoc-hybrid-architecture.md`](../designs/pandoc-hybrid-architecture.md)  |  Epic: `2026-08-20-pandoc-hybrid-epic.md`  |  Depends on: P3, P5
 **Implementation task breakdown + test-seam prevalidation:** [`2026-09-18-pandoc-hybrid-P6-implementation.md`](2026-09-18-pandoc-hybrid-P6-implementation.md) — this plan's Coarse checklist converted into dispatchable `## Task N` units, each test bound to a named production seam and revert hunk.
 
@@ -79,7 +84,7 @@ every registered type's display name via that param — P4's params-blob builder
 not passive inheritance from Q1's locale files. Q1's own static default is only ever load-bearing
 for a prefix Q2 doesn't register at all. This still confirms this finding's original point about
 *where* the field lives (not the constructor — `crossref-<type>-title` bypasses it entirely), so
-Theorem's `kind` still never goes through `theorem.lua`'s constructor — but it is not "redundant"
+Theorem's `kind` still never goes through `theorem.lua`\'s constructor — but it is not "redundant"
 in the sense of "Q2's opinion doesn't matter"; it matters via a different channel than the one
 this plan originally assumed (P5's field-map).
 
@@ -105,7 +110,7 @@ anything else is *removed*), **Q1's own `custom.lua` will register user-declared
 itself, reading the same source YAML Q2 already reads.** Problem C reduces from "build a
 Q2→Q1 registry export" to "confirm the passthrough holds and add a regression test for it" —
 a much smaller item than the design doc's prose implies. Field-shape parity is also already
-verified 1:1 by `crossref/metadata.rs`'s own tests (`key`→`ref_type`, `reference-prefix`→display
+verified 1:1 by `crossref/metadata.rs`\'s own tests (`key`→`ref_type`, `reference-prefix`→display
 name), so there's no new mapping code to write, only a golden confirming the Pandoc leg doesn't
 regress it.
 
@@ -113,7 +118,7 @@ regress it.
 have **no Q1 equivalent at all**: Q1 has no concept of "`crossref.ids`," so a Route-R node whose
 `ref_type` came from a `Promised` source has nothing in `valid_ref_types()` to match against.
 This was already true before this epic (it's a pre-existing Q2-only mechanism per the design
-plan D6/D7 cited in `registry.rs`'s doc comment) and isn't new scope for P6 — noting it here only
+plan D6/D7 cited in `registry.rs`\'s doc comment) and isn't new scope for P6 — noting it here only
 so a future reader doesn't mistake it for something Problem C needs to solve.
 
 ## Finding 3 — Default-category-set drift: audited, closed, no unexplained gaps
@@ -124,7 +129,7 @@ both already explained by design, not bugs to fix here:
 
 | Prefix | In Q1? | In Q2 BUILTINS? | Status |
 |---|---|---|---|
-| `prf` (Proof) | Yes — `crossref.categories.all`, kind=Block | **No** | **Confirmed intentional, not drift.** `transforms/proof.rs`'s doc comment: proofs are deliberately unnumbered — the sugar transform does not populate `plain_data.ref_type` at all, "the resulting `CustomNode("Proof")`... [is] skipped" by the indexer. P3's audit independently confirmed Q1's `proof.lua` renderer never reads `.order` either. Q1's `prf` category entry is real but its own renderer doesn't consume order from it — both sides agree Proof isn't numbered. No action. |
+| `prf` (Proof) | Yes — `crossref.categories.all`, kind=Block | **No** | **Confirmed intentional, not drift.** `transforms/proof.rs`'s doc comment: proofs are deliberately unnumbered — the sugar transform does not populate `plain_data.ref_type` at all, "the resulting `CustomNode("Proof")`... \[is\] skipped" by the indexer. P3's audit independently confirmed Q1's `proof.lua` renderer never reads `.order` either. Q1's `prf` category entry is real but its own renderer doesn't consume order from it — both sides agree Proof isn't numbered. No action. |
 | `alg` (Algorithm) | Yes — `theorem_types` | **No** | **Confirmed real gap, already tracked — not new.** P5 found this independently: `theorem.rs`'s `THEOREM_CLASSES` (8 entries) has no `algorithm` entry. P5 also flagged a second, deeper issue alongside it (Q2 detects theorem-like divs by class name, Q1 by identifier prefix) and left the fix location as P5's own open item. **P6 does not re-open this — it's P5's checklist item, cross-referenced here so the drift audit reads as closed rather than silently dropped.** |
 | `demo` (Demo) | **No** (absent from all three Q1 mechanisms) | Yes | **Confirmed intentional.** `demo` is a Q2-only feature (bd-t3cert81); nothing to reconcile against Q1. **Corrected 2026-09-17:** this row previously cited `ExampleEmbed`/Route N as the reason, retracted twice over since — P1 later resolved `ExampleEmbed` entirely upstream in Rust (format-parameterized B1, never reaching the shim for Pandoc targets at all), so it's neither Route N nor P5's item. The `demo` prefix asymmetry stands on its own regardless: it's a Q2-only ref-type category with no Q1 counterpart to reconcile, independent of how `ExampleEmbed` the CustomNode is handled. |
 
@@ -214,7 +219,7 @@ or an appendix-relocated float, landing on the same numbering machinery) against
   is the first strand for a deferral already on record twice in
   `claude-notes/plans/2026-04-15-crossref-design.md` (lines 77 and 405) with no strand until now.
   P5's own round-4 traversal sub-finding already names the fixture this needs
-  (`nested-float-in-callout.qmd`, a `FloatRefTarget` inside a `Callout`'s `content` slot) and P5's
+  (`nested-float-in-callout.qmd`, a `FloatRefTarget` inside a `Callout`\'s `content` slot) and P5's
   Layer-2 goldens own it; P6's own nesting coverage is its `test_all_three_injected_orders_*`
   pair in `crossref_external_mode_matrix.rs`, which asserts top-level numbers for all three types
   together, not subfloat lettering. No new checklist item needed — the gap is a feature request,
@@ -275,13 +280,13 @@ numbering.
       (commit `8e9e546b4`).
 - [x] Land the Callout-to-R change in the shim itself (P5's file — implementation, not the
       table update above) — **done in P5** (commit `4fb8b38e8`, "P5 Task 3: Route R for Callout
-      and Tabset"); confirmed by reading `resources/pandoc-filters/filters/quarto2-shim.lua`'s
+      and Tabset"); confirmed by reading `resources/pandoc-filters/filters/quarto2-shim.lua`\'s
       `route_callout`, and by P5's own test suite (`test_numbered_callout_gets_prefix`,
       `test_unnumbered_callout_has_no_prefix`, `test_callout_order_must_be_on_the_data_table`,
       `test_nested_wire_nodes_convert_inner_first`).
 - [x] Confirm `crossref.custom` passthrough into `Pandoc(fmt)` Meta with a regression test
       (Finding 2) — no new export code, just the test — **done**:
-      `crossref_custom_passthrough.rs`'s `test_crossref_custom_survives_into_wire_meta_verbatim`
+      `crossref_custom_passthrough.rs`\'s `test_crossref_custom_survives_into_wire_meta_verbatim`
       (T3.1, negative-space guard on `metadata_merge.rs:460`) and
       `test_crossref_custom_category_renders_its_declared_prefix` (T3.2, real Q1-side render of
       the same fixture, asserts `Diagram\u{a0}1:`).

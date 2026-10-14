@@ -1,10 +1,15 @@
-# revealjs `q2 preview` ↔ `q2 render` parity audit
+---
+title: 'revealjs `q2 preview` ↔ `q2 render` parity audit'
+date: 2026-06-17
+description: 'Catalogs DOM divergences between the React reveal.js preview and the native `q2 render` scaffold across the example decks, including dropped section ids and classes, missing footer and logo, and a logo image that fails to load.'
+braid:
+  strand: bd-zaa4m4bd
+  priority: P1
+---
 
-**Created:** 2026-06-17
 **Epic:** bd-67yja58s (format: revealjs) · GA gate: bd-v053sk3s (Phase 1P)
 **Related strands:** bd-vv8jft5n (section-id + config parity), bd-qn8yi1su
 (automated golden parity test), bd-ocxnva1f (user Lua filters footer/logo)
-**Audit strand:** bd-zaa4m4bd
 **Footer/logo strand:** bd-n2w0sxgd (F3)
 
 ## Overview
@@ -91,7 +96,7 @@ pipeline — it is **not** in `Q2_PREVIEW_TRANSFORM_EXCLUDED` — so the preview
 `ast.meta` carries `rendered.reveal.footer` and `rendered.reveal.logo`.
 `RevealDeck` simply never reads those slots, and the `<Deck>` wrapper never adds
 `has-logo` to `.reveal`. The fix is purely in `RevealDeck.tsx`: read the two
-meta slots and inject the markup outside `<Deck>`'s slides + add `has-logo`.
+meta slots and inject the markup outside `<Deck>`\'s slides + add `has-logo`.
 
 **Impact:** decks with `footer:`/`logo:` show no footer and no logo in preview —
 a complete feature miss, not a style nudge. Tracked by **bd-n2w0sxgd**;
@@ -240,7 +245,7 @@ verify):
   `id="title-slide" class="section title-slide center present"` and reveal
   vertically centers it (`section top: 288.5px`, h1 `text-align: center`); other
   sections gain ids + `section`. Tests in `RevealDeck.integration.test.tsx`.
-  **Known gap:** `@revealjs/react`'s `<Stack>` only accepts `className` (drops
+  **Known gap:** `@revealjs/react`\'s `<Stack>` only accepts `className` (drops
   `id`), so a `# Section`-divider stack's own `id` can't round-trip through the
   component yet (inner vertical slides still get theirs). `kvs` (e.g.
   `data-background-color`) not yet forwarded — defer to authoring features

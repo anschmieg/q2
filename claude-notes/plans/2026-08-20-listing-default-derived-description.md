@@ -1,9 +1,17 @@
-# Default listing emits no description for items without explicit `description:` (bd-listing-default-no-derived-desc-m0wrr8ty)
+---
+title: 'Default listing emits no description for items without explicit `description:` (bd-listing-default-no-derived-desc-m0wrr8ty)'
+date: 2026-08-20
+description: 'Investigates why default-type listings show no derived description for pages without `description:`, tracing it to a listing stage missing from the Pass-1 profile pipeline that feeds listings.'
+status: draft  # Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+braid:
+  strand: bd-listing-default-no-derived-desc-m0wrr8ty
+  priority: P3
+  labels: [listings]
+---
 
-**Date:** 2026-08-20
-**Braid:** bd-listing-default-no-derived-desc-m0wrr8ty
+**Merged 2026-10-09** into `2026-10-09-listing-description-precedence.md`, which now owns this strand's fix; this file is kept as the investigation record.
+
 **Branch:** `main` (investigated in the main checkout; no worktree created)
-**Status:** Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
 
 ## Triage verdict
 
@@ -108,7 +116,7 @@ Pass-1, add a shape test, bump `PROFILE_KEY_VERSION`. Native/WASM impact
 survey: see §"Native vs WASM stage gating" below.
 
 (`bd-do1nv39s` tracks verifying the `IncludeResolveStage` consequence;
-`LanguageResolveStage`'s consequence — un-localized values in the index —
+`LanguageResolveStage`\'s consequence — un-localized values in the index —
 is unverified.)
 
 ### Repro (reproducible at HEAD)
@@ -153,7 +161,7 @@ Output was inspected by hand.
   - Profile-level test: Pass-1 profile for a prose page has
     `listing_item.description` / `word_count` / `reading_time_minutes` set.
   - A **pipeline-shape guard**: assert the Pass-1 head pipeline's stage list
-    is a prefix of / consistent with `build_transform_pipeline`'s
+    is a prefix of / consistent with `build_transform_pipeline`\'s
     pre-checkpoint stages, so the two can't drift silently again.
   - (If Q2 below says yes) test for a page whose first block is a code cell
     with no prose: markers still emitted, L7 injects the engine-output

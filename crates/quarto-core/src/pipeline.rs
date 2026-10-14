@@ -66,6 +66,10 @@ use crate::stage::stages::PandocWriteStage;
 use crate::stage::stages::ResourceCopyFlushStage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::stage::stages::TypstCompileStage;
+use crate::stage::stages::{
+    InlineTableCssStage, PandocPrepareStage, PrefetchRemoteImagesStage, RasterizeSvgImagesStage,
+    UnexecutedCellCountStage,
+};
 use crate::stage::{
     ApplyTemplateStage, AstTransformsStage, AttributionGenerateStage, CompileThemeCssStage,
     DocumentProfileStage, EngineExecutionStage, EquationNumberStage, IncludeExpansionStage,
@@ -81,18 +85,19 @@ use crate::transforms::{
     CalloutResolveTransform, CalloutTransform, CategoriesSidebarTransform,
     CodeBlockGenerateTransform, CodeBlockRenderTransform, ConditionalContentTransform,
     CrossrefIndexTransform, CrossrefRenderTransform, CrossrefResolveTransform,
-    DateNormalizeTransform, DraftAlertTransform, EquationLabelTransform,
-    ExampleEmbedRenderTransform, ExampleEmbedTransform, FloatRefTargetSugarTransform,
-    FooterGenerateTransform, FooterRenderTransform, FootnotesResolveTransform, FootnotesTransform,
-    LinkRewriteTransform, ListingGenerateTransform, ListingRenderTransform, MermaidRenderTransform,
-    MetadataNormalizeTransform, NavbarGenerateTransform, NavbarRenderTransform,
-    PageNavGenerateTransform, PageNavRenderTransform, ProofSugarTransform,
-    ReferenceLinkDiagnosticsTransform, RepoActionsRenderTransform, ResourceCollectorTransform,
-    ResponsiveImageTransform, SectionizeTransform, ShortcodeResolveTransform,
-    SidebarGenerateTransform, SidebarRenderTransform, TableBootstrapClassTransform,
-    TheoremSugarTransform, TitleBannerTransform, TitleBlockTransform, TocGenerateTransform,
-    TocLocationTransform, TocRenderTransform, WebsiteBootstrapIconsTransform,
-    WebsiteCanonicalUrlTransform, WebsiteFaviconTransform, WebsiteTitlePrefixTransform,
+    DateNormalizeTransform, DraftAlertTransform, EditorialMarksOoxmlTransform,
+    EquationLabelTransform, ExampleEmbedRenderTransform, ExampleEmbedTransform,
+    FloatRefTargetSugarTransform, FooterGenerateTransform, FooterRenderTransform,
+    FootnotesResolveTransform, FootnotesTransform, LinkRewriteTransform, ListingGenerateTransform,
+    ListingRenderTransform, MermaidRenderTransform, MetadataNormalizeTransform,
+    NavbarGenerateTransform, NavbarRenderTransform, PageNavGenerateTransform,
+    PageNavRenderTransform, ProofSugarTransform, ReferenceLinkDiagnosticsTransform,
+    RepoActionsRenderTransform, ResourceCollectorTransform, ResponsiveImageTransform,
+    SectionizeTransform, ShortcodeResolveTransform, SidebarGenerateTransform,
+    SidebarRenderTransform, TableBootstrapClassTransform, TheoremSugarTransform,
+    TitleBannerTransform, TitleBlockTransform, TocGenerateTransform, TocLocationTransform,
+    TocRenderTransform, WebsiteBootstrapIconsTransform, WebsiteCanonicalUrlTransform,
+    WebsiteFaviconTransform, WebsiteTitlePrefixTransform,
 };
 
 /// Well-known path for the default CSS artifact in WASM context.
@@ -285,11 +290,26 @@ pub fn build_html_pipeline_stages_with_apply_config(
 /// registry set `ctx.engine_registry_override` (or equivalently
 /// `HtmlRenderConfig.engine_registry`) before calling `run_pipeline`,
 /// which applies it after constructing the `StageContext`.
-pub fn build_html_pipeline_stages_with_options(
-    apply_config: Option<ApplyTemplateConfig>,
-) -> Vec<Box<dyn PipelineStage>> {
-    let engine_stage = EngineExecutionStage::new();
-    let mut stages: Vec<Box<dyn PipelineStage>> = vec![
+/// The head pipeline: every stage from the raw source through the
+/// [`DocumentProfileStage`] checkpoint and the Pass-1 analyses that
+/// write to the profile ([`LinkResolutionStage`]). Its output is
+/// [`PipelineData::AtProfile`](crate::stage::PipelineData).
+///
+/// **Single source of truth for what a profile sees.** The full HTML
+/// pipeline ([`build_html_pipeline_stages_with_options`]) starts with
+/// exactly these stages, and Pass-1 profiling
+/// (`orchestrator::pass1_profile_single_file_live`) runs exactly
+/// these, so a document's Pass-1 profile — the one listings, sidebars
+/// and the dependency graph read — equals the profile its full render
+/// computes. The two lists used to be maintained by hand and drifted:
+/// `IncludeResolveStage`, `ListingItemInfoStage` and
+/// `LanguageResolveStage` were added to the full pipeline only, so
+/// listing autofill never reached listings
+/// (bd-listing-default-no-derived-desc-m0wrr8ty,
+/// bd-listing-description-precedence-x4bh6w3m). Add pre-checkpoint
+/// stages here, never to one caller.
+pub fn build_head_stages() -> Vec<Box<dyn PipelineStage>> {
+    vec![
         // Convert non-QMD files (e.g. .echo, .jl, .ipynb) to QMD before parse.
         // First engine in deterministic order that claims the file wins.
         // .qmd / .md files pass through unchanged; unclaimed non-QMD files error.
@@ -334,11 +354,27 @@ pub fn build_html_pipeline_stages_with_options(
         // graph can use them. See
         // `claude-notes/designs/body-link-resolution-contract.md`.
         Box::new(LinkResolutionStage::new()),
+    ]
+}
+
+pub fn build_html_pipeline_stages_with_options(
+    apply_config: Option<ApplyTemplateConfig>,
+) -> Vec<Box<dyn PipelineStage>> {
+    let engine_stage = EngineExecutionStage::new();
+    // Head (through the profile checkpoint) is shared with Pass-1;
+    // see `build_head_stages`.
+    let mut stages = build_head_stages();
+    let tail: Vec<Box<dyn PipelineStage>> = vec![
         Box::new(UnwrapProfileStage::new()),
         Box::new(PreEngineSugaringStage::new()),
+        // lmd exploration spike (bd-lmd-exploration-jqv2nbl4): before the
+        // engine so no engine ever sees a `{lmd}` cell. Today it only
+        // *displays* the desugared Lua; see the stage's docs.
+        Box::new(crate::stage::stages::LmdDesugarStage::new()),
         Box::new(engine_stage),
         Box::new(CompileThemeCssStage::new()),
     ];
+    stages.extend(tail);
     // Inject Bootstrap JS as a Project-scoped artifact when a
     // Bootstrap-backed theme is active. Predicate matches
     // CompileThemeCssStage so JS and CSS travel together.
@@ -365,6 +401,20 @@ pub fn build_html_pipeline_stages_with_options(
     // sidecar in both `pre` and `post` filter passes. No-op when
     // no provider is installed (`ctx.attribution_provider` is None).
     stages.push(Box::new(AttributionGenerateStage::new()));
+    // Listing resolution (bd-2oqen84t, M2): resolve the page's `listing:`
+    // declarations here, before the lmd cells and the user pre-filters,
+    // and publish them at `meta.listings.<id>`, so Lua code can read
+    // the items. Needs only the Pass-1 project index and the page's
+    // own metadata, both available from here on. The resolved set
+    // rides on `StageContext::resolved_listings` into `ast-transforms`,
+    // whose `listing-generate` then skips and `listing-render` renders
+    // the same set.
+    stages.push(Box::new(crate::stage::stages::ListingResolveStage::new()));
+    // lmd exploration spike 2 (bd-lmd-exploration-jqv2nbl4): run the cells
+    // `lmd-desugar` marked, after the engine (so they see its output) and
+    // before user pre-filters (where the eventual cell-as-filter story
+    // lives). Same Lua environment as a user filter.
+    stages.push(Box::new(crate::stage::stages::LmdExecuteStage::new()));
     stages.push(Box::new(UserFiltersStage::pre()));
     stages.push(Box::new(AstTransformsStage::new()));
     stages.push(Box::new(UserFiltersStage::post()));
@@ -395,6 +445,12 @@ pub fn build_html_pipeline_stages_with_options(
     // WASM pipelines — see math_js.rs module docs for the rationale.
     stages.push(Box::new(MathJsStage::new()));
     stages.push(Box::new(RenderHtmlBodyStage::new()));
+    // Website search capture (bd-eip0naf4): records the rendered body
+    // before the template wraps it. Native-only, like the JS stages:
+    // the index is written by the native post-render hooks, and the
+    // q2-preview pipeline drops render-html-body anyway.
+    #[cfg(not(target_arch = "wasm32"))]
+    stages.push(Box::new(crate::stage::stages::SearchCaptureStage::new()));
     let apply_stage = match apply_config {
         Some(cfg) => ApplyTemplateStage::with_config(cfg),
         None => ApplyTemplateStage::new(),
@@ -463,8 +519,13 @@ pub async fn render_qmd_to_pandoc(
 /// (`q2_preview_stage_excluded_names_exist_in_html_pipeline`)
 /// fails the test suite if any name here is not an actual stage in
 /// the full HTML pipeline (typo / rename guard).
-const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] =
-    &["math-ml", "math-js", "render-html-body", "apply-template"];
+const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] = &[
+    "math-ml",
+    "math-js",
+    "render-html-body",
+    "search-capture",
+    "apply-template",
+];
 
 /// Build the q2-preview pipeline stages (Plan 1).
 ///
@@ -525,6 +586,9 @@ pub fn build_q2_preview_pipeline_stages(
 /// validator.
 const PANDOC_STAGE_EXCLUDED: &[&str] = &[
     "compile-theme-css",
+    // Website search captures rendered HTML bodies; a Pandoc-writer
+    // format has none (bd-eip0naf4).
+    "search-capture",
     "bootstrap-js",
     "clipboard-js",
     "tabsets-js",
@@ -538,9 +602,110 @@ const PANDOC_STAGE_EXCLUDED: &[&str] = &[
     "apply-template",
 ];
 
+/// The HTML stage list minus [`PANDOC_STAGE_EXCLUDED`]: everything a
+/// `PipelineProfile::Pandoc(_)` render runs before the writer. Ungated, so
+/// the wasm entry point (`PandocPrepareStage` as the tail) and the native
+/// list ([`build_pandoc_pipeline_stages`], `PandocWriteStage` as the tail)
+/// share one prefix.
+///
+/// `captures` are server-recorded engine captures to splice in before
+/// engine execution (the wasm entry point passes the document's). With none,
+/// the list is exactly the old pandoc list minus its tail: the splice stage
+/// is only inserted when there is something to splice.
+pub fn build_pandoc_prefix_stages(
+    captures: Vec<quarto_trace::EngineCapture>,
+) -> Vec<Box<dyn PipelineStage>> {
+    let mut stages = build_html_pipeline_stages_with_options(None);
+    stages.retain(|s| !PANDOC_STAGE_EXCLUDED.contains(&s.name()));
+    if !captures.is_empty() {
+        insert_capture_splice_stage(&mut stages, captures);
+    }
+    // Last, so HTML spliced in or produced by user filters is covered too;
+    // a no-op unless the format is typst.
+    stages.push(Box::new(InlineTableCssStage::new()));
+    stages
+}
+
+/// Everything a browser pandoc request runs before `pandoc-prepare`:
+/// [`build_pandoc_prefix_stages`] plus [`UnexecutedCellCountStage`] right
+/// where the capture splice leaves off (before `ast-transforms` rewrites
+/// classes, present with or without captures). The single source for the
+/// single-document list, the book pause list and the book finishing list, so
+/// they cannot drift.
+fn build_pandoc_request_prefix(
+    captures: Vec<quarto_trace::EngineCapture>,
+) -> Vec<Box<dyn PipelineStage>> {
+    let mut stages = build_pandoc_prefix_stages(captures);
+    let engine_idx = stages
+        .iter()
+        .position(|s| s.name() == "engine-execution")
+        .expect("engine-execution stage must exist in the pipeline");
+    stages.insert(engine_idx, Box::new(UnexecutedCellCountStage::new()));
+    stages
+}
+
+/// The stage list for a `PipelineProfile::Pandoc(_)` render in the browser:
+/// [`build_pandoc_prefix_stages`] plus [`PandocPrepareStage`], which leaves
+/// the [`crate::pandoc_request::PandocRequest`] in the render context
+/// instead of running pandoc. Typst gets no `ResourceCopyFlushStage` or
+/// `TypstCompileStage` here.
+pub fn build_pandoc_request_stages(
+    captures: Vec<quarto_trace::EngineCapture>,
+) -> Vec<Box<dyn PipelineStage>> {
+    let mut stages = build_pandoc_request_prefix(captures);
+    stages.push(Box::new(PandocPrepareStage::new()));
+    stages
+}
+
+/// [`build_pandoc_request_stages`] with [`PrefetchRemoteImagesStage`] just
+/// before the tail: pandoc.wasm cannot fetch, so the call's runtime
+/// downloads remote images and `pandoc-prepare` then mounts them like local
+/// ones. `render_pandoc_request` (the browser export) uses this list; the
+/// plain one never touches the network, which tests of the prepare step rely
+/// on.
+pub fn build_pandoc_request_stages_fetching(
+    captures: Vec<quarto_trace::EngineCapture>,
+) -> Vec<Box<dyn PipelineStage>> {
+    let mut stages = build_pandoc_request_stages(captures);
+    let tail = stages.len() - 1;
+    stages.insert(tail, Box::new(PrefetchRemoteImagesStage::new()));
+    // After the prefetch, so remote SVGs fetched into `_remote/` are rasterized too.
+    stages.insert(tail + 1, Box::new(RasterizeSvgImagesStage::new()));
+    stages
+}
+
+/// The browser pandoc request list paused after `upper_bound`: the request
+/// prefix (with `captures` spliced in, and the unexecuted-cell count) through
+/// a range-bounded [`AstTransformsStage`], nothing after it. A whole-book
+/// request renders each chapter with this (`..=Normalization`) before
+/// merging; the native pause list ([`build_pandoc_pipeline_pause_stages`])
+/// ends in a process spawn and cannot run in the browser. Ungated.
+pub fn build_pandoc_request_pause_stages(
+    upper_bound: crate::transform::TransformPhase,
+    captures: Vec<quarto_trace::EngineCapture>,
+) -> Vec<Box<dyn PipelineStage>> {
+    pause_stages_from(build_pandoc_request_prefix(captures), upper_bound)
+}
+
+/// The browser pandoc request list resuming at `lower_bound`: a
+/// range-bounded [`AstTransformsStage`] followed by the unchanged request
+/// tail (`user-filters` post, `equation-number`, `resource-report`,
+/// `inline-table-css`, remote-image prefetch, SVG rasterization,
+/// `pandoc-prepare`). Starts with
+/// [`AstTransformsStage`] (input kind `DocumentAst`), so it must be driven by
+/// [`run_pipeline_from_ast`]. Shares its source with
+/// [`build_pandoc_request_stages_fetching`].
+pub fn build_pandoc_request_finishing_stages(
+    lower_bound: crate::transform::TransformPhase,
+) -> Vec<Box<dyn PipelineStage>> {
+    finishing_stages_from(
+        build_pandoc_request_stages_fetching(Vec::new()),
+        lower_bound,
+    )
+}
+
 /// Build the stage list for a `PipelineProfile::Pandoc(_)` render (docx,
-/// pptx, typst, …): [`build_html_pipeline_stages_with_options`] with the
-/// names in [`PANDOC_STAGE_EXCLUDED`] removed, plus [`PandocWriteStage`]
+/// pptx, typst, …): [`build_pandoc_prefix_stages`] plus [`PandocWriteStage`]
 /// appended as the tail (P4 Task 9) — the stage that serializes the
 /// wire-format AST and shells out to a real `pandoc` subprocess. Order is
 /// preserved for the retained prefix.
@@ -561,8 +726,7 @@ const PANDOC_STAGE_EXCLUDED: &[&str] = &[
 pub fn build_pandoc_pipeline_stages(
     format_identifier: crate::format::FormatIdentifier,
 ) -> Vec<Box<dyn PipelineStage>> {
-    let mut stages = build_html_pipeline_stages_with_options(None);
-    stages.retain(|s| !PANDOC_STAGE_EXCLUDED.contains(&s.name()));
+    let mut stages = build_pandoc_prefix_stages(Vec::new());
     stages.push(Box::new(PandocWriteStage::new()));
     if format_identifier == crate::format::FormatIdentifier::Typst {
         // book-projects P2c: flush `ctx.resource_copies` (images, etc.)
@@ -1010,6 +1174,15 @@ fn stage_context_from_render_context(
     )
     .map_err(|e| crate::error::QuartoError::Other(e.to_string()))?;
 
+    // R1: the temp root must be fixed before anything calls `temp_dir()`
+    // (`with_temp_dir` seeds a lazy cell that `set` cannot overwrite), and
+    // before `prepare()`, because absolute temp paths are baked into
+    // `QUARTO_FILTER_PARAMS`. On wasm this is the constant share root.
+    if let Some(options) = &ctx.prepare_options {
+        stage_ctx = stage_ctx.with_temp_dir(options.temp_root.clone());
+    }
+    stage_ctx.prepare_options = ctx.prepare_options.clone();
+
     // Transfer artifacts from RenderContext to StageContext
     stage_ctx.artifacts = std::mem::take(&mut ctx.artifacts);
     // Transfer user-grammar provider (browser path sets this; native CLI
@@ -1153,6 +1326,10 @@ fn restore_render_context(ctx: &mut RenderContext<'_>, stage_ctx: &mut StageCont
     // `execution_skipped` above.
     ctx.citation_manifest = stage_ctx.citation_manifest.take();
     ctx.citeproc_filter_in_post = stage_ctx.citeproc_filter_in_post;
+    // R1: the request `PandocPrepareStage` built (output-only).
+    ctx.pandoc_request = stage_ctx.pandoc_request.take();
+    // R3: the unexecuted-cell count (output-only).
+    ctx.unexecuted_cells = stage_ctx.unexecuted_cells;
 }
 
 /// Apply the diagnostic-suppression policy and map a pipeline result into
@@ -1244,8 +1421,9 @@ pub async fn render_qmd_to_ast_partial(
     ctx: &mut RenderContext<'_>,
     runtime: Arc<dyn quarto_system_runtime::SystemRuntime>,
     upper_bound: crate::transform::TransformPhase,
+    kind: PartialKind,
 ) -> Result<(crate::stage::DocumentAst, Vec<DiagnosticMessage>)> {
-    let stages = partial_stage_list(ctx, upper_bound);
+    let stages = partial_stage_list(ctx, upper_bound, kind);
     let (output, diagnostics) = run_pipeline(content, source_name, ctx, runtime, stages).await?;
     let doc_ast = output.into_document_ast().ok_or_else(|| {
         crate::error::QuartoError::Other("Partial pipeline did not produce DocumentAst".to_string())
@@ -1253,31 +1431,46 @@ pub async fn render_qmd_to_ast_partial(
     Ok((doc_ast, diagnostics))
 }
 
+/// Which stage-list family a partial render uses.
+pub enum PartialKind {
+    /// The native lists: the Pandoc-hybrid pause list for a Pandoc-profile
+    /// format, the HTML one otherwise. Native only: that list ends in a
+    /// process spawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    Native,
+    /// The browser request lists: for a Pandoc-profile format the request
+    /// prefix with `captures` spliced in and the unexecuted-cell count (the
+    /// chapter context never gets `prepare_options`, so the intent must be
+    /// explicit); the HTML list otherwise.
+    Request {
+        captures: Vec<quarto_trace::EngineCapture>,
+    },
+}
+
 /// The pause stage list for [`render_qmd_to_ast_partial`], chosen by the
-/// document's pipeline profile.
-#[cfg(not(target_arch = "wasm32"))]
+/// document's pipeline profile and the [`PartialKind`]. Identical on both
+/// targets for [`PartialKind::Request`] (the old wasm fallback returned the
+/// HTML list for every profile, which would silently give a browser book
+/// HTML-profile chapters).
 fn partial_stage_list(
     ctx: &RenderContext<'_>,
     upper_bound: crate::transform::TransformPhase,
+    kind: PartialKind,
 ) -> Vec<Box<dyn PipelineStage>> {
-    match crate::format::PipelineProfile::from_format(&ctx.format.target_format) {
-        crate::format::PipelineProfile::Pandoc(_) => {
+    let pandoc = matches!(
+        crate::format::PipelineProfile::from_format(&ctx.format.target_format),
+        crate::format::PipelineProfile::Pandoc(_)
+    );
+    match kind {
+        #[cfg(not(target_arch = "wasm32"))]
+        PartialKind::Native if pandoc => {
             build_pandoc_pipeline_pause_stages(upper_bound, ctx.format.identifier)
+        }
+        PartialKind::Request { captures } if pandoc => {
+            build_pandoc_request_pause_stages(upper_bound, captures)
         }
         _ => build_html_pipeline_pause_stages(upper_bound),
     }
-}
-
-/// WASM fallback: the Pandoc-hybrid stage list (and its write stages) is
-/// native-only, so a partial render there always uses the HTML list —
-/// Pandoc-profile documents can't render on WASM in the first place.
-#[cfg(target_arch = "wasm32")]
-fn partial_stage_list(
-    ctx: &RenderContext<'_>,
-    upper_bound: crate::transform::TransformPhase,
-) -> Vec<Box<dyn PipelineStage>> {
-    let _ = ctx;
-    build_html_pipeline_pause_stages(upper_bound)
 }
 
 /// Plain owned per-chapter state a book-merge orchestrator carries across
@@ -1318,6 +1511,10 @@ pub struct ChapterPauseState {
     /// `build_context` has nothing to restore here; `extract_from` reads
     /// whatever the paused render's `restore_render_context` call set.
     pub execution_skipped: bool,
+    /// The number of code cells this chapter's paused render left without a
+    /// recorded result (`UnexecutedCellCountStage`); output-only like
+    /// `execution_skipped`. The whole-book request sums it over chapters.
+    pub unexecuted_cells: usize,
 }
 
 impl ChapterPauseState {
@@ -1340,6 +1537,7 @@ impl ChapterPauseState {
             user_grammar_provider: None,
             resource_report: crate::project_resources::DocumentResourceReport::default(),
             execution_skipped: false,
+            unexecuted_cells: 0,
         }
     }
 
@@ -1390,6 +1588,7 @@ impl ChapterPauseState {
             user_grammar_provider: ctx.user_grammar_provider.clone(),
             resource_report: std::mem::take(&mut ctx.resource_report),
             execution_skipped: ctx.execution_skipped,
+            unexecuted_cells: ctx.unexecuted_cells,
         }
     }
 }
@@ -1853,6 +2052,8 @@ fn capture_untransformed_ast_json(content: &[u8], source_name: &str) -> Option<S
 /// 1. `CalloutTransform` - Convert callout Divs to CustomNodes
 /// 2. `CalloutResolveTransform` - Resolve CustomNodes to structured Divs
 /// 3. `ShortcodeResolveTransform` - Resolve shortcodes (e.g., `{{< meta title >}}`)
+/// 3a. `HeadingIdTransform` - Re-derive heading ids that expansion (shortcodes,
+///     lmd cells) made stale, unique document-wide
 /// 4. `MetadataNormalizeTransform` - Add derived metadata (pagetitle, etc.)
 /// 4a. `WebsiteTitlePrefixTransform` - Combine `website.title` with the page's title
 ///     into the rendered `<title>` (Phase 7)
@@ -1906,6 +2107,9 @@ fn capture_untransformed_ast_json(content: &[u8], source_name: &str) -> Option<S
 ///     numbers/targets from the project-wide registry (book-projects P5;
 ///     no-op without the registry)
 /// 20. `CrossrefRenderTransform` - Resolve crossref custom nodes to final HTML structure
+/// 20a. `ComponentsResolveTransform` - Bind `components:` declarations to their
+///     Divs/Spans and ship the component modules, vendored React and the client
+///     runtime (bd-react-components-a8flgldm; HTML render only)
 /// 21. `ResourceCollectorTransform` - Collect image dependencies
 /// Select the format-specific footer-render stage.
 ///
@@ -2021,6 +2225,11 @@ pub fn build_transform_pipeline(
         project_env,
         quarto_profile,
     )));
+    // Heading ids follow the *final* text: shortcode expansion just above
+    // and lmd cells (`lmd-execute`, before the transforms) both rewrite
+    // heading text after the reader derived ids from it (bd-2wv8431v,
+    // bd-lmd-exploration-jqv2nbl4 spike 5). Before sectionize and the TOC.
+    pipeline.push(Box::new(crate::transforms::HeadingIdTransform::new()));
     pipeline.push(Box::new(MetadataNormalizeTransform::new()));
     // Date normalization (bd-gx9cic8z P4): resolves today/now/
     // last-modified, writes ISO `date-meta`/`date-modified-meta` for
@@ -2269,6 +2478,11 @@ pub fn build_transform_pipeline(
     // entry.tsx module top (Phase F.1 pattern).
     #[cfg(not(target_arch = "wasm32"))]
     pipeline.push(Box::new(crate::transforms::QuartoNavJsTransform::new()));
+    // Website search UI (bd-eip0naf4): options JSON + offset meta in
+    // the head, and the search scripts as project artifacts. Reads the
+    // resolved language table and the search config only, so it has no
+    // ordering constraint beyond the Navigation phase.
+    pipeline.push(Box::new(crate::transforms::SearchUiTransform::new()));
     pipeline.push(Box::new(PageNavRenderTransform::new()));
     // Footer *generation* (above) is format-agnostic; footer *rendering* is
     // format-specific — html emits page-footer chrome, revealjs emits a
@@ -2330,6 +2544,25 @@ pub fn build_transform_pipeline(
     // blocks (shortcode expansion is upstream; resource-collector
     // does not touch code blocks).
     pipeline.push(Box::new(CodeBlockRenderTransform::new()));
+    // Editorial marks to Word and PowerPoint (document-import P6, I23): rewrites
+    // `[++ ]`/`[-- ]`/`[!! ]`/`[>> ]` into the span classes pandoc's docx writer turns
+    // into native tracked changes, highlights and comments (and raw runs for pptx).
+    // Self-gated on the docx/pptx identifiers, so a no-op for every other format and
+    // profile; bucket B3, registered for every profile and excluded for none. After every
+    // content transform that survives the Pandoc cut, so the whole tree it sees is final.
+    pipeline.push(Box::new(EditorialMarksOoxmlTransform::new()));
+    // bd-react-components-a8flgldm: bind `components:` declarations to
+    // their Divs/Spans (`data-quarto-component`), copy the modules under
+    // `site_libs/quarto-components/`, register the vendored React ESM +
+    // runtime artifacts and put the import map / manifest / module tag
+    // in the header slot. After every content transform (the marked
+    // element is final) and before `resource-collector` (a bound
+    // subtree's images are still collected). `HtmlRender` only;
+    // excluded from q2-preview via `Q2_PREVIEW_TRANSFORM_EXCLUDED`, the
+    // preview owns its own component loading (plan D8).
+    pipeline.push(Box::new(
+        crate::transforms::ComponentsResolveTransform::new(),
+    ));
     pipeline.push(Box::new(ResourceCollectorTransform::new()));
     // bd-3qych45b: render hephaestus plot documents (`![](plot.hep)`)
     // to SVG artifacts under `figure-html/` and point the image at
@@ -2508,6 +2741,13 @@ const Q2_PREVIEW_TRANSFORM_EXCLUDED: &[&str] = &[
     // the proper preview story — tracked as a follow-up strand.
     "panel-tabset",
     "panel-tabset-resolve",
+    // `components-resolve` marks bound elements, copies modules into the
+    // output tree and injects an import map + module script for the
+    // static page. The preview renders the AST itself and will load
+    // components through its own registry (plan
+    // `2026-10-13-react-components.md` D8, sibling strand); until then
+    // the preview shows the no-script content, which is the contract.
+    "components-resolve",
 ];
 
 /// Names of transforms in [`build_transform_pipeline`] that a Pandoc-writer
@@ -2542,6 +2782,7 @@ const PANDOC_TRANSFORM_EXCLUDED: &[&str] = &[
     "mermaid-render",
     "code-block-render",
     "table-bootstrap-class",
+    "components-resolve",
     // B2: HTML scaffolding / website chrome producers with no Pandoc-writer
     // analog.
     "title-block",
@@ -2561,6 +2802,7 @@ const PANDOC_TRANSFORM_EXCLUDED: &[&str] = &[
     "secondary-nav-render",
     "breadcrumbs-render",
     "quarto-nav-js",
+    "search-ui",
     "page-nav-generate",
     "page-nav-render",
     "toc-generate",
@@ -2678,6 +2920,8 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     // Format-*parameterized*, not format-specific: `lua_format_for()` hands
     // Lua the canonical Pandoc format string.
     ("shortcode-resolve", Bucket::B1),
+    // Re-derives heading ids from expanded text; format-neutral.
+    ("heading-id", Bucket::B1),
     ("metadata-normalize", Bucket::B1),
     ("date-normalize", Bucket::B1),
     ("authors-normalize", Bucket::B1),
@@ -2729,6 +2973,10 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     // bakes format presentation — a Pandoc writer must see the patched
     // numbers too.
     ("cross-chapter-crossref-resolve", Bucket::B3),
+    // Editorial marks (`[++ ]` etc.) to native Word/PowerPoint markup (document-import P6,
+    // I23). Gates itself on the docx/pptx identifiers, so it is inert elsewhere; it
+    // crosses the cut because pandoc's docx writer needs the rewritten classes.
+    ("editorial-marks-ooxml", Bucket::B3),
     ("resource-collector", Bucket::B3),
     // Captures the markdown companion for llms.txt. A service, not
     // presentation of the current format; self-gates on `llms_view_active`
@@ -2766,6 +3014,9 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     ("breadcrumbs-render", Bucket::B4),
     ("secondary-nav-render", Bucket::B4),
     ("quarto-nav-js", Bucket::B4),
+    // Website search UI: options JSON + offset meta + search scripts
+    // (bd-eip0naf4). Website chrome, like quarto-nav-js.
+    ("search-ui", Bucket::B4),
     ("page-nav-render", Bucket::B4),
     ("footer-render", Bucket::B4),
     // The HTML writer's copy of the renderer trinity. `crossref-render` is
@@ -2776,6 +3027,11 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     ("mermaid-render", Bucket::B4),
     ("code-block-render", Bucket::B4),
     ("table-bootstrap-class", Bucket::B4),
+    // Marks bound Divs/Spans with `data-quarto-component`, ships the
+    // component modules + vendored React + runtime and injects the head
+    // block (bd-react-components-a8flgldm). Pure HTML presentation; the
+    // transform also self-gates on `PipelineProfile::HtmlRender`.
+    ("components-resolve", Bucket::B4),
     // Swaps a `.hep` plot-document reference for a rendered SVG artifact —
     // an HTML-only presentation decision (sibling of `responsive-image`,
     // which it runs immediately before). No Pandoc-writer analog exists yet.
@@ -3296,6 +3552,35 @@ mod tests {
 
     // === Pipeline builder tests ===
 
+    // bd-listing-description-precedence-x4bh6w3m: Pass-1 runs
+    // `build_head_stages`, so the full pipeline must start with exactly
+    // that list — otherwise listing profiles silently miss whatever a
+    // pre-checkpoint stage contributes.
+    #[test]
+    fn full_pipeline_starts_with_the_shared_head() {
+        let names = |stages: Vec<Box<dyn PipelineStage>>| -> Vec<String> {
+            stages.iter().map(|s| s.name().to_string()).collect()
+        };
+        let head = names(build_head_stages());
+        let full = names(build_html_pipeline_stages());
+        assert_eq!(&full[..head.len()], &head[..]);
+        assert_eq!(
+            head,
+            [
+                "source-conversion",
+                "parse-document",
+                "metadata-merge",
+                "language-resolve",
+                "include-expansion",
+                "include-resolve",
+                "listing-item-info",
+                "document-profile",
+                "link-resolution",
+            ]
+        );
+        assert_eq!(full[head.len()], "unwrap-profile");
+    }
+
     #[test]
     fn test_build_html_pipeline_stages() {
         let stages = build_html_pipeline_stages();
@@ -3303,8 +3588,11 @@ mod tests {
         // stages main added — LanguageResolveStage after metadata-merge
         // (bd-llhlzd7p) and TabsetsJsStage in the JS block
         // (bd-toc-tabset-titles-zq93gjvf) — plus EquationNumberStage and
-        // MathMlStage after the post filters (bd-vlhi2zkj, bd-3evfzwal): 27.
-        assert_eq!(stages.len(), 27);
+        // MathMlStage after the post filters (bd-vlhi2zkj, bd-3evfzwal),
+        // plus LmdDesugarStage before the engine and LmdExecuteStage before
+        // the user pre-filters (bd-lmd-exploration-jqv2nbl4), plus
+        // ListingResolveStage before lmd-execute (bd-2oqen84t), plus SearchCaptureStage (bd-eip0naf4): 31.
+        assert_eq!(stages.len(), 31);
         // Pre-parse file-claim/convert (Task 10).
         assert_eq!(stages[0].name(), "source-conversion");
         assert_eq!(stages[1].name(), "parse-document");
@@ -3330,45 +3618,57 @@ mod tests {
         assert_eq!(stages[8].name(), "link-resolution");
         assert_eq!(stages[9].name(), "unwrap-profile");
         assert_eq!(stages[10].name(), "pre-engine-sugaring");
-        assert_eq!(stages[11].name(), "engine-execution");
-        assert_eq!(stages[12].name(), "compile-theme-css");
+        // lmd exploration spike (bd-lmd-exploration-jqv2nbl4): rewrites
+        // `{lmd}` cells before any engine can see them.
+        assert_eq!(stages[11].name(), "lmd-desugar");
+        assert_eq!(stages[12].name(), "engine-execution");
+        assert_eq!(stages[13].name(), "compile-theme-css");
         // Bootstrap JS (bd-4eyf) sits immediately after CompileThemeCssStage
         // so the same theme predicate gates JS and CSS together.
-        assert_eq!(stages[13].name(), "bootstrap-js");
+        assert_eq!(stages[14].name(), "bootstrap-js");
         // ClipboardJsStage (Phase 2 of bd-1tl09) sits next to
         // bootstrap-js because both ship a Project-scoped JS payload
         // gated on minimal-HTML. clipboard-js additionally gates on
         // `code-copy != false`.
-        assert_eq!(stages[14].name(), "clipboard-js");
+        assert_eq!(stages[15].name(), "clipboard-js");
         // TabsetsJsStage (bd-toc-tabset-titles-zq93gjvf) ships the
         // grouped-tabset sync module whenever Bootstrap does — same
         // gate as bootstrap-js, so it sits in the same JS block.
-        assert_eq!(stages[15].name(), "tabsets-js");
+        assert_eq!(stages[16].name(), "tabsets-js");
         // Attribution-generate runs before user filters so the
         // `quarto.attribution.*` Lua host binding sees a populated
         // sidecar (bd-0fd0). No-op when no provider is installed.
-        assert_eq!(stages[16].name(), "attribution-generate");
-        assert_eq!(stages[17].name(), "user-filters-pre");
-        assert_eq!(stages[18].name(), "ast-transforms");
-        assert_eq!(stages[19].name(), "user-filters-post");
+        assert_eq!(stages[17].name(), "attribution-generate");
+        // Listings resolve before the lmd cells and the user pre-filters
+        // so both see `meta.listings.<id>` (bd-2oqen84t).
+        assert_eq!(stages[18].name(), "listing-resolve");
+        // lmd exploration spike 2: cells run after the engine, before user
+        // pre-filters.
+        assert_eq!(stages[19].name(), "lmd-execute");
+        assert_eq!(stages[20].name(), "user-filters-pre");
+        assert_eq!(stages[21].name(), "ast-transforms");
+        assert_eq!(stages[22].name(), "user-filters-post");
         // bd-o8pr Phase 3: finalize per-doc resource report.
-        assert_eq!(stages[20].name(), "resource-report");
+        assert_eq!(stages[23].name(), "resource-report");
         // Equation-number encoding (bd-vlhi2zkj) must follow
         // user-filters-post: a Lua post filter may rewrite or delete the
         // reserved `quarto-eq-number` attribute the stage consumes.
-        assert_eq!(stages[21].name(), "equation-number");
+        assert_eq!(stages[24].name(), "equation-number");
         // Native MathML (bd-3evfzwal) follows equation-number (the TeX it
         // converts carries no `\tag`) and precedes math-js (which loads
         // MathJax only for what this stage left as TeX).
-        assert_eq!(stages[22].name(), "math-ml");
-        assert_eq!(stages[23].name(), "code-highlight");
+        assert_eq!(stages[25].name(), "math-ml");
+        assert_eq!(stages[26].name(), "code-highlight");
         // Math-mode (bd-w5ov) walks the post-transform AST and
         // populates meta.math when math is present. Sits just before
         // render-html-body so any late-introduced math (sugar, user
         // filters, the `\tag{N}` equation-number encoding) is visible.
-        assert_eq!(stages[24].name(), "math-js");
-        assert_eq!(stages[25].name(), "render-html-body");
-        assert_eq!(stages[26].name(), "apply-template");
+        assert_eq!(stages[27].name(), "math-js");
+        assert_eq!(stages[28].name(), "render-html-body");
+        // Website search capture (bd-eip0naf4): records the rendered
+        // body before the template wraps it.
+        assert_eq!(stages[29].name(), "search-capture");
+        assert_eq!(stages[30].name(), "apply-template");
     }
 
     #[test]
@@ -3376,8 +3676,10 @@ mod tests {
         let pipeline = build_html_pipeline();
         // Merged pipeline carries both SourceConversionStage (Task 10, branch)
         // LanguageResolveStage and TabsetsJsStage (main), plus
-        // EquationNumberStage and MathMlStage → 27 stages.
-        assert_eq!(pipeline.len(), 27);
+        // EquationNumberStage and MathMlStage, plus LmdDesugarStage and
+        // LmdExecuteStage, plus ListingResolveStage (bd-2oqen84t), plus
+        // SearchCaptureStage (bd-eip0naf4) → 31 stages.
+        assert_eq!(pipeline.len(), 31);
     }
 
     #[test]
@@ -5292,6 +5594,7 @@ mod tests {
             "compile-theme-css",
             "code-highlight",
             "render-html-body",
+            "search-capture",
             "apply-template",
         ] {
             assert!(
@@ -5319,6 +5622,7 @@ mod tests {
                 "user-filters-post",
                 "resource-report",
                 "equation-number",
+                "inline-table-css",
                 "pandoc-write",
                 "resource-copy-flush",
                 "typst-compile",
@@ -5348,6 +5652,7 @@ mod tests {
                 "code-highlight",
                 "math-js",
                 "render-html-body",
+                "search-capture",
                 "apply-template",
             ]
         );
@@ -5377,6 +5682,7 @@ mod tests {
             &mut ctx,
             make_test_runtime(),
             TransformPhase::Normalization,
+            PartialKind::Native,
         )
         .await
         .unwrap();
@@ -5449,6 +5755,7 @@ mod tests {
             &mut ctx,
             runtime.clone(),
             TransformPhase::Normalization,
+            PartialKind::Native,
         )
         .await
         .unwrap();
@@ -5514,6 +5821,7 @@ mod tests {
             &mut ctx,
             runtime,
             TransformPhase::Normalization,
+            PartialKind::Native,
         )
         .await
         .unwrap();
@@ -5584,6 +5892,7 @@ mod tests {
             &mut ctx,
             runtime.clone(),
             TransformPhase::Navigation,
+            PartialKind::Native,
         )
         .await
         .unwrap();
@@ -5668,6 +5977,7 @@ mod tests {
             &mut ctx,
             runtime.clone(),
             TransformPhase::Navigation,
+            PartialKind::Native,
         )
         .await
         .unwrap();
@@ -5768,6 +6078,7 @@ mod tests {
                 &mut ctx,
                 make_test_runtime(),
                 TransformPhase::Navigation,
+                PartialKind::Native,
             )
             .await
             .unwrap();
@@ -6122,6 +6433,7 @@ mod tests {
                 "panel-tabset-resolve",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6163,6 +6475,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",
@@ -6172,6 +6485,8 @@ mod tests {
                 "example-embed-render",
                 "mermaid-render",
                 "code-block-render",
+                "editorial-marks-ooxml",
+                "components-resolve",
                 "resource-collector",
                 "hephaestus-render",
                 "table-bootstrap-class",
@@ -6210,6 +6525,7 @@ mod tests {
                 "panel-tabset-resolve",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6252,6 +6568,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "reveal-footer-logo",
                 "link-rewrite",
@@ -6262,6 +6579,8 @@ mod tests {
                 "reveal-auto-stretch",
                 "mermaid-render",
                 "code-block-render",
+                "editorial-marks-ooxml",
+                "components-resolve",
                 "resource-collector",
                 "hephaestus-render",
                 "table-bootstrap-class",
@@ -6346,8 +6665,8 @@ mod tests {
 
         assert_eq!(
             nav_names.len(),
-            20,
-            "expected exactly 20 Navigation-phase transforms in the HTML pipeline; got: \
+            21,
+            "expected exactly 21 Navigation-phase transforms in the HTML pipeline; got: \
              {nav_names:?}",
         );
         assert!(
@@ -6390,6 +6709,7 @@ mod tests {
                 "panel-tabset",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6406,6 +6726,7 @@ mod tests {
                 "appendix-structure",
                 "cross-chapter-crossref-resolve",
                 "example-embed-render",
+                "editorial-marks-ooxml",
                 "resource-collector",
                 "llms-capture",
             ]
@@ -6582,6 +6903,7 @@ mod tests {
                 "callout",
                 "config-markdown",
                 "shortcode-resolve",
+                "heading-id",
                 "metadata-normalize",
                 "date-normalize",
                 "authors-normalize",
@@ -6622,6 +6944,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",
@@ -6629,6 +6952,7 @@ mod tests {
                 "cross-chapter-crossref-resolve",
                 "example-embed-render",
                 "code-block-render",
+                "editorial-marks-ooxml",
                 "resource-collector",
                 "table-bootstrap-class",
                 "responsive-image",
@@ -6709,8 +7033,11 @@ mod tests {
                 "link-resolution",
                 "unwrap-profile",
                 "pre-engine-sugaring",
+                "lmd-desugar",
                 "engine-execution",
                 "attribution-generate",
+                "listing-resolve",
+                "lmd-execute",
                 "user-filters-pre",
                 "ast-transforms",
                 "user-filters-post",
@@ -6719,6 +7046,8 @@ mod tests {
                 // every non-HTML format, and the stage still strips the
                 // quarto-eq-number attribute before pandoc sees it.
                 "equation-number",
+                // Last of the prefix; a no-op unless the format is typst.
+                "inline-table-css",
                 "pandoc-write",
             ]
         );
@@ -6729,6 +7058,250 @@ mod tests {
                 "`{excluded}` is on PANDOC_STAGE_EXCLUDED but survived in the Pandoc stage \
                  list; got: {names:?}",
             );
+        }
+    }
+
+    /// R2: the ungated prefix is the native pandoc list minus its tail, in
+    /// the same order, so the two cannot drift; the request list is the
+    /// prefix plus `pandoc-prepare` (no write, flush or compile stage).
+    #[test]
+    fn pandoc_prefix_and_request_stage_lists_match_the_native_list() {
+        let names = |stages: Vec<Box<dyn PipelineStage>>| -> Vec<String> {
+            stages.iter().map(|s| s.name().to_string()).collect()
+        };
+        let native = names(build_pandoc_pipeline_stages(
+            crate::format::FormatIdentifier::Docx,
+        ));
+        let prefix = names(build_pandoc_prefix_stages(Vec::new()));
+        assert_eq!(
+            prefix,
+            native[..native.len() - 1],
+            "prefix must equal the native docx list minus `pandoc-write`"
+        );
+        assert!(
+            !prefix.iter().any(|n| n == "pandoc-write"),
+            "the prefix has no writer"
+        );
+        let request = names(build_pandoc_request_stages(Vec::new()));
+        // The request list is the prefix plus the cell count (just before
+        // `engine-execution`) and the `pandoc-prepare` tail.
+        let mut expected = prefix.clone();
+        let engine = expected
+            .iter()
+            .position(|n| n == "engine-execution")
+            .unwrap();
+        expected.insert(engine, "unexecuted-cell-count".to_string());
+        assert_eq!(request[..request.len() - 1], expected[..]);
+        assert_eq!(request.last().map(String::as_str), Some("pandoc-prepare"));
+        for excluded in PANDOC_STAGE_EXCLUDED {
+            assert!(!request.iter().any(|n| n == excluded), "{excluded}");
+        }
+    }
+
+    /// R6: the browser's list is the request list with the remote-image
+    /// prefetch and then the SVG rasterizer (so it sees fetched SVGs) right
+    /// before `pandoc-prepare`.
+    #[test]
+    fn fetching_request_list_adds_the_prefetch_and_rasterizer_before_the_tail() {
+        let plain: Vec<String> = build_pandoc_request_stages(Vec::new())
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        let fetching: Vec<String> = build_pandoc_request_stages_fetching(Vec::new())
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        let mut expected = plain.clone();
+        expected.insert(plain.len() - 1, "prefetch-remote-images".to_string());
+        expected.insert(plain.len(), "rasterize-svg-images".to_string());
+        assert_eq!(fetching, expected);
+        for added in ["prefetch-remote-images", "rasterize-svg-images"] {
+            assert!(!plain.iter().any(|n| n == added), "{added}");
+        }
+    }
+
+    /// R2: captures splice in before engine execution (the wasm entry point
+    /// passes the document's); with none the list has no splice stage.
+    #[test]
+    fn pandoc_prefix_splices_captures_before_engine_execution() {
+        let capture = quarto_trace::EngineCapture {
+            engine_name: "knitr".to_string(),
+            input_qmd: String::new(),
+            result: serde_json::Value::Null,
+            files: Vec::new(),
+        };
+        let stages = build_pandoc_prefix_stages(vec![capture]);
+        let names: Vec<&str> = stages.iter().map(|s| s.name()).collect();
+        let splice = names
+            .iter()
+            .position(|n| *n == "capture-splice")
+            .expect("capture-splice present when captures are given");
+        assert_eq!(names[splice + 1], "engine-execution");
+        let none = build_pandoc_prefix_stages(Vec::new());
+        assert!(!none.iter().any(|s| s.name() == "capture-splice"));
+    }
+
+    fn stage_names(stages: Vec<Box<dyn PipelineStage>>) -> Vec<String> {
+        stages.iter().map(|s| s.name().to_string()).collect()
+    }
+
+    fn some_capture() -> quarto_trace::EngineCapture {
+        quarto_trace::EngineCapture {
+            engine_name: "knitr".to_string(),
+            input_qmd: String::new(),
+            result: serde_json::Value::Null,
+            files: Vec::new(),
+        }
+    }
+
+    /// R9 (a): the request pause list is the request prefix (with the cell
+    /// count before `engine-execution`) cut at `ast-transforms`, ending in
+    /// the range-bounded transforms stage, with nothing HTML.
+    #[test]
+    fn request_pause_list_is_the_prefix_cut_at_ast_transforms() {
+        let pause = stage_names(build_pandoc_request_pause_stages(
+            TransformPhase::Normalization,
+            Vec::new(),
+        ));
+        assert_eq!(pause.last().map(String::as_str), Some("ast-transforms"));
+        let count = pause.iter().position(|n| n == "unexecuted-cell-count");
+        let engine = pause.iter().position(|n| n == "engine-execution");
+        assert_eq!(count.map(|c| c + 1), engine, "count is right before engine");
+        assert!(!pause.iter().any(|n| n == "capture-splice"));
+        for excluded in ["apply-template", "render-html-body"] {
+            assert!(!pause.iter().any(|n| n == excluded), "{excluded}");
+        }
+        for excluded in PANDOC_STAGE_EXCLUDED {
+            assert!(!pause.iter().any(|n| n == excluded), "{excluded}");
+        }
+        // It is exactly the single-document request list up to `ast-transforms`.
+        let single = stage_names(build_pandoc_request_stages(Vec::new()));
+        let at = single.iter().position(|n| n == "ast-transforms").unwrap();
+        assert_eq!(pause[..pause.len() - 1], single[..at]);
+
+        // With captures: capture-splice, then the count, then the engine.
+        let with = stage_names(build_pandoc_request_pause_stages(
+            TransformPhase::Normalization,
+            vec![some_capture()],
+        ));
+        let splice = with.iter().position(|n| n == "capture-splice").unwrap();
+        assert_eq!(with[splice + 1], "unexecuted-cell-count");
+        assert_eq!(with[splice + 2], "engine-execution");
+    }
+
+    /// R9 (b): the request finishing list starts with `ast-transforms` and
+    /// ends `..., prefetch-remote-images, rasterize-svg-images, pandoc-prepare`, and shares its tail
+    /// with the single-document fetching list.
+    #[test]
+    fn request_finishing_list_starts_at_ast_transforms_and_ends_in_prepare() {
+        let finishing = stage_names(build_pandoc_request_finishing_stages(
+            TransformPhase::Navigation,
+        ));
+        assert_eq!(finishing[0], "ast-transforms");
+        let n = finishing.len();
+        assert_eq!(finishing[n - 1], "pandoc-prepare");
+        assert_eq!(finishing[n - 2], "rasterize-svg-images");
+        assert_eq!(finishing[n - 3], "prefetch-remote-images");
+        let single = stage_names(build_pandoc_request_stages_fetching(Vec::new()));
+        let at = single.iter().position(|n| n == "ast-transforms").unwrap();
+        assert_eq!(finishing[1..], single[at + 1..], "one source of truth");
+    }
+
+    /// R9 (c): `partial_stage_list` with `PartialKind::Request` gives the
+    /// Pandoc request pause list for a typst or epub format, on both targets
+    /// (the wasm branch used to return the HTML list for everything).
+    #[test]
+    fn partial_stage_list_request_kind_is_the_pandoc_request_list() {
+        let project = make_test_project();
+        let doc = DocumentInfo::from_path("/project/test.qmd");
+        let binaries = BinaryDependencies::new();
+        for format_key in ["typst", "epub"] {
+            let format = Format::from_format_string(format_key).unwrap();
+            let ctx = RenderContext::new(&project, &doc, &format, &binaries);
+            let got = stage_names(partial_stage_list(
+                &ctx,
+                TransformPhase::Normalization,
+                PartialKind::Request {
+                    captures: Vec::new(),
+                },
+            ));
+            let want = stage_names(build_pandoc_request_pause_stages(
+                TransformPhase::Normalization,
+                Vec::new(),
+            ));
+            assert_eq!(got, want, "{format_key}");
+            assert!(got.iter().any(|n| n == "unexecuted-cell-count"));
+        }
+        // An HTML-profile format keeps the HTML pause list.
+        let html = Format::from_format_string("html").unwrap();
+        let ctx = RenderContext::new(&project, &doc, &html, &binaries);
+        let got = stage_names(partial_stage_list(
+            &ctx,
+            TransformPhase::Normalization,
+            PartialKind::Request {
+                captures: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            got,
+            stage_names(build_html_pipeline_pause_stages(
+                TransformPhase::Normalization
+            ))
+        );
+    }
+
+    /// R9 task 3: a chapter paused with `PartialKind::Request` carries its
+    /// unexecuted-cell count out in `ChapterPauseState`, and a capture for the
+    /// cell removes it from the count (the driver sums these over chapters).
+    #[tokio::test]
+    async fn paused_request_render_reports_unexecuted_cells_in_the_chapter_state() {
+        let qmd = "---\ntitle: T\n---\n\n# One\n\n```{r}\nSRC_R\n```\n";
+        let project = make_test_project();
+        let doc = DocumentInfo::from_path("/project/test.qmd");
+        let format = Format::from_format_string("typst").unwrap();
+        let binaries = BinaryDependencies::new();
+        let mut ctx = RenderContext::new(&project, &doc, &format, &binaries);
+        ctx.execution_policy = crate::engine::ExecutionPolicy::None;
+        render_qmd_to_ast_partial(
+            qmd.as_bytes(),
+            "test.qmd",
+            &mut ctx,
+            make_test_runtime(),
+            TransformPhase::Normalization,
+            PartialKind::Request {
+                captures: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let state = ChapterPauseState::extract_from(&mut ctx);
+        assert_eq!(state.unexecuted_cells, 1);
+    }
+
+    /// R9 (d): the native lists' `name()` sequences are unchanged for typst
+    /// and EPUB: the pause list is the native prefix cut at `ast-transforms`,
+    /// the finishing list the native tail after it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_pause_and_finishing_lists_are_unchanged() {
+        use crate::format::FormatIdentifier;
+        for id in [FormatIdentifier::Typst, FormatIdentifier::Epub] {
+            let full = stage_names(build_pandoc_pipeline_stages(id));
+            let at = full.iter().position(|n| n == "ast-transforms").unwrap();
+            let pause = stage_names(build_pandoc_pipeline_pause_stages(
+                TransformPhase::Normalization,
+                id,
+            ));
+            assert_eq!(pause[..pause.len() - 1], full[..at], "{id:?}");
+            assert!(
+                !pause.iter().any(|n| n == "unexecuted-cell-count"),
+                "the native list has no request-only stage: {id:?}"
+            );
+            let finishing = stage_names(build_pandoc_pipeline_finishing_stages(
+                TransformPhase::Crossref,
+                id,
+            ));
+            assert_eq!(finishing[1..], full[at + 1..], "{id:?}");
         }
     }
 

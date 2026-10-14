@@ -1,6 +1,9 @@
-# P6 — Book-project-fixture harness
+---
+title: 'P6 — Book-project-fixture harness'
+date: 2026-09-27
+description: 'Adds a book-project harness to the smoke-all test: a file with `render-project: true` triggers one whole-book render per project, shared by its sibling files through `ProjectPipeline`.'
+---
 
-**Date:** 2026-09-27
 **Epic:** [`2026-09-27-typst-smoke-all-epic.md`](2026-09-27-typst-smoke-all-epic.md)
 **Depends on:** P1.
 **Worktree:** `workspace-5` (Track B — see epic's "Parallel development plan").
@@ -42,7 +45,7 @@ calls `quarto_core::render_to_file::render_to_file` — a **single-file** entry 
 each file independently. There is no project-fixture concept anywhere in
 `crates/quarto-test/src/`.
 
-`override-orange-book`, `orange-book-lang`, and `orange-book`'s non-index chapters
+`override-orange-book`, `orange-book-lang`, and `orange-book`\'s non-index chapters
 don't need this (single-file-in-project already works, or they carry
 `_quarto.tests.run.skip`, already supported per `spec.rs:24,55-57,89`). What needs
 building: **whole-book rendering**, triggered by `render-project: true` in a file's
@@ -93,7 +96,7 @@ use. Add this to the checklist explicitly so it isn't rediscovered mid-implement
 
 ## Checklist
 
-- [x] In `smoke_all.rs`, discover each `.qmd`'s project root via
+- [x] In `smoke_all.rs`, discover each `.qmd`\'s project root via
       `ProjectContext::discover`, group real project files by root, and report
       discovery failures as test failures. Single-file pseudo-projects are not
       grouped. The suite is serial, so grouping has no synchronization concerns.

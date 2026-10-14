@@ -1,0 +1,50 @@
+---
+title: "Invalid `components` entry"
+description: "A `components` entry is malformed: not a map, missing `name` or `src`, a duplicate name, or a `src` that is not a project file. The entry is skipped."
+code: Q-25-1
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-1` — Invalid `components` entry
+
+> A `components` entry is malformed: not a map, missing `name` or `src`, a duplicate name, or a `src` that is not a project file. The entry is skipped.
+
+## What this means
+
+The `components` key in a document's or project's metadata is a list of
+maps, one per component, and each map needs at least a `name` (the key an
+element binds by) and a `src` (the component's ES module, a file in the
+project):
+
+```yaml
+components:
+  - name: counter
+    src: counter.js
+```
+
+Quarto warns with this code when an entry does not have that shape, and
+skips the entry. The page's other components are unaffected.
+
+## Why this happens
+
+- The entry is a bare string (`- counter`) instead of a map.
+- `name:` or `src:` is missing or empty.
+- Two entries carry the same `name`; the first one wins.
+- `src:` is a URL. Only files inside the project can be shipped with the
+  page.
+- `components:` itself is not a list (`components: counter`).
+
+## How to fix
+
+Give every entry a `name` and a `src`, make the names unique, and point
+`src` at a file in the project (relative to the file that declares it; a
+leading `/` means the project root).
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

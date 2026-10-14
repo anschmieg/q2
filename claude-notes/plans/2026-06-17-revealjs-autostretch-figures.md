@@ -1,10 +1,13 @@
-# RevealJS auto-stretch — captioned & cross-referenceable figures
-
-**Strand:** bd-38ioql41 (follow-up to bd-zkstclhl)
-**Date:** 2026-06-17 (Case 1 implemented 2026-06-18)
-**Status:** **Case 1 implemented** (markdown captioned figure hoist, with
-`<p class="caption">` via bd-itqcfxc3). Case 2 (crossref figures) deferred —
-Option 2A. Centering deferred (flush-left, consistent with the bare-image case).
+---
+title: 'RevealJS auto-stretch — captioned & cross-referenceable figures'
+date: 2026-06-17  # (Case 1 implemented 2026-06-18)
+description: 'Extends reveal auto-stretch to captioned figures so a lone captioned image becomes a direct child of the slide section and stretches, leaving cross-referenceable figure divs as a separate case.'
+status: in-progress  # **Case 1 implemented** (markdown captioned figure hoist, with `<p class="caption">` via bd-itqcfxc3). Case 2 (crossref figures) deferred — Option 2A. Centering deferred (flush-left, consistent with the bare-image case).
+braid:
+  strand: bd-38ioql41  # follow-up to bd-zkstclhl
+  priority: P2
+  labels: [revealjs]
+---
 
 ## Overview
 
@@ -165,7 +168,7 @@ render and preview. Options:
   slide" signal plumbed into crossref render. Couples three subsystems
   (reveal/auto-stretch/crossref) and touches hub-client. High cost.
 - **Option 2C — Render-only late AST hoist (parity in render, gap in preview).**
-  A reveal transform after `crossref-render` that hoists the now-`Figure`'s img
+  A reveal transform after `crossref-render` that hoists the now-`Figure`\'s img
   (move id, add `.r-stretch`, sibling caption). Matches Q1 in `q2 render`;
   preview keeps the un-stretched CustomNode. Violates preview-parity for this
   case — only acceptable if we explicitly accept it and `log`/document it.
@@ -177,7 +180,7 @@ in a dedicated strand.
 ## Proposed scope for THIS strand (to confirm with user)
 
 - [x] Implement **Case 1** (markdown captioned figure) — early AST unwrap.
-      `RevealAutoStretchTransform`'s Figure branch now replaces the `Block::Figure`
+      `RevealAutoStretchTransform`\'s Figure branch now replaces the `Block::Figure`
       with `Plain[Image]` (`.r-stretch`, figure `id` transferred onto the img)
       followed by `caption_paragraph(...)` — a `Paragraph` with a trailing
       `Inline::Attr{.caption}`. See `hoist_figure` / `figure_caption_inlines` /

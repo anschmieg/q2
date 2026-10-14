@@ -1,10 +1,13 @@
-# QMD Sugaring: Div/Span to CustomNode Normalization
+---
+title: 'QMD Sugaring: Div/Span to CustomNode Normalization'
+date: 2026-01-24
+description: 'Normalizes Div and span syntax in the Pandoc AST, such as `.panel-tabset` and `.callout-*` classes, into typed `CustomNode` blocks, extending the existing callout transform to tabsets, decorated code blocks and float reference targets.'
+status: draft  # Planning
+---
 
 **Parent Epic**: kyoto-6jv
 **Beads Issue**: kyoto-50m
 **Related**: kyoto-kl1 (Phase 1: HTML Postprocessing Infrastructure)
-**Created**: 2026-01-24
-**Status**: Planning
 
 ---
 
@@ -96,7 +99,7 @@ This is the reference implementation for new custom node types.
 
 | Type | QMD Pattern | Slots | Plain Data |
 |------|-------------|-------|------------|
-| **Tabset** | `.panel-tabset` | tabs: Vec<Tab> | level |
+| **Tabset** | `.panel-tabset` | tabs: `Vec<Tab>` | level |
 | **DecoratedCodeBlock** | CodeBlock + filename attr | code: Block | filename, fold, annotations |
 | **FloatRefTarget** | Divs with `#fig-*`, `#tbl-*` IDs | content, caption_long, caption_short | ref_type, identifier |
 
@@ -246,11 +249,11 @@ CustomNode {
 ### DecoratedCodeBlock
 
 **Input**:
-```markdown
+```` markdown
 ```{.python filename="example.py"}
 print("Hello")
 ```
-```
+````
 
 **Parsed as**:
 ```
@@ -312,7 +315,7 @@ CustomNode {
 ### Phase A: Infrastructure (if needed)
 
 - [ ] Verify CustomNode serialization works for new slot patterns
-- [ ] Add any needed slot types (e.g., Vec<Tab> might need special handling)
+- [ ] Add any needed slot types (e.g., `Vec<Tab>` might need special handling)
 - [ ] Verify Shortcode handling is complete (already exists as `Inline::Shortcode`)
 
 ### Phase B: Tabset Transform

@@ -308,6 +308,12 @@ fn create_type(lua: &Lua) -> Result<Function> {
                 if ud.borrow::<crate::lua::types::LuaCitation>().is_ok() {
                     return Ok("Citation".to_string());
                 }
+                if ud.borrow::<crate::lua::nodes::LuaNodes>().is_ok() {
+                    return Ok("Nodes".to_string());
+                }
+                if ud.borrow::<crate::lua::metadata::LuaMetaProxy>().is_ok() {
+                    return Ok("Meta".to_string());
+                }
                 if ud
                     .borrow::<crate::lua::constructors::LuaListAttributes>()
                     .is_ok()
@@ -777,7 +783,7 @@ fn create_to_roman_numeral(lua: &Lua) -> Result<Function> {
 }
 
 /// Convert a Lua value (block, inline, list of elements) to plain text
-fn stringify_value(value: &Value) -> Result<String> {
+pub(crate) fn stringify_value(value: &Value) -> Result<String> {
     match value {
         Value::UserData(ud) => {
             // Try to extract as LuaInline

@@ -1,4 +1,8 @@
-# Plan: Consolidate qmd::read Error Reporting to DiagnosticMessage
+---
+title: 'Plan: Consolidate qmd::read Error Reporting to DiagnosticMessage'
+date: 2025-10-21
+description: 'Proposes having `qmd::read()` return all errors and warnings as `DiagnosticMessage` values and dropping its formatter parameter, so each caller decides between text and JSON output.'
+---
 
 <!-- quarto-error-code-audit-ignore-file -->
 
@@ -683,7 +687,7 @@ Currently source_context is in ASTContext. Might want to make it more accessible
 - **Phase 6** (Update tests): 2-3 hours
 - **Phase 7** (Clean up): 1 hour
 
-**Total**: ~10-14 hours (1.5-2 days)
+**Total**: \~10-14 hours (1.5-2 days)
 
 ## Summary
 

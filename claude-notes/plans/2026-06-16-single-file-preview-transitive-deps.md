@@ -1,9 +1,17 @@
-# Single-file `q2 preview`: transitive sibling-dependency resolution
+---
+title: 'Single-file `q2 preview`: transitive sibling-dependency resolution'
+date: 2026-06-16
+description: 'Makes single-file `q2 preview` populate its in-browser virtual file system with the deck''s full transitive closure of included files and images, reusing the renderer''s own include expansion so resolution cannot drift from `q2 render`.'
+status: draft  # plan for review — *not yet approved for implementation.*
+braid:
+  strand: bd-9cyza5vy
+  priority: P2
+  labels: [preview]
+---
 
 **Strand:** bd-9cyza5vy · **Follows:** bd-kpuweafo (direct images), bd-ggvq1j68
 (`_brand.yml`), bd-tnm3k (no-walk single-file mode)
 **Design doc this refines:** `2026-06-16-single-file-preview-vfs-bootstrapping.md`
-**Status:** plan for review — *not yet approved for implementation.*
 
 ## Goal
 
@@ -62,7 +70,7 @@ no async on-miss fetch. This is the cheap, correct core of the fix.
 
 ## Chosen mechanism: reuse the renderer's *actual* include expansion (C-strict)
 
-**Decision (revised after the bd-udrn0q47 finding):** run `quarto-core`'s real
+**Decision (revised after the bd-udrn0q47 finding):** run `quarto-core`\'s real
 `IncludeExpansionStage` natively against the real filesystem to produce the
 expanded AST + the recorded include set, then collect images off the **expanded**
 AST with `collect_referenced_asset_urls`. The single-file resolver thereby
@@ -179,7 +187,7 @@ scope for now (a later, informative error message is the likely treatment).
       need for image collection). Sequence in `quarto-preview`:
       - `runtime = Arc::new(NativeRuntime::new())`
       - `project = ProjectContext::single_file(abs_deck, &*runtime)?` (canonicalizes,
-        sets `is_single_file` so `StageContext::new`'s extension discovery passes
+        sets `is_single_file` so `StageContext::new`\'s extension discovery passes
         `None` for the project dir — cheap)
       - `document = DocumentInfo::from_path(abs_deck)`
       - `ctx = StageContext::new(runtime, Format::html(), project, document)?`
@@ -280,7 +288,7 @@ scope for now (a later, informative error message is the likely treatment).
   runtime) — not statically discoverable; engines don't run in WASM preview
   anyway. Documented caveat.
 - **Long-tail channels** beyond include + image: `bibliography:`/`csl:`,
-  `{{< embed >}}`, `resources:` globs, raw `<img>/<video>/<link>/<script>`/CSS
+  `{{{< embed >}}}`, `resources:` globs, raw `<img>/<video>/<link>/<script>`/CSS
   `url(...)`. Each is a future per-channel extension of the resolver; the
   worklist structure accommodates them. Note in the strand as follow-ups.
 - **Included-file content-edit re-render** (Phase 2 watcher extension above).

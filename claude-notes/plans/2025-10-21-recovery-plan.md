@@ -1,4 +1,8 @@
-# Recovery Plan: Fix Broken Repository State
+---
+title: 'Recovery Plan: Fix Broken Repository State'
+date: 2025-10-21
+description: 'Plans how to recover a repository that stopped compiling after a mixed commit, by checking whether an earlier commit builds and then keeping, completing, or reverting each of the two bundled pieces of work.'
+---
 
 ## Situation Analysis
 
@@ -78,7 +82,7 @@ This means 274a1c5 broke something.
 ### Common Next Steps (after determining state)
 
 1. **Verify k-103 work is complete**
-   - Check that ariadne rendering works for <anonymous> files
+   - Check that ariadne rendering works for \<anonymous> files
    - Run relevant tests
    - Possibly create a clean commit just for k-103
 

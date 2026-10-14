@@ -599,10 +599,12 @@ pub fn rawblock_to_config_value(
     let yaml = match quarto_yaml::parse_with_parent(&block.text, yaml_parent.clone()) {
         Ok(y) => y,
         Err(e) => {
-            // Report the YAML parse error as a diagnostic
-            diagnostics.error_at(
-                format!("Failed to parse YAML frontmatter: {}", e),
-                yaml_parent,
+            diagnostics.add(
+                crate::utils::yaml_syntax_error::yaml_syntax_error(e, &block.text, &yaml_parent)
+                    .add_hint(
+                        "The YAML front matter at the top of this document could not be parsed",
+                    )
+                    .build(),
             );
             // Return an empty map as the metadata
             return ConfigValue {
@@ -1432,5 +1434,50 @@ mod tests {
         let ctx = quarto_config::span_assert::context_for(FIXTURE_FILE, yaml_text);
         quarto_config::span_assert::assert_diagnostic_underlines(q29[0], &ctx, "<span id=\"y\">");
         quarto_config::span_assert::assert_diagnostic_underlines(q29[1], &ctx, "</span>");
+    }
+
+    // bd-e0e9kd4a: quarto-yaml <= 0.4.0 sat on yaml-rust2, whose scanner
+    // advanced its char-index marker by *bytes* over the tail of a block
+    // scalar's content line. Every marker after a `>`/`|` scalar holding
+    // multi-byte characters drifted forward (cumulatively), so later keys
+    // got wrong spans and their content provenance came back `None`
+    // (tripping `content_provenance_desync_warning`). Fixed upstream by
+    // quarto-yaml 0.5.0's switch to saphyr; this pins it from q2's side.
+    #[test]
+    fn non_ascii_block_scalars_keep_later_spans_and_provenance() {
+        const FIXTURE_FILE: &str = "fixture.yml";
+        // A folded and a literal scalar with multi-byte content, the
+        // latter on a line long enough to outrun the scanner's lookahead
+        // buffer, then a plain scalar whose raw HTML yields Q-2-9 carets.
+        let yaml_text = "status: >\n  v2 — x — y\nnotes: |\n  ééééééééééééééééééééé — ü\nafter: a <b>bold</b> word\n";
+        let parsed = quarto_yaml::parse_file(yaml_text, FIXTURE_FILE).expect("valid yaml");
+        let mut diagnostics = crate::utils::diagnostic_collector::DiagnosticCollector::new();
+        let _ = yaml_to_config_value(
+            parsed,
+            InterpretationContext::DocumentMetadata,
+            &mut diagnostics,
+        );
+
+        let diags = diagnostics.diagnostics();
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.title == "YAML string scalar has no content provenance"),
+            "no provenance desync expected after non-ASCII block scalars; got {diags:?}"
+        );
+
+        let q29: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("Q-2-9"))
+            .collect();
+        assert_eq!(
+            q29.len(),
+            2,
+            "expected two Q-2-9 warnings (open + close <b> tags); got {diags:?}"
+        );
+
+        let ctx = quarto_config::span_assert::context_for(FIXTURE_FILE, yaml_text);
+        quarto_config::span_assert::assert_diagnostic_underlines(q29[0], &ctx, "<b>");
+        quarto_config::span_assert::assert_diagnostic_underlines(q29[1], &ctx, "</b>");
     }
 }

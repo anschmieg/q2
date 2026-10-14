@@ -1,6 +1,13 @@
-# A failed include fails the document
+---
+title: 'A failed include fails the document'
+date: 2026-09-02
+description: 'Makes a failed `{{< include >}}` a fatal render error for that page instead of silently dropping the block and writing HTML that is missing content, and raises the related Q-17 codes to errors.'
+braid:
+  strand: bd-include-parse-failure-dropped-u4rdjxru
+  priority: P2
+  labels: [includes, parity]
+---
 
-**Strand:** `bd-include-parse-failure-dropped-u4rdjxru`
 **Repro:** `q2-positron-docs/llms-info/repros/include-parse-failure-dropped/`
 
 ## Overview
@@ -60,7 +67,7 @@ flagged the circular-include arm (`Q-17-1`) as a separate judgement. What
 settles it is internal consistency: leaving one arm non-fatal reintroduces
 exactly the inconsistency this change exists to remove, and `Q-17-1` is
 emitted from two sites (see D3), so its severity cannot be decided
-independently of `Q-17-2`'s.
+independently of `Q-17-2`\'s.
 
 Quarto 1 is only weak corroboration here, and the PR should not claim more.
 Measured against `~/bin/quarto` (99.9.9):
@@ -110,7 +117,7 @@ failing stage can carry warnings collected before it out through its error;
 warning does not reappear just because the document later failed. Errors
 are never suppressible, so the failure itself always survives.
 
-**D8 — a failed render must not empty `q2 preview`'s watch set.**
+**D8 — a failed render must not empty `q2 preview`\'s watch set.**
 `quarto_preview::config::resolve_single_file_deps` derives the
 watch/sync set by running the real parse + include-expansion stages, and
 it discarded everything when the stage returned `Err` — so one broken
@@ -131,12 +138,12 @@ the `Err`; the dependency collector ignores it. Pinned by
 - [x] `unresolved` flag on `IncludeExpander`, set by all five failure arms
 - [x] `expand_includes_in_blocks` returns `PipelineError::Structured`
 - [x] `Q-17-1` / `Q-17-2` raised from warning to error at both sites
-- [x] `DiagnosticPolicy` applied on `run_pipeline`'s error exit
+- [x] `DiagnosticPolicy` applied on `run_pipeline`\'s error exit
 - [x] Unit tests reworked to assert the failure while keeping the
       block-removal (`bd-qpvoamvu`) assertions
 - [x] Error-catalog message templates for `Q-17-1` / `Q-17-2` / `Q-17-3`
 - [x] Docs pages `docs/errors/include/Q-17-{1,2,3}.qmd`
-- [x] `expand_document_includes` seam so `q2 preview`'s dependency
+- [x] `expand_document_includes` seam so `q2 preview`\'s dependency
       collector keeps the watch set when the render fails (D8)
 - [x] smoke-all fixtures `includes/circular` + `includes/missing` moved
       from `noErrors` + WARN to `shouldError` + ERROR

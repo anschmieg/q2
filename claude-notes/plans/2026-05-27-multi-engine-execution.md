@@ -1,9 +1,12 @@
-# Sequential multi-engine execution
-
-**Issue:** bd-5yff4 — feature/design.
-
-**Status:** design / investigation. Implementation is gated on explicit
-user go-ahead after this plan is reviewed and iterated.
+---
+title: 'Sequential multi-engine execution'
+date: 2026-05-27
+description: 'Designs running several execution engines in sequence for one document, with `engine` accepting an ordered list, threading each engine''s output into the next and redesigning trace and replay for multiple captures.'
+status: draft  # design / investigation. Implementation is gated on explicit user go-ahead after this plan is reviewed and iterated.
+braid:
+  strand: bd-5yff4
+  priority: P2
+---
 
 ## Overview
 
@@ -187,7 +190,7 @@ Each is addressed below, with the open design questions called out.
 | `engine: knitr` | `[knitr]` |
 | `engine: { jupyter: { kernel: python3 } }` | `[jupyter+config]` |
 | `engine: [knitr, mermaidjs]` | `[knitr, mermaidjs]` |
-| `engine:`<br>`  - knitr`<br>`  - mermaidjs: { theme: dark }` | `[knitr, mermaidjs+config]` |
+| `engine:` `<br>`{=html} `  - knitr` `<br>`{=html} `  - mermaidjs: { theme: dark }` | `[knitr, mermaidjs+config]` |
 | top-level `jupyter:` (no `engine:`) | `[jupyter+config]` |
 | (none) | `[markdown]` |
 
@@ -287,7 +290,7 @@ the remap offset becomes "current slot count," not a constant `+1`.
 
 Invariant to preserve: a block's `FileId` identifies its provenance —
 the `.qmd` for kept blocks, the relevant intermediate for blocks first
-introduced by engine k. We must verify that `quarto_ast_reconcile`'s
+introduced by engine k. We must verify that `quarto_ast_reconcile`\'s
 keep/replace/recurse decisions remain correct when the "original" side
 of the reconcile already carries FileIds from multiple prior slots.
 
@@ -336,7 +339,7 @@ sequencing. Proposed contract:
 To exercise **engine→engine handoff** (engine A emits a cell that engine
 B executes), the test fixtures use two registrations of the file-backed
 engine under two distinct names (e.g. `fixture-a`, `fixture-b`), where
-`fixture-a`'s results include a fenced `{fixture-b}` cell that
+`fixture-a`\'s results include a fenced `{fixture-b}` cell that
 `fixture-b` then fills. This proves the "engine N produces cells for
 engine N+1" requirement without any real runtime.
 
@@ -432,7 +435,7 @@ preview flow has two parts; both are in scope:
      ships opaque bytes; only the WASM parse shape changes) — confirm.
 
 2. **Incremental capture cache** (the part that makes preview *fast*
-   across edits — `quarto-preview/src/cache.rs`'s `record_capture_cached`
+   across edits — `quarto-preview/src/cache.rs`\'s `record_capture_cached`
    keys a capture by SHA-256 of the canonical input QMD so unchanged code
    cells don't re-run the engine). For a sequence this becomes:
    - store/serve the **ordered vec** of captures per doc;
@@ -467,13 +470,13 @@ doc-keyed invalidation already covers it.
 - [x] Design + land the **file-backed test engine** (`FixtureEngine`,
       `crates/quarto-core/src/engine/fixture.rs`) with 15 unit tests:
       splices per-cell results in order; in-memory + JSON-file-backed
-      results; ignores other engines' cells / display blocks; skips
+      results; ignores other engines\' cells / display blocks; skips
       content inside non-matching fences; engine→engine handoff
       (result introduces the next engine's cell); surplus/missing/
       unterminated diagnostics; longer-fence round-trip. Gated to
       non-WASM; **never** wired into the default registry. Verified the
       cell form against pampa: executable cells serialize as
-      ```` ```{<name>} ```` (braces kept inside the class name).
+      \`\`\`\` \`\`\`\{\<name>\} \`\`\`\` (braces kept inside the class name).
 - [x] Duplicate-handling policy: **dedup keeping first occurrence +
       diagnostic** (resolved with user; only fires for array+array
       repeated engine).

@@ -1,8 +1,12 @@
-# quarto-hub MVP: Automerge-Based Collaborative Infrastructure
-
-**Issue:** k-4wex
-**Status:** In Progress
-**Created:** 2025-12-08
+---
+title: 'quarto-hub MVP: Automerge-Based Collaborative Infrastructure'
+date: 2025-12-08
+description: 'Plans a new `quarto-hub` crate that builds a `hub` binary for automerge-based collaborative editing, with WebSocket and REST endpoints and persistence under a `.quarto/hub/` directory.'
+status: in-progress
+braid:
+  strand: k-4wex
+  priority: P1
+---
 
 ## Overview
 
@@ -22,7 +26,7 @@ Create a new crate `quarto-hub` that:
 | Communication | **WebSocket + REST hybrid** |
 | Document scope | **Multiple documents per project** (all .qmd files) |
 | Automerge crate | **samod** (v0.6, JS-compatible replacement for automerge_repo) |
-| Persistence | **Save on every edit** (low concurrency ~tens of users) |
+| Persistence | **Save on every edit** (low concurrency \~tens of users) |
 | Auth (MVP) | **None** - local development, trust network |
 | Future sync | Eventually sync with remote source |
 

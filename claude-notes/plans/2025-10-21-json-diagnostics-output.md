@@ -1,4 +1,8 @@
-# Plan: JSON Diagnostics Output for Metadata Warnings/Errors
+---
+title: 'Plan: JSON Diagnostics Output for Metadata Warnings/Errors'
+date: 2025-10-21
+description: 'Routes metadata parsing warnings and errors through the `--json-errors` flag as structured JSON instead of plain text on stderr, weighing a signature change to `qmd::read` against a diagnostic collector abstraction.'
+---
 
 <!-- quarto-error-code-audit-ignore-file -->
 
@@ -38,7 +42,7 @@ let result = readers::qmd::read(
 ```
 
 **Key observations**:
-1. `error_formatter` is `Option<F>` where F is a function that produces Vec<String>
+1. `error_formatter` is `Option<F>` where F is a function that produces `Vec<String>`
 2. This is used for **parse errors** (tree-sitter errors), not warnings
 3. The formatter is called in `qmd.rs` at lines 106-112
 
@@ -434,7 +438,7 @@ Should not output any diagnostic JSON (empty array or nothing).
 Eventually, all errors (parse errors, metadata errors, warnings) should use DiagnosticMessage.
 
 Current split:
-- Parse errors: Vec<String> (ariadne-formatted or JSON)
+- Parse errors: `Vec<String>` (ariadne-formatted or JSON)
 - Metadata errors/warnings: DiagnosticMessage
 
 Goal: Everything as DiagnosticMessage.
@@ -478,4 +482,4 @@ Could add levels to control what gets output:
 - Maintains consistency with parse error JSON format
 - Easy to test
 
-**Effort**: ~2-3 hours
+**Effort**: \~2-3 hours

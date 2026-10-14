@@ -1,0 +1,10 @@
+---
+title: "A typed component"
+components:
+  - name: typed
+    src: typed.tsx
+---
+
+::: {#typed}
+Static text with a `0`.
+:::

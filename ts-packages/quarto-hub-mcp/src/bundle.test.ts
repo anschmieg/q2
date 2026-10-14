@@ -8,16 +8,25 @@
  * with plain `node` — keyring addon resolution via the bundle's mini
  * node_modules, base64-inlined automerge wasm, full MCP round-trip
  * against an in-process sync peer, stdout purity, and stdin-EOF exit.
+ *
+ * Parser tier (CAP-11): bundling stages the wasm-qmd-parser nodejs pkg,
+ * which only a wasm32 toolchain can build — so on toolchain-less legs
+ * (PARSER_UNAVAILABLE, e.g. CI's workspace-ts-suites) the whole file
+ * skips, the same gated-tier pattern as the qmd-* test files. CI covers
+ * the file in the toolchain-rich test-suite job (ts-test-suite.yml).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpTestClient } from './mcp-test-client.js';
 import { startTestHub, type TestHub } from './test-hub.js';
+import { wasmPkgAvailable } from './test-wasm-host.js';
+import { PARSER_UNAVAILABLE } from './test-setup.js';
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -25,33 +34,53 @@ let tmpDir: string;
 let bundleEntry: string;
 let hub: TestHub;
 
-beforeAll(async () => {
-  execFileSync('node', [path.join(pkgRoot, 'scripts/bundle.mjs')], {
-    stdio: 'pipe',
-  });
-  // os.tmpdir() is outside the repo: node resolution from the copied
-  // bundle cannot accidentally reach the workspace node_modules.
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-mcp-bundle-test-'));
-  fs.cpSync(path.join(pkgRoot, 'dist-bundle'), path.join(tmpDir, 'bundle'), {
-    recursive: true,
-  });
-  bundleEntry = path.join(tmpDir, 'bundle', 'index.mjs');
-  hub = await startTestHub();
-}, 60000);
+// The bundle build refuses to run without the Rust WASM artifacts (a
+// stub must never ship) and stages the qmd parser pkg, so this whole
+// suite is a no-op in the no-Rust/no-WASM CI leg.
+describe.skipIf(PARSER_UNAVAILABLE || !wasmPkgAvailable())('bundle smoke', () => {
+  beforeAll(async () => {
+    execFileSync('node', [path.join(pkgRoot, 'scripts/bundle.mjs')], {
+      stdio: 'pipe',
+    });
+    // os.tmpdir() is outside the repo: node resolution from the copied
+    // bundle cannot accidentally reach the workspace node_modules.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-mcp-bundle-test-'));
+    fs.cpSync(path.join(pkgRoot, 'dist-bundle'), path.join(tmpDir, 'bundle'), {
+      recursive: true,
+    });
+    bundleEntry = path.join(tmpDir, 'bundle', 'index.mjs');
+    hub = await startTestHub();
+  }, 60000);
 
-afterAll(async () => {
-  await hub?.stop();
-  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-});
+  afterAll(async () => {
+    await hub?.stop();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-describe('bundle smoke', () => {
   it('ships the expected artifacts', () => {
     const bundleDir = path.join(tmpDir, 'bundle');
     expect(fs.existsSync(path.join(bundleDir, 'index.mjs'))).toBe(true);
+    // get_errors local validation: the WASM host + binary must ride in
+    // the bundle (index.mjs dynamic-imports ./wasm-host.mjs at first use).
+    expect(fs.existsSync(path.join(bundleDir, 'wasm-host.mjs'))).toBe(true);
+    const wasm = path.join(bundleDir, 'wasm_quarto_hub_client_bg.wasm');
+    expect(fs.existsSync(wasm)).toBe(true);
+    expect(fs.statSync(wasm).size).toBeGreaterThan(10_000_000);
     const info = JSON.parse(
       fs.readFileSync(path.join(bundleDir, 'build-info.json'), 'utf8'),
-    ) as { gitCommit: string; nodeTarget: string; keyringPackages: string[] };
+    ) as {
+      gitCommit: string;
+      nodeTarget: string;
+      wasmSha256?: string;
+      keyringPackages: string[];
+    };
     expect(info.nodeTarget).toBe('node24');
+    // The dedupe marker q2's launcher keys the embed strip on: it must
+    // record the shipped WASM's actual sha256.
+    const actualSha = createHash('sha256')
+      .update(fs.readFileSync(wasm))
+      .digest('hex');
+    expect(info.wasmSha256).toBe(actualSha);
     expect(info.keyringPackages).toContain('keyring');
     expect(info.keyringPackages.length).toBeGreaterThanOrEqual(2);
     // the keyring loader package plus at least one platform addon
@@ -76,8 +105,8 @@ describe('bundle smoke', () => {
       await client.start(['--server', hub.url], { entry: bundleEntry });
 
       const tools = (await client.listTools()).map((t) => t.name);
-      expect(tools).toContain('connect_project');
-      expect(tools).toContain('patch_file');
+      expect(tools).toContain('project');
+      expect(tools).toContain('edit');
 
       const created = await client.callTool('create_project', {
         files: [{ path: 'smoke.qmd', content: 'bundle smoke ÄöÜ → 🧪\n' }],
@@ -87,14 +116,14 @@ describe('bundle smoke', () => {
       };
       expect(indexDocId).toBeTruthy();
 
-      await client.callTool('connect_project', { project: indexDocId });
-      await client.callTool('patch_file', {
+      await client.callTool('project', { action: 'connect', project: indexDocId });
+      await client.callTool('edit', { action: 'patch',
         project: indexDocId,
         path: 'smoke.qmd',
         old_string: 'bundle smoke',
         new_string: 'bundle smoke (patched)',
       });
-      const readBack = await client.callTool('read_file', {
+      const readBack = await client.callTool('read', { action: 'read',
         project: indexDocId,
         path: 'smoke.qmd',
       });

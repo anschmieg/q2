@@ -1,9 +1,16 @@
-# L10 — Q1 → Q2 listing template migration docs + LLM skill (`bd-hzsi`)
+---
+title: 'L10 — Q1 → Q2 listing template migration docs + LLM skill (`bd-hzsi`)'
+date: 2026-08-26
+description: 'Documents the migration from Quarto 1 EJS listing templates to Quarto 2 doctemplates on a new page and adds an LLM skill, with examples re-rooted in the built-in templates and locked by integration tests.'
+braid:
+  strand: bd-hzsi
+  priority: P2
+---
 
 **Strand:** `bd-hzsi` (P2, task, parent `bd-61cd` Listings epic, blocked-by
 `bd-rqgx` L8 — closed).
 **Branch:** `braid/bd-hzsi-listing-template-migration-docs` (worktree
-`.worktrees/workspace-4`), off `main` @ `c11aa0e4d`.
+`.worktrees/workspace-4`), off `main` \@ `c11aa0e4d`.
 
 ## Overview
 
@@ -135,7 +142,7 @@ All go in `crates/quarto-core/tests/integration/listing_pipeline.rs`
       `guides/projects/listings.qmd`.
 - [x] **"Links and images must be markdown."** The two silent failure
       modes as one rule with two costs. The anchor-markdown /
-      contents-raw idiom, citing the built-ins'
+      contents-raw idiom, citing the built-ins\'
       ``[`$image-html$`{=html}]($path$)``. Include the masking note
       (finding 3) — it is why this survives testing.
 - [x] **"Descriptions and the placeholder envelope."** Why the envelope
@@ -226,12 +233,12 @@ values a template can read, the card example — and links to a new
 `docs/guides/projects/listing-templates.qmd` carrying the two semantics,
 the built-in anatomy, the migration treatment and the worked examples.
 This supersedes the brief's original "extend the section, don't add a
-page": at ~400 lines the migration content would have dominated
+page": at \~400 lines the migration content would have dominated
 `listings.qmd`. The existing `### Migrating a Quarto 1 template`
 subsection **moves** to the new page, leaving a pointer behind.
 
-**D2 — The wild worked example: `quarto-dev/quarto-web`'s
-`docs/gallery/gallery.ejs`.** Chosen over `InseeFrLab/utilitR`'s
+**D2 — The wild worked example: `quarto-dev/quarto-web`\'s
+`docs/gallery/gallery.ejs`.** Chosen over `InseeFrLab/utilitR`\'s
 `listing.ejs` on provenance — same org, so no third-party licensing
 question. It exercises `metadataAttrs(tile)`, three raw `<a href>`s, a
 raw `<img src>`, an `alt`-building nested ternary, and a nested
@@ -326,7 +333,7 @@ citing any file touched here. Output was **inspected**, not inferred:
 - Every cross-link resolves: `listings.html#custom-templates`,
   `paths.html#raw-html-is-not-rewritten`,
   `../../errors/listing/Q-12-{9,10,13,24}.html`.
-- `Q-12-24`'s mapping table renders 7 body rows (was 5), including the
+- `Q-12-24`\'s mapping table renders 7 body rows (was 5), including the
   two new markdown-link / markdown-image rows.
 
 The worked example in the doc was itself rendered before being written

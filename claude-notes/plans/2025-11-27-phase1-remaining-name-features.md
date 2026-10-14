@@ -1,7 +1,11 @@
-# Phase 1 Remaining: Name Formatting Features
+---
+title: 'Phase 1 Remaining: Name Formatting Features'
+date: 2025-11-27
+description: 'Lists the deferred name-formatting edge cases in `quarto-citeproc`, such as HTML entity escaping, `name-part` elements and initialization rules, with the effort and expected test impact of each.'
+status: draft  # Optional/Deferred
+---
 
 **Parent issue:** k-422 (quarto-citeproc: Citation processing engine)
-**Status:** Optional/Deferred
 **Priority:** Low - these are edge cases that can be addressed later
 
 ## Overview
@@ -26,7 +30,7 @@ The remaining items are edge cases that affect fewer tests and can be deferred.
 - May need to be conditional based on output format
 
 **Effort:** Low
-**Impact:** ~5-10 tests
+**Impact:** \~5-10 tests
 
 ### 2. Complex `initialize="false"` Variants
 
@@ -44,7 +48,7 @@ The remaining items are edge cases that affect fewer tests and can be deferred.
 - Complex rules about when spaces/periods are added
 
 **Effort:** Medium
-**Impact:** ~6 tests
+**Impact:** \~6 tests
 
 ### 3. `name-part` Element Support
 
@@ -66,7 +70,7 @@ The remaining items are edge cases that affect fewer tests and can be deferred.
 - Apply prefix/suffix/formatting per name part during rendering
 
 **Effort:** Medium-High
-**Impact:** ~10-15 tests
+**Impact:** \~10-15 tests
 
 ### 4. Apostrophe Handling in Given Names
 
@@ -81,7 +85,7 @@ The remaining items are edge cases that affect fewer tests and can be deferred.
 - "D'Angelo" → "D." (not "D.'A.")
 
 **Effort:** Low
-**Impact:** ~2 tests
+**Impact:** \~2 tests
 
 ## Recommendation
 
@@ -97,11 +101,11 @@ if test coverage goals require them.
 
 | Feature | Tests Affected | Effort | Priority |
 |---------|---------------|--------|----------|
-| HTML entity escaping | ~10 | Low | Medium |
-| Complex initialize="false" | ~6 | Medium | Low |
-| name-part elements | ~15 | Medium-High | Low |
-| Apostrophe handling | ~2 | Low | Low |
+| HTML entity escaping | \~10 | Low | Medium |
+| Complex initialize="false" | \~6 | Medium | Low |
+| name-part elements | \~15 | Medium-High | Low |
+| Apostrophe handling | \~2 | Low | Low |
 
-**Total potential:** ~33 tests
+**Total potential:** \~33 tests
 **Current coverage:** 262/896 (29.2%)
-**After all Phase 1:** ~295/896 (32.9%)
+**After all Phase 1:** \~295/896 (32.9%)

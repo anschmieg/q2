@@ -1,0 +1,12 @@
+---
+title: "Chart reference"
+---
+
+## Chart types
+
+Line, bar, and scatter charts, plus the tidepool chart.
+
+## The tidepool chart
+
+The tidepool chart shows many small series at once, like pools at low
+tide; it is the chart Product B is known for.

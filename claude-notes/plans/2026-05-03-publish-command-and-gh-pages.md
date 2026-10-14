@@ -1,9 +1,12 @@
-# `quarto publish` scaffolding + `gh-pages` provider
-
-**Date:** 2026-05-03
-**Beads:** `bd-t3ny` (epic; phase sub-issues to be filed after design approval)
-**Status:** Draft — pending user review. **Do not start implementation until
-the user gives the go-ahead.**
+---
+title: '`quarto publish` scaffolding + `gh-pages` provider'
+date: 2026-05-03
+description: 'Adds the scaffolding for a `quarto publish` command in a new crate, shipping GitHub Pages as the first provider so that other hosts can be added one at a time.'
+status: draft  # Draft — pending user review. **Do not start implementation until the user gives the go-ahead.**
+braid:
+  strand: bd-t3ny  # phase sub-issues to be filed after design approval
+  priority: P1
+---
 
 ## Overview
 
@@ -337,7 +340,7 @@ End-to-end test (gated, native-only):
     copy render output in, write `.nojekyll` with deploy id, `git add
     -Af`, `git commit --allow-empty`). Stash provider state (worktree
     path, deploy id, target site URL) in the `Box<dyn Any>`. Builds
-    the `PublishAction` plan ("would push commit <SHA> to
+    the `PublishAction` plan ("would push commit \<SHA> to
     origin/gh-pages: N files, S bytes").
   - `commit`: runs `git push --force origin HEAD:gh-pages` and
     cleans up the worktree.
@@ -545,7 +548,7 @@ without committing to building one.
    `Anonymous` variant; `Authorized`/`Environment` follow when a
    provider needs them.
 5. **Real git for tests.** Bare local remote in a temp dir. Worth
-   the ~1–2s per test for fidelity. Helper to set this up will live
+   the \~1–2s per test for fidelity. Helper to set this up will live
    under `quarto-publish/tests/common/` so future provider tests can
    reuse the rig pattern.
 6. **`.nojekyll` deploy poll is in Phase 1, gated by an option.**
@@ -780,7 +783,7 @@ forward, what's worth simplifying, and what's worth changing.
   lessons worth stealing: clear "force-push detected, are you
   sure?" warning when the gh-pages branch was modified by another
   tool; explicit "what was deployed" summary at the end (commit
-  SHA, file count, total size). Q1 prints "Published to <URL>" —
+  SHA, file count, total size). Q1 prints "Published to \<URL>" —
   thin compared to mkdocs.
 - **`cargo publish`: dry-run is first-class.** `--dry-run` runs the
   full machinery up to the actual upload and stops. Worth adding

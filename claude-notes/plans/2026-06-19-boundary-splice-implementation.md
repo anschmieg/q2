@@ -1,4 +1,8 @@
-# Boundary-addressed splice — Implementation Plan
+---
+title: 'Boundary-addressed splice — Implementation Plan'
+date: 2026-06-19
+description: 'Task-by-task TDD plan for the boundary-addressed splice, generalizing `apply_node_edit` to gap ranges in pampa, adding a client-side verb library, and wiring the new commit path through the preview and hub client.'
+---
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -28,7 +32,7 @@
 - Test `crates/pampa/tests/integration/node_edit_tests.rs` — add splice tests alongside the existing `apply_node_edit_*`.
 
 **Rust (WASM)**
-- Modify `crates/wasm-quarto-hub-client/src/lib.rs` — add `apply_node_splice` export next to `apply_node_edit` (~line 2803).
+- Modify `crates/wasm-quarto-hub-client/src/lib.rs` — add `apply_node_splice` export next to `apply_node_edit` (\~line 2803).
 
 **TypeScript (preview-renderer, inside the iframe)**
 - Create `ts-packages/preview-renderer/src/q2-preview/edit.ts` — `Content`/`Boundary`/`ContainerRef`/`Splice` types + `md`/`ast`/`EMPTY` + verb vocabulary (pure).
@@ -579,7 +583,7 @@ git commit -m "feat(pampa): apply_node_splice (boundary-addressed); apply_node_e
 ## Task 4: WASM — export `apply_node_splice`
 
 **Files:**
-- Modify: `crates/wasm-quarto-hub-client/src/lib.rs` (~line 2803, beside `apply_node_edit`)
+- Modify: `crates/wasm-quarto-hub-client/src/lib.rs` (\~line 2803, beside `apply_node_edit`)
 
 **Interfaces:**
 - Consumes: `pampa::apply_node_edit::apply_node_splice`.
@@ -840,7 +844,7 @@ git commit -m "refactor(preview-renderer): usePreviewEdit -> { resolveSource, co
 ## Task 7: Parent — route the Splice through `apply_node_splice`
 
 **Files:**
-- Modify: `hub-client/src/components/render/ReactPreview.tsx` (`handleSetAst`, ~653–718)
+- Modify: `hub-client/src/components/render/ReactPreview.tsx` (`handleSetAst`, \~653–718)
 - Modify: `hub-client/src/types/wasm-quarto-hub-client.d.ts`
 
 **Interfaces:**

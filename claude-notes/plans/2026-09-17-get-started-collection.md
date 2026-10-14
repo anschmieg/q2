@@ -1,8 +1,12 @@
-# Get Started collection: seeded example projects for new hub users
+---
+title: 'Get Started collection: seeded example projects for new hub users'
+date: 2026-09-17
+description: 'Seeds each new hub user with a personal Get Started collection of three or four example projects, one per document type, built from hub-only templates so every copy can be edited freely.'
+status: draft  # draft, shaping the example set with Andrew (2026-09-17)
+---
 
 **Strand:** not yet filed (will link bd-d147nkqx as parent or related)
 **Branch:** `feature/bd-d147nkqx-hub-only-project-templates` (Carlos's PR #684, draft)
-**Status:** draft, shaping the example set with Andrew (2026-09-17)
 **Related:** `2026-09-15-hub-only-project-templates.md` (mechanism),
 `2026-09-15-auto-create-project-set-on-first-run.md` (first-run hook),
 `2026-09-01-unified-invite-landing.md` (deferred "seeded first-run samples"),
@@ -223,7 +227,7 @@ Decisions:
 - Resources under `resources/templates/examples/<name>/`, all
   `static_text` (no `$title$`; the example content carries its own titles).
   Meeting Notes, Article and Presentation are `Default + template`;
-  `get_scaffold`'s `Default` arm gains a template match. Website is
+  `get_scaffold`\'s `Default` arm gains a template match. Website is
   `Website + template`. The deck's `fork_icon.png` becomes the text
   `fork-icon.svg` (the connector cannot fetch binaries); the same SVG is
   what the other three already use.
@@ -514,7 +518,7 @@ gathered by comparing hub preview against native `q2 render` of the same file:
 
 Template edits from the review: the article table caption no longer uses a
 crossref (works around bd-daa1nw40's visible artifact), and every template's
-"Make it yours" section (or meeting-notes' customization tail) now points at
+"Make it yours" section (or meeting-notes\' customization tail) now points at
 the getting started guide:
 https://quarto-dev.github.io/quarto-hub/get-started.html
 

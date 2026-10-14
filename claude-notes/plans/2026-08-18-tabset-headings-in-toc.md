@@ -1,9 +1,15 @@
-# Headings nested inside tabset panels leak into the TOC and point at hidden content (bd-tabset-headings-in-toc-t04ie7f7)
+---
+title: 'Headings nested inside tabset panels leak into the TOC and point at hidden content (bd-tabset-headings-in-toc-t04ie7f7)'
+date: 2026-08-18
+description: 'Stops headings inside tabset panes, callouts and blockquotes from leaking into the table of contents, by matching Quarto 1''s section recursion rather than skipping only tabset Divs.'
+status: draft  # Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+braid:
+  strand: bd-tabset-headings-in-toc-t04ie7f7
+  priority: P2
+  labels: [html]
+---
 
-**Date:** 2026-08-18
-**Braid:** bd-tabset-headings-in-toc-t04ie7f7
-**Branch:** `main` @ `5b6774d1` (investigated in the main checkout, per `/investigate-beads`; no worktree created)
-**Status:** Investigation — pending design alignment with user. **Do not start implementation until the user gives the go-ahead.**
+**Branch:** `main` \@ `5b6774d1` (investigated in the main checkout, per `/investigate-beads`; no worktree created)
 
 ## Triage verdict
 
@@ -177,7 +183,7 @@ phases differ substantially between them.
 - **Phase 3 — Sweep the fallout** — snapshots, `quarto-ast-reconcile` hashing, `llms.rs`,
   `idempotence.rs`, anything asserting on section structure.
 - **Phase 4 — Re-measure against the port** — rerun the Connect-docs chrome sweep; expect the
-  `toc:N` bucket to go to ~0.
+  `toc:N` bucket to go to \~0.
 - **Phase 5 — Docs** if reader-facing behavior changes (direction C).
 
 ## Open design questions for the user
@@ -214,8 +220,8 @@ phases differ substantially between them.
 
 ## Risks / tradeoffs (draft)
 
-- **(B)'s blast radius measured lower than feared.** `sectionize_blocks` output feeds
-  `quarto-ast-reconcile`'s hashing, `llms.rs`, the idempotence tests, and the HTML writer's
+- **(B)\'s blast radius measured lower than feared.** `sectionize_blocks` output feeds
+  `quarto-ast-reconcile`\'s hashing, `llms.rs`, the idempotence tests, and the HTML writer's
   `section` detection — but the recursion spike passed all 12306 workspace tests. The remaining
   risk is the *attribute-merge* half (finding 5), which the spike did not implement.
 - **The merge rule is the subtle part.** Pandoc absorbs a Div into the section it wraps only under
@@ -321,7 +327,7 @@ q2 keeps the marker class *and* the Div, so 10 Connect-docs pages carry a
       *under* the preceding top-level section rather than beside it.
 - [x] A non-section Div terminates the walk (pandoc's `sectionToListItem`).
 - [x] Remove the `BlockQuote` arm (bd-8yjvs3bj).
-- [x] Un-sectionized fallback: documented the precondition in `pampa::toc`'s module docs and filed
+- [x] Un-sectionized fallback: documented the precondition in `pampa::toc`\'s module docs and filed
       **bd-tebu6o4a**. Running sectionize for reveal would change reveal's slide DOM and wants its
       own testing; reveal emits no `nav#TOC` today, so this is a trap for the next person, not a
       live bug.
@@ -481,7 +487,7 @@ The same 7 pre-existing differences remain.
 > Two local environment stumbles worth noting, neither caused by this branch:
 > the new `ts-packages/quarto-engine-host-deno` workspace needed `npm install`
 > after the rebase, and `@esbuild/darwin-arm64` was missing from `node_modules`
-> (optional platform dep), which failed `quarto-hub-mcp`'s bundle test.
+> (optional platform dep), which failed `quarto-hub-mcp`\'s bundle test.
 
 ## Phase 6 — render-component fallout from Phase 2 (found by CI)
 

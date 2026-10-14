@@ -182,8 +182,7 @@ fn run_test_file_inner(
     project_root: Option<&Path>,
     mut project_cache: Option<&mut ProjectRenderCache>,
 ) -> Result<TestResult> {
-    let path = path
-        .canonicalize()
+    let path = quarto_system_runtime::canonicalize(path)
         .with_context(|| format!("failed to resolve path: {}", path.display()))?;
 
     // Read and parse YAML frontmatter
@@ -512,18 +511,14 @@ fn render_project_document(
         .files
         .iter()
         .map(|file| {
-            file.input
-                .canonicalize()
-                .unwrap_or_else(|_| file.input.clone())
+            quarto_system_runtime::canonicalize(&file.input).unwrap_or_else(|_| file.input.clone())
         })
         .collect();
     let project_messages = diagnostics_to_messages(&summary.project_diagnostics);
     let mut outputs = HashMap::new();
     for output in summary.outputs {
-        let input = output
-            .input_path
-            .canonicalize()
-            .unwrap_or(output.input_path);
+        let input =
+            quarto_system_runtime::canonicalize(&output.input_path).unwrap_or(output.input_path);
         outputs.insert(
             input,
             RenderOutput {
@@ -576,24 +571,31 @@ fn render_project_document(
     })
 }
 
+/// Turn render diagnostics into the harness's log messages.
+///
+/// The message is the full plain-text rendering (title, problem, details,
+/// hints), not just the title: when `noErrorsOrWarnings` fails in CI, the
+/// log has to say *why* (which URL, which error), and `printsMessage`
+/// regexes match anywhere in the text so they can target the detail too.
+/// Plain rendering keeps ANSI color and OSC 8 hyperlinks out of the text.
 fn diagnostics_to_messages(
     diagnostics: &[quarto_error_reporting::DiagnosticMessage],
 ) -> Vec<LogMessage> {
-    diagnostics
-        .iter()
-        .map(|diag| {
-            let level = match diag.kind {
-                quarto_error_reporting::DiagnosticKind::Error => LogLevel::Error,
-                quarto_error_reporting::DiagnosticKind::Warning => LogLevel::Warn,
-                quarto_error_reporting::DiagnosticKind::Info => LogLevel::Info,
-                quarto_error_reporting::DiagnosticKind::Note => LogLevel::Debug,
-            };
-            LogMessage {
-                level,
-                message: diag.title.clone(),
-            }
-        })
-        .collect()
+    diagnostics.iter().map(diagnostic_to_message).collect()
+}
+
+fn diagnostic_to_message(diag: &quarto_error_reporting::DiagnosticMessage) -> LogMessage {
+    let level = match diag.kind {
+        quarto_error_reporting::DiagnosticKind::Error => LogLevel::Error,
+        quarto_error_reporting::DiagnosticKind::Warning => LogLevel::Warn,
+        quarto_error_reporting::DiagnosticKind::Info => LogLevel::Info,
+        quarto_error_reporting::DiagnosticKind::Note => LogLevel::Debug,
+    };
+    LogMessage {
+        level,
+        message: diag
+            .to_text_with_options(None, &quarto_error_reporting::TextRenderOptions::plain()),
+    }
 }
 
 /// Render a document to the specified format.
@@ -623,8 +625,24 @@ fn render_document(input_path: &Path, format: &str) -> RenderOutput {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
 
-    let extension = quarto_core::format::Format::from_format_string(format)
-        .map_or_else(|_| "html".to_string(), |parsed| parsed.output_extension);
+    // Fallback path only (a successful render reports its own path); honor a
+    // typst document's `output-ext` so an early failure names the right file.
+    let extension = quarto_core::format::Format::from_format_string(format).map_or_else(
+        |_| "html".to_string(),
+        |parsed| {
+            let ext = (parsed.identifier == quarto_core::format::FormatIdentifier::Typst)
+                .then(|| std::fs::read_to_string(input_path).ok())
+                .flatten()
+                .and_then(|content| {
+                    quarto_core::output_ext::resolve_output_ext(
+                        &content,
+                        None,
+                        &parsed.target_format,
+                    )
+                });
+            ext.unwrap_or(parsed.output_extension)
+        },
+    );
 
     let fallback_output_path = output_dir.join(format!("{}.{}", stem, extension));
 
@@ -640,18 +658,7 @@ fn render_document(input_path: &Path, format: &str) -> RenderOutput {
     match render_to_file(input_path, format, &options, runtime) {
         Ok(result) => {
             // Capture diagnostics as log messages
-            for diag in &result.render_output.diagnostics {
-                let level = match diag.kind {
-                    quarto_error_reporting::DiagnosticKind::Error => LogLevel::Error,
-                    quarto_error_reporting::DiagnosticKind::Warning => LogLevel::Warn,
-                    quarto_error_reporting::DiagnosticKind::Info => LogLevel::Info,
-                    quarto_error_reporting::DiagnosticKind::Note => LogLevel::Debug,
-                };
-                messages.push(LogMessage {
-                    level,
-                    message: diag.title.clone(),
-                });
-            }
+            messages.extend(diagnostics_to_messages(&result.render_output.diagnostics));
 
             RenderOutput {
                 output_path: result.output_path,
@@ -717,6 +724,62 @@ Content here.
         let metadata = extract_yaml_metadata(content).unwrap();
         assert_eq!(metadata["title"].as_str(), Some("Test"));
         assert!(metadata["_quarto"]["tests"]["html"].is_mapping());
+    }
+
+    #[test]
+    fn diagnostic_messages_keep_problem_and_hints_as_plain_text() {
+        use quarto_error_reporting::DiagnosticMessageBuilder;
+
+        let diag = DiagnosticMessageBuilder::warning("Google font not available to Typst")
+            .with_code("Q-21-4")
+            .problem(
+                "Could not fetch the Google Fonts description for 'Fira Code': no route to host",
+            )
+            .add_hint("Typst will use a fallback font")
+            .build();
+
+        let messages = diagnostics_to_messages(&[diag]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].level, LogLevel::Warn);
+        let text = &messages[0].message;
+        assert!(
+            text.contains("Google font not available to Typst"),
+            "{text}"
+        );
+        assert!(text.contains("no route to host"), "{text}");
+        assert!(text.contains("fallback font"), "{text}");
+        assert!(!text.contains('\x1b'), "no escape sequences: {text:?}");
+    }
+
+    #[test]
+    fn single_document_render_keeps_diagnostic_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let doc = temp.path().join("doc.qmd");
+        fs::write(
+            &doc,
+            "---\ntitle: Detail\nformat: html\n---\n\n{{< no-such-shortcode-xyz >}}\n",
+        )
+        .unwrap();
+
+        let output = render_document(&doc, "html");
+        assert!(output.error.is_none(), "{:?}", output.error);
+        let warning = output
+            .messages
+            .iter()
+            .find(|m| m.level == LogLevel::Warn && m.message.contains("Unknown shortcode"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected an Unknown shortcode warning: {:?}",
+                    output.messages
+                )
+            });
+        // The title alone is one line; the rendered diagnostic carries the
+        // problem text, which names the shortcode.
+        assert!(
+            warning.message.contains("no-such-shortcode-xyz"),
+            "message should carry the problem text, got: {:?}",
+            warning.message
+        );
     }
 
     #[test]

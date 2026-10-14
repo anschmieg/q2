@@ -1,8 +1,12 @@
-# Refactor: Extract `useAutomergeSync` Hook
+---
+title: 'Refactor: Extract `useAutomergeSync` Hook'
+date: 2026-04-01
+description: 'Moves the bidirectional Automerge-to-Monaco sync logic out of `Editor.tsx` into a `useAutomergeSync` hook, leaving the editor component to handle replay, file switching and other UI concerns.'
+---
 
 ## Context
 
-The bidirectional Automerge↔Monaco sync logic in `Editor.tsx` spans ~80 lines across 3 effects + 2 handlers, interleaved with unrelated UI concerns. Following the clean separation pattern from automerge-codemirror (`codeMirrorToAm` / `amToCodemirror`), we extract this into a focused `useAutomergeSync` hook. This follows the existing pattern of `usePresence`, `useReplayMode`, etc.
+The bidirectional Automerge↔Monaco sync logic in `Editor.tsx` spans \~80 lines across 3 effects + 2 handlers, interleaved with unrelated UI concerns. Following the clean separation pattern from automerge-codemirror (`codeMirrorToAm` / `amToCodemirror`), we extract this into a focused `useAutomergeSync` hook. This follows the existing pattern of `usePresence`, `useReplayMode`, etc.
 
 ## Hook Interface
 

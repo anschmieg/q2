@@ -1,6 +1,9 @@
-# Implementation Plan: pandoc_soft_break Node Handler
+---
+title: 'Implementation Plan: pandoc_soft_break Node Handler'
+date: 2025-10-31
+description: 'Adds a handler for the `pandoc_soft_break` tree-sitter node so that a newline inside a paragraph becomes a `SoftBreak` inline rather than concatenating adjacent words.'
+---
 
-**Date**: 2025-10-31
 **Context**: Tree-sitter grammar refactoring work (k-274)
 **Goal**: Implement handler for `pandoc_soft_break` to correctly process soft line breaks in paragraphs
 
@@ -76,7 +79,7 @@ This is a **trivial** implementation, nearly identical to the `pandoc_space` han
 
 ### Code to Add
 
-**Location**: `crates/quarto-markdown-pandoc/src/pandoc/treesitter.rs` ~line 540 (after `pandoc_space`)
+**Location**: `crates/quarto-markdown-pandoc/src/pandoc/treesitter.rs` \~line 540 (after `pandoc_space`)
 
 ```rust
 "pandoc_soft_break" => {
@@ -241,7 +244,7 @@ The tree-sitter grammar uses `pandoc_soft_break` (with underscore as alias for a
 - Step 3 (Implement handler): 2 minutes
 - Steps 4-7 (Testing & verification): 5 minutes
 
-**Total**: ~15 minutes
+**Total**: \~15 minutes
 
 This is one of the simplest node types to implement!
 

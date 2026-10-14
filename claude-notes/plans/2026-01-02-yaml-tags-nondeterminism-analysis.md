@@ -1,8 +1,12 @@
-# Analysis: Nondeterministic sourceInfoPool IDs in JSON Writer
-
-**Beads Issue**: k-gv05
-**Date**: 2026-01-02
-**Status**: Fixed (2026-01-03)
+---
+title: 'Analysis: Nondeterministic sourceInfoPool IDs in JSON Writer'
+date: 2026-01-02
+description: 'Explains why the `yaml-tags` snapshot output varied between runs: a pointer-keyed cache in the JSON writer returned stale source-pool IDs when memory addresses were reused.'
+status: done  # Fixed (2026-01-03)
+braid:
+  strand: k-gv05
+  priority: P1
+---
 
 ## Problem Summary
 
@@ -115,7 +119,7 @@ SourceInfo::Substring {
 }
 ```
 
-The expr value has offsets [15,20], path has [33,47]. These are **not equal**, so content comparison correctly distinguishes them.
+The expr value has offsets `[15,20]`, path has `[33,47]`. These are **not equal**, so content comparison correctly distinguishes them.
 
 The problem is that the pointer cache **bypasses** content comparison entirely.
 
@@ -152,7 +156,7 @@ json!({
 })
 ```
 
-- CLONE_A (with offsets [15,20]) is created and stored in the `inlines` Vec
+- CLONE_A (with offsets `[15,20]`) is created and stored in the `inlines` Vec
 - `write_inlines` interns CLONE_A; `id_map` gets `addr_clone_a -> 2`
 - `json!` returns a Value
 - **`inlines` is dropped**, freeing CLONE_A's memory
@@ -170,7 +174,7 @@ json!({
 })
 ```
 
-- CLONE_B (with offsets [33,47]) is created
+- CLONE_B (with offsets `[33,47]`) is created
 - **If the allocator reuses the freed memory**, CLONE_B is at address `addr_clone_a`
 - `write_inlines` calls `intern(&clone_b_source_info)`
 - In `intern`: `ptr = addr_clone_a` (due to memory reuse)

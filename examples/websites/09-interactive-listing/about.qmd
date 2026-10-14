@@ -1,0 +1,10 @@
+---
+title: "About"
+---
+
+This site is the example for three Quarto 2 features that were designed
+to work together: a listing declared as `type: metadata`, an `{lmd}` cell
+that builds the page from the listing's items, and a React component that
+filters the same items in the browser.
+
+See the [posts](index.qmd) page and the `README.md` next to this file.

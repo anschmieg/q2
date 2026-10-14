@@ -17,6 +17,8 @@ Gate each test helper with the same conditions as its callers. A `#[cfg(test)]` 
 
 Before applying `#[cfg(unix)]` to a test, separate the portable behavior from the platform-specific setup and assertions. For example, a loopback TCP handshake works on every platform, but a `kill -0` liveness check does not. Gate only the platform-specific code. Prefer a `#[cfg(unix)]`/`#[cfg(not(unix))]` helper pair so the test still runs on all three platforms. See `spawn_long_lived_child` and `echo_stdin_to_stderr_cmd` in `crates/quarto-core/src/engine/ts_process.rs` for examples of both patterns.
 
+When the gated code uses no platform-specific API and only *running* it is platform-restricted, guard it at runtime with `if !cfg!(unix) { bail!(..) }` instead of `#[cfg(unix)]`. `cfg!` expands to a plain boolean, so the code still compiles everywhere, its helpers keep a caller, and their portable tests keep running on Windows; see `run()` in `crates/xtask/src/capture_pandoc_recordings.rs`.
+
 When gated code changes, update the comment that explains why the gate is needed. A stale explanation can lead someone to widen or copy an unnecessary gate.
 
 ## File paths

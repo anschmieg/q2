@@ -1,4 +1,8 @@
-# Plan A: `quarto.doc` Lua API (pampa crate)
+---
+title: 'Plan A: `quarto.doc` Lua API (pampa crate)'
+date: 2026-04-01
+description: 'Adds the `quarto.version`, `quarto.base64.encode` and `quarto.doc` Lua APIs in the pampa crate, plus `dofile` and `loadfile` overrides for restricted WASM and test environments and a script-directory stack for nested paths.'
+---
 
 ## Status: Complete
 
@@ -197,16 +201,16 @@ executing script file, tracked via the script-dir stack.
   Reads `FORMAT` global at call time. Logic:
   1. Exact match: if `fmt == FORMAT`, return true
   2. Alias table (hardcoded, matching TS Quarto `_format.lua`):
-     - `"html"` → true if FORMAT in {html, html4, html5, epub, epub2,
-       epub3, revealjs, s5, slidy, slideous, dzslides}
+     - `"html"` → true if FORMAT in \{html, html4, html5, epub, epub2,
+       epub3, revealjs, s5, slidy, slideous, dzslides\}
      - `"html:js"` → true if `is_format("html")` and NOT
        `is_format("epub")`
-     - `"latex"` or `"pdf"` → true if FORMAT in {latex, beamer, pdf}
+     - `"latex"` or `"pdf"` → true if FORMAT in \{latex, beamer, pdf\}
      - `"epub"` → true if FORMAT starts with "epub"
-     - `"markdown"` → true if FORMAT in {markdown, markdown_github,
-       gfm, commonmark, commonmark_x, markua}
+     - `"markdown"` → true if FORMAT in \{markdown, markdown_github,
+       gfm, commonmark, commonmark_x, markua\}
      - `"asciidoc"` or `"asciidoctor"` → true if FORMAT in
-       {asciidoc, asciidoctor}
+       \{asciidoc, asciidoctor\}
      - Everything else → false (exact match only)
   3. Also register `quarto.doc.isFormat` as alias (TS Quarto provides
      both; `kbd.lua` uses both forms)
@@ -368,7 +372,7 @@ registration time. We match this behavior. This keeps
 
 TS Quarto's `is_format` uses a hardcoded if/else chain mapping format
 names to groups. `is_format("html")` doesn't do string prefix matching
-— it checks if FORMAT is in a specific set (html, html4, html5, epub*,
+— it checks if FORMAT is in a specific set (html, html4, html5, epub\*,
 slide formats). `"html:js"` is a special alias meaning "HTML that
 supports JavaScript" (HTML minus epub), not a prefix:variant syntax.
 
@@ -421,7 +425,7 @@ Plan A does NOT widen the return type of `apply_lua_filter` or
 results are discarded. This means:
 - No changes to `unified_filter.rs`
 - No changes to callers in `quarto-core`
-- No changes to the ~100 filter test sites that destructure tuples
+- No changes to the \~100 filter test sites that destructure tuples
 - `cargo build --workspace` succeeds without touching quarto-core
 
 Plan B introduces a `FilterOutput` struct, widens the return types,

@@ -127,11 +127,11 @@ fn default_listing_renders_three_posts_in_default_order() {
         );
         write(
             &p.join("posts/a.qmd"),
-            "---\ntitle: First\ndate: 2026-01-15\nauthor: Alice\ndescription: First desc.\nformat: html\n---\n\nFirst body.\n",
+            "---\ntitle: First\ndate: 2026-01-15\nauthor: Alice\nformat: html\n---\n\nFirst body.\n",
         );
         write(
             &p.join("posts/b.qmd"),
-            "---\ntitle: Second\ndate: 2026-02-20\nauthor: Bob\ndescription: Second desc.\nformat: html\n---\n\nSecond body.\n",
+            "---\ntitle: Second\ndate: 2026-02-20\nauthor: Bob\nformat: html\n---\n\nSecond body.\n",
         );
         write(
             &p.join("posts/c.qmd"),
@@ -141,10 +141,11 @@ fn default_listing_renders_three_posts_in_default_order() {
 
     let host = html_for(&outputs, "index");
 
-    // Listing wrapper Div with the auto-synthesized id and the
-    // data-listing-rendered marker.
+    // Listing wrapper Div with Q1's container id for the synthesized
+    // listing id (`listing-` + `listing`) and the data-listing-rendered
+    // marker.
     assert!(
-        host.contains(r#"id="listing-1""#),
+        host.contains(r#"id="listing-listing""#),
         "expected listing wrapper id; got:\n{}",
         host
     );
@@ -181,9 +182,10 @@ fn default_listing_renders_three_posts_in_default_order() {
 
     // L7 ran during `WebsiteProjectType::post_render`: the
     // description envelope markers are stripped from the rendered
-    // host and the description region is replaced with each post's
-    // engine-rendered first paragraph (`"First body."` etc., from
-    // the post bodies above).
+    // host. First and Second have no `description:`, so their region
+    // holds the engine-rendered first paragraph; Third's explicit
+    // `description:` is authored and stays as written
+    // (bd-listing-description-precedence-x4bh6w3m).
     assert!(
         !host.contains("desc-begin(5A0113B34292)"),
         "L7 should have stripped description begin markers; got: {host}"
@@ -192,12 +194,13 @@ fn default_listing_renders_three_posts_in_default_order() {
         !host.contains("desc-end(5A0113B34292)"),
         "L7 should have stripped description end markers"
     );
-    // Engine-rendered first paragraph from each post's body.
     assert!(
-        host.contains("First body.")
-            && host.contains("Second body.")
-            && host.contains("Third body."),
+        host.contains("First body.") && host.contains("Second body."),
         "L7 should substitute the engine first paragraphs; got: {host}"
+    );
+    assert!(
+        host.contains("Third desc.") && !host.contains("Third body."),
+        "an explicit description is final, not replaced; got: {host}"
     );
 
     // Authors and dates flow through.
@@ -518,10 +521,12 @@ format: html
     });
 
     let host = html_for(&outputs, "index");
-    // The id should exist exactly once on a Div, with the
-    // data-listing-rendered marker, and the listing items live
-    // *inside* that Div (between Heading and After in source order).
-    assert!(host.contains(r#"id="my-blog""#));
+    // The slot is renamed to Q1's container id `listing-<id>`
+    // (bd-nbv80e33), carries the data-listing-rendered marker, and
+    // the listing items live *inside* it (between Heading and After
+    // in source order).
+    assert!(host.contains(r#"id="listing-my-blog""#), "{host}");
+    assert!(!host.contains(r#"id="my-blog""#), "{host}");
     assert!(host.contains(r#"data-listing-rendered="1""#));
     assert!(host.contains("First"));
     let p_heading = host.find("Heading").expect("Heading missing");
@@ -594,6 +599,91 @@ fn vendored_js_artifacts_emit_script_tags_and_land_under_site_libs() {
         "list.min.js body unexpectedly small: {} bytes",
         bytes.len()
     );
+}
+
+/// bd-nbv80e33: end to end, a paginated default listing with
+/// categories carries everything List.js and `quarto-listing.js` read
+/// back, under ids that agree with each other: the container
+/// `#listing-listing` (Q1's id for a lone listing), the items'
+/// `data-*` attrs, the pagination `<nav>` inside the container, and an
+/// init script naming that container. The script must reach the page
+/// verbatim (a raw-HTML block, not escaped text).
+#[test]
+fn paginated_listing_with_categories_carries_the_listjs_bootstrap() {
+    let (_dir, outputs) = render_project(|p| {
+        write(
+            &p.join("_quarto.yml"),
+            "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+        );
+        write(
+            &p.join("index.qmd"),
+            "---\ntitle: Listing\nlisting:\n  contents: posts\n  page-size: 2\n  categories: true\nformat: html\n---\n",
+        );
+        for i in 1..=3 {
+            write(
+                &p.join(format!("posts/p{i}.qmd")),
+                &format!(
+                    "---\ntitle: Post {i}\ndate: 2026-01-0{i}\ncategories: [cat{i}, shared]\nformat: html\n---\n\nBody {i}.\n"
+                ),
+            );
+        }
+    });
+    let host = html_for(&outputs, "index");
+
+    // The container, with Q1's id and classes.
+    let container = host
+        .find(r#"id="listing-listing""#)
+        .unwrap_or_else(|| panic!("no #listing-listing container:\n{host}"));
+    let container_tag = &host[host[..container].rfind('<').unwrap()..];
+    let container_tag = &container_tag[..container_tag.find('>').unwrap()];
+    for class in ["quarto-listing", "quarto-listing-container-default"] {
+        assert!(container_tag.contains(class), "{class}: {container_tag}");
+    }
+
+    // Item attrs: one data-index per item, base64 categories
+    // (btoa(encodeURIComponent("cat1,shared"))), date sort values.
+    for i in 0..3 {
+        assert!(
+            host.contains(&format!(r#"data-index="{i}""#)),
+            "item {i}:\n{host}"
+        );
+    }
+    assert!(
+        host.contains(r#"data-categories="Y2F0MSUyQ3NoYXJlZA==""#),
+        "{host}"
+    );
+    assert!(
+        host.contains(r#"data-listing-date-sort="1767225600000""#),
+        "{host}"
+    );
+
+    // Pagination nav and script, inside the container (after it opens).
+    let nav = host
+        .find(r#"<nav id="listing-pagination" class="listing-pagination""#)
+        .unwrap_or_else(|| panic!("no pagination nav:\n{host}"));
+    let script = host
+        .find(r#"new List("listing-listing", options)"#)
+        .unwrap_or_else(|| panic!("no List.js init script:\n{host}"));
+    assert!(
+        container < nav && nav < script,
+        "order: container, nav, script"
+    );
+    assert!(host.contains(r#""page":2"#), "{host}");
+    assert_eq!(
+        host.matches("new List(").count(),
+        1,
+        "one script per listing"
+    );
+    assert!(
+        !host.contains("new List(&quot;"),
+        "script must not be HTML-escaped:\n{host}"
+    );
+
+    // The libraries it calls are linked from the page head.
+    let list_js = host
+        .find("site_libs/listing/list.min.js")
+        .expect("list.min.js linked");
+    assert!(list_js < container, "List.js is loaded before the listing");
 }
 
 #[test]
@@ -1194,13 +1284,9 @@ const TRUNCATED_SENTENCE: &str = "alpha bravo charlie delta echo foxtrot…";
 /// placeholder (Q1's `_pagination.ejs.md` parity) and the derived
 /// description ends with `…`.
 ///
-/// Fixture note: the default item template guards the description
-/// envelope with `$if(description)$` (br-listing-default-no-derived-
-/// desc-ywc4zvu8), so the post carries a short explicit
-/// `description:` to make the envelope render; the post-render
-/// substitution then overwrites it with the derived first paragraph
-/// (bd-listing-description-precedence-x4bh6w3m). If either of those
-/// strands changes behavior, revisit this fixture.
+/// The post has no `description:`, so the description is derived from
+/// its first paragraph and truncated at `max-description-length`
+/// (bd-listing-default-no-derived-desc-m0wrr8ty).
 #[test]
 fn default_listing_emits_no_matching_placeholder_and_derived_ellipsis() {
     let (_dir, outputs) = render_project(|p| {
@@ -1214,9 +1300,7 @@ fn default_listing_emits_no_matching_placeholder_and_derived_ellipsis() {
         );
         write(
             &p.join("posts/a.qmd"),
-            &format!(
-                "---\ntitle: Alpha\ndate: 2026-01-01\ndescription: placeholder\nformat: html\n---\n\n{LONG_SENTENCE}\n"
-            ),
+            &format!("---\ntitle: Alpha\ndate: 2026-01-01\nformat: html\n---\n\n{LONG_SENTENCE}\n"),
         );
     });
 
@@ -1550,4 +1634,68 @@ fn custom_template_markdown_image_is_copied_raw_image_is_not() {
         "raw-HTML <img> must not be collected (RawInline is a no-op leaf in \
          ResourceCollector), so the asset never reaches the output tree"
     );
+}
+
+/// Element depth (count of unclosed `<div>`s) at each opening
+/// `<div class="<class>…">` in `html`, in document order.
+fn div_depths_of(html: &str, class: &str) -> Vec<usize> {
+    let needle = format!(r#"<div class="{class}"#);
+    html.match_indices(&needle)
+        .map(|(at, _)| {
+            let before = &html[..at];
+            before.matches("<div").count() - before.matches("</div").count()
+        })
+        .collect()
+}
+
+/// Write a website whose `index.qmd` lists `n` trivial docs with a
+/// listing of type `kind`.
+fn many_items_fixture(p: &std::path::Path, kind: &str, n: usize) {
+    write(
+        &p.join("_quarto.yml"),
+        "project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: \"My Site\"\n",
+    );
+    write(
+        &p.join("index.qmd"),
+        &format!("---\ntitle: Home\nlisting:\n  type: {kind}\n  contents: \"p/*.qmd\"\n---\n"),
+    );
+    for i in 1..=n {
+        write(
+            &p.join(format!("p/d{i:03}.qmd")),
+            &format!("---\ntitle: \"Doc {i:03}\"\n---\n\nHello world\n"),
+        );
+    }
+}
+
+/// bd-mlmkev01: the item partials end in `:::`, and doctemplate
+/// strips a partial's final newline, so `$items:item-default()$`
+/// glued each item's closing fence onto the next item's opening
+/// fence and every item nested one level deeper than the last.
+/// Items must be siblings.
+#[test]
+fn default_and_grid_items_are_siblings() {
+    for (kind, item_class) in [("default", "quarto-post"), ("grid", "g-col-1")] {
+        let (_dir, outputs) = render_project(|p| many_items_fixture(p, kind, 3));
+        let depths = div_depths_of(html_for(&outputs, "index"), item_class);
+        assert_eq!(depths.len(), 3, "{kind}: expected 3 items, got {depths:?}");
+        assert!(
+            depths.iter().all(|d| *d == depths[0]),
+            "{kind}: listing items must be siblings at one depth, got {depths:?}"
+        );
+    }
+}
+
+/// bd-mlmkev01: with per-item nesting, ~90 items exceeded the
+/// parser's 99-level limit and the whole listing was dropped.
+#[test]
+fn default_and_grid_listings_with_120_items_render_every_item() {
+    for (kind, item_class) in [("default", "quarto-post"), ("grid", "g-col-1")] {
+        let (_dir, outputs) = render_project(|p| many_items_fixture(p, kind, 120));
+        let depths = div_depths_of(html_for(&outputs, "index"), item_class);
+        assert_eq!(
+            depths.len(),
+            120,
+            "{kind}: expected all 120 items in the listing"
+        );
+    }
 }

@@ -44,6 +44,16 @@ For images the same split costs **two** things — rewriting *and* copying:
 `<img src="$it.image$">`{=html}   ✘ neither: the src 404s in the deployed site
 ```
 
+Item prose follows the same split. `$it.title$`, `$it.subtitle$` and
+`$it.description$` are **markdown** (formatting kept, special characters
+escaped); inside a raw HTML block use their rendered twins:
+
+```
+### [$it.title$]($it.path$)                    ✔ markdown in markdown
+`<span class="t">$it.title-html$</span>`{=html}  ✔ HTML in HTML
+`<span class="t">$it.title$</span>`{=html}       ✘ shows `Fix \_scope` source
+```
+
 Raw HTML is fine *inside* the link text — the built-ins do exactly this with
 ``[`$image-html$`{=html}]($path$)``. **Anchor markdown, contents raw.**
 
@@ -84,10 +94,13 @@ $it.description-placeholder-end$
 ````
 
 The markers delimit the *region* to substitute, so they must exist for
-exactly the items the `$if$` skips. The built-in templates gate the whole
-envelope on `$if(description)$` — so **copying the built-in shape loses
-previews for precisely the items that need them.** A custom template can and
-should do better.
+exactly the items the `$if$` skips. They are empty strings for an item whose
+description the author wrote (`listing-item.description`, `description:`,
+`abstract:`), so emitting them unconditionally never overrides an authored
+description; for a derived one, `$it.description$` holds the pre-render
+first paragraph and the markers let the post-render pass replace it. The
+built-in `default` and `grid` templates follow this shape (grid puts the
+envelope inside the description link — see `docs/guides/projects/listing-templates.qmd`).
 
 ## Read this first
 

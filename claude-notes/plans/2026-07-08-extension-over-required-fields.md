@@ -1,4 +1,12 @@
-# Relax q2 over-required `_extension.yml` fields (bd-8b0af414)
+---
+title: 'Relax q2 over-required `_extension.yml` fields (bd-8b0af414)'
+date: 2026-07-08
+description: 'Relaxes the q2 extension reader''s hard requirements on `title` and `author` in `_extension.yml` to match Quarto 1, so valid older extensions load instead of rendering as raw code.'
+braid:
+  strand: bd-8b0af414
+  priority: P1
+  labels: [bug]
+---
 
 ## Overview
 
@@ -106,4 +114,4 @@ boundary =** none; the unit under test is never mocked. Filesystem is real (temp
 - [x] `cargo nextest run -p quarto-core` — 2703 passed (1 flaky julia e2e passed in isolation; baseline flake, not a regression)
 - [x] `cargo nextest run --workspace` — 10667 passed, 0 failed
 - [x] `cargo xtask verify --skip-hub-build --skip-hub-tests` — **all Rust legs green**: Step 1 custom lints + clippy (`-D warnings`) pass (fixed `map_unwrap_or` → `map_or_else`); `cargo build --workspace` + full `cargo nextest run --workspace` = 10667 passed. Step 6 (ts-packages `tsc`) fails **only** on `TS2307 Cannot find module '@quarto/...'` = missing `node_modules` in this fresh worktree (no `npm install`, correctly skipped — hub-client not in scope). Diff is Rust-only (7 quarto-core files, zero TS/WASM/ts-packages); the extension reader is not in the WASM/TS path, so this leg is unaffected by the change. Run `npm install` at the worktree root if a full ts-packages pass is wanted.
-- [x] End-to-end: `q2 render` author-less shortcode extension. BEFORE (author required): 4× `WARN Failed to read extension … missing required 'author'`, `{{< greet >}}` → `<strong>?greet</strong>` (unknown-shortcode fallback, silent exit 0). AFTER (fix): extension loads, no warnings, `{{< greet >}}` → `HELLO_FROM_AUTHORLESS_EXTENSION`. Fixture: `scratchpad/e2e-authorless/`.
+- [x] End-to-end: `q2 render` author-less shortcode extension. BEFORE (author required): 4× `WARN Failed to read extension … missing required 'author'`, `{{{< greet >}}}` → `<strong>?greet</strong>` (unknown-shortcode fallback, silent exit 0). AFTER (fix): extension loads, no warnings, `{{{< greet >}}}` → `HELLO_FROM_AUTHORLESS_EXTENSION`. Fixture: `scratchpad/e2e-authorless/`.

@@ -62,6 +62,15 @@ pub struct LogMessage {
     pub message: String,
 }
 
+impl LogMessage {
+    /// The message with every line after the first indented by `indent`, so a
+    /// multi-line rendered diagnostic stays visually attached to its
+    /// `[LEVEL]` prefix when listed with other messages.
+    pub fn indented(&self, indent: &str) -> String {
+        self.message.replace('\n', &format!("\n{indent}"))
+    }
+}
+
 /// Context provided to assertions for verification.
 #[derive(Debug)]
 pub struct VerifyContext {

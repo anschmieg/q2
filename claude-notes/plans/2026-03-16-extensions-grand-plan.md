@@ -1,7 +1,10 @@
-# Quarto Extensions Grand Plan
+---
+title: 'Quarto Extensions Grand Plan'
+date: 2026-03-16
+description: 'Roadmap for implementing the Quarto extension system in the Rust rewrite, covering the seven contribution types declared in `_extension.yml` files and the phases that deliver each one.'
+status: in-progress  # In Progress (Phases 1, 2, 3, 4 complete)
+---
 
-**Created**: 2026-03-16
-**Status**: In Progress (Phases 1, 2, 3, 4 complete)
 **Sub-plans**:
 - Phase 1: `claude-notes/plans/2026-03-16-extensions-phase1-yml-and-metadata.md`
 - Phase 2: `claude-notes/plans/2026-03-17-extensions-phase2-filter-resolution.md`
@@ -317,7 +320,7 @@ before file discovery.
 
 ## Implementation Phases
 
-### Phase 1: _extension.yml Parsing and Metadata Contributions
+### Phase 1: \_extension.yml Parsing and Metadata Contributions
 
 **Split out to**: `claude-notes/plans/2026-03-16-extensions-phase1-yml-and-metadata.md`
 
@@ -451,7 +454,7 @@ custom writer via `writer: x.lua`; this phase handles that `.lua`-writer path.
 **Goal**: Extensions can contribute reveal.js plugins via
 `contributes: revealjs-plugins:` (Q1 shape: plugin `name` + `script[]` +
 `stylesheet[]`, with a `plugin.yml` carrying name/scripts/stylesheets/config).
-At render, the listed plugins' assets are registered and their globals injected
+At render, the listed plugins\' assets are registered and their globals injected
 into the `Reveal.initialize({ plugins: [...] })` call, with config merged
 (plugin defaults → user front-matter).
 
@@ -589,7 +592,7 @@ integration that was originally scoped here.
 
 **Goal**: `quarto install extension` command support.
 
-- [ ] GitHub source detection (org/repo[@version][/subdir])
+- [ ] GitHub source detection (`org/repo[@version][/subdir]`)
 - [ ] Archive URL support
 - [ ] Local path support
 - [ ] Trust verification prompt

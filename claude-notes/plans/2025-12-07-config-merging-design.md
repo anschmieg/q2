@@ -1,8 +1,12 @@
-# Configuration Merging System Design
-
-**Date**: 2025-12-07
-**Issue**: k-zvzm
-**Status**: Design proposal
+---
+title: 'Configuration Merging System Design'
+date: 2025-12-07
+description: 'Designs a Rust configuration merging system where `!prefer` and `!concat` YAML tags control merge behavior, using lazy evaluation and source tracking so validation errors point to the right file.'
+status: draft  # Design proposal
+braid:
+  strand: k-zvzm
+  priority: P1
+---
 
 **Incorporated subissue designs**:
 - `k-vpgx`: MergedConfig lifetime design → cursor-based navigation (see RQ1)
@@ -37,7 +41,7 @@ final configuration
 The current TypeScript implementation uses `mergeConfigs()` with lodash's `mergeWith`, which:
 1. Loses source location information after merge
 2. Uses hardcoded logic (arrays concatenate, scalars override)
-3. Accounts for ~15% of total runtime
+3. Accounts for \~15% of total runtime
 
 ### Goals for Rust Port
 
@@ -676,7 +680,7 @@ Use tags to override the default:
 
 | Situation | Tag | Result |
 |-----------|-----|--------|
-| Want markdown in _quarto.yml | `!md` | Parsed as markdown |
+| Want markdown in \_quarto.yml | `!md` | Parsed as markdown |
 | Want plain string in .qmd | `!str` | Kept as literal |
 | Want to override AND markdown | `!prefer_md` | Reset + parse as markdown |
 
@@ -695,7 +699,7 @@ Eagerly create a new `YamlWithSourceInfo` tree for every merge.
 - Fast access after merge
 
 **Cons:**
-- ~15% runtime cost (cloning/copying)
+- \~15% runtime cost (cloning/copying)
 - Memory pressure from duplicated trees
 - Doesn't preserve preference tags through multi-layer merge
 
@@ -964,7 +968,7 @@ pub fn validate_config(
 - [ ] Handle `Interpretation::Markdown` with existing parser
 - [ ] Handle `Interpretation::PlainString` bypass
 - [ ] Update document rendering to use `MergedConfig`
-- [ ] Integration tests with real .qmd files and _quarto.yml
+- [ ] Integration tests with real .qmd files and \_quarto.yml
 
 ### Phase 6: Performance & Polish
 

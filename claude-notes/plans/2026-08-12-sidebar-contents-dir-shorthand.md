@@ -1,11 +1,17 @@
-# Sidebar `contents: <directory>` shorthand renders a broken sidebar (bd-sidebar-contents-dir-shorthand-z7arvhx8)
+---
+title: 'Sidebar `contents: <directory>` shorthand renders a broken sidebar (bd-sidebar-contents-dir-shorthand-z7arvhx8)'
+date: 2026-08-12
+description: 'Makes a bare directory name in `contents:` expand to a titled section of the pages in that directory, as Quarto 1 does, and applies sidebar selection after expansion.'
+status: in-progress  # Design settled 2026-08-13 — implementing.
+braid:
+  strand: bd-sidebar-contents-dir-shorthand-z7arvhx8
+  priority: P1
+  labels: [navigation]
+---
 
-**Date:** 2026-08-12
-**Braid:** `bd-sidebar-contents-dir-shorthand-z7arvhx8` (bug, p1, label `navigation`)
-**Branch:** `braid/bd-sidebar-contents-dir-shorthand-z7arvhx8`, off `main` @
+**Branch:** `braid/bd-sidebar-contents-dir-shorthand-z7arvhx8`, off `main` \@
 `152ed8fb`, in the **main checkout** (no worktree — user's call, Q5).
 **Also fixes:** `bd-4feoon8u` (multi-sidebar `auto:` selection).
-**Status:** Design settled 2026-08-13 — implementing.
 
 ## Triage verdict
 
@@ -141,7 +147,7 @@ Selection therefore operates on *unexpanded* contents. And `contains_source_path
 (`crates/quarto-navigation/src/sidebar.rs:647`) explicitly ignores
 `SidebarEntry::Auto(_)` (`:663`).
 
-`sidebar_for_page`'s rules explain both reported symptoms as one root cause:
+`sidebar_for_page`\'s rules explain both reported symptoms as one root cause:
 
 - **Minimal repro (one sidebar, no `id`)** — Rule 2, the single-sidebar wildcard
   (`:637`), applies the sidebar regardless of containment. You get the sidebar
@@ -159,7 +165,7 @@ no sidebar.
 `claude-notes/plans/sidebar-contents-dir-shorthand-investigation/multi-sidebar-auto/`
 declares two `id:`-bearing sidebars — defeating the Rule-2 wildcard, the same
 shape as the Connect docs — where one is defined by an explicit `auto: how-to`.
-It uses only syntax q2 supports today. Rendered at `main` @ `152ed8fb`:
+It uses only syntax q2 supports today. Rendered at `main` \@ `152ed8fb`:
 
 ```
 how-to/index.html      sidebar=0
@@ -214,7 +220,7 @@ The trap: this transform runs **per page**, so naively expanding all sidebars
 would fire `Q-13-6` ("`auto:` matched no documents") for unselected sidebars on
 every page. Expansion must therefore collect diagnostics **per sidebar**, and
 only the picked sidebar's diagnostics may reach `ctx.diagnostics`. Same applies
-to `strip_auto`'s `Q-13-5` on the no-index path.
+to `strip_auto`\'s `Q-13-5` on the no-index path.
 
 **D3 — Directory-ness comes from the project index, not the filesystem.** A
 pattern is a bare directory when it carries no glob metacharacter *and* at least
@@ -250,7 +256,7 @@ in the main checkout.
       sidebar DOM against the repro's `_site-q1/`. Per CLAUDE.md, record the
       exact invocation and observed output in this plan.
 - [x] **Phase 5 — Docs.** Document the shorthand and the `auto: <dir>` section
-      shape. Re-read `Q-13-6`'s wording for the case where the user wrote
+      shape. Re-read `Q-13-6`\'s wording for the case where the user wrote
       `contents: <dir>` and never typed `auto:`.
 - [x] **Phase 6 — Full `cargo xtask verify`** (not `--skip-hub-build`;
       `quarto-core` is WASM-relevant), then request push approval.
@@ -262,7 +268,7 @@ in the main checkout.
 - `cargo xtask verify` — **EXIT=0, all 14 steps passed, no skips.** This
   includes the WASM/hub-client leg (steps 7-8) that `--skip-hub-build` would
   have skipped — the leg that matters here, since `quarto-core` is in
-  `wasm-quarto-hub-client`'s dependency closure.
+  `wasm-quarto-hub-client`\'s dependency closure.
 
 ### A false alarm worth recording
 

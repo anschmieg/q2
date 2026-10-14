@@ -1,9 +1,14 @@
-# Code Span Implementation - Completion Summary
+---
+title: 'Code Span Implementation - Completion Summary'
+date: 2025-10-31
+description: 'Summarizes the tree-sitter handler for inline code spans, including how whitespace captured in the delimiters becomes Space nodes so that the output matches Pandoc.'
+status: done  # ✅ COMPLETE
+braid:
+  strand: k-281
+  priority: P0
+---
 
-**Date**: 2025-10-31
-**Issue**: k-281
 **Epic**: k-274 (Tree-sitter Grammar Refactoring)
-**Status**: ✅ COMPLETE
 
 ## What Was Implemented
 
@@ -20,8 +25,8 @@ Successfully implemented the `pandoc_code_span` node handler for inline code wit
 ### 2. Space Injection Pattern
 Like emphasis constructs (emph, strong, strikeout, etc.), code spans require Space node injection because the tree-sitter grammar includes surrounding whitespace in delimiters:
 
-**Example**: `test \`code\` here`
-- Tree structure shows: `code_span_delimiter: (0, 4) - (0, 6)` captures " `" (space + backtick)
+**Example**: ``test `code` here``
+- Tree structure shows: `code_span_delimiter: (0, 4) - (0, 6)` captures \" \`\" (space + backtick)
 - Handler detects leading/trailing spaces in delimiters
 - Injects Space nodes before/after Code inline as needed
 - Result: `[Str "test", Space, Code (...) "code", Space, Str "here"]` ✅
@@ -57,8 +62,8 @@ All in `tests/test_treesitter_refactoring.rs`:
 
 1. ✅ `test_pandoc_code_span_basic()` - `` `code` ``
 2. ✅ `test_pandoc_code_span_with_spaces()` - `` `code with spaces` ``
-3. ✅ `test_pandoc_code_span_no_spaces_around()` - `x\`y\`z`
-4. ✅ `test_pandoc_code_span_within_text()` - `test \`code\` here`
+3. ✅ `test_pandoc_code_span_no_spaces_around()` - ``x`y`z``
+4. ✅ `test_pandoc_code_span_within_text()` - ``test `code` here``
 5. ✅ `test_pandoc_code_span_multiple()` - `` `foo` and `bar` ``
 6. ✅ `test_pandoc_code_span_preserves_spaces()` - `` `  spaced  ` ``
 
@@ -80,7 +85,7 @@ echo "\`code\`" | cargo run -- --verbose 2>&1 | grep MISSING
 ### Pandoc Comparison
 All outputs exactly match Pandoc's native format:
 
-**Test**: `test \`code\` here`
+**Test**: ``test `code` here``
 - Pandoc: `[ Para [ Str "test" , Space , Code ( "" , [] , [] ) "code" , Space , Str "here" ] ]`
 - Ours:   `[ Para [Str "test", Space, Code ( "" , [] , [] ) "code", Space, Str "here"] ]`
 - Match: ✅ (only formatting differs)
@@ -90,7 +95,7 @@ All outputs exactly match Pandoc's native format:
 - Ours:   `[ Para [Code ( "" , [] , [] ) "foo", Space, Str "and", Space, Code ( "" , [] , [] ) "bar"] ]`
 - Match: ✅
 
-**Test**: `x\`y\`z`
+**Test**: ``x`y`z``
 - Pandoc: `[ Para [ Str "x" , Code ( "" , [] , [] ) "y" , Str "z" ] ]`
 - Ours:   `[ Para [Str "x", Code ( "" , [] , [] ) "y", Str "z"] ]`
 - Match: ✅
@@ -148,7 +153,7 @@ Or continue with other priorities from the epic (k-274).
 - Initial implementation: 45 minutes
 - Debugging Space injection: 20 minutes
 - Testing and verification: 15 minutes
-- **Total**: ~2.5 hours (within estimate of 2-3 hours)
+- **Total**: \~2.5 hours (within estimate of 2-3 hours)
 
 ## Success Criteria Met
 

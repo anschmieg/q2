@@ -64,7 +64,7 @@ fn write_bytes(path: &Path, contents: &[u8]) {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    quarto_system_runtime::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 // ─── Drive modes ──────────────────────────────────────────────────
@@ -310,6 +310,7 @@ fn pandoc_to_document_ast(pandoc: Pandoc, ast_context: ASTContext, path: PathBuf
         source_context: SourceContext::new(),
         warnings: Vec::new(),
         recorded_includes: Vec::new(),
+        derived_listing: Default::default(),
     }
 }
 

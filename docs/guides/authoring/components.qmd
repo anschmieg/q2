@@ -1,0 +1,164 @@
+---
+title: Components
+description: Bind a React component to an element of an HTML page, keep the markdown as the no-script version, and hand the component its content and props.
+---
+
+A component is a React component that takes over one element of the
+rendered page. The element is written as ordinary markdown, so a reader
+without JavaScript, a feed, or a search engine sees the markdown; in a
+browser, a small runtime mounts the component over it. Nothing about
+purely static documents changes: a page with no `components:` key ships no
+runtime and no React.
+
+```yaml
+---
+title: A page
+components:
+  - name: carousel
+    src: carousel.tsx
+---
+```
+
+```markdown
+::: {#carousel}
+- ![First](one.png)
+- ![Second](two.png)
+:::
+```
+
+The component is an ES module whose default export is a React component.
+`src` is a file in the project: `.js` or `.mjs` ships as written; `.tsx`,
+`.ts` and `.jsx` are transpiled when the page renders (types stripped, JSX
+compiled), with no build step on your side. Relative imports between your
+files are followed and shipped too.
+
+```tsx
+import { useState } from "react";
+import type { QuartoComponentProps } from "@quarto/components";
+
+export default function Carousel({ children }: QuartoComponentProps) {
+  const [i, setI] = useState(0);
+  return <div className="carousel" onClick={() => setI(i + 1)}>{children}</div>;
+}
+```
+
+`react`, `react-dom/client` and `react/jsx-runtime` resolve through an
+import map to a copy of React shipped with the site under
+`site_libs/quarto-react/`, so every component on the page shares one
+React. Other packages are not resolved yet (`npm:` sources are planned;
+see [`Q-25-3`](/errors/components/Q-25-3.qmd)).
+
+## Declaring components
+
+Each entry under `components:` (in the document, or in `_quarto.yml` for
+every page) takes:
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `name` | The name an element binds by. | required |
+| `src` | The module, relative to the file that declares it; a leading `/` is the project root. | required |
+| `export` | The module export to mount. | `default` |
+| `bind` | Which elements: `"#id"` (one element) or `.class` (every element with the class). | `#<name>` |
+| `content` | How the element's content reaches the component: `dom`, `ast` or `none`. | `dom` |
+| `props` | A map of static props, passed as a JSON object. | none |
+
+Quote `bind: "#id"`: an unquoted `#` starts a YAML comment.
+
+Only Divs and Spans host components, so a block component is written as a
+fenced div and an inline one as a bracketed span.
+
+## Binding on the element
+
+Instead of a selector in metadata, an element can name its component:
+
+```markdown
+::: {component=carousel}
+...
+:::
+
+A [12 15 9 22]{component=sparkline component-props='{"width": 80}'} inline.
+```
+
+`component=<name>` refers to a declared component. A path works too and
+declares the component on the spot: `component=./carousel.tsx`.
+`component-props` carries per-element props as a JSON object, in single
+quotes so the double quotes inside survive; it is merged over the
+declaration's `props`.
+
+## What the component receives
+
+The props are the same in every page that mounts the component, and the
+same shape the q2 preview will use when it dispatches on the element:
+
+```ts
+interface QuartoComponentProps<P = Record<string, unknown>> {
+  attrs: { id: string; classes: string[]; attributes: Record<string, string> };
+  props: P;              // declared props, overlaid by the element's
+  children: React.ReactNode;  // the no-script content (content: dom)
+  node?: Block | Inline; // the element's Pandoc AST (content: ast)
+  host: HTMLElement | null;   // the element itself; null in the preview
+}
+```
+
+`children` is the element's rendered content, handed back as a React
+element. Render it where you want it and treat it as opaque; a component
+that needs structure asks for `content: ast` and reads `node`, the
+element's Pandoc JSON (`{ t: "Div", c: [attr, blocks] }`), the same
+representation the preview renders from. `content: none` drops the content.
+
+The types live in the `@quarto/components` package (`QuartoComponentProps`,
+`QuartoComponent`, `defineComponent`); the page runtime does not need them,
+they are for your editor.
+
+## Building the element from Lua
+
+A Lua filter or an lmd cell builds a bound element with
+`quarto.component(name, props, content)`: a Div with the content and the
+props attached, or a Span when the content is inline. Props are encoded by
+`pandoc.json.encode`, which turns inlines and blocks into their text and a
+`meta` value into plain JSON, so listing items can be passed straight
+through. This is how a listing becomes interactive: declare it as
+[`type: metadata`](../projects/listings.qmd#listings-as-data), build the
+no-script markup, and hand the items to a component.
+
+````markdown
+---
+listing:
+  id: posts
+  type: metadata
+  contents: posts/*.qmd
+components:
+  - name: filter-table
+    src: filter-table.tsx
+---
+
+```{lmd}
+local items = meta.listings.posts.items
+local rows = items:map(function(it)
+  return { title = pandoc.utils.stringify(it.title), href = it["output-href"], date = it.date }
+end)
+local list = pandoc.BulletList(items:map(function(it)
+  return {=: `{lmd} pandoc.Link(it.title, it.path)` (`{lmd} it.date`) :=}
+end))
+return quarto.component("filter-table", { rows = rows }, { list })
+```
+````
+
+The component receives `props.rows` and `children` (the bullet list); the
+page without JavaScript shows the list.
+
+## When something goes wrong
+
+The runtime never breaks the page: a module that fails to load or a
+component that throws is logged to the browser console and the element
+keeps its static content. At render time, a declaration or binding problem
+is a warning with a `Q-25-*` code: no element for a binding
+([`Q-25-4`](/errors/components/Q-25-4.qmd)), two components on one element
+([`Q-25-5`](/errors/components/Q-25-5.qmd)), an undeclared name on an
+element ([`Q-25-7`](/errors/components/Q-25-7.qmd)), or a TypeScript module
+that does not compile ([`Q-25-9`](/errors/components/Q-25-9.qmd), with the
+position inside the module).
+
+Components are an HTML feature: other formats render the markdown and
+ignore the binding. The q2 preview currently shows the static content for
+bound elements; mounting the same components in the preview is planned.

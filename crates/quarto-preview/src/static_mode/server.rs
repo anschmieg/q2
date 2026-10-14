@@ -16,6 +16,9 @@
 //!   canonicalization: symlinks inside the output tree are followed
 //!   like any static server would, and the server is loopback-bound.
 //! - Every response is `Cache-Control: no-store, max-age=0`.
+//! - Files under `site_libs/quarto-search/` (the website search bundle)
+//!   also carry `Access-Control-Allow-Origin: *`, so a federated parent
+//!   site previewed on another port can merge this site's index.
 //! - Content types come from the extension (`mime_guess`).
 //! - `text/html` bodies get the client before the last `</body>`
 //!   (appended if there is none) — unless the request is a `fetch()`
@@ -55,6 +58,7 @@ const CLIENT_JS: &str = include_str!("client.js");
 
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store, max-age=0");
 const HTML_UTF8: HeaderValue = HeaderValue::from_static("text/html; charset=utf-8");
+const CORS_ANY: HeaderValue = HeaderValue::from_static("*");
 
 /// Characters to percent-encode when a filename becomes a URL path
 /// segment: controls, space, and the delimiters that would change the
@@ -384,7 +388,27 @@ fn file_response(
     }
     let content_type = HeaderValue::from_str(mime.as_ref())
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-    bytes_response(bytes, status, content_type, is_head)
+    let mut response = bytes_response(bytes, status, content_type, is_head);
+    if is_search_asset(path) {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, CORS_ANY);
+    }
+    response
+}
+
+/// Is this file part of the website search bundle
+/// (`<lib_dir>/quarto-search/…`)? Those are served with
+/// `Access-Control-Allow-Origin: *` so a *federated* parent site being
+/// previewed on another port can merge this site's index — the one
+/// cross-origin read a rendered site is designed to allow (plan:
+/// "Federated search across sites", constraint 2). Nothing else gets
+/// the header.
+fn is_search_asset(path: &Path) -> bool {
+    let components: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
+    components
+        .windows(2)
+        .any(|pair| pair[0] == "site_libs" && pair[1] == "quarto-search")
 }
 
 fn html_response(body: Vec<u8>, status: StatusCode, is_head: bool) -> Response {

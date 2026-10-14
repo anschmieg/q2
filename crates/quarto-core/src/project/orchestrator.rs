@@ -616,6 +616,19 @@ impl ProjectType for WebsiteProjectType {
                 runtime,
                 diagnostics,
             )?;
+            // Website search (bd-eip0naf4): Pagefind bundle under
+            // `<lib_dir>/quarto-search/`, its manifest, and the
+            // Quarto 1-shaped `search.json`, from the captures
+            // `SearchCaptureStage` deposited. Same late slot as llms:
+            // every page has rendered and every resource has landed.
+            super::search::writer::write_search_index(
+                project,
+                index,
+                project_artifacts,
+                &self.lib_dir(),
+                runtime,
+                diagnostics,
+            )?;
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -909,6 +922,13 @@ pub enum RenderMode {
     ActivePage(std::path::PathBuf),
 }
 
+/// What the whole-book pandoc request needs beyond the pipeline's own state.
+pub(crate) struct BookRequestParams<'a> {
+    pub prepare_options: crate::pandoc_request::PrepareOptions,
+    pub captures_by_path: &'a std::collections::BTreeMap<String, Vec<u8>>,
+    pub hooks: Option<&'a dyn crate::project::book::BookRenderHooks>,
+}
+
 /// Two-pass project render driver.
 ///
 /// Generic over [`Pass2Renderer`] so the same orchestration logic
@@ -1005,7 +1025,7 @@ impl<'a> ProjectPipeline<'a, RenderToFileRenderer<'a>> {
     /// The native CLI entry points call this instead of [`Self::run`].
     /// For non-book projects it is exactly `run()`: the same
     /// [`run_inner`](Self::run_inner) body and the same unconditional
-    /// `shutdown_all()` teardown (TS-engine Deno subprocess reaping)
+    /// `shutdown_all()` teardown (TS-engine Node subprocess reaping)
     /// afterward. For books it adds the format-support gate (Q-5-33,
     /// Q1's `projectFormatsOnly` + `isSupportedFormat`) before
     /// rendering; P2/P4/P5's book orchestration (single-file merge,
@@ -1435,7 +1455,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // on *every* exit path — success, the fail-fast early return, or a
         // `?`-propagated hook/resource error — before `ProjectContext` (and its
         // `registry`) drops. This is the caller Plan 1a-host deferred to: q2 uses
-        // explicit `registry.shutdown_all()` (not Drop) to reap TS-engine Deno
+        // explicit `registry.shutdown_all()` (not Drop) to reap TS-engine Node
         // subprocesses at end-of-render. Best-effort: log at WARN and continue;
         // the host's own Drop is the backstop if this errs.
         let result = self.run_inner().await;
@@ -1855,6 +1875,49 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         Vec<FileFailure>,
     ) {
         self.pass_one().await
+    }
+
+    /// The browser's whole-book pandoc request: Pass 1 and the book's
+    /// `pre_render` run as [`Self::run_book_single_file_merge`] runs them
+    /// (the book's render list and format defaults are computed there), then
+    /// the shared single-file-merge core renders every chapter one after
+    /// another and ends in a `PandocRequest` instead of a pandoc process.
+    /// `pass1_failures` are ignored, as native does without `--fail-fast`.
+    /// No engine-registry shutdown or diagnostics drain: the browser has no
+    /// engines.
+    pub(crate) async fn run_book_request(
+        &mut self,
+        params: BookRequestParams<'_>,
+    ) -> crate::pandoc_request::render::PandocRequestOutcome {
+        use crate::pandoc_request::render::PandocRequestOutcome;
+        let (profiles, _pass1_failures) = self.pass_one().await;
+        let index = Arc::new(ProjectIndex::new(profiles));
+        if let Err(e) = self
+            .project_type
+            .pre_render(self.project, &index, self.runtime.as_ref())
+            .await
+        {
+            return match e {
+                QuartoError::Parse(parse_error) => PandocRequestOutcome {
+                    request: None,
+                    diagnostics: parse_error.diagnostics.clone(),
+                    source_context: parse_error.source_context.clone(),
+                    error: Some(QuartoError::Parse(parse_error).to_string()),
+                    unexecuted_cells: 0,
+                    book: None,
+                },
+                other => PandocRequestOutcome::failed_with(format!("pre_render failed: {other}")),
+            };
+        }
+        let book_items = self.project.book_render_items.clone().unwrap_or_default();
+        crate::project::book::request::render_book_request(
+            self.project,
+            &book_items,
+            &self.format,
+            self.runtime.clone(),
+            params,
+        )
+        .await
     }
 
     async fn pass_one(
@@ -2466,6 +2529,12 @@ async fn pass1_profile_with_cache(
     let source_path = pass1_project_relative_source_path(&project.dir, &doc_info.input);
     let format_id = format.target_format.clone();
 
+    // The modification date `ListingItemInfoStage` records as
+    // `listing_item.date_modified` — computed by the same function, so
+    // a touched file misses the cache instead of serving a stale date.
+    let source_modified_date =
+        crate::stage::stages::listing_item_info::mtime_iso(runtime.as_ref(), &doc_info.input);
+
     // Layered _metadata.yml raw bytes for the cache-key domain.
     // We re-read the raw bytes (not the parsed ConfigValue) because
     // byte-for-byte changes invalidate the key — a comment-only
@@ -2515,6 +2584,7 @@ async fn pass1_profile_with_cache(
         format_id: &format_id,
         source_path: &source_path,
         source_bytes: &source_bytes,
+        source_modified_date: source_modified_date.as_deref(),
         metadata_files: &metadata_files,
         quarto_yml_bytes: &quarto_yml_bytes,
         extension_contributions: &extension_contributions,
@@ -2565,37 +2635,21 @@ async fn pass1_profile_single_file_live(
     doc_info: &DocumentInfo,
     source_bytes: &[u8],
 ) -> Result<crate::document_profile::DocumentProfile> {
-    use crate::pipeline::run_pipeline;
+    use crate::pipeline::{build_head_stages, run_pipeline};
     use crate::render::{BinaryDependencies, RenderContext};
-    use crate::stage::{
-        DocumentProfileStage, IncludeExpansionStage, LinkResolutionStage, MetadataMergeStage,
-        ParseDocumentStage, PipelineStage, SourceConversionStage,
-    };
 
     let source_name = doc_info.input.to_string_lossy().to_string();
     let binaries = BinaryDependencies::new();
     let mut ctx = RenderContext::new(project, doc_info, format, &binaries);
 
-    let stages: Vec<Box<dyn PipelineStage>> = vec![
-        // Convert non-QMD files to QMD before parse.  A non-QMD input
-        // without conversion would yield a garbage DocumentProfile /
-        // ProjectIndex entry in Pass 1 (plan1c §1067-1086).
-        Box::new(SourceConversionStage::new()),
-        Box::new(ParseDocumentStage::new()),
-        Box::new(MetadataMergeStage::new()),
-        // Include-expansion threads child content through the
-        // profile so transitive `{{< include … >}}` is visible
-        // (bd-xfwx). Phase 8 sub-phase 8.0d's LinkResolutionStage
-        // also depends on it: the AST walk must see post-include
-        // content so a body link inside an included child counts as
-        // a dependency edge of the parent.
-        Box::new(IncludeExpansionStage::new()),
-        Box::new(DocumentProfileStage::new()),
-        // Pass-1 cross-doc body-link resolution. Reads the
-        // post-include AST, writes `profile.body_link_targets` for
-        // the dependency graph.
-        Box::new(LinkResolutionStage::new()),
-    ];
+    // Exactly the full pipeline's head, so the Pass-1 profile equals
+    // the one the full render computes (see `build_head_stages`).
+    // Source conversion runs first: a non-QMD input without it would
+    // yield a garbage DocumentProfile / ProjectIndex entry
+    // (plan1c §1067-1086); include expansion precedes the checkpoint so
+    // transitive `{{< include … >}}` content and body links are visible
+    // (bd-xfwx, Phase 8.0d).
+    let stages = build_head_stages();
 
     let (output, _diagnostics) =
         run_pipeline(source_bytes, &source_name, &mut ctx, runtime, stages).await?;
@@ -2618,7 +2672,7 @@ mod tests {
 
     /// Build a non-spawned `TsEngine` with the given `_extension.yml` path
     /// set. `TsEngineHost::new` does not spawn a subprocess, so this is
-    /// safe outside a `deno`-gated test.
+    /// safe outside a `node`-gated test.
     fn make_ts_engine_with_extension_yml(
         name: &str,
         extension_yml_path: PathBuf,

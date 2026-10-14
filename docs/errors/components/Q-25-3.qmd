@@ -1,0 +1,35 @@
+---
+title: "npm component sources are not supported yet"
+description: "A component's `src` is an `npm:` package specifier. Only project files are supported for now; the entry is skipped."
+code: Q-25-3
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-3` — npm component sources are not supported yet
+
+> A component's `src` is an `npm:` package specifier. Only project files are supported for now; the entry is skipped.
+
+## What this means
+
+`src: npm:<package>@<version>` is reserved for loading a published
+component through the page's import map. That route is not built yet
+(it is deferred in the design, pending a way to vendor the package into
+the output), so Quarto warns and skips the entry.
+
+## Why this happens
+
+- The entry uses the `npm:` prefix.
+
+## How to fix
+
+Copy or build the component into a file in the project and point `src:`
+at it. Keep the `npm:` line out until the feature lands.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

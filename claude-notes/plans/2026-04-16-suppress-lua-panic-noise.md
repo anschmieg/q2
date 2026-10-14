@@ -1,4 +1,8 @@
-# Suppress noisy `lua error` panic stack traces in WASM
+---
+title: 'Suppress noisy `lua error` panic stack traces in WASM'
+date: 2026-04-16
+description: 'Stops expected Lua error panics in the WASM build from printing stack traces to the browser console while keeping output for genuine Rust panics, comparing a custom hook against a sentinel payload type.'
+---
 
 ## Problem
 
@@ -165,7 +169,7 @@ code paths that are compiled only for wasm32). `cargo nextest run
 
 Options considered for native unit coverage:
 - Extract `LuaThrow` sentinel to a new workspace crate
-  (`quarto-lua-panic-wasm`): over-engineered for ~15 lines of code.
+  (`quarto-lua-panic-wasm`): over-engineered for \~15 lines of code.
 - Add `rlib` to crate-type and fix the native build: unrelated large
   refactor.
 - Use `wasm-bindgen-test` harness: this crate has zero existing tests
@@ -203,7 +207,7 @@ Tests must come *before* implementation.
 - [x] Define `pub struct LuaThrow;` sentinel type at the crate root
       (`crates/wasm-quarto-hub-client/src/lib.rs`) so it is always
       compiled regardless of target. A unit struct is trivially `'static
-      + Send`, satisfying `panic_any`'s requirements.
+      + Send`, satisfying `panic_any`\'s requirements.
 - [x] Replace `panic!("lua error")` in
       `crates/wasm-quarto-hub-client/src/c_shim.rs::rust_lua_throw` with
       `std::panic::panic_any(crate::LuaThrow)`. `panic_any` produces a
@@ -225,7 +229,7 @@ Tests must come *before* implementation.
       traces in output.
 - [x] Existing `test-lua-wasm.mjs` (which includes a `pcall error` case
       that previously produced noise) now passes silently — 10/10 tests
-      still pass; only `test_unwind`'s deliberate `panic!("test panic")`
+      still pass; only `test_unwind`\'s deliberate `panic!("test panic")`
       surfaces (expected).
 - [x] Updated `hub-client/e2e/helpers/previewExtraction.ts` comment to
       reflect new behavior. Kept the `unreachable`/`RuntimeError`

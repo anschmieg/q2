@@ -1,9 +1,15 @@
-# Recognize bare `<` as a `Str` token
+---
+title: 'Recognize bare `<` as a `Str` token'
+date: 2026-05-18
+date-modified: 2026-05-18
+description: 'Makes a bare `<` that does not start an HTML tag, comment, or autolink parse as a plain string instead of a hard parse error, by adding a scanner token for it.'
+status: done  # implemented (awaiting review / push)
+braid:
+  strand: bd-j9cf
+  priority: P2
+---
 
-**Status:** implemented (awaiting review / push)
-**Tracking issue:** bd-j9cf
 **Owner:** cscheid
-**Last updated:** 2026-05-18
 
 ## Overview
 
@@ -36,7 +42,7 @@ resolve the construct to one of:
 If the scanner walks to EOF / end-of-block without finding `>` or
 `}`, it returns `false` and emits no token at all. The grammar's
 internal `pandoc_str` regex
-(`crates/tree-sitter-qmd/tree-sitter-markdown/grammar.js`, ~line 80)
+(`crates/tree-sitter-qmd/tree-sitter-markdown/grammar.js`, \~line 80)
 also does **not** include `<` in any of its character classes (it
 explicitly excludes `<` from `PANDOC_VALID_MATH_SYMBOLS` and never
 adds it back). So `<` ends up lexed by nothing, the parser hits the
@@ -103,7 +109,7 @@ producing a `Q-2-9` warning — see "Risks" below.
 In `grammar.js`:
 
 - Declare `$._pandoc_lt_str` in the `externals` list (near
-  `$.html_element`, ~line 1046).
+  `$.html_element`, \~line 1046).
 - Add it as an alternative for `_inline_element`, aliased to
   `$.pandoc_str` (or as a distinct node-type that
   `pampa/src/pandoc/treesitter.rs` maps to `Str { text: "<" }`).
@@ -242,11 +248,11 @@ or token here` at the `<`.
 **Discovered downstream change** (not in the original plan):
 
 Tree-sitter chomps preceding whitespace into the external token's
-reported range (the block-level scan loop at `scanner.c` ~line 2160
+reported range (the block-level scan loop at `scanner.c` \~line 2160
 consumes indentation before dispatching to
 `parse_open_angle_brace`). This is the same behavior that the
 `html_element` and `autolink` handlers already split out into a
-leading `Space` inline. Extended `treesitter.rs`'s `pandoc_str`
+leading `Space` inline. Extended `treesitter.rs`\'s `pandoc_str`
 branch to do the same:
 
 - If the `pandoc_str` text starts with ASCII whitespace, emit a

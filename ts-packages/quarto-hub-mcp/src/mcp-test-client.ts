@@ -38,6 +38,10 @@ export class McpTestClient {
   readonly stderrLines: string[] = [];
   private stderrBuffer = '';
 
+  /** The `serverInfo` from the initialize handshake (captured by
+   * `start`), so tests can assert on the server's identity/version. */
+  serverInfo?: { name?: string; version?: string };
+
   /**
    * Start the MCP server process with the given arguments.
    *
@@ -106,11 +110,14 @@ export class McpTestClient {
     });
 
     // Initialize the MCP session
-    await this.sendRequest('initialize', {
+    const initResponse = await this.sendRequest('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'test-client', version: '1.0' },
     });
+    this.serverInfo = (
+      initResponse.result as { serverInfo?: { name?: string; version?: string } } | undefined
+    )?.serverInfo;
 
     // Send initialized notification
     this.sendNotification('notifications/initialized');
@@ -237,6 +244,33 @@ export class McpTestClient {
       annotations?: unknown;
     }> };
     return result.tools;
+  }
+
+  /**
+   * List all available prompts.
+   */
+  async listPrompts(): Promise<Array<{ name: string; description?: string; arguments?: unknown }>> {
+    const response = await this.sendRequest('prompts/list');
+    if (response.error) {
+      throw new Error(`MCP error: ${response.error.message}`);
+    }
+    return (response.result as { prompts: Array<{ name: string }> }).prompts;
+  }
+
+  /**
+   * Get a prompt with arguments filled in.
+   */
+  async getPrompt(
+    name: string,
+    args: Record<string, string>,
+  ): Promise<{ messages: Array<{ role: string; content: { type: string; text: string } }> }> {
+    const response = await this.sendRequest('prompts/get', { name, arguments: args });
+    if (response.error) {
+      throw new Error(`MCP error: ${response.error.message}`);
+    }
+    return response.result as {
+      messages: Array<{ role: string; content: { type: string; text: string } }>;
+    };
   }
 
   // ---- Internal ----

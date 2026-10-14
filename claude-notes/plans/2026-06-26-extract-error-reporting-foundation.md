@@ -1,4 +1,13 @@
-# Step 1: extract the diagnostics foundation into two standalone `posit-dev/` repos — `quarto-source-map` first, then `quarto-error-reporting`
+---
+title: 'Step 1: extract the diagnostics foundation into two standalone `posit-dev/` repos — `quarto-source-map` first, then `quarto-error-reporting`'
+date: 2026-06-26
+description: 'Extracts the `quarto-source-map` and `quarto-error-reporting` crates into standalone published repositories, moving the error catalog data into a q2-side crate so the reporting core stays catalog-agnostic.'
+status: draft  # Plan (not started)
+braid:
+  strand: bd-egcyeym9
+  priority: P2
+  labels: [architecture, research]
+---
 
 > **Naming (decided 2026-06-27):** both externalized crates **keep their current
 > names** — `quarto-source-map` and `quarto-error-reporting` (and `quarto-yaml`
@@ -9,9 +18,6 @@
 > `coalesce.rs` stay in the external crate behind a default-off `json` feature
 > (see "The split").
 
-**Strand:** bd-egcyeym9
-**Date:** 2026-06-26
-**Status:** Plan (not started)
 **Design contract:** `claude-notes/designs/cross-package-error-codes.md`
 **Sibling plan (gated behind this):**
   `claude-notes/plans/2026-06-26-extract-quarto-yaml-validation-design.md`
@@ -71,7 +77,7 @@ deleting `validate-yaml` (step 2), wiring yaml validation into q2 config, the
 ## The split: what goes where
 
 Only **one** thing actually leaves `quarto-error-reporting`: the `Q-*` catalog
-*data*. Everything else stays in the (now catalog-agnostic) crate, so consumers'
+*data*. Everything else stays in the (now catalog-agnostic) crate, so consumers\'
 imports are unchanged.
 
 ```
@@ -241,7 +247,7 @@ public surface (minus the moved catalog *data*).
       nothing → EmptyCatalog" choice. The 2 `quarto-core` data-presence `#[test]`s
       now query
       `quarto_error_catalog::ERROR_CATALOG` directly (dev-dep added). **Audit
-      script + ~25 path references updated** to `crates/quarto-error-catalog/…`;
+      script + \~25 path references updated** to `crates/quarto-error-catalog/…`;
       `scripts/audit-error-codes.py` passes (exit 0). Full workspace nextest:
       **10240 passed**.
 - [x] **2d.** `json.rs` now behind a **default-off `json` feature** (`lib.rs`
@@ -258,7 +264,7 @@ public surface (minus the moved catalog *data*).
 - [x] **2f.** `cargo xtask verify` **GREEN — all 14 steps** (incl. WASM build +
       hub-client tests). Two failures found + fixed en route: (1) two clippy lints
       in the new code (Step 1); (2) the WASM build (Step 7) broke hub-client's vite
-      PWA step — wiring `install()` into the WASM bootstrap `include_str!`'d the
+      PWA step — wiring `install()` into the WASM bootstrap `include_str!`\'d the
       46 KB catalog and forced it past the 35 MiB precache limit (`vite.config.ts`
       `maximumFileSizeToCacheInBytes`). Fixed *soundly* (not by raising the limit):
       removed the WASM `install()` + `quarto-error-catalog` dep, since the WASM
@@ -420,7 +426,7 @@ Open forks (settle before 1a / 3a):
 
 - *Behaviour-preservation (Phase 2):* the 2a tests — installed catalog reproduces
   today's `docs_url`; empty catalog returns `None`.
-- *Catalog-agnostic (Phase 3):* `quarto-error-reporting`'s own test suite passes
+- *Catalog-agnostic (Phase 3):* `quarto-error-reporting`\'s own test suite passes
   with `EmptyCatalog` and **no** dependency on any `Q-*` data.
 - *External-consumer smoke (3c):* a throwaway crate builds a `DiagnosticMessage`,
   installs a trivial `CatalogProvider`, and renders — proving the published API is

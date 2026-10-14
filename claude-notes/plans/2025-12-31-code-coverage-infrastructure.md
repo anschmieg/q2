@@ -1,4 +1,8 @@
-# Plan: Code Coverage Infrastructure
+---
+title: 'Plan: Code Coverage Infrastructure'
+date: 2025-12-31
+description: 'Sets up `cargo-llvm-cov` with nextest to measure line, function and branch coverage per crate and per file across the workspace, with a `scripts/coverage.sh` wrapper and git-ignored report outputs.'
+---
 
 ## Problem Statement
 
@@ -196,7 +200,7 @@ For a project of this size, initial coverage might be:
 - `quarto-system-runtime/native.rs`: 92.22%
 
 **Medium coverage (50-90%)**:
-- `quarto-core`: ~80%
+- `quarto-core`: \~80%
 - `quarto-yaml-validation`: 61-87%
 - `quarto-pandoc-types`: 50-93% (varies by module)
 

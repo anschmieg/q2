@@ -53,9 +53,17 @@ mod engine_execution;
 mod equation_number;
 mod include_expansion;
 mod include_resolve;
+mod inline_table_css;
 mod language_resolve;
 mod link_resolution;
-mod listing_item_info;
+// lmd ("lua+md") exploration spike: rewrites `{lmd}` cells into displayed,
+// desugared Lua. See claude-notes/plans/2026-10-12-lmd-exploration.md.
+pub(crate) mod listing_item_info;
+// Listing resolution ahead of `lmd-execute` and the user pre-filters, so
+// `meta.listings.<id>` is populated for Lua consumers (bd-2oqen84t).
+mod listing_resolve;
+mod lmd_desugar;
+mod lmd_execute;
 mod source_conversion;
 // Math-mode stage: injects a math-rendering JS engine (MathJax / KaTeX)
 // when the document contains Math elements. Included on both native
@@ -66,16 +74,20 @@ mod math_js;
 // MathJax via math_js. Included on native and WASM.
 mod math_ml;
 mod metadata_merge;
-// Pandoc-hybrid leg's writer stage: shells out to a real `pandoc`
-// subprocess via `std::process::Command` and materializes the vendored
-// filter tree via `crate::pandoc_filters::bundle::extract_share_tree`
-// (`tempfile`-backed). Same WASM-exclusion reasoning as `bootstrap_js`
-// and `crate::pandoc_filters::{bundle, harness}`.
-#[cfg(not(target_arch = "wasm32"))]
+// Pandoc-hybrid leg's writer stage. `prepare()` is pure and ungated (it builds
+// the `PandocRequest` for the native executor and the wasm host alike);
+// process spawning, disk extraction of the share tree and the typst pre-step
+// stay native-only inside the module.
 mod pandoc_write;
+// R1: ungated (builds the `PandocRequest`; no process, no `std::fs`), so it
+// is testable natively and shared with the wasm pipeline.
+mod pandoc_prepare;
 mod parse_document;
 mod pre_engine_sugaring;
+mod prefetch_remote_images;
+mod rasterize_svg_images;
 mod render_html;
+mod unexecuted_cell_count;
 // book-projects P2c: flushes queued resource copies (images, etc.)
 // through a real `OutputSink` before `TypstCompileStage` shells out to
 // `typst compile`. Native-only, like `pandoc_write`/`typst_compile` —
@@ -86,6 +98,8 @@ mod resource_report;
 // Tabsets-sync JS injection (bd-toc-tabset-titles-zq93gjvf): vendors
 // the grouped-tabset sync module as a Project-scoped artifact whenever
 // Bootstrap is active. Same WASM-exclusion reasoning as `bootstrap_js`.
+#[cfg(not(target_arch = "wasm32"))]
+mod search_capture;
 #[cfg(not(target_arch = "wasm32"))]
 mod tabsets_js;
 // pandoc-hybrid-typst Phase 2: compiles PandocWriteStage's intermediate
@@ -125,22 +139,34 @@ pub use include_expansion::{
     IncludeExpansionStage, collect_include_paths, expand_document_includes, extract_include_path,
 };
 pub use include_resolve::IncludeResolveStage;
+pub use inline_table_css::{InlineTableCssStage, inline_table_css};
 pub use language_resolve::LanguageResolveStage;
 pub use link_resolution::LinkResolutionStage;
 pub use listing_item_info::ListingItemInfoStage;
+pub use listing_resolve::ListingResolveStage;
+pub use lmd_desugar::LmdDesugarStage;
+pub use lmd_execute::LmdExecuteStage;
 pub use math_js::{DEFAULT_KATEX_URL_BASE, DEFAULT_MATHJAX_URL, MathEngine, MathJsStage};
 pub use math_ml::MathMlStage;
 pub use metadata_merge::MetadataMergeStage;
+pub use pandoc_prepare::PandocPrepareStage;
 #[cfg(not(target_arch = "wasm32"))]
-pub use pandoc_write::{
-    PandocWriteStage, classify_pandoc_completion, retain_temp_json_unless_success,
-};
+pub use pandoc_write::retain_temp_json_unless_success;
+pub use pandoc_write::{PandocWriteStage, PreparedPandoc, TypstPrepInputs};
+pub use prefetch_remote_images::{PrefetchRemoteImagesStage, REMOTE_DIR, REMOTE_SRC_ATTR};
+pub use rasterize_svg_images::{RASTER_DIR, RASTER_SRC_ATTR, RasterizeSvgImagesStage};
+pub use unexecuted_cell_count::{UnexecutedCellCountStage, count_engine_cells};
+// Pure, so ungated (the wasm host classifies a completion with it); the path
+// `stages::classify_pandoc_completion` is unchanged.
+pub use crate::pandoc_filters::diagnostics::classify_pandoc_completion;
 pub use parse_document::ParseDocumentStage;
 pub use pre_engine_sugaring::PreEngineSugaringStage;
 pub use render_html::RenderHtmlBodyStage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use resource_copy_flush::ResourceCopyFlushStage;
 pub use resource_report::ResourceReportStage;
+#[cfg(not(target_arch = "wasm32"))]
+pub use search_capture::SearchCaptureStage;
 pub use source_conversion::SourceConversionStage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use tabsets_js::TabsetsJsStage;

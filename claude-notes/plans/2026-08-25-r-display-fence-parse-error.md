@@ -1,9 +1,15 @@
-# R display fences (``` r) are a fatal parse error (bd-knitr-inline-r-eats-fence-2ofk91x1)
+---
+title: 'R display fences (\`\`\` r) are a fatal parse error (bd-knitr-inline-r-eats-fence-2ofk91x1)'
+date: 2026-08-25
+description: 'Fixes the knitr inline-R preprocessing pattern so that R display fences with a language but no braces stop being read as inline expressions, which currently makes the whole page fail to parse.'
+status: done  # **Implemented** on branch `braid/bd-knitr-inline-r-eats-fence-2ofk91x1-r-display-fence-parse-error` (`7e6e479ba`). All phases done; not yet pushed.
+braid:
+  strand: bd-knitr-inline-r-eats-fence-2ofk91x1
+  priority: P0
+  labels: [engine, parity]
+---
 
-**Date:** 2026-08-25
-**Braid:** bd-knitr-inline-r-eats-fence-2ofk91x1 (P0, bug, labels `engine` `parity`)
 **Worktree:** `.worktrees/workspace-1` (branch `braid/bd-knitr-inline-r-eats-fence-2ofk91x1-r-display-fence-parse-error`, based on `main` @ `d05e96ee8`)
-**Status:** **Implemented** on branch `braid/bd-knitr-inline-r-eats-fence-2ofk91x1-r-display-fence-parse-error` (`7e6e479ba`). All phases done; not yet pushed.
 
 ## Triage verdict
 
@@ -26,12 +32,12 @@ knitr engine runs, and the whole page is lost. Q1 renders all spellings. Two
 stages compound:
 
 - **Stage 1** — `crates/pampa/src/writers/qmd.rs:783-786` (`write_codeblock`)
-  writes a single-class code block's language as a bare word, so `` ``` r ``,
-  `` ```{.r} `` and `` ```r `` all re-serialize to `` ```r ``.
+  writes a single-class code block's language as a bare word, so `` \`\`\` r ``,
+  `` \`\`\`{.r} `` and `` \`\`\`r `` all re-serialize to `` \`\`\`r ``.
 - **Stage 2** — `crates/quarto-core/src/engine/knitr/preprocess.rs:43`
-  runs `` `r\s+([^`]+)` `` over the whole serialized document. Against
-  `` ```r `` it anchors on the fence's *third* backtick, `\s+` consumes the
-  newline, and `[^`]+` swallows the block body.
+  runs `` `r\s+([^\`]+)` `` over the whole serialized document. Against
+  `` \`\`\`r `` it anchors on the fence's *third* backtick, `\s+` consumes the
+  newline, and ``[^`]+`` swallows the block body.
 
 Real-world cost is in the strand: the Positron docs port loses `download.qmd`
 entirely, which breaks 85 site-wide references because every page's navbar
@@ -81,14 +87,14 @@ out from under it.
 the strand's fixtures, with stage 1's collapse simulated. Full output in
 `regex-candidates.out`. Summary:
 
-| fixture | q2 today | knitr upstream | proposed `(^\|[^`])` port |
+| fixture | q2 today | knitr upstream | proposed ``(^\|[^`])`` port |
 |---|---|---|---|
-| `repro/` (``` r) | **matches → fatal** | no | no |
-| `nospace/` (```r) | **matches → fatal** | no | no |
-| `attr-fence/` (```{.r}) | **matches → fatal** | no | no |
-| `yaml-title/` (```r in a YAML scalar) | **matches → fatal** | **matches** | no |
-| `control/` (```bash) | no | no | no |
-| `workaround/` (```R) | no | no | no |
+| `repro/` (\`\`\` r) | **matches → fatal** | no | no |
+| `nospace/` (\`\`\`r) | **matches → fatal** | no | no |
+| `attr-fence/` (\`\`\`{.r}) | **matches → fatal** | no | no |
+| `yaml-title/` (\`\`\`r in a YAML scalar) | **matches → fatal** | **matches** | no |
+| `control/` (\`\`\`bash) | no | no | no |
+| `workaround/` (\`\`\`R) | no | no | no |
 
 Every inline form the existing 15 unit tests pin still matches under the
 proposed pattern.
@@ -204,7 +210,7 @@ change: 13368 passed / 199 skipped at `d05e96ee8`.
 - [x] **Phase 0 — Test plan (TDD, tests written and watched failing first).**
   - 11 unit tests added to `preprocess.rs`: each fence spelling, a 4-backtick
     fence, a fence spelling inside a YAML scalar, a backtick-prefixed
-    `` ``r x` ``, a newline after `r`, the escaped-backtick form (below), plus
+    ``` ``r x` ```, a newline after `r`, the escaped-backtick form (below), plus
     three regression guards (inline R beside a fence, a tab separator, a body
     spanning lines). **8 failed against the old pattern**; the three guards
     passed before and after, which is what makes them guards.
@@ -269,7 +275,7 @@ Copied to a scratch dir (a Q1 run mutates the originals) and rendered with
 | `attr-fence/` (```{.r}) | fatal | **renders** | `sourceCode r` |
 | `yaml-title/` | fatal | **renders** (1 pre-existing `Q-1-20` warning) | — |
 | `control/` (```bash) | renders | renders | `sourceCode bash` |
-| `workaround/` (```R) | renders unhighlighted | unchanged | `R code-with-copy` |
+| `workaround/` ``(```R)`` | renders unhighlighted | unchanged | `R code-with-copy` |
 
 `grep -c QuartoInlineRender` is **0** in all six outputs. The `workaround/` row
 is unchanged on purpose — that is finding (a), deliberately not filed, and the

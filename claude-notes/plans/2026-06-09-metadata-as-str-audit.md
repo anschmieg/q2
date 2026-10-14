@@ -1,8 +1,14 @@
-# Audit: metadata string reads using `as_str()` that should use `as_plain_text()`
+---
+title: 'Audit: metadata string reads using `as_str()` that should use `as_plain_text()`'
+date: 2026-06-09
+description: 'Audits metadata string reads that call `as_str()` and switches the user-facing front-matter options, such as `appendix-style` and `toc-title`, to `as_plain_text()` so bare YAML strings are no longer silently ignored.'
+braid:
+  strand: bd-y89ihf0i
+  priority: P2
+  labels: [footnotes, tech-debt]
+---
 
-**Strand:** bd-y89ihf0i (task, p2; labels: footnotes, tech-debt)
 **Discovered from:** bd-9ez3ngt1 (PR #265, reference-location front matter)
-**Date:** 2026-06-09
 
 ## Overview
 
@@ -60,7 +66,7 @@ base branch.
 Verified by reading each site (not a blanket replace). Line numbers are on
 `main` / the #265 base; re-confirm after switching branches.
 
-### SWITCH — real user-front-matter reads (~10 sites)
+### SWITCH — real user-front-matter reads (\~10 sites)
 
 | File | Line | Option | Notes |
 |------|------|--------|-------|
@@ -78,7 +84,7 @@ Verified by reading each site (not a blanket replace). Line numbers are on
 **Removed from SWITCH after per-site verification:**
 
 - `transforms/shortcode_resolve.rs:169` (`config_value_to_inlines`, the
-  `{{< meta key >}}` shortcode) → **LEAVE**. The `as_str()` is a fast-path;
+  `{{{< meta key >}}}` shortcode) → **LEAVE**. The `as_str()` is a fast-path;
   `PandocInlines` is explicitly handled at line 192 (`inlines.clone()`), so a
   bare front-matter string already resolves. Switching to `as_plain_text()`
   would be a **regression** — it would flatten inline markdown the meta

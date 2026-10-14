@@ -1,6 +1,12 @@
-# Preview rich-text editor: open with drag-selection preserved
+---
+title: 'Preview rich-text editor: open with drag-selection preserved'
+date: 2026-07-07
+description: 'Keeps a text selection made by dragging inside a block when the preview opens its rich-text editor, and suppresses activation for cross-block drags so copy gestures still work.'
+braid:
+  strand: bd-abo9m23f
+  priority: P2
+---
 
-**Strand:** bd-abo9m23f
 **Builds on:** bd-q9lyghv2 (caret-at-click), whose design comments live in
 `ts-packages/preview-renderer/src/q2-preview/richtext/caretFromClick.ts` and
 `RichTextEditor.tsx`.
@@ -233,7 +239,7 @@ Mount-effect fallback chain (inside the existing rAF):
   passed, 0 failed).
 - [x] `npm run test:ci` (hub-client): unit + integration legs green; the
   `test:wasm` leg fails on the PRE-EXISTING `changelog.md renders
-  successfully` test — the 2026-07-07 changelog entry's literal `~37MB`
+  successfully` test — the 2026-07-07 changelog entry's literal `\~37MB`
   parses as an unclosed subscript (Q-2-17). Broken on main (commit
   `6cd4dd5a`), unrelated to this strand; an open PR already fixes it
   (bd-5px05kui filed and closed as duplicate).

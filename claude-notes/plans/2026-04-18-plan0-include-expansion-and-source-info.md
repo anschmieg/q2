@@ -1,4 +1,8 @@
-# Plan 0: Pre-Engine Include Expansion & Engine SourceInfo
+---
+title: 'Plan 0: Pre-Engine Include Expansion & Engine SourceInfo'
+date: 2026-04-18
+description: 'Adds a pre-engine include expansion stage so `{{< include >}}` code cells reach engines, plus SourceInfo provenance for the text passed to engines, for parity with Quarto 1.'
+---
 
 **Grand plan:** [2026-04-16-ts-engine-extensions-subprocess.md](2026-04-16-ts-engine-extensions-subprocess.md)
 **Depends on:** Nothing
@@ -85,7 +89,7 @@ Parse → MetadataMerge → IncludeExpansion → DocumentProfileStage →
   RenderHtmlBody → ApplyTemplate
 ```
 
-`IncludeExpansion`'s position relative to `PreEngineSugaring` is
+`IncludeExpansion`\'s position relative to `PreEngineSugaring` is
 unchanged; the profile checkpoint sits between them, observing the
 post-include AST. See `claude-notes/designs/document-profile-contract.md`.
 
@@ -177,7 +181,7 @@ handling from scratch.
     is an `Inline::Shortcode` where `name == "include"`
   - **Block-level only:** Quarto 1 only expands includes that occupy an
     entire line (`isBlockShortcode` in `parse-shortcode.ts` uses regex
-    `^\s*{{< ... >}}\s*$`). The AST-level equivalent is: the shortcode is
+    `^\s*{{{< ... >}}}\s*$`). The AST-level equivalent is: the shortcode is
     the only child of a `Paragraph`. If an include shortcode appears inline
     among other inlines (e.g., `text {{< include f.qmd >}} more`), leave it
     in place — `ShortcodeResolveTransform` will encounter it later and can
@@ -280,7 +284,7 @@ serialized QMD — so the serializer must construct the provenance.
       pandoc: &Pandoc,
   ) -> Result<(Vec<u8>, SourceInfo), Vec<DiagnosticMessage>>
   ```
-  The existing `write(&Pandoc, &mut impl Write)` is unchanged. All ~19
+  The existing `write(&Pandoc, &mut impl Write)` is unchanged. All \~19
   other callsites are unaffected.
 
   The new function owns a `Vec<u8>` internally so it can read `buf.len()`
@@ -417,7 +421,7 @@ dependent integration tests are deferred to Phase 0A's commit.
   `Arc::new(doc_ast.source_context.clone())`. This is a one-time clone per
   pipeline run, not a hot path.
 
-  No changes to `DocumentAst`'s field types. No migration of downstream
+  No changes to `DocumentAst`\'s field types. No migration of downstream
   consumers.
 
   For TsEngine (subprocess engines), `TsEngine::execute()` extracts the
@@ -558,7 +562,7 @@ to "origin unknown" until that bug is fixed.
 
 1. **`ast_context.source_context`** — created by pampa's reader. Contains
    `FileInformation` (line break indices) that `map_offset()` needs for
-   byte-offset → line/column conversion. This is what AST nodes' `FileId`s
+   byte-offset → line/column conversion. This is what AST nodes\' `FileId`s
    resolve against.
 
 2. **`source_context` (top-level field)** — created by `ParseDocumentStage`.

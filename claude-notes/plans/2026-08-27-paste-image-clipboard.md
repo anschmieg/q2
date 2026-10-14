@@ -1,8 +1,13 @@
-# Paste images from clipboard into the Monaco source editor
+---
+title: 'Paste images from clipboard into the Monaco source editor'
+date: 2026-08-27
+description: 'Lets users paste raster images from the clipboard into the hub-client Monaco editor, saving them as hashed files beside the current document and inserting an image reference at the cursor, without a dialog.'
+status: done  # Complete (implemented, verified E2E, strand closed 2026-08-27)
+braid:
+  strand: bd-706b0ixu
+  priority: P2
+---
 
-**Braid strand:** bd-706b0ixu
-**Created:** 2026-08-27
-**Status:** Complete (implemented, verified E2E, strand closed 2026-08-27)
 **Follow-up strands:** bd-yspyic32 (mixed text+image payloads), bd-myoj9kp5
 (pipeline-wide SVG posture)
 
@@ -280,13 +285,13 @@ enough that repeat-pastes of the same content don't proliferate files.
 - **(F1) Content-hash name: `pasted-<hash8>.<ext>`** (ext from MIME).
   - Concurrent pastes of *different* images by two peers → different
     hashes → **different index keys → no CRDT conflict at all**. This is
-    the crucial property: `createBinaryFile`'s existence check is
+    the crucial property: `createBinaryFile`\'s existence check is
     check-then-act on the *local* replica, so two peers concurrently
     claiming the same path with different content would race to
     last-writer-wins on the index map key and one image would silently
     vanish. Distinct names sidestep LWW entirely.
   - Concurrent pastes of the *same* image → same name, same content; LWW
-    picks one docId, both peers' markdown references resolve to identical
+    picks one docId, both peers\' markdown references resolve to identical
     bytes. The losing doc is orphaned (unreferenced in the index) —
     harmless. Sequentially, the dedup branch already returns
     `deduplicated: true` and creates nothing.

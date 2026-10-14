@@ -16,8 +16,6 @@ concurrency:
 
 env:
   PANDOC_VERSION: "3.11"
-  # Deno version for engine-host-deno vitest + deno-test + bundle freshness gate.
-  DENO_VERSION: "2.9.0"
   # Typst — the Pandoc-hybrid typst leg's `L`-tier tests (typst_compile.rs)
   # require a real `typst` binary on PATH (TYPST_VERSION_FLOOR is 0.8+).
   TYPST_VERSION: "0.15.1"
@@ -144,15 +142,7 @@ jobs:
       # violations one day after the rule itself merged — bd-owmzraf6.)
       - name: Lint hub-client CSS
         shell: bash
-        run: npm run lint:css -w hub-client
-
-      # Deno — needed for engine-host-deno deno-test and the freshness gate.
-      # denoland/setup-deno is safe here: this workflow has no "Free disk space"
-      # step (and no remove_tool_cache invariant to preserve).
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: ${{ env.DENO_VERSION }}
+        run: npm run lint:css -w hub-client --if-present
 
       # WASM build for hub-client (must happen before TypeScript build)
       - name: Set up Clang (Linux)
@@ -184,53 +174,58 @@ jobs:
           cd hub-client
           npm run build:all
 
+      # Real-wasm pandoc-host tests (hub-client/src/pandoc/*.wasm.test.ts) need the
+      # pinned pandoc.wasm (sha-verified against resources/pandoc-wasm.json) and the
+      # semantic output comparer. A cache miss during a GitHub outage fails the job.
+      - name: Cache pandoc.wasm and typst assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/pandoc-wasm
+            .cache/typst-assets
+          key: pandoc-wasm-${{ hashFiles('resources/pandoc-wasm.json', 'resources/typst-wasm.json') }}
+
+      - name: Fetch pandoc.wasm
+        shell: bash
+        run: node scripts/fetch-pandoc-wasm.mjs --require
+
+      - name: Build quarto-output-extract
+        shell: bash
+        run: cargo build --release -p quarto-output-extract
+
       - name: Run hub-client tests
         shell: bash
         run: |
           cd hub-client
           npm run test:ci
 
-      # engine-host-deno: vitest suite (105+ Node-side harness tests)
-      - name: Run engine-host-deno tests (vitest)
+      # engine-host-node: vitest suite (harness tests + the TS<->Rust wire-parity gate)
+      - name: Run engine-host-node tests (vitest)
         shell: bash
-        run: npm run test -w @quarto/engine-host-deno
+        run: npm run test -w @quarto/engine-host-node
 
-      # engine-host-deno: deno-native test (the one leg that requires Deno)
-      - name: Run engine-host-deno deno test
-        shell: bash
-        run: deno test --allow-all ts-packages/quarto-engine-host-deno/src/deno-host.deno-test.ts
-
-      # plan1a.6 Phase 2 (Deno dial-back) — seam #8: connectControl round-trip
-      # over a REAL loopback socket (Deno.listen({ port: 0 }) in-test); no mock
-      # Deno.Conn. CI-only tier (cannot be a vitest test — the module references
-      # Deno.*). `--sloppy-imports` lets deno's type-checker resolve
-      # @quarto/types' `.js` internal specifiers pulled in transitively via
-      # ./types.ts (same reason the wire-parity step below needs it).
-      - name: Run engine-host-deno control-transport deno test
-        shell: bash
-        run: deno test --allow-all --sloppy-imports ts-packages/quarto-engine-host-deno/src/control-transport.deno-test.ts
-
-      # T-Gate-parity: TS↔Rust wire-dual parity (Plan 2 Phase B gate). Reads the
-      # Rust-serialized fixture (crates/quarto-core/tests/fixtures/ts_wire_parity.json,
-      # produced by the regen-gated #[test] in ts_protocol.rs) and set-equates each
-      # instance's keys against a KEYS list pinned to the TS wire type via
-      # `satisfies`/`_Exhaustive`. `--sloppy-imports` lets deno's type-checker
-      # resolve @quarto/types' `.js` internal specifiers (so the compile guards
-      # are checked here, not just the runtime set-equality). @quarto/types is
-      # mapped in the repo-root deno.jsonc.
-      - name: Run engine-host-deno wire-parity deno test
-        shell: bash
-        run: deno test --allow-all --sloppy-imports ts-packages/quarto-engine-host-deno/src/wire-parity.deno-test.ts
-
-      # Bundle freshness gate: rebuild engine-host-deno.js from source and assert
+      # Bundle freshness gate: rebuild engine-host-node.mjs from source and assert
       # the committed bytes are unchanged.  Fails if someone edited TS but forgot
       # to run `npm run bundle`.  build-info.json is gitignored (volatile builtAt);
       # the diff targets only the bundle itself.
-      - name: Check engine-host-deno bundle freshness
+      - name: Check engine-host-node bundle freshness
         shell: bash
         run: |
-          npm run bundle -w @quarto/engine-host-deno
-          git diff --exit-code -- ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js
+          npm run bundle -w @quarto/engine-host-node
+          git diff --exit-code -- ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs
+
+      # ts-bundle: vitest suite (the rollup driver behind `q2 call build-ts-extension`)
+      - name: Run ts-bundle tests (vitest)
+        shell: bash
+        run: npm run test -w @quarto/ts-bundle
+
+      # Same freshness gate for the embedded ts-bundle driver: rollup and its
+      # plugins are pinned exactly, so the bytes depend only on the sources.
+      - name: Check ts-bundle driver freshness
+        shell: bash
+        run: |
+          npm run bundle -w @quarto/ts-bundle
+          git diff --exit-code -- ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs
 
       # preview-renderer's integration tier imports wasm-quarto-hub-client
       # (aliased in vitest.integration.config.ts:53-55 to the committed
@@ -242,11 +237,32 @@ jobs:
         shell: bash
         run: npm run test:integration -w ts-packages/preview-renderer
 
+      # quarto-hub-mcp's parser tier (CAP-11): the qmd-structure tool tests
+      # need the wasm-qmd-parser nodejs pkg, which only a wasm32 toolchain
+      # can build. workspace-ts-suites is deliberately toolchain-free (the
+      # suite's global setup writes a marker and the tier skips there), so
+      # the tier runs here alongside the other WASM-needing suites. Beyond
+      # the qmd-* files, the tier includes: conformance.test.ts, whose
+      # parser-gated golden cases (e.g. get_outline) skip there but must
+      # execute somewhere; bundle.test.ts, which stages the pkg into
+      # dist-bundle at build time and so cannot run toolchain-free at all;
+      # and npm-pack.test.ts / mcpb-pack.test.ts (CAP-15), whose pack
+      # scripts rebuild that bundle.
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Run quarto-hub-mcp parser-tier tests
+        shell: bash
+        run: |
+          npm run build --if-present -w ts-packages/quarto-sync-client -w ts-packages/quarto-automerge-schema
+          cd ts-packages/quarto-hub-mcp
+          npx vitest run src/qmd-ast.test.ts src/qmd-outline.test.ts src/qmd-sections.test.ts src/conformance.test.ts src/bundle.test.ts src/npm-pack.test.ts src/mcpb-pack.test.ts
+
   # ── Workspace TS suites (GH #250) ────────────────────────────────────────
   #
   # A separate job on purpose. These suites need only Node + npm ci + the
-  # ts-packages dists — no Rust, no WASM, no pandoc/tree-sitter/deno. Keeping
-  # them out of `test-suite` means a red hub-client test, a deno step or the
+  # ts-packages dists — no Rust, no WASM, no pandoc/tree-sitter. Keeping
+  # them out of `test-suite` means a red hub-client test or the
   # bundle-freshness gate cannot mask them, and they are not serialised behind
   # an uncached WASM build on both matrix legs. The one suite that does need
   # the WASM (preview-renderer's integration tier) lives in `test-suite`.
@@ -308,6 +324,39 @@ jobs:
         shell: bash
         run: npm test -w ts-packages/preview-runtime
 
+      - name: Run pandoc-host unit tests
+        shell: bash
+        run: |
+          npm run typecheck:tests -w ts-packages/pandoc-host
+          npm test -w ts-packages/pandoc-host
+
+      # typst-host runs the real typst.ts wasm (from node_modules), the default fonts
+      # (typst-assets crate, SHA-pinned) and, for the parity test, the pdf.js build: all
+      # three come from `fetch-pandoc-wasm.mjs`.
+      - name: Fetch pandoc, typst and pdf.js assets
+        shell: bash
+        run: node scripts/fetch-pandoc-wasm.mjs --require
+
+      # The browser compiler is typst 0.14.2 (resources/typst-wasm.json) while the Rust tests
+      # above use TYPST_VERSION (0.15.1). The parity test compares the two compilers' page
+      # count and text, so it needs a native binary of the *browser's* version, pinned here
+      # (not brew, which is unpinned).
+      - name: Set up native typst for browser parity (pinned)
+        shell: bash
+        run: |
+          TYPST_PARITY_VERSION=$(node -p "require('./resources/typst-wasm.json').typst_version")
+          if [ "$RUNNER_OS" = "Linux" ]; then TRIPLE=x86_64-unknown-linux-musl; else TRIPLE=aarch64-apple-darwin; fi
+          curl -fsSL -o typst-parity.tar.xz "https://github.com/typst/typst/releases/download/v${TYPST_PARITY_VERSION}/typst-${TRIPLE}.tar.xz"
+          mkdir typst-parity && tar -xf typst-parity.tar.xz -C typst-parity --strip-components=1
+          echo "TYPST_PARITY_BIN=$PWD/typst-parity/typst" >> "$GITHUB_ENV"
+          echo "TYPST_PARITY_REQUIRED=1" >> "$GITHUB_ENV"
+
+      - name: Run typst-host unit tests (includes browser/native parity)
+        shell: bash
+        run: |
+          npm run typecheck:tests -w ts-packages/typst-host
+          npm test -w ts-packages/typst-host
+
       - name: Run quarto-api tests
         shell: bash
         run: npm test -w ts-packages/quarto-api
@@ -337,8 +386,10 @@ jobs:
         run: npm test -w trace-viewer
 
       # These two resolve workspace siblings through dist/, so they need the
-      # "Build ts-packages workspaces" step above. hub-mcp is the heaviest
-      # suite in this job (~32s: bundle.test.ts runs esbuild in beforeAll).
+      # "Build ts-packages workspaces" step above. hub-mcp's parser tier
+      # (qmd-*, conformance's parser-gated cases, bundle.test.ts,
+      # npm-pack.test.ts, mcpb-pack.test.ts) skips on this toolchain-free
+      # leg and runs in the test-suite job instead.
       #
       # --retry=2: `src/doc-inventory.test.ts > getDocInventory > reports
       # index, text, and binary docs with states and heads` fails

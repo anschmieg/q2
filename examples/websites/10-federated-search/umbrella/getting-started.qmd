@@ -1,0 +1,12 @@
+---
+title: "Getting started"
+---
+
+## Install the family
+
+Install Product A first, then Product B. Each product site has its own
+installation page with the details; this page only covers the order.
+
+## Where to go next
+
+Open a product site from the navbar, or search for it from here.

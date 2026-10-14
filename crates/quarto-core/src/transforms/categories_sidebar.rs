@@ -397,7 +397,9 @@ mod tests {
 
     fn item(title: &str, categories: &[&str]) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
             description: None,
             author: None,

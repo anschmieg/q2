@@ -1,6 +1,9 @@
-# Hash-based tracking of edit locations ("track me") — block-editing successor
+---
+title: 'Hash-based tracking of edit locations ("track me") — block-editing successor'
+date: 2026-06-13
+description: 'Tracks the editor''s block by a position-independent structural hash so the parent can relocate an open editor after a collaborator''s re-render, which fixes nested child edits being dropped.'
+---
 
-**Date:** 2026-06-13
 **Branch:** feature/block-editing-improvements (worktree `.worktrees/block-editing`)
 **Successor to:** `2026-06-11-block-editing-improvements.md` (Phases 1–3). **Not yet the active plan** —
 finish that plan's P3.4 ("self-heal on write") first; this layers on top. Do **not** repoint
@@ -74,7 +77,7 @@ projection — as future consumers).
 - **Self-heal effect** = `useLayoutEffect` on `[astJson, renderedContent, untransformedAstJson]`
   (`PreviewRoot.tsx:244-285`) calling `findReanchorCandidate`. **This is the integration point.**
 - **Hosts duplicate the handler:** `handleSetAst` in both `ReactPreview.tsx` and `PreviewApp.tsx`
-  (SPA ~no-op for file mode today). UPDATE_AST assembly is per-host ⇒ track-me parent logic must be a
+  (SPA \~no-op for file mode today). UPDATE_AST assembly is per-host ⇒ track-me parent logic must be a
   **shared helper** consumed by both (mirror `computeNestedEditBuffers`).
 - **The hash:** `quarto_ast_reconcile::compute_block_hash_fresh` (`crates/quarto-ast-reconcile/src/
   hash.rs:102`) — content-only, **excludes all source location**, per-subtree, deterministic
@@ -110,7 +113,7 @@ projection — as future consumers).
 
 ### Phase B — Rust/WASM relocation primitive (native-testable)
 
-New module `crates/pampa/src/node_tracking.rs` (mirror `apply_node_edit.rs`'s deserialize-and-walk),
+New module `crates/pampa/src/node_tracking.rs` (mirror `apply_node_edit.rs`\'s deserialize-and-walk),
 reusing `quarto_ast_reconcile::compute_block_hash_fresh`. Rust returns **hash recall + nearest**; the
 **slice-verify, distance-cap, and drop policy live in TS** (Phase C), where they're easy to tune.
 
@@ -125,7 +128,7 @@ reusing `quarto_ast_reconcile::compute_block_hash_fresh`. Rust returns **hash re
     - **duplicate subtrees** → returns the match **nearest** `|r0 − hint|`;
     - **trivial-content node** (empty paragraph / `HorizontalRule`, huge hash class) → nearest-by-hint
       is the sole disambiguator (documented);
-    - **non-local parse change** (an unclosed ``` fence typed above swallows the node) → the node's
+    - **non-local parse change** (an unclosed \`\`\` fence typed above swallows the node) → the node's
       subtree hash changes → `None` (conservative drop).
 - [ ] `pub fn subtree_hash_at(untransformed_ast_json: &str, r0: usize, r1: usize) -> Option<u64>`.
 - [ ] `pub fn locate_subtrees(untransformed_ast_json: &str, targets: &[(u64 /*hash*/, usize /*hint_r0*/)])
@@ -153,7 +156,7 @@ A pure, host-agnostic `NodeTracker` (plus a thin `useNodeTracking` adapter if co
   referential-stable empty — mirror `nestedEditBuffers`/`EMPTY`).
 - [ ] Add iframe→parent messages `TRACK_NODE {trackId, r0, r1, generation}` and `UNTRACK_NODE {trackId}`
   to the message union + dispatch (`iframeMessageDispatch.ts`), handled in both hosts.
-- [ ] Wire `NodeTracker` into both hosts' `UPDATE_AST` assembly: after producing a fresh
+- [ ] Wire `NodeTracker` into both hosts\' `UPDATE_AST` assembly: after producing a fresh
   `untransformed_ast_json`+`renderedContent`, call `relocate(...)` and attach
   `trackedLocations?: Record<string,[number,number]|null>`.
 - [ ] Slice-verify, distance-cap threshold, and drop policy live here (TS). Distance cap = a multiple of
@@ -302,7 +305,7 @@ The load-bearing conclusions, all folded into the phases above:
 - **C5/C6/C7** hash gives clean deletion (`null`), clean content-change drop, and **sibling-edit
   immunity** (per-subtree) — the latter is the nested-child fix.
 - **C13/C33** duplicates → nearest-`lastPos` + slice-verify + distance-cap; residual = deleted-twin
-  (cursors' domain).
+  (cursors\' domain).
 - **C15** the generation handshake is the correctness floor (TRACK offsets are version-relative).
 - **C17/C18** commit-rebase and destination-projection reuse this exact primitive — **deliberately
   out of scope** here, designed-for.

@@ -1,0 +1,51 @@
+---
+title: "Invalid website.search Value"
+description: "A `website.search` option has a value of the wrong type or outside its allowed values. The default is used instead."
+code: Q-5-39
+subsystem: project
+status: complete
+since: "99.9.9"
+categories:
+  - project
+---
+
+# `Q-5-39` — Invalid website.search Value
+
+> A `website.search` option has a value of the wrong type or outside
+> its allowed values. The default is used instead.
+
+## What this means
+
+Each `website.search` option takes a specific kind of value. When a
+value does not fit, Quarto warns and renders with that option's
+default, so a configuration mistake never breaks the render.
+
+```yaml
+# _quarto.yml
+website:
+  search:
+    location: footer      # Q-5-39: must be `navbar` or `sidebar`
+    limit: -3             # Q-5-39: must be a positive integer
+```
+
+Expected values:
+
+| Option | Accepts |
+|---|---|
+| `location` | `navbar` or `sidebar` |
+| `type` | `overlay` or `textbox` |
+| `limit` | a positive integer |
+| `collapse-after` | a positive integer, or `false` |
+| `copy-button`, `merge-navbar-crumbs` | `true` or `false` |
+| `keyboard-shortcut` | a key, or a list of keys |
+| `show-item-context` | `tree`, `parent`, `root`, `true`, or `false` |
+| `federate` | a list of site URLs or maps with a `url` |
+| `federate[].weight` | a positive number |
+| `algolia` | a map of Algolia settings |
+
+A `federate` entry without a `url` is reported with this code and
+skipped.
+
+## How to fix it
+
+Change the value to one of the accepted forms listed above.

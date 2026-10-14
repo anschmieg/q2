@@ -18,8 +18,10 @@ use yaml_rust2::Yaml;
 /// Convert Pandoc inlines to plain text.
 ///
 /// Extracts and concatenates text from Str and Space nodes, recursively
-/// handling formatting nodes (Emph, Strong, etc.).
-fn inlines_to_plain_text(inlines: &[Inline]) -> String {
+/// handling formatting nodes (Emph, Strong, etc.). This is the projection
+/// [`ConfigValue::as_plain_text`] applies to `PandocInlines`; consumers that
+/// keep metadata prose as inlines use it to get the same plain text.
+pub fn inlines_to_plain_text(inlines: &[Inline]) -> String {
     let mut text = String::new();
     for inline in inlines {
         match inline {
@@ -53,6 +55,64 @@ fn inlines_to_plain_text(inlines: &[Inline]) -> String {
         }
     }
     text
+}
+
+/// Plain text of a block list: the text of each paragraph-like block,
+/// code and nested containers, with blocks separated by one blank line.
+/// Raw blocks, rules and custom nodes contribute nothing. The block
+/// counterpart of [`inlines_to_plain_text`]; both are projections for
+/// consumers that need prose as a string (JSON props for components,
+/// listing descriptions).
+pub fn blocks_to_plain_text(blocks: &[crate::block::Block]) -> String {
+    use crate::block::Block;
+    let mut parts: Vec<String> = Vec::new();
+    for block in blocks {
+        let text = match block {
+            Block::Paragraph(p) => inlines_to_plain_text(&p.content),
+            Block::Plain(p) => inlines_to_plain_text(&p.content),
+            Block::Header(h) => inlines_to_plain_text(&h.content),
+            Block::LineBlock(lb) => lb
+                .content
+                .iter()
+                .map(|line| inlines_to_plain_text(line))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::CodeBlock(c) => c.text.clone(),
+            Block::BlockQuote(q) => blocks_to_plain_text(&q.content),
+            Block::Div(d) => blocks_to_plain_text(&d.content),
+            Block::Figure(f) => blocks_to_plain_text(&f.content),
+            Block::OrderedList(l) => l
+                .content
+                .iter()
+                .map(|item| blocks_to_plain_text(item))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::BulletList(l) => l
+                .content
+                .iter()
+                .map(|item| blocks_to_plain_text(item))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::DefinitionList(dl) => dl
+                .content
+                .iter()
+                .map(|(term, defs)| {
+                    let mut t = inlines_to_plain_text(term);
+                    for d in defs {
+                        t.push('\n');
+                        t.push_str(&blocks_to_plain_text(d));
+                    }
+                    t
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    parts.join("\n\n")
 }
 
 /// Merge operation for a value.
@@ -958,6 +1018,37 @@ impl ConfigValue {
     ///
     /// This is needed because YAML strings may be parsed as markdown
     /// and become PandocInlines containing a single Str node.
+    /// The value as plain JSON, provenance and kinds dropped: scalars as
+    /// themselves, arrays and maps as JSON arrays and objects, `Path`,
+    /// `Glob` and `Expr` as strings, and metadata prose
+    /// (`PandocInlines` / `PandocBlocks`) as its plain text. This is the
+    /// projection a browser-side consumer sees (component `props:`,
+    /// bd-react-components-a8flgldm), as opposed to the tagged
+    /// `Serialize` form `DocumentProfile` and the wire format use.
+    pub fn to_plain_json(&self) -> serde_json::Value {
+        match &self.value {
+            ConfigValueKind::Scalar { yaml, .. } => yaml_to_serde_value(yaml),
+            ConfigValueKind::PandocInlines(inlines) => {
+                serde_json::Value::String(inlines_to_plain_text(inlines))
+            }
+            ConfigValueKind::PandocBlocks(blocks) => {
+                serde_json::Value::String(blocks_to_plain_text(blocks))
+            }
+            ConfigValueKind::Path(s) | ConfigValueKind::Glob(s) | ConfigValueKind::Expr(s) => {
+                serde_json::Value::String(s.clone())
+            }
+            ConfigValueKind::Array(items) => {
+                serde_json::Value::Array(items.iter().map(ConfigValue::to_plain_json).collect())
+            }
+            ConfigValueKind::Map(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.to_plain_json()))
+                    .collect(),
+            ),
+        }
+    }
+
     pub fn is_string_value(&self, expected: &str) -> bool {
         match &self.value {
             ConfigValueKind::Scalar {

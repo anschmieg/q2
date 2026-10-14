@@ -1,8 +1,14 @@
-# GH #420 — rich-text editor loses focus on incoming CRDT changes
+---
+title: 'GH #420 — rich-text editor loses focus on incoming CRDT changes'
+date: 2026-08-26
+description: 'Keeps the rich-text editor mounted and focused when remote CRDT changes shift text offsets above it, by re-anchoring the edit target during render instead of one render too late.'
+status: approved  # diagnosed + fix validated by prototype (2026-08-26); implementation pending (TDD)
+braid:
+  strand: bd-84ljmbaf
+  priority: P1
+---
 
-**Strand:** bd-84ljmbaf
 **Issue:** https://github.com/quarto-dev/q2/issues/420
-**Status:** diagnosed + fix validated by prototype (2026-08-26); implementation pending (TDD)
 
 ## Overview
 
@@ -18,7 +24,7 @@ into the CRDT).
 | Remote change | Editor fate | Focus | Caret | Uncommitted draft |
 |---|---|---|---|---|
 | After active block (no offset shift) | survives, same DOM node | kept | kept | kept |
-| Before active block (offset shift, same block count) | **unmount + remount** | ~30ms blip (focusout→focusin) | **reset to end** | **rich: silently DISCARDED**; plain textarea: kept |
+| Before active block (offset shift, same block count) | **unmount + remount** | \~30ms blip (focusout→focusin) | **reset to end** | **rich: silently DISCARDED**; plain textarea: kept |
 | Whole block inserted/deleted above | unmount + remount (index keys shift) | blip | reset | rich: discarded |
 | Active block itself edited remotely | DROP: editor **closes** | moves to nearby block | — | discarded (by design, commit-on-drop guard) |
 
@@ -34,10 +40,10 @@ the rich surface loses all uncommitted edits — strictly worse than focus loss.
 2. That render still carries the **stale** `editTarget` (old `anchorR0`). The
    dispatcher's edit-surface predicate
    (`ctx.editTarget.anchorR0 === resolved.sourceEntry.r[0]`,
-   `dispatchers.tsx` ~line 134) fails for every block when offsets shifted →
+   `dispatchers.tsx` \~line 134) fails for every block when offsets shifted →
    the block renders as normal content → `RichTextEditor` **unmounts** in that
    commit (tiptap instance destroyed).
-3. The P2.3b self-heal `useLayoutEffect` (`PreviewRoot.tsx` ~line 388) then
+3. The P2.3b self-heal `useLayoutEffect` (`PreviewRoot.tsx` \~line 388) then
    runs `findReanchorCandidate` (content-first, symmetric — robust), calls
    `setEditTargetRaw(reanchored)` → a second render **mounts a fresh editor**.
 4. The fresh `RichTextEditor` seeds from the AST (`astToDoc`), not from the

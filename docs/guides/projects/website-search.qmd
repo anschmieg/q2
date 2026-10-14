@@ -1,0 +1,212 @@
+---
+title: "Website search"
+---
+
+## Overview
+
+Every Quarto website and book gets a search box. Rendering the site
+builds a full-text index of its pages next to the HTML output, and the
+search box in the navbar (or the sidebar) queries it in the browser;
+no server, no third-party service, nothing to configure. Results are
+grouped by page, show the matching section with a highlighted excerpt,
+and following one highlights the search term on the target page.
+
+```yaml
+# _quarto.yml
+website:
+  title: "My Site"
+  navbar:
+    left:
+      - index.qmd
+      - docs/guide.qmd
+```
+
+That configuration already has search. Set `website.search: false` to
+turn it off.
+
+The configuration surface is Quarto 1's, so an existing
+`website.search` block carries over unchanged. What differs is the
+engine: Quarto 1 downloaded the whole index on the first keystroke and
+scanned it with Fuse.js; Quarto 2 builds a [Pagefind](https://pagefind.app)
+index that the browser fetches in small pieces as you type, so large
+sites stay fast and nothing is downloaded until the reader focuses the
+box. See [Differences from Quarto 1](#differences-from-quarto-1).
+
+## Options
+
+```yaml
+website:
+  search:
+    location: navbar          # navbar | sidebar
+    type: overlay             # overlay | textbox
+    limit: 50
+    collapse-after: 3         # or false
+    copy-button: false
+    keyboard-shortcut: ["f", "/", "s"]
+    show-item-context: false  # tree | parent | root | true | false
+    merge-navbar-crumbs: true
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `location` | `navbar` when the site has a navbar, else `sidebar` | Where the search box lives. |
+| `type` | `overlay` in the navbar, `textbox` in the sidebar | `overlay` shows an icon that opens a search dialog; `textbox` shows an inline input with a drop-down panel (it becomes the dialog on narrow screens). |
+| `limit` | `50` | Maximum number of matching sections shown. |
+| `collapse-after` | `3` | Rows shown per page before a "more matches" toggle; `false` shows every match. |
+| `copy-button` | `false` | Adds a button that copies a link to the current search. |
+| `keyboard-shortcut` | `f`, `/`, `s` | Keys that open the search box when focus is not in a form field. A single key or a list. |
+| `show-item-context` | `false` | Shows where a page sits in the sidebar: `tree` (the full trail; `true` means this), `parent`, or `root`. |
+| `merge-navbar-crumbs` | `true` | Prefixes the trail with the navbar item that leads to the page's sidebar. |
+
+The navbar and sidebar can each override the placement:
+
+```yaml
+website:
+  navbar:
+    search: false     # no box in the navbar even when location is navbar
+  sidebar:
+    search: true      # a textbox in the sidebar
+```
+
+An unknown option or a value of the wrong kind is reported
+([Q-5-38](../../errors/project/Q-5-38.qmd),
+[Q-5-39](../../errors/project/Q-5-39.qmd)) and the default is used; a
+search configuration problem never fails a render.
+
+## What gets indexed
+
+Every rendered HTML page, as the reader sees it: body text, headings,
+tables, callouts, code and its output. Drafts and the `404.html` page
+are left out. To keep a page out of the index without hiding it, set
+`search: false` in its front matter:
+
+```yaml
+---
+title: "Internal notes"
+search: false
+---
+```
+
+Each page is indexed once with its level-2 sections as sub-results, so
+a hit inside `## Installation` links straight to that heading. The
+page's `lang` picks the stemmer (English when unset): a search for
+"rendering" also finds "render" and "rendered".
+
+Search is typo-sensitive: a misspelled word matches nothing. Prefixes
+do match while you type.
+
+## Output files
+
+Rendering writes, under the output directory:
+
+- `site_libs/quarto-search/pagefind/` — the index and its runtime.
+  The index is split into chunks named by content hash; a query
+  fetches only the chunks for the words it contains, a few tens of
+  kilobytes each.
+- `site_libs/quarto-search/manifest.json` — the site title, the
+  Quarto and Pagefind versions that built the index, its languages,
+  and the page count. Other sites read it before federating (below).
+- `search.json` — one record per page and per section, in the shape
+  Quarto 1 produced. It is not used by the search box; it exists for
+  [uploading to Algolia](#algolia) and for tools that read it.
+
+Incremental renders keep the pages they skipped in the index and drop
+sections a page no longer has.
+
+## Searching other sites
+
+A site can extend its search box to other Quarto websites, so an
+umbrella documentation site finds pages in the product sites it links
+to:
+
+```yaml
+website:
+  search:
+    federate:
+      - url: https://docs.example.org/product-a/
+        title: Product A         # shown on each result from that site
+        weight: 0.8              # rank its results a little lower
+      - url: https://docs.example.org/product-b/
+      - url: https://other.example.org/
+        bundle: pagefind/        # a Pagefind site that is not a Quarto site
+```
+
+Each entry names a site's root URL; `title` and `weight` are optional
+(the title defaults to the other site's own). Searching queries every
+site at once and merges the results; cards from another site carry its
+title.
+
+Requirements:
+
+- **Same Pagefind version.** A federated site's index must have been
+  built with the same Pagefind version as this site's runtime. Quarto
+  checks the other site's `manifest.json` before merging and skips the
+  site with a message in the browser console when the versions differ.
+  Sites rendered by the same Quarto release always match.
+- **Cross-origin access.** Sites under one origin (such as
+  `docs.example.org/product-a/` reached from `docs.example.org`) need
+  nothing. A site on another origin must serve its
+  `site_libs/quarto-search/` directory with an
+  `Access-Control-Allow-Origin` header that admits the searching site;
+  `quarto preview --static` does this for local development.
+- A `bundle` path is only needed for a Pagefind site that is not a
+  Quarto website; Quarto sites are found through their fixed
+  `site_libs/quarto-search/` location.
+
+Expect each federated site to cost roughly what the local index costs
+per query. A dozen sites is comfortable; hundreds would not be.
+
+## Algolia
+
+To query an [Algolia](https://www.algolia.com) index instead of the
+built-in one, provide the three connection values:
+
+```yaml
+website:
+  search:
+    algolia:
+      index-name: my-site
+      application-id: ABC123DEF4
+      search-only-api-key: 0123456789abcdef0123456789abcdef
+      show-logo: true            # "Search by Algolia" footer
+      analytics-events: false    # send view/click events to Algolia Insights
+      params:                    # extra query parameters
+        hitsPerPage: 20
+      index-fields:              # if your records use other field names
+        text: body
+```
+
+Quarto still renders `search.json`; upload it to populate the index
+(each record has an `objectID`). A block missing any of the three
+required values is reported as [Q-5-40](../../errors/project/Q-5-40.qmd)
+and ignored, so the page keeps the built-in search.
+
+The Algolia client and, with `analytics-events`, the Insights scripts
+load from `cdn.jsdelivr.net`. Quarto 2 has no cookie-consent feature
+yet, so the Insights scripts are not consent-gated.
+
+## Hosting notes
+
+- The search runtime runs WebAssembly. A Content Security Policy must
+  allow `'wasm-unsafe-eval'` in `script-src` and, unless the page
+  disables workers, `blob:` in `worker-src`.
+- Search needs a web server; it does not work from a `file://` URL.
+  The box then shows an error card instead of results.
+- `quarto preview` (the default, browser-rendered preview) renders one
+  page at a time and shows no search box; `quarto preview --static`
+  and a rendered site do.
+
+## Differences from Quarto 1
+
+- The engine is Pagefind, not Fuse.js. Results are ranked by relevance
+  with stemming per language, and only the index chunks a query needs
+  are downloaded. The trade-off is typo tolerance: Quarto 1's fuzzy
+  matching (at its near-exact threshold) is gone.
+- `search.json` is still written in the same shape, but the search box
+  no longer reads it.
+- `limit` defaults to 50 and `collapse-after` to 3, which is what
+  Quarto 1's code did (its documentation said 20 and 2).
+- Level-1 sections no longer lose the text between their heading and
+  the first level-2 heading, and incremental renders no longer leave
+  stale section anchors behind.
+- Federated search across sites is new.

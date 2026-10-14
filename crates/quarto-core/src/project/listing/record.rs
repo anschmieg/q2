@@ -14,9 +14,13 @@
 
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::ConfigValue;
+use quarto_pandoc_types::inline::split_string_to_inlines;
 use quarto_source_map::SourceInfo;
 
-use super::item::{ItemOrigin, ItemTarget, ListingItem, join_authors, rebase_image_from_dir};
+use super::item::{
+    FieldSource, ItemOrigin, ItemTarget, ListingItem, flattened_prose_warning, join_authors,
+    rebase_image_from_dir,
+};
 use crate::document_profile::{LISTING_ITEM_KEYS, ListingItemInfo, UnknownKeyPolicy};
 
 /// Keys this module owns: typed here, never forwarded to `extra`.
@@ -55,6 +59,13 @@ pub fn parse_record(value: &ConfigValue, diags: &mut Vec<DiagnosticMessage>) -> 
         .and_then(|v| v.as_plain_text().map(|p| (p, v.source_info.clone())));
 
     diagnose_near_misses(value, diags);
+    for key in &info.flattened_prose {
+        diags.push(flattened_prose_warning(
+            key,
+            "this listing record",
+            value.get(key).map(|v| v.source_info.clone()),
+        ));
+    }
     if info.title.is_none() && path.is_none() {
         diags.push(
             DiagnosticMessageBuilder::warning("Listing record has no `title:`")
@@ -85,18 +96,26 @@ pub fn record_item(rec: ListingRecord, target: ItemTarget, base_dir: &str) -> Li
     let li = rec.info;
     let title = li
         .title
-        .or_else(|| target.filename().map(|f| stem(&f)))
+        .or_else(|| {
+            target
+                .filename()
+                .map(|f| split_string_to_inlines(&stem(&f)))
+        })
         .unwrap_or_default();
+    let description_source = authored_or_absent(li.description.is_some());
+    let image_source = authored_or_absent(li.image.is_some());
     ListingItem {
         title,
         subtitle: li.subtitle,
         description: li.description,
+        description_source,
         author: join_authors(&rec.authors),
         authors: rec.authors,
         date: li.date,
         date_modified: li.date_modified,
         categories: li.categories,
         image: li.image.map(|img| rebase_image_from_dir(&img, base_dir)),
+        image_source,
         image_alt: li.image_alt,
         image_lazy_loading: None,
         reading_time_minutes: li.reading_time_minutes,
@@ -121,6 +140,7 @@ pub fn overlay_record(mut item: ListingItem, rec: ListingRecord, base_dir: &str)
     }
     if li.description.is_some() {
         item.description = li.description;
+        item.description_source = FieldSource::Record;
     }
     if li.date.is_some() {
         item.date = li.date;
@@ -130,6 +150,7 @@ pub fn overlay_record(mut item: ListingItem, rec: ListingRecord, base_dir: &str)
     }
     if let Some(img) = li.image {
         item.image = Some(rebase_image_from_dir(&img, base_dir));
+        item.image_source = FieldSource::Record;
     }
     if li.image_alt.is_some() {
         item.image_alt = li.image_alt;
@@ -153,6 +174,16 @@ pub fn overlay_record(mut item: ListingItem, rec: ListingRecord, base_dir: &str)
     item.extra.extend(li.extra);
     item.origin = ItemOrigin::RecordOverDocument;
     item
+}
+
+/// A record's own value is authored; without one the field is absent
+/// (a bare record has no document to derive from).
+fn authored_or_absent(present: bool) -> FieldSource {
+    if present {
+        FieldSource::Record
+    } else {
+        FieldSource::Absent
+    }
 }
 
 fn stem(filename: &str) -> String {
@@ -289,9 +320,12 @@ mod tests {
             ("link", s("download.qmd")),
         ]));
         assert!(diags.is_empty(), "{diags:?}");
-        assert_eq!(rec.info.title.as_deref(), Some("Get started"));
         assert_eq!(
-            rec.info.description.as_deref(),
+            crate::document_profile::plain(&rec.info.title).as_deref(),
+            Some("Get started")
+        );
+        assert_eq!(
+            crate::document_profile::plain(&rec.info.description).as_deref(),
             Some("Download and install Positron")
         );
         assert_eq!(
@@ -399,7 +433,7 @@ mod tests {
             ItemTarget::Href("guides/report.pdf".to_string()),
             "sub",
         );
-        assert_eq!(item.title, "report");
+        assert_eq!(item.title_text(), "report");
         assert_eq!(item.origin, ItemOrigin::Record);
         assert_eq!(
             item.image.as_deref(),
@@ -419,8 +453,8 @@ mod tests {
             source_path: std::path::PathBuf::from("download.qmd"),
             output_href: "download.html".to_string(),
             format_id: "html".to_string(),
-            title: Some("Download stub".to_string()),
-            description: Some("from the document".to_string()),
+            title: Some(crate::document_profile::text("Download stub")),
+            description: Some(crate::document_profile::text("from the document")),
             categories: vec!["doc-cat".to_string()],
             authors: vec!["Doc Author".to_string()],
             ..DocumentProfile::default()
@@ -433,9 +467,9 @@ mod tests {
             ("icon", s("bi-rocket-takeoff")),
         ]));
         let item = overlay_record(base, rec, "");
-        assert_eq!(item.title, "Get started", "record title wins");
+        assert_eq!(item.title_text(), "Get started", "record title wins");
         assert_eq!(
-            item.description.as_deref(),
+            crate::document_profile::plain(&item.description).as_deref(),
             Some("from the document"),
             "unset record fields keep the document's"
         );
@@ -451,6 +485,11 @@ mod tests {
         );
         assert_eq!(item.origin, ItemOrigin::RecordOverDocument);
         assert_eq!(
+            item.description_source,
+            FieldSource::Document,
+            "a document description the record leaves alone keeps its source"
+        );
+        assert_eq!(
             item.target,
             ItemTarget::document("download.qmd", "download.html")
         );
@@ -461,6 +500,47 @@ mod tests {
                 .as_deref(),
             Some("bi-rocket-takeoff")
         );
+    }
+
+    // bd-listing-description-precedence-x4bh6w3m: a record's own
+    // description / image are authored; one it leaves unset keeps the
+    // document's source — derived stays derived, so L7 can still
+    // upgrade it (Q1 spreads the record over the document's item).
+    #[test]
+    fn overlay_record_sets_record_source_only_for_fields_it_sets() {
+        use crate::document_profile::{DerivedListingValues, DocumentProfile};
+        let profile = DocumentProfile {
+            source_path: std::path::PathBuf::from("post.qmd"),
+            output_href: "post.html".to_string(),
+            derived_listing: DerivedListingValues {
+                description: Some("body paragraph".to_string()),
+                image: Some("body.png".to_string()),
+            },
+            ..DocumentProfile::default()
+        };
+        let base = crate::project::listing::hydrate_item(&profile);
+        assert_eq!(base.description_source, FieldSource::Derived);
+        assert_eq!(base.image_source, FieldSource::Derived);
+
+        let (rec, _) = parse(&map(vec![
+            ("path", s("post.qmd")),
+            ("description", s("from the record")),
+        ]));
+        let item = overlay_record(base, rec, "");
+        assert_eq!(item.description_source, FieldSource::Record);
+        assert_eq!(item.image_source, FieldSource::Derived);
+        assert_eq!(item.image.as_deref(), Some("body.png"));
+    }
+
+    #[test]
+    fn bare_record_sources_are_record_or_absent() {
+        let (rec, _) = parse(&map(vec![
+            ("title", s("Inline")),
+            ("image", s("cover.png")),
+        ]));
+        let item = record_item(rec, ItemTarget::None, "");
+        assert_eq!(item.description_source, FieldSource::Absent);
+        assert_eq!(item.image_source, FieldSource::Record);
     }
 
     /// Q-12-22 must underline the misspelled *key*, not the record.

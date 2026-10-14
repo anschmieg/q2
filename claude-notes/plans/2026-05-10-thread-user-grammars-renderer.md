@@ -1,9 +1,14 @@
-# Phase 9 follow-up: thread user_grammars through RenderToHtmlRenderer (bd-izfv)
+---
+title: 'Phase 9 follow-up: thread user_grammars through RenderToHtmlRenderer (bd-izfv)'
+date: 2026-05-10
+description: 'Threads user-supplied syntax grammars into `RenderToHtmlRenderer` so that project renders apply them, since the project path currently drops them and breaks TOML code highlighting inside projects.'
+status: approved  # Design questions answered (2026-05-10) — implementation not yet started. **Wait for user go-ahead before starting Phase 0.**
+braid:
+  strand: bd-izfv
+  priority: P3
+---
 
-**Date:** 2026-05-10
-**Beads:** bd-izfv (P3, open → set to in_progress on `main` once user agrees)
-**Worktree:** `.worktrees/bd-izfv-thread-user-grammars` (branch `beads/bd-izfv-thread-user-grammars`, based on `main` @ `0fa2655d`)
-**Status:** Design questions answered (2026-05-10) — implementation not yet started. **Wait for user go-ahead before starting Phase 0.**
+**Worktree:** `.worktrees/bd-izfv-thread-user-grammars` (branch `beads/bd-izfv-thread-user-grammars`, based on `main` \@ `0fa2655d`)
 
 ## Triage verdict
 
@@ -32,7 +37,7 @@ Phase-9 close-out (bd-ayj6). Description verbatim:
 >
 > Threading user grammars through the renderer is straightforward:
 > add a field to RenderToHtmlRenderer holding an
-> Arc<Mutex<Option<JsUserGrammars>>> (or similar) and have its
+> `Arc<Mutex<Option<JsUserGrammars>>>` (or similar) and have its
 > render() method install the provider on the per-page RenderContext.
 >
 > Filed as discovered-from-bd-ayj6 and tagged P3 since most
@@ -222,7 +227,7 @@ fixture used as regression tests.
    Provider is shared across all pages a renderer touches —
    future multi-page render modes work without a second migration.
    Costs a one-line rewrite at every existing
-   `Some(Box::new(provider))` call site (~half-dozen sites + tests).
+   `Some(Box::new(provider))` call site (\~half-dozen sites + tests).
 
 2. **`JsUserGrammars` `Clone` derive — skip.** Not needed under
    model (B): the `Rc` shares the underlying value without cloning
@@ -296,7 +301,7 @@ same branch:
   preview rendered correctly. The helper now derives a
   `userGrammars` context from VFS state — stripping the
   `/project/` prefix `vfs_list_files` returns to match
-  `discoverUserGrammars`'s project-relative shape, and wiring
+  `discoverUserGrammars`\'s project-relative shape, and wiring
   binary/text resolvers back through `vfsReadBinaryFile` /
   `vfsReadFile`.
 

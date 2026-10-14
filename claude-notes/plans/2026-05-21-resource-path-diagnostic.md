@@ -1,4 +1,8 @@
-# Source-pointing diagnostics for resource-path errors
+---
+title: 'Source-pointing diagnostics for resource-path errors'
+date: 2026-05-21
+description: 'Gives out-of-project `resources:` errors a tidyverse-style diagnostic with an Ariadne snippet pointing at the offending YAML scalar in `_quarto.yml` or the document header, instead of plain text.'
+---
 
 ## Overview
 
@@ -83,7 +87,7 @@ pub enum ResourceError {
 In the orchestrator, instead of `QuartoError::other(e.to_string())`,
 build a `DiagnosticMessage` using
 `DiagnosticMessageBuilder::error(...)` with a label at
-`source_info`'s span, e.g.:
+`source_info`\'s span, e.g.:
 
 ```
 error: resource path resolves outside the project root

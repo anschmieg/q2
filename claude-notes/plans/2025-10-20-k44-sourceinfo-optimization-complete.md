@@ -1,7 +1,11 @@
-# k-44: SourceInfo JSON Serialization Optimization - Complete
-
-**Date**: 2025-10-20
-**Issue**: k-44 - Investigate and optimize SourceInfo JSON serialization size
+---
+title: 'k-44: SourceInfo JSON Serialization Optimization - Complete'
+date: 2025-10-20
+description: 'Records the finished pool-based SourceInfo serialization, which replaces repeated parent chains with `$ref` IDs in the JSON output and confirms that no parent chains are duplicated in the pool.'
+braid:
+  strand: k-44
+  priority: P1
+---
 
 ## Status: ✅ COMPLETE
 
@@ -118,7 +122,7 @@ After optimization:
   }
 }
 ```
-Size: ~200+ bytes per reference × 100 siblings = **~20,000+ bytes**
+Size: \~200+ bytes per reference × 100 siblings = **\~20,000+ bytes**
 
 **After** (pooled with references):
 ```json
@@ -126,9 +130,9 @@ Size: ~200+ bytes per reference × 100 siblings = **~20,000+ bytes**
   "key_source": {"$ref": 5}
 }
 ```
-Size: ~15 bytes per reference × 100 siblings = **~1,500 bytes**
+Size: \~15 bytes per reference × 100 siblings = **\~1,500 bytes**
 
-Plus one-time pool entry (~100 bytes per unique SourceInfo).
+Plus one-time pool entry (\~100 bytes per unique SourceInfo).
 
 ### Expected Improvement
 

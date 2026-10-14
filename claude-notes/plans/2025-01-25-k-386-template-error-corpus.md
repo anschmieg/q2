@@ -1,8 +1,15 @@
-# Plan: Error Corpus Integration for quarto-doctemplate (k-386)
+---
+title: 'Plan: Error Corpus Integration for quarto-doctemplate (k-386)'
+date: 2025-01-25
+description: 'Adds structured Q-10 error codes and code-aware diagnostic helpers to `quarto-doctemplate`, so template parse, variable, and partial failures report stable, documented error codes with source locations.'
+braid:
+  strand: k-386  # id from title only
+  priority: P4
+---
 
 ## Overview
 
-This plan adds structured error reporting infrastructure to quarto-doctemplate, using the Q-10-* error code range for template-related errors. The implementation follows the pattern established by quarto-markdown-pandoc for markdown errors (Q-2-*).
+This plan adds structured error reporting infrastructure to quarto-doctemplate, using the Q-10-* error code range for template-related errors. The implementation follows the pattern established by quarto-markdown-pandoc for markdown errors (Q-2-\*).
 
 ## Current State Analysis
 
@@ -31,13 +38,13 @@ This plan adds structured error reporting infrastructure to quarto-doctemplate, 
 
 ### What's Missing
 
-1. **Error codes** - No Q-10-* codes in error_catalog.json
+1. **Error codes** - No Q-10-\* codes in error_catalog.json
 2. **Structured error messages** - Current messages are plain strings without codes
 3. **Error corpus for parse errors** - No TreeSitterLogObserver integration
 
 ## Implementation Plan
 
-### Phase 1: Add Q-10-* Error Codes to Catalog
+### Phase 1: Add Q-10-\* Error Codes to Catalog
 
 Add the following entries to `crates/quarto-error-reporting/error_catalog.json`:
 
@@ -228,13 +235,13 @@ Add tests to verify error codes are correctly attached:
 
 ## Implementation Order
 
-1. **Phase 1**: Add Q-10-* codes to error_catalog.json (~5 min)
-2. **Phase 2-3**: Update DiagnosticCollector and EvalContext (~15 min)
-3. **Phase 4**: Update evaluator.rs error points (~10 min)
-4. **Phase 5**: Update parse error handling (~15 min)
-5. **Phase 7**: Add tests (~20 min)
+1. **Phase 1**: Add Q-10-\* codes to error_catalog.json (\~5 min)
+2. **Phase 2-3**: Update DiagnosticCollector and EvalContext (\~15 min)
+3. **Phase 4**: Update evaluator.rs error points (\~10 min)
+4. **Phase 5**: Update parse error handling (\~15 min)
+5. **Phase 7**: Add tests (\~20 min)
 
-Total estimated work: ~1 hour
+Total estimated work: \~1 hour
 
 ## Out of Scope (Future Work)
 

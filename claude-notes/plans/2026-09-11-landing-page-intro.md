@@ -1,6 +1,12 @@
-# Landing page explains Quarto Hub; Learn more points at the real site
+---
+title: 'Landing page explains Quarto Hub; Learn more points at the real site'
+date: 2026-09-11
+description: 'Adds a short invite-only intro and tagline to the hub-client sign-in screen, and points every Learn more link at the project''s marketing site instead of quarto.org.'
+braid:
+  strand: bd-g0uyp2v1
+  priority: P1
+---
 
-**Strand:** bd-g0uyp2v1 · **Branch:** `braid/bd-g0uyp2v1-landing-page-intro` · **Scope:** `hub-client/`
 **Closes:** bd-rh2n4d7q (the provisional `quarto.org` Learn more URL)
 
 ## Overview
@@ -69,7 +75,7 @@ link to `quarto.org` as a placeholder.
 - [x] Add the landing copy to `strings.ts`.
 - [x] Shared URL constant: `links.quartoHub` in `strings.ts`, consumed by
       both `LoginScreen` and `InviteLanding`. `LEARN_MORE_URL` deleted.
-- [x] Rebuild `LoginScreen`'s markup: lockup, tagline, what-it-is,
+- [x] Rebuild `LoginScreen`\'s markup: lockup, tagline, what-it-is,
       invite-only footnote, status slot, sign-in button. Inline styles
       replaced by `LoginScreen.css` so `lint:css` can check them.
 - [x] Dev-harness pages `landing`, `landing-expired`, `landing-denied`,
@@ -140,4 +146,4 @@ Recorded because several reverse an earlier decision above.
 ## Resolved questions
 
 1. ~~How much of "what works today" to include~~ — none; see 7.
-2. The invite cards' footnote keeps "New to Quarto Hub? Learn more."
+2. The invite cards\' footnote keeps "New to Quarto Hub? Learn more."

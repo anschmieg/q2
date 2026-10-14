@@ -12,6 +12,8 @@
 //! - [`AppendixStructureTransform`] - Consolidates appendix content into single container
 //! - [`CalloutTransform`] - Converts callout Divs to CustomNodes
 //! - [`CalloutResolveTransform`] - Resolves Callout CustomNodes to standard Div structure
+//! - [`ComponentsResolveTransform`] - Binds `components:` declarations to elements and ships the client runtime
+//! - [`EditorialMarksOoxmlTransform`] - Renders editorial marks to Word and PowerPoint (docx, pptx)
 //! - [`FooterGenerateTransform`] - Resolves `page-footer:` YAML into `navigation.footer`
 //! - [`FooterRenderTransform`] - Renders `navigation.footer` to HTML
 //! - [`FootnotesTransform`] - Resolves footnote refs/defs into native `Inline::Note`s
@@ -60,6 +62,7 @@ mod callout_resolve;
 mod categories_sidebar;
 mod code_block_generate;
 mod code_block_render;
+mod components_resolve;
 mod conditional_content;
 mod config;
 mod config_markdown;
@@ -69,6 +72,7 @@ pub(crate) mod crossref_render;
 mod crossref_resolve;
 mod date_normalize;
 mod draft_alert;
+mod editorial_marks_ooxml;
 mod equation_label;
 mod example_embed;
 mod float_ref_target;
@@ -77,8 +81,9 @@ mod footer_render;
 mod footnotes;
 mod footnotes_resolve;
 mod format_css;
+mod heading_id;
 mod link_rewrite;
-mod listing_generate;
+pub(crate) mod listing_generate;
 mod listing_render;
 pub mod llms;
 mod mermaid;
@@ -111,6 +116,7 @@ mod secondary_nav_render;
 // same vendored files itself in entry.tsx — see the module docs.
 #[cfg(not(target_arch = "wasm32"))]
 mod quarto_nav_js;
+mod search_ui;
 mod sectionize;
 mod shortcode_resolve;
 mod shortcode_text;
@@ -124,6 +130,7 @@ pub(crate) mod title_block;
 mod toc_generate;
 mod toc_location;
 mod toc_render;
+pub(crate) use toc_render::strip_links_and_notes;
 mod website_bootstrap_icons;
 mod website_canonical_url;
 mod website_favicon;
@@ -144,6 +151,7 @@ pub use code_block_generate::{
     resolve_default_copy_mode,
 };
 pub use code_block_render::CodeBlockRenderTransform;
+pub use components_resolve::ComponentsResolveTransform;
 pub use conditional_content::ConditionalContentTransform;
 pub use config::{
     AppendixStyle, ReferenceLocation, TitleBlockStyle, is_feature_disabled, page_has_navbar,
@@ -155,6 +163,7 @@ pub use crossref_render::CrossrefRenderTransform;
 pub use crossref_resolve::CrossrefResolveTransform;
 pub use date_normalize::DateNormalizeTransform;
 pub use draft_alert::DraftAlertTransform;
+pub use editorial_marks_ooxml::EditorialMarksOoxmlTransform;
 pub use equation_label::EquationLabelTransform;
 pub use example_embed::{ExampleEmbedRenderTransform, ExampleEmbedTransform};
 pub use float_ref_target::FloatRefTargetSugarTransform;
@@ -164,6 +173,7 @@ pub use footnotes::FootnotesTransform;
 pub use footnotes_resolve::FootnotesResolveTransform;
 pub use format_css::FormatCssTransform;
 pub(crate) use format_css::user_css_urls;
+pub use heading_id::{HeadingIdTransform, rederive_stale_heading_ids};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hephaestus::HephaestusRenderTransform;
 pub use link_rewrite::LinkRewriteTransform;
@@ -186,6 +196,7 @@ pub use reference_link_diagnostics::ReferenceLinkDiagnosticsTransform;
 pub use repo_actions_render::RepoActionsRenderTransform;
 pub use resource_collector::{ResourceCollectorTransform, collect_referenced_asset_urls};
 pub use responsive_image::ResponsiveImageTransform;
+pub use search_ui::SearchUiTransform;
 pub use secondary_nav_render::SecondaryNavRenderTransform;
 pub use sectionize::SectionizeTransform;
 pub(crate) use shortcode_resolve::code_shortcode_opt_out;

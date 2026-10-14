@@ -1,7 +1,14 @@
-# Error-docs foundation
+---
+title: 'Error-docs foundation'
+date: 2026-05-22
+description: 'Defines the layout, front-matter schema, and page template for error-code documentation, with one subdirectory per subsystem so that the `docs_url` values in the error catalog stay stable.'
+status: draft  # drafting — pending user review
+braid:
+  strand: bd-nvlxn  # child of bd-94x8a
+  priority: P2
+  labels: [documentation, error-reporting, website]
+---
 
-**Status:** drafting — pending user review
-**Beads:** [bd-nvlxn](../../.beads/issues.jsonl) (child of [bd-94x8a](2026-05-22-error-docs-website-epic.md))
 **Blocks:** bd-8otua (tooling), bd-an6z4 (content)
 
 ## Goal
@@ -103,7 +110,7 @@ Field semantics:
 
 ## Page template
 
-```markdown
+````markdown
 ---
 title: "..."
 description: "..."
@@ -150,7 +157,7 @@ A minimal reproducer if it helps clarify the scenario above.
 ## Related errors (optional)
 
 - [`Q-X-Y'`](Q-X-Y'.qmd) — short note on the relationship.
-```
+````
 
 ## Quality bar by status
 
@@ -311,10 +318,10 @@ done:
 ## Decisions (resolved 2026-05-22)
 
 1. **Page format** = plain markdown body inside qmd. Shortcode-driven
-   page generation (e.g. `{{< error-page Q-1-1 >}}` pulling catalog
+   page generation (e.g. `{{{< error-page Q-1-1 >}}}` pulling catalog
    data at render time) is over-engineered for v1. A shortcode for
-   *linking to* error pages from other content (e.g. `{{< error
-   Q-1-1 >}}` → a styled link) is interesting future work but
+   *linking to* error pages from other content (e.g. `{{{< error
+   Q-1-1 >}}}` → a styled link) is interesting future work but
    explicitly out of scope here.
 2. **Listing view** — defer to when content has landed; ship with
    the table-grouped-by-category form drafted above and iterate.

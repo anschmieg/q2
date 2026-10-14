@@ -1,8 +1,13 @@
-# Tree-sitter Grammar Refactoring Plan
+---
+title: 'Tree-sitter Grammar Refactoring Plan'
+date: 2025-10-31
+description: 'Tracks the rewrite of the `native_visitor` processor to handle the redesigned tree-sitter grammar node by node, with a dedicated test file and a priority list of node types.'
+status: in-progress
+braid:
+  strand: k-274
+  priority: P0
+---
 
-**Date**: 2025-10-31
-**Status**: In Progress
-**Beads Issue**: k-274
 **Context**: Major redesign of tree-sitter grammar - all node names changed and grammar now reports much more fine-grained syntax tree
 
 ## Problem Statement
@@ -81,7 +86,7 @@ Already working or next to implement:
 - ❌ `pandoc_space` - derived from `_whitespace` token
 
 ### Category 2: Basic Inline Formatting (Priority: HIGH)
-- `pandoc_emph` - emphasis with * or _
+- `pandoc_emph` - emphasis with \* or _
 - `pandoc_strong` - strong emphasis with ** or __
 - `pandoc_code_span` - inline code with backticks
 - `backslash_escape` - escaped characters
@@ -91,15 +96,15 @@ Already working or next to implement:
 - `pandoc_display_math` - display math $$...$$
 
 ### Category 4: Links and Images (Priority: HIGH)
-- `pandoc_span` - [text](url) or [text]{attrs}
-- `pandoc_image` - ![alt](url)
+- `pandoc_span` - \[text\](url) or \[text\]\{attrs\}
+- `pandoc_image` - `![alt](url)`
 - `target` - the (url) part of links
 - `inline_link` - full link construct (from inline grammar)
 - `image` - full image construct (from inline grammar)
 
 ### Category 5: Advanced Inline (Priority: MEDIUM)
 - `pandoc_superscript` - ^superscript^
-- `pandoc_subscript` - ~subscript~
+- `pandoc_subscript` - \~subscript\~
 - `pandoc_strikeout` - ~~strikeout~~
 - `pandoc_single_quote` - 'quoted'
 - `pandoc_double_quote` - "quoted"
@@ -116,7 +121,7 @@ Already working or next to implement:
 - `note_reference` - [^note_id]
 
 ### Category 8: Shortcodes (Priority: MEDIUM)
-- `shortcode` - {{< shortcode >}}
+- `shortcode` - {{{< shortcode >}}}
 - `shortcode_escaped` - {{{< shortcode >}}}
 - `shortcode_keyword_param`
 - `shortcode_name`, `shortcode_string`, `shortcode_number`, `shortcode_boolean`
@@ -295,7 +300,7 @@ document: {Node document (0, 0) - (1, 0)}
 1. All node types have handlers in `native_visitor`
 2. Each node type has at least 3 tests (basic, edge case, interaction)
 3. All tests in `test_treesitter_refactoring.rs` pass
-4. No "[TOP-LEVEL MISSING NODE]" warnings for valid QMD
+4. No "\[TOP-LEVEL MISSING NODE\]" warnings for valid QMD
 5. Output matches expected Pandoc AST structure
 6. All existing tests pass (re-enable after refactoring complete)
 

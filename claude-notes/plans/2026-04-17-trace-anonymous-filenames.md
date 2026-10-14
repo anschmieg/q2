@@ -1,4 +1,8 @@
-# Fix `<anonymous>` filenames in pipeline trace `astContext`
+---
+title: 'Fix `<anonymous>` filenames in pipeline trace `astContext`'
+date: 2026-04-17
+description: 'Fixes the pipeline trace writing `<anonymous>` as the only source file by passing the real AST context into the trace serializer and recording both the `.qmd` and the engine intermediate file after engine execution.'
+---
 
 Beads: `bd-b0f2`
 
@@ -126,7 +130,7 @@ Two problems here:
   references in the *content*, not in the source-location metadata).
 - `doc_ast.ast_context` is dropped. The reconciled AST still contains
   `SourceInfo` nodes pointing at `FileId(0)` for blocks that were *kept from
-  the original parse*, but those FileIds now index into `new_ast_context`'s
+  the original parse*, but those FileIds now index into `new_ast_context`\'s
   `filenames` — which only knows one file, and it's the one the engine-parse
   passed in. So kept blocks silently get misattributed to the engine output.
 

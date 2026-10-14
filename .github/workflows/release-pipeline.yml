@@ -1,5 +1,5 @@
 # Release pipeline (bd-c6l13j79), as a REUSABLE workflow (bd-p4ljdp2e):
-# web payloads → 5-target binary build → checksummed, signed artifacts →
+# web payloads → 6-target binary build → checksummed, signed artifacts →
 # GitHub Release. Two callers:
 #
 #   release.yml  tag push / dispatch on an existing tag  → channel: release
@@ -252,6 +252,16 @@ jobs:
         run: npm run build
         working-directory: q2-preview-spa
 
+      # The MCP bundle's qmd parser (CAP-11): a wasm32 artifact like the
+      # others above — target-independent, so build it once here and let
+      # every bundle-building leg reuse it (their freshness stamps match
+      # the shared checkout, so `npm run bundle` skips rebuilding).
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Build wasm-qmd-parser (nodejs target)
+        run: node ts-packages/quarto-hub-mcp/scripts/build-qmd-parser.mjs
+
       # Docs embed for `q2 docs llms` (bd-hwop1zii). Target-independent
       # like the SPA dists, so it is staged once here rather than on
       # every build leg — where cross-compiled targets could not run the
@@ -284,6 +294,25 @@ jobs:
             trace-viewer/dist
             q2-preview-spa/dist
             agents-docs-dist
+            # The wasm-pack artifacts (glue JS + .wasm) themselves: the
+            # per-target build legs and the hub-mcp-bundle job run
+            # `npm run bundle`, whose buildWasmHost refuses to bundle
+            # without them — and rebuilding them here would mean the
+            # whole wasm32/wasm-bindgen/binaryen toolchain on every leg.
+            #
+            # Stage the real output directory, never the committed
+            # hub-client/wasm-quarto-hub-client symlink that points at
+            # it: on a checkout that has not built WASM the symlink
+            # dangles (Linux/macOS) or is a plain text file (Windows,
+            # no core.symlinks), and download-artifact cannot create a
+            # directory under either — every downstream job then fails
+            # with "Artifact download failed after 5 retries" (nightly
+            # 2026-10-14). Glob-ing the symlink here uploads the files
+            # under the symlink path, which is exactly what breaks.
+            crates/wasm-quarto-hub-client/pkg
+            # The qmd parser wasm (CAP-11), built once here — the
+            # hub-mcp-bundle job stages it without rebuilding.
+            crates/wasm-qmd-parser/pkg-nodejs
           retention-days: 7
           if-no-files-found: error
 
@@ -308,7 +337,10 @@ jobs:
   # build already relies on — see stage-keyring.mjs).
   hub-mcp-bundle:
     name: Build standalone hub MCP bundle
-    needs: check-inputs
+    # web-payloads: the bundle build needs the wasm-pack artifacts
+    # (crates/wasm-quarto-hub-client/pkg/) for the WASM render host, and
+    # the qmd parser pkg (crates/wasm-qmd-parser/pkg-nodejs, CAP-11).
+    needs: [check-inputs, web-payloads]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -330,6 +362,18 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      # Target-independent payloads from the web-payloads job, placed
+      # where the bundle build looks for them — the wasm-pack artifacts
+      # (crates/wasm-quarto-hub-client/pkg/) are required: buildWasmHost
+      # refuses to ship a stub host. The qmd parser wasm (CAP-11) also
+      # comes from web-payloads — this job has no Rust toolchain, and
+      # with the pkg present and fresh (same checkout) `npm run bundle`
+      # stages it without rebuilding.
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-payloads
+          path: .
+
       # esbuild compiles the @quarto/* workspace deps from TS source (the
       # `source` condition in scripts/bundle.mjs), so no prior workspace
       # build is needed here.
@@ -337,13 +381,16 @@ jobs:
         run: npm run bundle -w ts-packages/quarto-hub-mcp
 
       # Fail closed: a real bundle (not the empty/placeholder case), every
-      # requested keyring addon staged, and the module graph actually
-      # loads under node (the linux-x64 addon resolves on this runner).
+      # requested keyring addon staged, the qmd parser staged AND loading,
+      # and the module graph actually loads under node (the linux-x64
+      # addon resolves on this runner).
       - name: Verify bundle
         shell: bash
         run: |
           DIR=ts-packages/quarto-hub-mcp/dist-bundle
-          for f in index.mjs build-info.json; do
+          # wasm-host.mjs + the .wasm: the standalone bundle has no
+          # shared crate to draw the render WASM from, so it must ship.
+          for f in index.mjs build-info.json wasm-host.mjs wasm_quarto_hub_client_bg.wasm; do
             test -f "$DIR/$f" || { echo "::error::$DIR/$f missing"; exit 1; }
           done
           IFS=',' read -ra PLATFORMS <<< "$KEYRING_PLATFORMS"
@@ -351,6 +398,14 @@ jobs:
             test -d "$DIR/node_modules/@napi-rs/keyring-$P" \
               || { echo "::error::keyring addon for $P not staged"; exit 1; }
           done
+          for f in package.json wasm_qmd_parser.js wasm_qmd_parser_bg.wasm; do
+            test -f "$DIR/node_modules/wasm-qmd-parser/$f" \
+              || { echo "::error::qmd parser $f not staged"; exit 1; }
+          done
+          node --input-type=module -e \
+            "const m = await import('$DIR/node_modules/wasm-qmd-parser/wasm_qmd_parser.js'); \
+             const r = JSON.parse(m.parse_qmd('# ok\n', 'true')); \
+             if (r.success !== true) { console.error('qmd parser smoke failed'); process.exit(1); }"
           node "$DIR/index.mjs" --help >/dev/null
 
       # Build a copy named for the version so the tarball extracts into a
@@ -447,7 +502,8 @@ jobs:
           # target platform — both libc flavors on linux (glibc + Alpine
           # node), both mac archs (Rosetta mismatch: x64 q2 under an
           # arm64 node and vice versa), both win archs (arm64 Windows
-          # runs x64 q2 under emulation with a native arm64 node).
+          # can run either q2 under either node: x64 binaries run there
+          # under emulation, and older releases ship only the x64 one).
           # NOTE the keyring lists stay libc-plural even though q2 itself
           # is now musl-only: the addon must match the user's *node*, and
           # an Alpine user runs a musl node while a Debian user runs a
@@ -486,6 +542,16 @@ jobs:
             os: windows-latest
             ext: zip
             keyring: win32-x64-msvc,win32-arm64-msvc
+            cargo_flags: ''
+          # Native ARM64 build (bd-windows-arm64-nightly-xms5p652). Built
+          # on an arm runner rather than cross-compiled from
+          # windows-latest: an x64 Windows host cannot execute an ARM64
+          # binary, and the verify steps below must run it.
+          - platform: windows_arm64
+            target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            ext: zip
+            keyring: win32-arm64-msvc,win32-x64-msvc
             cargo_flags: ''
     steps:
       - uses: actions/checkout@v6
@@ -584,8 +650,8 @@ jobs:
           cargo build --release --locked --target ${{ matrix.target }} -p quarto ${{ matrix.cargo_flags }}
 
       # Every target in the matrix can execute on its runner (musl
-      # binaries are static; darwin x86_64 runs under Rosetta; windows
-      # runs natively), so these checks are unconditional. `shell: bash`
+      # binaries are static; darwin x86_64 runs under Rosetta; both
+      # windows legs run natively), so these checks are unconditional. `shell: bash`
       # uses Git Bash on the windows runner.
       #
       # Beyond braid's version check, this is the anti-stale-embed /
@@ -652,6 +718,18 @@ jobs:
           case "$DOCS_COMMIT_LINE" in
             *"(dirty)") echo "::warning::embedded docs were staged from a dirty tree at $EXPECTED_SHA" ;;
           esac
+
+          # Embedded bundler: build a tiny extension with the release binary.
+          # It runs the embedded rollup driver under the runner's Node 24 (the
+          # same Node TS engine extensions need), so this is where the musl and
+          # Windows binaries' build path is exercised.
+          mkdir -p verify-ext/src
+          printf 'title: T\nversion: 1.0.0\ncontributes:\n  engines:\n    - path: dist/e.js\n' > verify-ext/_extension.yml
+          echo 'export default { name: "verify-ext" };' > verify-ext/src/e.ts
+          if ! "$BIN" call build-ts-extension verify-ext || ! grep -q 'verify-ext' verify-ext/dist/e.js; then
+            echo "::error::release binary cannot build a TS extension (embedded rollup driver or Node failed)"
+            FAIL=1
+          fi
           exit $FAIL
 
       # Live-share local asset serving (plan Phase 2, bd-ee2fqm95): a
@@ -820,7 +898,7 @@ jobs:
       - name: Compare hashes across platforms
         run: |
           cd asset-hashes
-          EXPECTED="linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64"
+          EXPECTED="linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64 windows_arm64"
           for platform in $EXPECTED; do
             f="asset-manifest-hashes-$platform.txt"
             if [ ! -f "$f" ]; then
@@ -869,7 +947,7 @@ jobs:
           # "<platform>:<ext>" — Windows ships .zip, the rest .tar.gz.
           for entry in linux_amd64:tar.gz linux_arm64:tar.gz \
                        darwin_amd64:tar.gz darwin_arm64:tar.gz \
-                       windows_amd64:zip; do
+                       windows_amd64:zip windows_arm64:zip; do
             platform="${entry%%:*}"; ext="${entry##*:}"
             for f in "q2-${VERSION}-${platform}.${ext}" \
                      "q2-${VERSION}-${platform}.${ext}.sha256"; do
@@ -981,6 +1059,7 @@ jobs:
             echo "| macOS Intel | \`q2-${VERSION}-darwin_amd64.tar.gz\` |"
             echo "| macOS Apple Silicon | \`q2-${VERSION}-darwin_arm64.tar.gz\` |"
             echo "| Windows x86_64 | \`q2-${VERSION}-windows_amd64.zip\` |"
+            echo "| Windows ARM64 | \`q2-${VERSION}-windows_arm64.zip\` |"
             echo
             echo "**Verify a manual download** (Unix archives are signed with [minisign](https://jedisct1.github.io/minisign/), Ed25519):"
             echo

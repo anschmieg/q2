@@ -1,15 +1,18 @@
-# Analysis: Memory Reuse Bug Within Precomputation Phase
+---
+title: 'Analysis: Memory Reuse Bug Within Precomputation Phase'
+date: 2026-01-13
+description: 'Explains an intermittent `yaml-tags.qmd` snapshot failure caused by freed temporaries whose memory is reused during JSON precomputation, producing stale source IDs, and proposes keeping those temporaries alive until precomputation finishes.'
+status: done  # Fixed
+---
 
-**Date**: 2026-01-13
 **Related Issue**: Continuation of k-gv05 (originally marked as fixed 2026-01-03)
-**Status**: Fixed
 
 ## Problem Summary
 
 The `yaml-tags.qmd` snapshot test continues to fail intermittently, despite the fix applied in commit 227acbe (2026-01-03). The symptom is identical to the original bug:
 - The `path` metadata value's Str node gets different `s` values (pool IDs): sometimes `2`, sometimes `4`
-- `s:4` is correct (points to path's source range [33,47])
-- `s:2` is incorrect (points to compute's source range [15,20])
+- `s:4` is correct (points to path's source range `[33,47]`)
+- `s:2` is incorrect (points to compute's source range `[15,20]`)
 
 ## Root Cause: Incomplete Fix
 

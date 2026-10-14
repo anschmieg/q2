@@ -9,6 +9,10 @@
  */
 
 use mlua::{Function, LightUserData, Lua, Result, Table, Value};
+
+use super::metadata::LuaMetaProxy;
+use super::types::{LuaBlock, LuaInline};
+use super::utils::stringify_value;
 use std::ptr;
 
 /// Sentinel pointer for JSON null value
@@ -130,6 +134,15 @@ fn lua_to_json(lua: &Lua, value: &Value) -> Result<serde_json::Value> {
         }
         Value::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_string())),
         Value::Table(t) => {
+            // A `pandoc.Inlines` / `pandoc.Blocks` list is prose: one
+            // string, as `pandoc.utils.stringify` renders it. A plain
+            // `pandoc.List` stays an array.
+            if let Some(mt) = t.metatable()
+                && let Ok(name) = mt.get::<String>("__name")
+                && (name == "Inlines" || name == "Blocks")
+            {
+                return Ok(serde_json::Value::String(stringify_value(value)?));
+            }
             // Check if it's an array (sequential integer keys starting from 1)
             // or an object (string keys)
             let len = t.raw_len();
@@ -174,7 +187,22 @@ fn lua_to_json(lua: &Lua, value: &Value) -> Result<serde_json::Value> {
                 Ok(serde_json::Value::Null)
             }
         }
-        // For other types (functions, userdata, etc.), return null
+        Value::UserData(ud) => {
+            // AST nodes encode as their plain text; a `meta` proxy (a map
+            // reached through `meta.*`, bd-react-components-a8flgldm) as
+            // the plain JSON of the metadata under it. Anything else is
+            // null, as before.
+            if ud.is::<LuaInline>() || ud.is::<LuaBlock>() {
+                return Ok(serde_json::Value::String(stringify_value(value)?));
+            }
+            if let Ok(proxy) = ud.borrow::<LuaMetaProxy>() {
+                return Ok(proxy
+                    .node()
+                    .map_or(serde_json::Value::Null, |node| node.to_plain_json()));
+            }
+            Ok(serde_json::Value::Null)
+        }
+        // For other types (functions, etc.), return null
         _ => Ok(serde_json::Value::Null),
     }
 }

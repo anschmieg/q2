@@ -1,9 +1,15 @@
-# `source: file` brand fonts: never copied, `@font-face` URLs resolve against the theme CSS's directory (bd-ve916wr8)
+---
+title: '`source: file` brand fonts: never copied, `@font-face` URLs resolve against the theme CSS''s directory (bd-ve916wr8)'
+date: 2026-09-08
+description: 'Publishes `source: file` brand font files as artifacts beside the theme CSS and emits a constant `fonts/` URL, so `@font-face` rules resolve in websites and single documents instead of returning 404 errors.'
+status: approved  # Design agreed with user 2026-09-08 (decisions below). Ready to implement on a topic branch.
+braid:
+  strand: bd-ve916wr8
+  priority: P2
+  labels: [css, theming, websites]
+---
 
-**Date:** 2026-09-08
-**Braid:** bd-ve916wr8
-**Checkout:** main @ `b7e7c96a` (investigation ran in the main checkout)
-**Status:** Design agreed with user 2026-09-08 (decisions below). Ready to implement on a topic branch.
+**Checkout:** main \@ `b7e7c96a` (investigation ran in the main checkout)
 
 ## Overview
 
@@ -107,12 +113,12 @@ theme CSS and out of scope here.
       `brand_dir.join(path)`; external URLs skipped), read bytes via
       `ctx.runtime`, store `Artifact::from_bytes(bytes, <mime by ext>)`
       with key `font:<basename>` and path `quarto/fonts/<basename>` /
-      `fonts/<basename>` (mirror `theme_artifact_key_and_path`'s
+      `fonts/<basename>` (mirror `theme_artifact_key_and_path`\'s
       single-doc switch), scope `Project`.
 - [x] Collision check before `ctx.artifacts.store`: same key already
       present with different bytes → structured error naming both source
       paths. Cross-document collisions surface via
-      `ArtifactStore::merge_into_project`'s existing conflict — wrap that
+      `ArtifactStore::merge_into_project`\'s existing conflict — wrap that
       error so it names the font sources too (today it prints key + byte
       lengths only).
 - [x] Missing file → warning diagnostic; render continues without the
@@ -149,7 +155,7 @@ theme CSS and out of scope here.
       leg; hub-client vitest is currently red on `main` for an unrelated
       `localStorage` environment issue, see NOTES.md).
 - [x] Rebase over bd-5fseopxy if it has landed; resolve the
-      `file_font_face_block` conflict. Done 2026-09-09 onto `main` @
+      `file_font_face_block` conflict. Done 2026-09-09 onto `main` \@
       `9d236060` (after #661, #663, #664–#667): kept #663's weight-range
       emitter (`font_weight_to_css` + `RangeOk::FontFace`, YAML-path
       error locations, `Brand::validate`) and #661's structured
@@ -174,7 +180,7 @@ file-entry key). Re-check the catalog at rebase time.
 
 ## Risks
 
-- **Artifact-store size.** Variable fonts are ~100–500 KB each; a brand
+- **Artifact-store size.** Variable fonts are \~100–500 KB each; a brand
   with several files puts a few MB through the artifact map per render.
   Images already take this route; measure once on a real brand.
 - **Collision granularity.** Basename-keyed names mean two *different*

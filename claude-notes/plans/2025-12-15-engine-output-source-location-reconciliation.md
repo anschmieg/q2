@@ -1,8 +1,13 @@
-# Source Location Reconciliation After Engine Execution
+---
+title: 'Source Location Reconciliation After Engine Execution'
+date: 2025-12-15
+description: 'Designs an algorithm that reconciles the AST parsed before engine execution with the one parsed after it, so unchanged elements keep their original source locations while computed output points to the engine''s intermediate file.'
+status: draft  # Design phase
+braid:
+  strand: k-6daf
+  priority: P1
+---
 
-**Date**: 2025-12-15
-**Issue**: k-6daf
-**Status**: Design phase
 **Related**: claude-notes/plans/2025-12-15-source-info-for-structured-formats.md
 
 ## Problem Statement
@@ -386,7 +391,7 @@ For documents with thousands of blocks, O(n^2) alignment is too slow.
 This design complements the ipynb source tracking work:
 
 1. **ipynb → qmd**: The previous plan handles source locations from notebook cells to qmd
-2. **qmd → engine → qmd'**: This plan handles source locations through engine execution
+2. **qmd → engine → qmd\'**: This plan handles source locations through engine execution
 
 Together, they provide end-to-end source tracking:
 ```

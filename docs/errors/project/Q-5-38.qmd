@@ -1,0 +1,38 @@
+---
+title: "Unknown website.search Option"
+description: "`website.search` has an option Quarto does not recognize. The option is ignored."
+code: Q-5-38
+subsystem: project
+status: complete
+since: "99.9.9"
+categories:
+  - project
+---
+
+# `Q-5-38` — Unknown website.search Option
+
+> `website.search` has an option Quarto does not recognize. The option
+> is ignored.
+
+## What this means
+
+The `website.search` map accepts a fixed set of keys. A key outside
+that set is most often a typo, so Quarto reports it rather than
+silently dropping it, then renders with the key ignored.
+
+```yaml
+# _quarto.yml
+website:
+  search:
+    locaton: sidebar      # Q-5-38: did you mean `location`?
+```
+
+The known options are `location`, `type`, `limit`, `collapse-after`,
+`copy-button`, `keyboard-shortcut`, `show-item-context`,
+`merge-navbar-crumbs`, `federate`, and `algolia`. Inside a `federate`
+entry, the known keys are `url`, `title`, `weight`, and `bundle`.
+
+## How to fix it
+
+Correct the spelling, or remove the key. See the website search
+documentation for what each option does.

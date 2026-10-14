@@ -1,7 +1,12 @@
-# Unknown `project.type` should be a hard error (bd-sekn481x)
-
-**Strand:** bd-sekn481x
-**Status:** done — implemented, all gates green (2026-08-08)
+---
+title: 'Unknown `project.type` should be a hard error (bd-sekn481x)'
+date: 2026-08-08
+description: 'Turns an unrecognized `project.type` from a silent fallback to the default type into a hard error with a source-located diagnostic, so that unsupported extension types cannot scatter output into the source tree.'
+status: done  # done — implemented, all gates green (2026-08-08)
+braid:
+  strand: bd-sekn481x
+  priority: P1
+---
 
 **Review decisions (Carlos, 2026-08-08):** hard error (custom project
 type extensions likely tackled next anyway); no `_extensions/`-aware
@@ -60,7 +65,7 @@ design produces the symptom:
   are flushed to a per-document `<stem>_files/` dir.
 - No `output-dir` default, so output lands **next to the sources**.
 
-So each of the ~350 documents got its own copy of the bootstrap bundle,
+So each of the \~350 documents got its own copy of the bootstrap bundle,
 in-tree. `.md` vs `.qmd` is irrelevant.
 
 ### Verification (standalone repro)
@@ -82,7 +87,7 @@ printf -- '---\ntitle: Sub\n---\n\nMore.\n' > sub/page.md
 cargo run --bin q2 -- render /tmp/md-libs-repro
 ```
 
-Observed (2026-08-08, workspace @ 5c714919):
+Observed (2026-08-08, workspace \@ 5c714919):
 
 - `q2 render` prints `Rendering project: … (type: default)` — no
   warning, no error — and exits 0.
@@ -153,7 +158,7 @@ error[Q-5-17]: Unknown project type `posit-docs`
 
 ### Non-goals
 
-- **No change to default-type projects' per-document `_files/` layout.**
+- **No change to default-type projects\' per-document `_files/` layout.**
   That layout is intentional for `type: default` (and matches Q1);
   the bug is only the misclassification.
 - **No extension project-type support.** That's a large feature; if we

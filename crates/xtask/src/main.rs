@@ -19,7 +19,9 @@
 //! - `build-trace-viewer`: Build just the trace-viewer SPA
 //! - `build-hub-client-embed`: Build the hub-client editor bundle for `q2 preview --ui editor`
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
-//! - `build-engine-host-bundle`: Build the committed engine-host-deno.js bundle
+//! - `build-engine-host-bundle`: Build the committed engine-host-node.mjs bundle
+//! - `build-ts-bundle`: Build the committed ts-bundle.mjs driver for `q2 call build-ts-extension`
+//! - `vendor-react`: Rebuild the vendored React ES modules under `resources/js/react/`
 //! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
 //! - `pull-extension-subtree`: Sync vendored extension subtrees under `resources/extension-subtrees/`
@@ -32,7 +34,10 @@ mod build_hub_client_embed;
 mod build_hub_mcp_bundle;
 mod build_q2_preview_spa;
 mod build_trace_viewer;
+mod build_ts_bundle;
+mod capture_import_recordings;
 mod capture_pandoc_goldens;
+mod capture_pandoc_recordings;
 mod create_worktree;
 mod dev_setup;
 mod gen_math_spec;
@@ -48,6 +53,7 @@ mod tree_sitter;
 mod treesitter_crlf;
 mod ts_packages;
 mod util;
+mod vendor_react;
 mod verify;
 
 use anyhow::Result;
@@ -60,6 +66,12 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand)]
+enum CaptureImportAction {
+    /// Rebuild each fixture's `source.<ext>` from `sources/` (run when a source changes).
+    Generate,
 }
 
 #[derive(Subcommand)]
@@ -249,6 +261,12 @@ enum Command {
         #[arg(long)]
         skip_css_lint: bool,
 
+        /// Skip the strict claude-notes render (q2 render --strict
+        /// claude-notes) that runs right after the Rust build. Also skipped
+        /// by --skip-rust-build.
+        #[arg(long)]
+        skip_claude_notes_render: bool,
+
         /// Include hub-client e2e tests (slower, requires browser).
         #[arg(long)]
         e2e: bool,
@@ -276,10 +294,31 @@ enum Command {
     /// (`capture_pandoc_goldens::QUARTO_PINNED_VERSION`) on `PATH` — fails
     /// loudly, never skips, if absent or at the wrong version. Renders each
     /// fixture in `tests/fixtures/pandoc-goldens/` to docx and pptx,
-    /// extracts semantic content via `quarto-ooxml-extract`, and writes the
+    /// extracts semantic content via `quarto-output-extract`, and writes the
     /// result as a committed insta snapshot. Never invoked from `cargo
     /// xtask verify` or CI.
     CapturePandocGoldens {},
+
+    /// Dev-only capture of the exact inputs of real native pandoc runs
+    /// (pandoc.wasm epic, phase R0): renders each recording fixture to docx,
+    /// pptx, epub and typst with `QUARTO_PANDOC` set to
+    /// `scripts/pandoc-capture.sh`, then normalizes the captures into
+    /// `crates/quarto-core/tests/fixtures/pandoc-recordings/recordings/`.
+    /// Needs the pinned native pandoc on `PATH`. Unix only; never invoked
+    /// from `cargo xtask verify` or CI.
+    CapturePandocRecordings {},
+
+    /// Dev-only capture of native pandoc *reader* runs for document import
+    /// (plan P1 T2): runs the pinned pandoc over each checked-in
+    /// `source.<ext>` under `crates/quarto-core/tests/fixtures/import-recordings/`
+    /// with the import argv and writes `argv.json`, `pandoc.json`, `stderr.txt`,
+    /// `status.json`, `media/` and `manifest.json` beside it. `generate` first
+    /// rebuilds the binary sources from `sources/`. Needs the pinned native
+    /// pandoc on `PATH`. Unix only; never invoked from `cargo xtask verify` or CI.
+    CaptureImportRecordings {
+        #[command(subcommand)]
+        action: Option<CaptureImportAction>,
+    },
 
     /// Byte-diff a rendered corpus between `--base <commit>` and `HEAD`.
     ///
@@ -378,14 +417,30 @@ enum Command {
     /// quarto-hub-mcp / quarto-sync-client / quarto-automerge-schema.
     BuildHubMcpBundle {},
 
-    /// Build the committed engine-host-deno.js bundle (Plan 1b).
+    /// Rebuild the vendored React ES modules under `resources/js/react/`
+    /// from the workspace `node_modules` (bd-react-components-a8flgldm).
+    /// Runs `build.mjs` then `check.mjs` (jsdom smoke). The files are
+    /// committed and version-pinned by the Rust test suite; run this
+    /// after bumping `react` / `react-dom`.
+    VendorReact {},
+
+    /// Build the committed engine-host-node.mjs bundle (Plan 1b).
     ///
-    /// Produces `ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js`
-    /// (esbuild, ESM, Deno-ready) — the artifact `quarto-core` embeds via
+    /// Produces `ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs`
+    /// (esbuild, ESM, node24) — the artifact `quarto-core` embeds via
     /// `include_str!` in `engine/ts_process.rs`. A plain `cargo build`
-    /// does NOT refresh it; run this after changing `quarto-engine-host-deno`,
+    /// does NOT refresh it; run this after changing `quarto-engine-host-node`,
     /// `@quarto/api`, or `@quarto/types` sources.
     BuildEngineHostBundle {},
+
+    /// Build the committed ts-bundle driver (`q2 call build-ts-extension`).
+    ///
+    /// Produces `ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs` (rollup +
+    /// plugins + wasm in one ESM file) — the artifact `quarto-core` embeds via
+    /// `include_str!` in `extension/build.rs` and pipes to `node -`. A plain
+    /// `cargo build` does NOT refresh it; run this after changing
+    /// `quarto-ts-bundle`.
+    BuildTsBundle {},
 
     /// Fresh-clone build orchestration.
     ///
@@ -398,8 +453,9 @@ enum Command {
     /// 4. trace-viewer build (if present; Phase 4.3+)
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
-    /// 7. engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
-    /// 8. cargo build --workspace
+    /// 7. engine-host-node bundle (quarto-core embed artifact; Plan 1b)
+    /// 8. ts-bundle driver (quarto-core embed artifact for build-ts-extension)
+    /// 9. cargo build --workspace
     BuildAll {
         /// Skip `npm install`.
         #[arg(long)]
@@ -425,9 +481,13 @@ enum Command {
         #[arg(long)]
         skip_hub_mcp_bundle: bool,
 
-        /// Skip the engine-host-deno bundle build.
+        /// Skip the engine-host-node bundle build.
         #[arg(long)]
         skip_engine_host_bundle: bool,
+
+        /// Skip the ts-bundle driver build.
+        #[arg(long)]
+        skip_ts_bundle: bool,
 
         /// Skip the Rust workspace build.
         #[arg(long)]
@@ -500,6 +560,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_tests,
             skip_css_lint,
+            skip_claude_notes_render,
             e2e,
             no_deny_warnings,
         } => {
@@ -517,6 +578,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_tests,
                 skip_css_lint,
+                skip_claude_notes_render,
                 include_e2e: e2e,
                 no_deny_warnings,
             };
@@ -524,6 +586,10 @@ fn main() -> Result<()> {
         }
         Command::PandocCheck {} => pandoc_check::run(),
         Command::CapturePandocGoldens {} => capture_pandoc_goldens::run(),
+        Command::CapturePandocRecordings {} => capture_pandoc_recordings::run(),
+        Command::CaptureImportRecordings { action } => {
+            capture_import_recordings::run(matches!(action, Some(CaptureImportAction::Generate)))
+        }
         Command::RenderCorpusDiff { base, corpus, keep } => {
             render_corpus_diff::run(render_corpus_diff::Args { base, corpus, keep })
         }
@@ -536,7 +602,9 @@ fn main() -> Result<()> {
         Command::BuildQ2PreviewSpa {} => build_q2_preview_spa::run(),
         Command::BuildHubClientEmbed {} => build_hub_client_embed::run(),
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
+        Command::VendorReact {} => vendor_react::run(),
         Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
+        Command::BuildTsBundle {} => build_ts_bundle::run(),
         Command::BuildAll {
             skip_npm_install,
             skip_ts_packages_build,
@@ -545,6 +613,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_bundle,
             skip_engine_host_bundle,
+            skip_ts_bundle,
             skip_rust_build,
             skip_agents_docs,
             release,
@@ -558,6 +627,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_bundle,
                 skip_engine_host_bundle,
+                skip_ts_bundle,
                 skip_rust_build,
                 release,
             };

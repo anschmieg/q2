@@ -1,0 +1,6 @@
+---
+title: "Product A"
+---
+
+Product A collects measurements from sensors and stores them as tidy
+tables. This site is rendered on its own and also searched from the family site.

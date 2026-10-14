@@ -1,7 +1,10 @@
-# Directory Metadata (_metadata.yml) Support
+---
+title: 'Directory Metadata (`_metadata.yml`) Support'
+date: 2026-02-17
+description: 'Adds support for directory-level `_metadata.yml` files, discovered between the project root and a document and layered between project config and document frontmatter.'
+status: done  # Core Implementation Complete (Path Resolution Deferred)
+---
 
-**Date**: 2026-02-17
-**Status**: Core Implementation Complete (Path Resolution Deferred)
 **Depends on**: `2026-02-16-project-metadata-merging.md` (Complete)
 
 ## Overview
@@ -314,7 +317,7 @@ css: !path styles/custom.css
 
 - [x] Handle YAML parse errors with descriptive messages
 - [x] Include file path and source location in error messages
-- [x] Fail render with "Directory metadata validation failed for {file}" message
+- [x] Fail render with "Directory metadata validation failed for \{file\}" message
 - [ ] (Future) Add schema validation when front-matter schemas are ported
 
 ### Phase 3: Path Resolution - DEFERRED
@@ -588,7 +591,7 @@ quarto-core (ast_transforms.rs) ◄─── merge all layers
 ### Existing Implementation to Study
 
 **Project metadata merging** (just completed, use as template):
-- `crates/quarto-core/src/stage/stages/ast_transforms.rs` - Look at lines ~107-200 for the existing project → document merge
+- `crates/quarto-core/src/stage/stages/ast_transforms.rs` - Look at lines \~107-200 for the existing project → document merge
 - `crates/quarto-config/src/format.rs` - `resolve_format_config()` flattens `format.{target}.*` to top-level
 
 **YAML parsing to ConfigValue**:
@@ -599,8 +602,8 @@ quarto-core (ast_transforms.rs) ◄─── merge all layers
 **Project context**:
 - `crates/quarto-core/src/project.rs` - `ProjectContext` struct has `dir: PathBuf` (project root)
 - `ProjectConfig` struct has `metadata: Option<ConfigValue>` (the parsed `_quarto.yml`)
-- **Look at `find_project_config()`** (~line 263) - shows pattern for checking `.yml` and `.yaml` extensions
-- **Look at `parse_config()`** (~line 301) - shows how to parse YAML to ConfigValue with `yaml_to_config_value`
+- **Look at `find_project_config()`** (\~line 263) - shows pattern for checking `.yml` and `.yaml` extensions
+- **Look at `parse_config()`** (\~line 301) - shows how to parse YAML to ConfigValue with `yaml_to_config_value`
 
 **SystemRuntime abstraction**:
 - `quarto_system_runtime::SystemRuntime` trait abstracts file I/O
@@ -784,7 +787,7 @@ export async function directoryMetadataForInputFile(
 **Key observations:**
 1. Takes `inputDir` (document's parent directory), NOT the document path itself
 2. Walks each directory component from project root to inputDir
-3. Does NOT include project root's _metadata.yml (starts walking from first subdir)
+3. Does NOT include project root's \_metadata.yml (starts walking from first subdir)
 4. Uses `mergeConfigs` which does deep merge - later values override earlier for scalars, arrays concatenate
 
 ### toInputRelativePaths (project-shared.ts:137-206)

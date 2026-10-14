@@ -1,12 +1,10 @@
-# JavaScript Execution Performance Considerations
+---
+title: 'JavaScript Execution Performance Considerations'
+date: 2026-01-12
+description: 'Analyzes the cost of creating a fresh V8 runtime for each JavaScript render call and compares caching strategies, though the JavaScript surface it covers has since been removed.'
+status: superseded  # OBSOLETE (2026-06-12) — the JS execution surface this document describes was removed in bd-3e3sam51 (see `claude-notes/plans/2026-06-12-remove-deno-core-rusty-v8.md`). Project scaffolding renders with quarto-doctemplate (pure Rust) since bd-kuxzj8su; `js_native.rs` and the deno_core/rusty_v8 dependency no longer exist. Kept for historical context only.
+---
 
-**Created**: 2026-01-12
-**Status**: OBSOLETE (2026-06-12) — the JS execution surface this document
-describes was removed in bd-3e3sam51 (see
-`claude-notes/plans/2026-06-12-remove-deno-core-rusty-v8.md`). Project
-scaffolding renders with quarto-doctemplate (pure Rust) since bd-kuxzj8su;
-`js_native.rs` and the deno_core/rusty_v8 dependency no longer exist.
-Kept for historical context only.
 **Related code**: `crates/quarto-system-runtime/src/js_native.rs` (deleted)
 
 ## Overview
@@ -43,21 +41,21 @@ async fn render_ejs(&self, template: &str, data: &serde_json::Value) -> RuntimeR
 
 Each `render_ejs()` or `js_render_simple_template()` call:
 
-1. **Creates V8 isolate** (~15-25ms)
+1. **Creates V8 isolate** (\~15-25ms)
    - Allocates heap (lazy, but setup is not)
    - Initializes garbage collector
    - Creates built-in objects (Object, Array, Function, etc.)
    - Sets up JIT compilation infrastructure
 
-2. **Loads JS bundle** (~5-10ms)
-   - Parses JavaScript (~50KB for EJS bundle)
+2. **Loads JS bundle** (\~5-10ms)
+   - Parses JavaScript (\~50KB for EJS bundle)
    - Compiles to bytecode
    - Creates global `ejs` object
 
-3. **Renders template** (~1-5ms)
+3. **Renders template** (\~1-5ms)
    - The actual work - typically fast
 
-**Total: ~20-35ms per operation**
+**Total: \~20-35ms per operation**
 
 ### Scaling estimates
 
@@ -124,11 +122,11 @@ impl SystemRuntime for NativeRuntime {
 ```
 
 **Characteristics**:
-- First call per thread: ~30ms (creates JsEngine)
-- Subsequent calls: ~5ms (reuses JsEngine)
+- First call per thread: \~30ms (creates JsEngine)
+- Subsequent calls: \~5ms (reuses JsEngine)
 - Thread-safe by construction (each thread has its own)
 - Works naturally with thread pools (tokio, rayon)
-- ~20 lines of change
+- \~20 lines of change
 - **No API changes required**
 
 **Caveats**:
@@ -177,7 +175,7 @@ impl JsExecutor {
 - All JS serialized through one thread
 - Good for consistent memory usage
 - More complex implementation
-- Channel overhead per call (~1-2ms)
+- Channel overhead per call (\~1-2ms)
 
 **When to use**: If memory is constrained and you want predictable JS memory usage.
 
@@ -269,7 +267,7 @@ impl Drop for PooledEngine<'_> {
 
 2. **If >100 templates become common**: Implement thread-local storage (Strategy 1).
    - Transparent change, no API impact
-   - ~20 lines of code
+   - \~20 lines of code
    - 10-50x speedup for repeated operations
 
 3. **If batch operations are identified**: Add batch API (Strategy 3).

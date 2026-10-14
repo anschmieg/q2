@@ -103,7 +103,7 @@ fn format_messages(messages: &[super::LogMessage]) -> String {
     } else {
         messages
             .iter()
-            .map(|m| format!("  [{}] {}", m.level.as_str(), m.message))
+            .map(|m| format!("  [{}] {}", m.level.as_str(), m.indented("    ")))
             .collect::<Vec<_>>()
             .join("\n")
     }

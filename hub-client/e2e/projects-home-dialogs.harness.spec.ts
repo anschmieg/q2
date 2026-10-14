@@ -9,7 +9,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { bootHarness } from './helpers/harness';
+import { bootHarness, openNewProjectMenu } from './helpers/harness';
 
 test.beforeEach(async ({ page }) => {
   await bootHarness(page, 'projects-home', '.projects-home', 'light');
@@ -19,12 +19,18 @@ test('New project dialog opens via the New menu and closes with focus return', a
   page,
 }) => {
   const trigger = page.getByRole('button', { name: '＋ New ▾' });
-  await trigger.click();
-  const menu = page.locator('[role="menu"]');
-  await expect(menu).toBeVisible();
+  // openNewProjectMenu waits for the registry's groups to replace the placeholder item
+  // (see its docstring). The Menu keeps keyboard focus on its first item through that swap,
+  // so the Templates group is focused once it exists. (Pressing Enter on whatever was focused
+  // first is what flaked: the placeholder could vanish between the focus check and the key,
+  // taking focus with it; bd-c72wsugj.)
+  const menu = await openNewProjectMenu(page);
+  const templates = menu.getByRole('menuitem', { name: /^Templates/ });
+  await expect(templates).toBeFocused();
 
-  // Keyboard: first item focused; Enter opens the dialog.
-  await expect(menu.locator('[role="menuitem"]').first()).toBeFocused();
+  // Keyboard: ArrowRight opens the group and focuses its first choice; Enter opens the dialog.
+  await page.keyboard.press('ArrowRight');
+  await expect(menu.getByRole('menuitem', { name: /^Default/ })).toBeFocused();
   await page.keyboard.press('Enter');
 
   const dialog = page.locator('[role="dialog"]');

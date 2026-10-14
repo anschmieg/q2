@@ -1,9 +1,15 @@
-# NewFileDialog: Enter-submit reopens the dialog (GH #635)
+---
+title: 'NewFileDialog: Enter-submit reopens the dialog (GH #635)'
+date: 2026-08-31
+description: 'Fixes the hub-client New file dialog, where pressing Enter reopens the dialog and Enter on Cancel still creates a file, by suppressing the keydown''s default click.'
+status: approved  # planned, not yet implemented. Root cause confirmed empirically in a real browser; fix hypothesis verified end-to-end and then reverted pending TDD.
+braid:
+  strand: bd-zcv0iea4
+  priority: P2
+  labels: [hub-client]
+---
 
 **GitHub issue:** https://github.com/quarto-dev/q2/issues/635
-**Braid strand:** bd-zcv0iea4
-**Status:** planned, not yet implemented. Root cause confirmed empirically in a real
-browser; fix hypothesis verified end-to-end and then reverted pending TDD.
 
 ## Overview
 
@@ -24,7 +30,7 @@ focus-restore machinery, which is working as designed.
 
 ## Root cause (confirmed, not hypothesized)
 
-`NewFileDialog` handles Enter via `ModalDialog`'s `onKeyDown` delegation — a
+`NewFileDialog` handles Enter via `ModalDialog`\'s `onKeyDown` delegation — a
 handler on the dialog **container div**, reached by bubbling from whatever is
 focused (lines 113–120). On Enter it calls `handleCreateTextFile()`, which
 creates the file and calls `onClose()`. It never calls `e.preventDefault()`.
@@ -92,7 +98,7 @@ Two viable shapes for the fix:
   delegation): semantically cleanest, but changes behavior — Enter on the
   template select would no longer submit. Not recommended for a minimal fix.
 
-Either way, document the contract on `ModalDialog`'s `onKeyDown` prop doc:
+Either way, document the contract on `ModalDialog`\'s `onKeyDown` prop doc:
 *a delegated handler that synchronously closes the dialog must call
 `e.preventDefault()` on Enter, or the keydown's default-action click lands on
 the focus-restore target.* This is what makes the bug a class rather than a
@@ -129,7 +135,7 @@ one-off.
 ### Phase 2 — fix
 
 - [x] Apply design (A) in `NewFileDialog.handleKeyDown`.
-- [x] Extend `ModalDialog`'s `onKeyDown` prop docstring with the
+- [x] Extend `ModalDialog`\'s `onKeyDown` prop docstring with the
       preventDefault-on-close contract (comment-only change).
 - [x] All Phase-1 tests green (19/19 unit, 3/3 harness).
 

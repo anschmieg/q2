@@ -1,4 +1,10 @@
-# P7 — Per-format tail + invocation builder (docx first)
+---
+title: 'P7 — Per-format tail + invocation builder (docx first)'
+date: 2026-08-20
+date-modified: 2026-09-18
+description: 'Builds the per-format output tail for docx and pptx, covering the pandoc invocation, format defaults, the Meta-block mapping and a golden-parity harness, with latex left as a stub.'
+status: done  # Implementation complete (2026-09-21) — every Coarse checklist item is `[x]`. All 12 tasks in the implementation companion (`2026-09-18-pandoc-hybrid-P7-implementation.md`) are done, including Task 11 (the golden assertion harness) closing out last. Pending: Gordon's review before merging `braid/pandoc-hybrid-p7-format-tail` into the `feature/pandoc-writer-hybrid` integration line.
+---
 
 **Date:** 2026-08-20  **Updated:** 2026-09-18 (two passes) — see `git log --oneline -- claude-notes/plans/2026-08-20-pandoc-hybrid-P7-format-tail.md`
 for the full correction history. Latest (round 4 review): the `render.rs:680-684` relaxation is
@@ -17,11 +23,6 @@ feasibility reviews found four gaps in this plan's own scope — format-specific
 missing pptx's `echo: false`/`warning: false`, an unstated pandoc-defaults forwarding policy, the
 multi-format render guardrail this plan's own `render.rs` relaxation removes, and three concrete
 build gaps in this plan's own golden-artifact proposal — closed, see the "Finding" section below.)
-**Status:** Implementation complete (2026-09-21) — every Coarse checklist item is `[x]`. All 12
-tasks in the implementation companion (`2026-09-18-pandoc-hybrid-P7-implementation.md`) are done,
-including Task 11 (the golden assertion harness) closing out last. Pending: Gordon's review before
-merging `braid/pandoc-hybrid-p7-format-tail` into the `feature/pandoc-writer-hybrid` integration
-line.
 **Design (authoritative):** [`../designs/pandoc-hybrid-architecture.md`](../designs/pandoc-hybrid-architecture.md)  |  Epic: `2026-08-20-pandoc-hybrid-epic.md`  |  Depends on: **P7-foundation** (new, 2026-09-20 — see below), P1, P2, P4, P5
 **Implementation task breakdown + test-seam prevalidation:** [`2026-09-18-pandoc-hybrid-P7-implementation.md`](2026-09-18-pandoc-hybrid-P7-implementation.md) — this plan's Coarse checklist converted into dispatchable `## Task N` units, each test bound to a named production seam and revert hunk. **As of 2026-09-20, that companion's Tasks 1, 2, 3, and 7 have moved to [`2026-09-20-pandoc-hybrid-P7-foundation-implementation.md`](2026-09-20-pandoc-hybrid-P7-foundation-implementation.md)** — see the note immediately below.
 
@@ -88,7 +89,7 @@ Both items previously carried as "Deferred in-plan questions" in this plan
    These are consumed by `EngineExecutionStage`, upstream of this plan's own per-format tail
    (`pipeline.rs:322` vs. the tail at the very end) — **this plan still owns stating the values**
    (it's the only plan that has the per-format facts), but applying them is a seam into
-   `EngineExecutionStage`'s own defaulting, not something P7's invocation builder does directly.
+   `EngineExecutionStage`\'s own defaulting, not something P7's invocation builder does directly.
    **Correction (2026-09-18, round 4 review, Reviewer C): "not something P7 does directly" left
    this seam with no owner at all** — no other plan mentions `EngineExecutionStage`, and this
    plan's own checklist folded the values back into the invocation-builder item, the same
@@ -113,11 +114,11 @@ Both items previously carried as "Deferred in-plan questions" in this plan
    consumers this repo's `CLAUDE.md` requires registering: neither is in
    `FORMAT_PATH_KEYS` (`crates/quarto-core/src/project/format_paths.rs:99-105`, currently 5
    entries: `css, theme, include-in-header, include-before-body, include-after-body`) or in
-   `claude-notes/designs/path-resolution-model.md`'s consumption inventory. Add both there when
+   `claude-notes/designs/path-resolution-model.md`\'s consumption inventory. Add both there when
    implementing (resolve relative to the declaring file, a leading `/` means project root — the
    same convention every other path key already follows), per the repo rule requiring a strand
    linked to `bd-oejuizi9` for any deliberate scope-out.
-3. **Multi-format render guardrail — see design doc §14.** Relaxing `render.rs:680-684`'s format
+3. **Multi-format render guardrail — see design doc §14.** Relaxing `render.rs:680-684`\'s format
    check removes the only existing signal that Q2 renders one format per invocation. Add a
    warning when `format:` declares more than one key and only one is rendered, naming which was
    used and which were skipped.
@@ -125,7 +126,7 @@ Both items previously carried as "Deferred in-plan questions" in this plan
    fixes to actually build, per a fresh implementation-feasibility review:**
    - **Insta mechanics.** `.snap` files are produced *by tests*, with filenames derived from
      `module_path!()` + snapshot name and a YAML header (`source:`, `expression:` —
-     `.claude/rules/integration-tests.md`'s `integration__<module>__<name>.snap` convention). An
+     `.claude/rules/integration-tests.md`\'s `integration__<module>__<name>.snap` convention). An
      **xtask** writing files a later test will match by name must either hand-author that
      convention exactly or use `insta::Settings` with an explicit snapshot path + name (simplest);
      getting this wrong yields "snapshot not found, created new" — a silent pass, not a build
@@ -164,7 +165,7 @@ Both items previously carried as "Deferred in-plan questions" in this plan
      `<w:drawing>`/`<w:br w:type="page"/>` element counts — cheap, version-stable, and turns "image
      silently missing" into a visible snapshot diff. **Also add `<m:oMath>` text content (or at
      minimum an `<m:oMath>` element count plus its flattened text)** (2026-09-18, round 4 review,
-     Reviewer B) — for docx/pptx, `renderEquation`'s fallback branch mutates the equation's TeX
+     Reviewer B) — for docx/pptx, `renderEquation`\'s fallback branch mutates the equation's TeX
      source itself before Pandoc's writer converts it to OMML, so a rendered equation number ends
      up inside `<m:oMath>`, not in the paragraph's `<w:t>` runs; without this, the extraction shows
      identical text whether the equation number is present, absent, or wrong — exactly the Route-N
@@ -233,7 +234,7 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
      one we own — per this repo's External Sources Policy, anything needed at test time must be a
      local, committed resource, not a read from `external-sources/`; fixtures drawn from
      quarto-cli get copied into our own `tests/fixtures/` directory once (mirroring
-     `resources/scss/`'s "copy in, track locally" pattern), not referenced from the sibling
+     `resources/scss/`\'s "copy in, track locally" pattern), not referenced from the sibling
      checkout at test time.
 - **Triage two pre-existing Q2 bugs before trusting any golden diff:** the nested-`<p>` bug from
   missing `ensureMetaInlines` block→inline coercion (`template.rs:221` /
@@ -315,7 +316,7 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
   green — exactly the "before trusting any golden diff" triage Task 8 established a precedent
   for, so fixed in this plan rather than filed as follow-on strands:**
   1. **Relatively-referenced images silently dropped from every real docx/pptx render.**
-     `PandocWriteStage`'s pandoc `Command` (`crates/quarto-core/src/stage/stages/pandoc_write.rs`)
+     `PandocWriteStage`\'s pandoc `Command` (`crates/quarto-core/src/stage/stages/pandoc_write.rs`)
      never set `--resource-path` (or a `current_dir`), so a body-content `Image` target like
      `img/thinker.jpg` — never rebased by anything upstream, unlike the `FORMAT_PATH_KEYS`
      config keys `build_forwarded_args` already rebases — resolved against pandoc's inherited
@@ -326,16 +327,16 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
      `render_document_to_file_docx_embeds_a_relatively_referenced_image` in
      `pandoc_render_to_file.rs` (RED confirmed before the fix, GREEN after).
   2. **A crossref-numbered table's caption was duplicated in every docx/pptx render.** Q1's own
-     parse-time behavior (`quarto-pre/parsefiguredivs.lua`) clears a `Table`'s native `caption`
+     parse-time behavior (`quarto-pre/parsefiguredivs.lua`) clears a `Table`\'s native `caption`
      once it's surfaced onto the wrapping float target, so only the numbered rendering shows it.
-     Q2 only replicated that elision inside `crossref_render.rs`'s HTML-float-DOM branch — but
+     Q2 only replicated that elision inside `crossref_render.rs`\'s HTML-float-DOM branch — but
      `crossref-render` is `Bucket::B4` (does not survive to the Pandoc cut at all), so it never
      runs for docx/pptx, and the Table's own caption reached the vendored Lua filters uncleared.
-     Fixed at the actual construction site, `float_ref_target.rs`'s `convert_div`'s
+     Fixed at the actual construction site, `float_ref_target.rs`\'s `convert_div`\'s
      `[Block::Table(_)]` arm (clears `table.caption` there, matching Q1's parse-time behavior
      unconditionally rather than only in the HTML branch) — plus, as a defensive second layer
      matching Q1's own redundant clearing at two separate Lua sites, generalized
-     `crossref_render.rs`'s existing elision to run on both its `html_float_dom` and non-HTML
+     `crossref_render.rs`\'s existing elision to run on both its `html_float_dom` and non-HTML
      branches, not only the HTML one. Reproduced via `cargo run --bin q2 -- render
      <table-with-a-caption> --to docx`, which produced two "My Caption" paragraphs in the output
      `word/document.xml`. Bound by `div_over_table_clears_the_tables_own_caption`
@@ -345,7 +346,7 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
   since they cost real debugging time): a fixture rendered through `render_document_to_file`
   needs a **discovered** `ProjectContext` (not `None`) for image resource resolution to work at
   all; and several real quarto-cli-sourced fixtures declare `format: latex` in their own front
-  matter, which `resolve_format_key`'s prefer-merge lets **outrank** the render call's `format`
+  matter, which `resolve_format_key`\'s prefer-merge lets **outrank** the render call's `format`
   argument unless the desired format is *also* passed via the `format_override` parameter (the
   one a real `--to docx` CLI invocation threads through) — passing only `format` reproduced
   `Unknown format: latex` (latex is a documented stub with no `FormatIdentifier` implementation).
@@ -368,13 +369,13 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
   multi-id crossref drop is flagged (a diagnostic naming every dropped id, tests bound and
   RED/GREEN-verified). Bug A's docx-relevant half was already fixed by Task 6; its HTML-only
   `<p>`-in-`<p>` symptom is flagged via strand `bd-aoq12tv7`.
-- [x] `link_rewrite.rs:29`'s stale comment / behavior gap — **resolved 2026-09-17: no longer
+- [x] `link_rewrite.rs:29`\'s stale comment / behavior gap — **resolved 2026-09-17: no longer
   exists.** Read the file directly; the doc comment already correctly documents image rewriting
   matching Q1 (landed later via commit `1d17a9ce7`, after this plan's original claim was
   written). No fix needed; reuse the transform verbatim.
 - [x] Invocation builder (docx, pptx) per the facts pulled from the TS research doc above; latex
   stub documented. **Include format-specific `execute`/`pandoc` defaults** (Finding 1: pptx
-  `echo: false`/`warning: false`, both formats' fig sizes and `default-image-extension: png`) and
+  `echo: false`/`warning: false`, both formats\' fig sizes and `default-image-extension: png`) and
   **the pandoc-defaults forwarding allow-list** (Finding 2: `reference-doc`, `template`,
   `highlight-style`, `toc`/`toc-depth`, `reference-location`, `shift-heading-level-by`,
   `slide-level`) — register `reference-doc`/`template` as `FORMAT_PATH_KEYS` consumers per the
@@ -382,7 +383,7 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
   `92b89e517` on `braid/pandoc-hybrid-p7-format-tail`.** `number-sections`/`number-offset`
   deliberately excluded from the allow-list (T4.11).
 - [x] **New (2026-09-18, round 4 review): apply the pptx `execute` defaults into
-  `EngineExecutionStage`'s own defaulting** — this plan states the values (Finding 1) but no plan
+  `EngineExecutionStage`\'s own defaulting** — this plan states the values (Finding 1) but no plan
   previously owned applying them; explicitly this plan's item now (see the correction above),
   since P7 is the only plan with the per-format facts and no other plan mentions
   `EngineExecutionStage`. **Done 2026-09-20 — implementation companion Task 5, commit `e8d6cea4e`.**
@@ -392,7 +393,7 @@ P7-foundation has landed and builds the docx/pptx-specific work on top of it.
   into `resources/formats/docx/`, wired as part of Task 4, commit `92b89e517`.**
 - [x] **Moved to P7-foundation, 2026-09-20:** the multi-format render warning (Finding 3 / design
   doc §14) and the project-mode containment gate (design doc §13, Gordon's decision) — both
-  format-agnostic guardrails made necessary by relaxing `render.rs`'s format gate at all, not by
+  format-agnostic guardrails made necessary by relaxing `render.rs`\'s format gate at all, not by
   anything docx/pptx-specific. See
   [`2026-09-20-pandoc-hybrid-P7-foundation.md`](2026-09-20-pandoc-hybrid-P7-foundation.md) Tasks 1
   and 2.

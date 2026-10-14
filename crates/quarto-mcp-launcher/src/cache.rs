@@ -218,7 +218,12 @@ fn extract_files(files: &[BundleFile], into: &Path) -> Result<()> {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        fs::write(&dest, contents).with_context(|| format!("writing {}", dest.display()))?;
+        // Lazy payloads (the shared render WASM) materialize here, on
+        // the only path that needs their bytes: a cold extraction.
+        let bytes = contents
+            .materialize()
+            .with_context(|| format!("materializing {}", rel.display()))?;
+        fs::write(&dest, bytes).with_context(|| format!("writing {}", dest.display()))?;
     }
     Ok(())
 }

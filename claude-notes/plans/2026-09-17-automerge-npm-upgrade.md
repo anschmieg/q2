@@ -1,8 +1,14 @@
-# Upgrade `@automerge/automerge` and `@automerge/automerge-repo` (npm)
+---
+title: 'Upgrade `@automerge/automerge` and `@automerge/automerge-repo` (npm)'
+date: 2026-09-17
+description: 'Upgrades the npm automerge stack to the stable 3.5.0 release and ports the automerge-repo family to the 2.6.0-alpha.5 line, which moves document availability off `DocHandle.state` onto `DocumentQuery`.'
+braid:
+  strand: bd-d08gpqvu
+  priority: P2
+  labels: [dependencies]
+---
 
-**Strand:** bd-d08gpqvu
 **Branch:** `braid/bd-d08gpqvu-automerge-npm-upgrade` (worktree under `.worktrees/`)
-**Date:** 2026-09-17
 
 ## Overview
 
@@ -137,7 +143,7 @@ step for this port).
       takes an optional event (upstream's handler is `() => void`);
       subclass + control-test comments updated for the upstream timer fix
 - [x] `hub-client` `projectSetService.findCollectionDoc`: the second
-      attempt classifies from `find()`'s rejection (unavailable →
+      attempt classifies from `find()`\'s rejection (unavailable →
       `not-found`, abort/timeout → `sync-unreachable`) instead of
       `allowableStates` + `handle.state`; dead `raceHandleReady` removed
 - [x] `hub-client` `presenceService`: guard `doc()` returning undefined
@@ -151,7 +157,7 @@ step for this port).
       eslint clean on touched files (repo-wide eslint baseline unchanged)
 - [x] Full gate: `cargo xtask verify` — all 14 steps passed (Rust: 13924
       tests, 199 skipped; hub-client build:all incl. WASM; test:ci;
-      trace-viewer; preview-*; hub MCP; q2-preview-spa build)
+      trace-viewer; preview-\*; hub MCP; q2-preview-spa build)
 - [x] `hub-client/changelog.md` entry (two-commit workflow) — `4084897a9`
 - [x] Commits `07b211229`, `d0b399460`, `4084897a9` pushed to
       `origin/chore/bd-d08gpqvu-automerge-npm-upgrade`; PR #685 opened

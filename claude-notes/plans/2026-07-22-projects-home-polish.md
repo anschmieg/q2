@@ -1,6 +1,12 @@
-# ProjectsHome polish: dark-mode contrast, right-click menu, per-collection sort
+---
+title: 'ProjectsHome polish: dark-mode contrast, right-click menu, per-collection sort'
+date: 2026-07-22
+description: 'Adds darker scoped dark-mode colors, a right-click project menu, and a per-collection sort control to the hub-client projects home, with the sort comparator extracted for unit tests.'
+braid:
+  strand: bd-je3w8q39
+  priority: P2
+---
 
-**Strand:** bd-je3w8q39
 **Branch:** `feature/85-projects-collections-ui` (PR #394, after merging main on 2026-07-22)
 **Context:** Review feedback from Carlos while end-to-end testing PR #394's
 collections-based projects home against a local dev server.
@@ -31,7 +37,7 @@ Three UI improvements to `hub-client/src/components/ProjectsHome.tsx` / `.css`:
 ## Design decisions
 
 - **Scoped dark tokens, not global.** `ProjectsHome.css` already routes all
-  colors through theme tokens; we redefine ~8 of them on
+  colors through theme tokens; we redefine \~8 of them on
   `:root.dark .projects-home` with a darker, desaturated slate ramp
   (hue kept slightly blue, chroma way down). Light mode untouched.
 - **Sort comparator extracted for testability.** The three-way comparator

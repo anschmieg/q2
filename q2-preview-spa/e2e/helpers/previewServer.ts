@@ -196,6 +196,15 @@ export interface StartOptions {
    * existing caller passes it, so behaviour is unchanged for every other spec.
    */
   extraEnv?: Record<string, string>;
+  /**
+   * bd-eip0naf4: launch `q2 preview --static --no-watch` instead of the
+   * default hub/SPA preview — render the project to `_site/` through
+   * the `q2 render` path and serve it as plain HTML. The SUT is then
+   * the rendered website (navbar, scripts, search bundle), not the
+   * WASM preview. `--data-dir` is not passed in this mode (static
+   * mode has no samod state); `dataDir` stays an empty tempdir.
+   */
+  staticMode?: boolean;
 }
 
 /**
@@ -259,8 +268,7 @@ export async function startPreviewServer(opts: StartOptions): Promise<PreviewSer
     [
       'preview',
       '--no-browser',
-      '--data-dir',
-      dataDir,
+      ...(opts.staticMode ? ['--static', '--no-watch'] : ['--data-dir', dataDir]),
       ...(opts.allowEdit ? ['--allow-edit'] : []),
       // Single-file mode targets one file inside the temp project;
       // project mode targets the directory (the default).

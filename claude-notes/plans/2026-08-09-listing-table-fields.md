@@ -1,9 +1,15 @@
-# Table listings ignore fields/field-display-names (bd-listing-table-fields-peg1w3b3)
+---
+title: 'Table listings ignore fields/field-display-names (bd-listing-table-fields-peg1w3b3)'
+date: 2026-08-09
+description: 'Makes table listings honor `fields`, `field-display-names` and the `field-links` option by pre-rendering the header and row markdown in the binding, so only declared columns appear and missing values no longer warn.'
+status: in-progress  # Design settled with user (2026-08-09) — implementation in progress.
+braid:
+  strand: bd-listing-table-fields-peg1w3b3
+  priority: P1
+  labels: [listings]
+---
 
-**Date:** 2026-08-09
-**Braid:** bd-listing-table-fields-peg1w3b3 (bug, P1, label `listings`)
 **Branch:** `main` (investigated in place; no worktree created)
-**Status:** Design settled with user (2026-08-09) — implementation in progress.
 **Follow-up:** bd-bl1e00r6 (sort-ui/filter-ui/table-hover interactive parity, discovered-from this strand)
 
 ## Problem
@@ -14,7 +20,7 @@ The built-in table listing templates are static: `listing-table.template` hardco
 - `field-display-names:` is ignored for headers.
 - Items missing `date`/`author` produce "Undefined variable" doctemplate diagnostics, surfaced as one Q-12-10 warning per listing (the binding deliberately omits absent optional fields so `$if(field)$` works).
 
-Reproduced at HEAD (`main` @ 4bb32844) with the committed repro under `claude-notes/plans/listing-table-fields-investigation/repro/` — rendered output was inspected: `<th>Title</th><th>Date</th><th>Author</th>` + `Q-12-10 … Undefined variable: date`.
+Reproduced at HEAD (`main` \@ 4bb32844) with the committed repro under `claude-notes/plans/listing-table-fields-investigation/repro/` — rendered output was inspected: `<th>Title</th><th>Date</th><th>Author</th>` + `Q-12-10 … Undefined variable: date`.
 
 doctemplate is Pandoc-style/logic-less (no `item[field]` indexing), so no static template can render an author-chosen column set — the dynamism must come from Rust.
 
@@ -28,7 +34,7 @@ doctemplate is Pandoc-style/logic-less (no `item[field]` indexing), so no static
    - Unknown fields → dotted-path lookup into the item's `extra` map (`a.b` walks nested maps, Q1 `readField` parity); array values join `", "`.
    - Missing value → **empty cell** (Q1 emits `&nbsp;`; empty cell is the markdown-table equivalent).
    - **`field-links`**: new config option, Q1 default for table listings is `[title, filename]` (empty for other types). A linked field's cell becomes `[<value>](<path>){.no-external}` when the item has a path and the value is non-empty. (Q1's extra `listing-<field>` classes exist to serve list.js — deferred to bd-bl1e00r6.)
-4. **Cell escaping:** escape `|` → `\|` and flatten newlines to spaces inside cell values; accept that some documents need markdown changes for Quarto 2. Values otherwise pass through as markdown (consistent with the other templates' `$title$` interpolation).
+4. **Cell escaping:** escape `|` → `\|` and flatten newlines to spaces inside cell values; accept that some documents need markdown changes for Quarto 2. Values otherwise pass through as markdown (consistent with the other templates\' `$title$` interpolation).
 5. **Interactive parity (sort-ui anchors, filter-ui, table-hover onclick, list.js classes) is out of scope** → filed as bd-bl1e00r6.
 
 ### Additional Q1-parity findings from the source study
@@ -101,4 +107,4 @@ doctemplate is Pandoc-style/logic-less (no `item[field]` indexing), so no static
 ## Investigation record (2026-08-09)
 
 - Repro: `claude-notes/plans/listing-table-fields-investigation/repro/` — `cargo run --bin q2 -- render .` → `Warning [Q-12-10]: Listing 'guides' doctemplate produced 4 diagnostic(s); first: Undefined variable: date`; `_site/index.html` shows `<th>Title</th><th>Date</th><th>Author</th>` despite `fields: [title]` + `field-display-names`. Output inspected directly.
-- Q1 references: `external-sources/quarto-cli/src/resources/projects/website/listing/listing-table.ejs.md` (template loop, readField/outputValue), `src/project/types/website/listing/website-listing-template.ts` (fieldName/outputLink utilities), `src/project/types/website/listing/website-listing-read.ts` (defaultFieldDisplayNames, kDefaultFieldLinks, kDefaultTableFields, suggested-field presence filter), `src/resources/language/_language.yml` (listing-page-field-* strings).
+- Q1 references: `external-sources/quarto-cli/src/resources/projects/website/listing/listing-table.ejs.md` (template loop, readField/outputValue), `src/project/types/website/listing/website-listing-template.ts` (fieldName/outputLink utilities), `src/project/types/website/listing/website-listing-read.ts` (defaultFieldDisplayNames, kDefaultFieldLinks, kDefaultTableFields, suggested-field presence filter), `src/resources/language/_language.yml` (listing-page-field-\* strings).

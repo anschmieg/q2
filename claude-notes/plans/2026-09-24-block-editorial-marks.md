@@ -1,7 +1,13 @@
-# Block-level editorial marks: `::: ++` / `::: --` / `::: >>`
-
-**Status:** **Implemented** (2026-09-24) on `braid/bd-an9gkxnp-qmd-block-level-editorial`: all phases done, `cargo xtask verify` green. Awaiting review/merge. Commits: `5337b87ef` (Phase 1), `3f8ac499c` (bd-2281lkrx panic fix), `54824ea1b` (Phases 2/2b/3), `aad95cb70` (Phase 4).
-**Braid:** bd-an9gkxnp · follow-up: bd-t1avfz0n (q2-preview block-comment chrome)
+---
+title: 'Block-level editorial marks: `::: ++` / `::: --` / `::: >>`'
+date: 2026-09-24
+description: 'Adds block-level `::: ++`, `::: --` and `::: >>` editorial divs to the grammar, reusing the fenced-div note machinery and factoring out the shared closer tail so future sigil constructs are small local changes.'
+status: done  # **Implemented** (2026-09-24) on `braid/bd-an9gkxnp-qmd-block-level-editorial`: all phases done, `cargo xtask verify` green. Awaiting review/merge. Commits: `5337b87ef` (Phase 1), `3f8ac499c` (bd-2281lkrx panic fix), `54824ea1b` (Phases 2/2b/3), `aad95cb70` (Phase 4).
+braid:
+  strand: bd-an9gkxnp  # follow-up: bd-t1avfz0n (q2-preview block-comment chrome)
+  priority: P2
+  labels: [parser, tree-sitter]
+---
 
 ## Goal
 
@@ -215,7 +221,7 @@ stage.
   `process_fenced_div_block` does.
 - Dispatch `"editorial_div"` in `treesitter.rs` (next to `pandoc_div` at
   `:1499`).
-- **qmd writer** (`writers/qmd.rs:642` `write_div`): mirror `write_span`'s
+- **qmd writer** (`writers/qmd.rs:642` `write_div`): mirror `write_span`\'s
   rule. A Div whose *first* class is `quarto-insert` (etc.) is written as
   `::: ++` plus a trailing `{…}` for the remaining attributes. (The inline
   rule requires exactly one class and no attributes. We can relax both
@@ -397,7 +403,7 @@ expectations.
     postprocessed. The rewrite returns `recurse=false` before the top-down
     walk reaches the cells. So note refs, standalone attrs and editorial
     marks in cells fail (Q-3-31/32/33). Fixing it needs care around
-    `with_table`'s caption heuristic.
+    `with_table`\'s caption heuristic.
   - **bd-i4xrcdqx**: a whitespace-only blank line before `:::` in a list
     item makes the list tight. The qmd writer emits exactly that shape,
     so list items containing a div flip Para→Plain on round-trip. The

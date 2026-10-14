@@ -1,9 +1,15 @@
-# SCSS cache key ignores `@import`ed partials (bd-m3hga05o)
+---
+title: 'SCSS cache key ignores `@import`ed partials (bd-m3hga05o)'
+date: 2026-09-14
+description: 'Makes the sass cache key cover the files a custom theme pulls in through `@import`, so editing a partial such as `_colors.scss` invalidates cached CSS instead of serving stale output.'
+status: in-progress  # Implemented on the branch (2026-09-15); Phase 2 measurement partly done. Rebased onto `main` after PR #679 merged (`f0bcb9538`).
+braid:
+  strand: bd-m3hga05o
+  priority: P2
+  labels: [perf]
+---
 
-**Date:** 2026-09-14
-**Braid:** bd-m3hga05o (P2, bug, label `perf`)
-**Branch:** `braid/bd-m3hga05o-scss-cache-import-closure` in the room-2 main checkout (based on `main` @ `35bc11415`; topic branch, no worktree, per user request)
-**Status:** Implemented on the branch (2026-09-15); Phase 2 measurement partly done. Rebased onto `main` after PR #679 merged (`f0bcb9538`).
+**Branch:** `braid/bd-m3hga05o-scss-cache-import-closure` in the room-2 main checkout (based on `main` \@ `35bc11415`; topic branch, no worktree, per user request)
 
 ## Triage verdict
 
@@ -127,7 +133,7 @@ Fixture: `claude-notes/plans/scss-cache-import-closure-investigation/fixture/`
 (copied from the bd-79c4do6g branch). `theme.scss` does
 `@import "_colors"`; `_colors.scss` sets `$repro-fg: #123456`.
 
-Commands (from the fixture directory, `main` @ `35bc11415`, after a green
+Commands (from the fixture directory, `main` \@ `35bc11415`, after a green
 `cargo xtask verify --skip-hub-build`):
 
 ```bash
@@ -264,7 +270,7 @@ against `main`, four commits, full verify green per its description.
   is already hashed by content. An in-process memo `(path → hash)` for
   the duration of one render bounds the cost on large closures; add it
   only if Phase 3 shows it matters.
-- **Native recording point: `RuntimeFs::read`'s runtime-fallback
+- **Native recording point: `RuntimeFs::read`\'s runtime-fallback
   branch only** (`sass_native.rs`), via a `RefCell<Vec<PathBuf>>` on
   the adapter. Embedded hits are not recorded. Paths are whatever grass
   asked for — `theme_dir.join(import)` — which after #679 is the

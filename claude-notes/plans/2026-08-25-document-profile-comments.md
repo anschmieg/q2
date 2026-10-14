@@ -1,9 +1,14 @@
-# DocumentProfile: comment summary for downstream tooling (GH #445)
+---
+title: 'DocumentProfile: comment summary for downstream tooling (GH #445)'
+date: 2026-08-25
+description: 'Adds editorial comment entries to the document profile so tooling can count and list outstanding comments per page, including unrendered pages, and surfaces the active page''s count to hub-client.'
+status: approved  # reviewed 2026-08-25 (open questions resolved — see §"Resolved decisions"); awaiting explicit go-ahead to execute.
+braid:
+  strand: bd-0rsk07il
+  priority: P2
+---
 
-**Strand:** bd-0rsk07il
 **GH issue:** https://github.com/quarto-dev/q2/issues/445
-**Status:** reviewed 2026-08-25 (open questions resolved — see
-§"Resolved decisions"); awaiting explicit go-ahead to execute.
 
 ## Overview
 
@@ -20,7 +25,7 @@ toggle (expand / show / hide) lives in
 GH #445 asks: teach Quarto 2's Pass-1 processing (the
 `DocumentProfile`) to summarize the comments present in a document, so
 UI that wants "are there comments? how many?" doesn't have to process
-the whole document — and so *other* documents' comment states are
+the whole document — and so *other* documents\' comment states are
 knowable without rendering them (Pass-1 profiles exist for every
 project file).
 
@@ -50,7 +55,7 @@ with the count of outstanding comments on the active page.
 - Comments attached to code blocks are stored by the hub UI as `[>> ]`
   paragraphs inside a wrapper Div (`quarto-edit-comment-container`) —
   still ordinary `EditComment` inlines, so a plain AST walk finds them.
-- Comments carry **no author/date today**: `CommentBlock.tsx`'s
+- Comments carry **no author/date today**: `CommentBlock.tsx`\'s
   `addComment` writes a bare span (empty attr). Author dots in the UI
   come from the automerge **attribution overlay**, not from source.
   `EditComment.attr` (id/classes/kvs) exists and round-trips through
@@ -217,7 +222,7 @@ profile field exists.
       `document_profile_pipeline.rs`). Verified failing first
       (E0609 on the missing field).
 - [x] `ProfileComment` + `comments` field + `CommentCollector` walk
-      (mirrors `LinkResolutionStage`'s traversal; comment spans are
+      (mirrors `LinkResolutionStage`\'s traversal; comment spans are
       leaves). Execution finding recorded in §Facts: at the checkpoint
       comments are `Span`s with class `quarto-edit-comment` (reader
       postprocess rewrites `EditComment`), so the walk keys on the
@@ -326,7 +331,7 @@ profile field exists.
    Verified in-tree: the native profile cache lives at
    `<project>/.quarto/cache/`
    (`crates/quarto-core/src/project/profile_cache.rs`, via
-   `NativeRuntime::with_cache_dir`), and `q2 create`'s git scaffolding
+   `NativeRuntime::with_cache_dir`), and `q2 create`\'s git scaffolding
    ensures `/.quarto/` is in `.gitignore`
    (`crates/quarto/src/commands/create/project.rs:151-153`). Projects
    assembled by hand without that ignore entry could commit cached

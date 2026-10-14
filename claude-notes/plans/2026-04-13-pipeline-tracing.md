@@ -1,4 +1,8 @@
-# Pipeline Execution Tracing
+---
+title: 'Pipeline Execution Tracing'
+date: 2026-04-13
+description: 'Explores how to capture the data at each pipeline stage boundary by extending `PipelineObserver` with data-bearing callbacks, going beyond Quarto 1''s filter-only, whole-AST-dump tracing.'
+---
 
 ## Overview
 
@@ -17,7 +21,7 @@ In Quarto 1, tracing is implemented in `src/resources/filters/ast/runemulation.l
 - **Viewer**: A Quarto document (`trace-viewer.qmd`) that embeds the trace data as Base64 for interactive comparison
 - **Limitations**:
   - Only sees filter-level AST transforms (no visibility into parsing, engine, template, CSS, etc.)
-  - Full AST serialized per step -- O(n * AST_size) disk/memory cost
+  - Full AST serialized per step -- O(n \* AST_size) disk/memory cost
   - Lua userdata (Pandoc objects) are silently skipped during serialization
   - No timing information
   - No way to get intermediate formats (e.g., rendered HTML body before template application)

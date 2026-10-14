@@ -1513,6 +1513,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -2277,6 +2278,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         })
     }
 
@@ -2491,9 +2493,7 @@ mod tests {
                     "diagnostic: {}",
                     d.to_text(None)
                 );
-                let opts = quarto_error_reporting::TextRenderOptions {
-                    enable_hyperlinks: false,
-                };
+                let opts = quarto_error_reporting::TextRenderOptions::default().hyperlinks(false);
                 d.to_text_with_options(Some(&pe.source_context), &opts)
             }
             other => panic!("expected PipelineError::Structured, got: {other}"),

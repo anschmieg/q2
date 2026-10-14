@@ -1,4 +1,8 @@
-# Citeproc Delimiter Inheritance Bug Report
+---
+title: 'Citeproc Delimiter Inheritance Bug Report'
+date: 2025-12-05
+description: 'Analyzes why `quarto-citeproc` dropped group delimiters inside `<choose>` branches, causing missing punctuation in bibliography entries, and recommends refactors to prevent similar bugs.'
+---
 
 ## Summary
 
@@ -98,7 +102,7 @@ Both paths implement similar logic for:
 
 ### Evidence of Duplication
 
-**In `output.rs`, the `render()` method (lines ~358-400):**
+**In `output.rs`, the `render()` method (lines \~358-400):**
 ```rust
 let inner: String = if let Some(ref delim) = formatting.delimiter {
     let rendered: Vec<String> = children
@@ -113,7 +117,7 @@ let inner: String = if let Some(ref delim) = formatting.delimiter {
 };
 ```
 
-**In `output.rs`, the `to_inlines_inner()` function (lines ~1427-1450):**
+**In `output.rs`, the `to_inlines_inner()` function (lines \~1427-1450):**
 ```rust
 let with_delimiters: Vec<Vec<Inline>> = if let Some(ref delim) = formatting.delimiter {
     let mut result = Vec::new();

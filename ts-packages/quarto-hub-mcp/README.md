@@ -35,9 +35,8 @@ argument.
 
 | Tool | What it does |
 |------|--------------|
-| `write_file` | Replace a text file's entire content (creates it if absent). |
+| `write_file` | Replace a text file's entire content (creates it if absent; `create_only: true` refuses to overwrite an existing file). |
 | `patch_file` | Replace one unique substring in a text file. |
-| `create_file` | Create a new text file. |
 | `delete_file` | Delete a file. |
 | `rename_file` | Rename / move a file. |
 | `create_project` | Create a new project on the sync server with optional initial files. |
@@ -48,6 +47,17 @@ The write tools are hidden when the server is started with `--read-only`.
 
 `authenticate` and `authenticate_clear` are present only when the OAuth env
 vars are configured (see [Setup](#setup)). On a no-auth hub they are unused.
+
+### Resources and prompts
+
+For hosts that support them, the server also speaks MCP **resources** and
+**prompts**. Every file in a connected project is a resource under
+`hub://project/<id>/<path>` (binary files as base64 blobs), subscribable
+for change notifications, and every write result carries a resource link to
+the file it touched. Four prompt templates — `review-draft`,
+`collaborate-with-human`, `safe-edit-workflow`, and (with `--allow-render`)
+`fix-render-errors` — walk the agent through the standard workflows. See
+`docs/tools/q2-mcp.qmd` in the Quarto repository for details.
 
 ### `wait_for_change` — reacting to a live collaborator
 
@@ -72,6 +82,14 @@ never missed. The tool is read-only and is available even in `--read-only`
 mode.
 
 ## Setup
+
+The server ships three ways: embedded in the `q2` binary (`q2 mcp` —
+recommended; it carries the quarto-hub.com OAuth client credentials),
+this npm package (`npx @quarto/hub-mcp`, Node.js 24+, also listed in
+the MCP Registry as `io.github.quarto-dev/hub-mcp`), and a `.mcpb`
+one-click bundle for Claude Desktop attached to each release. The npm
+and `.mcpb` channels carry **no** built-in OAuth client credentials —
+see below.
 
 You need two values from your hub operator:
 

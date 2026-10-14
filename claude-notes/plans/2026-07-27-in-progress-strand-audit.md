@@ -1,7 +1,11 @@
-# In-progress braid strand audit (bd-a0eyjshu)
-
-**Date:** 2026-07-27
-**Strand:** bd-a0eyjshu — Audit and clean up stale in-progress braid strands
+---
+title: 'In-progress braid strand audit (bd-a0eyjshu)'
+date: 2026-07-27
+description: 'Audits the 55 braid strands marked in progress, sorting each into close, reopen, or keep-in-progress based on git and PR evidence of whether its work landed or is still live.'
+braid:
+  strand: bd-a0eyjshu
+  priority: P2
+---
 
 ## Overview
 
@@ -116,7 +120,7 @@ route?) and mergeability (`git merge-tree --write-tree` against `main`).
 **bd-g4uw7d8g — `beads/bd-g4uw7d8g-q2-preview-eager-sync`**
 
 - 3 commits, 2026-06-10, base `a64d94d3`. `main` is **486 commits ahead** of
-  the base. ~573 insertions.
+  the base. \~573 insertions.
 - Content: `POST /api/preview/sync-file` endpoint
   (`crates/quarto-preview/src/sync_file.rs`, 84 lines + 181 lines of
   integration tests); SPA eager-sync scheduler in `PreviewApp.tsx` (300 ms
@@ -127,7 +131,7 @@ route?) and mergeability (`git merge-tree --write-tree` against `main`).
   `crates/quarto-preview/src/lib.rs:343` still reads `sync_interval_secs:
   Some(5)` under the comment *"Light periodic sync — the user can Ctrl-C any
   time"* — the exact ≤5 s edit-persistence latency and Ctrl-C race this
-  strand was filed against are still `main`'s behavior.
+  strand was filed against are still `main`\'s behavior.
 - **Merge:** one conflict, `q2-preview-spa/src/PreviewApp.tsx`. It is
   **semantic, not just textual**: since the branch was cut, `main` gained
   bd-jit6pdwq Phase 3, a `pagehide` handler that deliberately *disconnects*
@@ -142,7 +146,7 @@ route?) and mergeability (`git merge-tree --write-tree` against `main`).
 **bd-hcp8m3ve — `braid/bd-hcp8m3ve-float-taxonomy`**
 
 - 4 commits, 2026-07-21, base `cbdf27ea`. `main` is 41 commits ahead.
-  ~1708 insertions.
+  \~1708 insertions.
 - Content: design doc (`claude-notes/designs/float-layout-class-taxonomy.md`,
   214 lines) + plan; Q1-verbatim float DOM in the pampa HTML writer (+115);
   a substantial `crossref_render.rs` rework (+924); `auto_stretch.rs`

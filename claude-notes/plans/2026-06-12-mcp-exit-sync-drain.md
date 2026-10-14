@@ -1,4 +1,12 @@
-# bd-10deu8h4: MCP server exit must not race outbound document sync
+---
+title: 'bd-10deu8h4: MCP server exit must not race outbound document sync'
+date: 2026-06-12
+description: 'Makes the MCP server wait for outbound sync to drain before exiting on stdin EOF, so documents created just before shutdown reach the hub instead of being lost.'
+braid:
+  strand: bd-10deu8h4
+  priority: P1
+status: in-progress  # IN PROGRESS (2026-06-12, worktree `.worktrees/bd-10deu8h4-hub-mcp-server-exit`, branch `beads/bd-10deu8h4-hub-mcp-server-exit` off `4bd6d4bf`). Designed for parallel implementation alongside bd-vm5e5u10.
+---
 
 **Strand:** bd-10deu8h4 (p1). Related: bd-8x482xb0 (closed — the
 production casualty this caused), bd-p68lx71t (the 2026-06-12
@@ -6,10 +14,6 @@ incident), bd-vm5e5u10 (the amplifier, being fixed IN PARALLEL — see
 boundary contract below), bd-xnmd5ni1 (closed — requireOnline, which
 ensured the *connection* but not *delivery*), parent plan
 `claude-notes/plans/2026-06-12-sync-client-offline-race.md`.
-**Status:** IN PROGRESS (2026-06-12, worktree
-`.worktrees/bd-10deu8h4-hub-mcp-server-exit`, branch
-`beads/bd-10deu8h4-hub-mcp-server-exit` off `4bd6d4bf`). Designed for
-parallel implementation alongside bd-vm5e5u10.
 
 ## Work items
 
@@ -24,7 +28,7 @@ parallel implementation alongside bd-vm5e5u10.
 - [x] Test hubs announce a `storageId` like the real samod hub does:
       give both `test-hub.ts` copies a `MemoryStorageAdapter`; add
       `hubHasDoc` to the hub-mcp copy. (Also: their `stop()` now
-      tolerates `repo.shutdown()`'s flush throwing "DocHandle is not
+      tolerates `repo.shutdown()`\'s flush throwing "DocHandle is not
       ready" — the half-delivered state these tests leave behind.)
 - [x] Red test 1 (sync-client `exit-drain.test.ts`):
       create-then-disconnect(drainMs) loses nothing; observed RED.
@@ -172,10 +176,10 @@ satisfies the equality against at least one storage-backed peer.
 Why this is correct, from the sources (automerge-repo 2.5.6 installed;
 samod q2 fork checkout `0b50c16`):
 
-1. **No gossiping flag needed.** `Repo`'s constructor subscribes to the
+1. **No gossiping flag needed.** `Repo`\'s constructor subscribes to the
    synchronizer's `sync-state` event and calls
    `handle.setSyncInfo(storageId, {lastHeads: theirHeads, ...})`
-   unconditionally (`dist/Repo.js` ~154-175). The
+   unconditionally (`dist/Repo.js` \~154-175). The
    `enableRemoteHeadsGossiping` flag only gates *relay* of third-party
    heads (`remote-heads-changed` control messages), not this direct
    path. `theirHeads` comes from the automerge sync protocol: every
@@ -281,7 +285,7 @@ were *delivered* before exit.
 2. **Bounded, never hanging.** MCP hosts expect prompt termination
    (and `stdio-hygiene.test.ts` asserts exit within 5 s of stdin
    EOF — do not break bd-9jq2a060). Pick a drain budget that fits
-   (suggestion: up to ~3 s total, returning EARLY the moment
+   (suggestion: up to \~3 s total, returning EARLY the moment
    delivery is confirmed; adjust the hygiene test's bound only if
    justified, with a comment).
 3. **Loud on failure, never silent.** If the budget expires with

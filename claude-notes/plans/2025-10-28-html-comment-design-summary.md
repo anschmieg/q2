@@ -1,7 +1,9 @@
-# HTML Comment Support - Design Summary
-
-**Date:** 2025-10-28
-**Status:** Ready for review and implementation
+---
+title: 'HTML Comment Support - Design Summary'
+date: 2025-10-28
+description: 'Adds HTML comment recognition as an atomic external scanner token in both tree-sitter markdown parsers, so markdown-special characters inside a comment no longer trigger parse errors.'
+status: approved  # Ready for review and implementation
+---
 
 ## Executive Summary
 
@@ -301,20 +303,20 @@ HTML comments should have HIGHER precedence than any markdown:
 ### tree-sitter-markdown-inline
 
 1. `crates/tree-sitter-qmd/tree-sitter-markdown-inline/src/scanner.c`
-   - Add `HTML_COMMENT` to TokenType enum (line ~50)
+   - Add `HTML_COMMENT` to TokenType enum (line \~50)
    - Add `parse_html_comment()` function
-   - Add case `'<':` to `scan()` function (line ~530)
+   - Add case `'<':` to `scan()` function (line \~530)
    - Update serialize/deserialize if needed (no state, so no changes)
 
 2. `crates/tree-sitter-qmd/tree-sitter-markdown-inline/grammar.js`
-   - Add `$._html_comment` to externals array (line ~30)
+   - Add `$._html_comment` to externals array (line \~30)
    - Add `html_comment: $ => $._html_comment` rule
    - Add `$.html_comment` to `_inline_element` choice (find via add_inline_rules)
 
 ### tree-sitter-markdown
 
 1. `crates/tree-sitter-qmd/tree-sitter-markdown/src/scanner.c`
-   - Add `HTML_COMMENT` to TokenType enum (line ~64)
+   - Add `HTML_COMMENT` to TokenType enum (line \~64)
    - Add `parse_html_comment()` function (can be nearly identical to inline version)
    - Add handling in scan function
 

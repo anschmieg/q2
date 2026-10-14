@@ -1,4 +1,8 @@
-# quarto-citeproc Development Guide
+---
+title: 'quarto-citeproc Development Guide'
+date: 2025-11-29
+description: 'Workflow guide for coding sessions on `quarto-citeproc`, setting feature parity with Pandoc''s citeproc as the goal and explaining how to pick, run, enable and defer conformance tests.'
+---
 
 This document serves as a workflow guide for LLM coding sessions working on
 quarto-citeproc, a Rust implementation of CSL (Citation Style Language) processing.
@@ -442,7 +446,7 @@ Only revisit deferred tests when:
 1. **Test name case**: Names in `enabled_tests.txt` are case-insensitive
 2. **Test counts confusion**: There are multiple numbers that can cause confusion:
    - **858**: Total CSL conformance tests in `test-data/csl-suite/`
-   - **~73**: Unit tests in the crate (not CSL conformance tests)
+   - **\~73**: Unit tests in the crate (not CSL conformance tests)
    - **1**: The `csl_validate_manifest` test
    - When `cargo nextest run` reports "N tests run, M skipped":
      - N = enabled CSL tests + unit tests + validate_manifest

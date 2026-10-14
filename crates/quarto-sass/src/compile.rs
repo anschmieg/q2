@@ -76,7 +76,7 @@ pub fn assemble_theme_scss(
 ) -> Result<(String, Vec<PathBuf>), SassError> {
     use crate::bundle::{
         load_copy_code_layer, load_embed_example_layer, load_equation_number_layer,
-        load_highlight_layer, load_listing_layer, load_title_block_layer,
+        load_highlight_layer, load_listing_layer, load_search_layer, load_title_block_layer,
     };
 
     // Process theme specs into layers
@@ -92,6 +92,7 @@ pub fn assemble_theme_scss(
     let copy_code_layer = load_copy_code_layer()?;
     let equation_number_layer = load_equation_number_layer()?;
     let listing_layer = load_listing_layer()?;
+    let search_layer = load_search_layer()?;
     let mut user_layers = Vec::new();
     // `title-block-style: plain|none` drops the title-block layer
     // (bd-gx9cic8z P6); all other built-in layers are unconditional.
@@ -104,6 +105,7 @@ pub fn assemble_theme_scss(
         copy_code_layer,
         equation_number_layer,
         listing_layer,
+        search_layer,
     ]);
     user_layers.extend(result.layers);
 
@@ -212,7 +214,7 @@ pub fn compile_with_doc_vars(
 ) -> Result<SassOutput, SassError> {
     use crate::bundle::{
         load_copy_code_layer, load_embed_example_layer, load_equation_number_layer,
-        load_highlight_layer, load_listing_layer, load_title_block_layer,
+        load_highlight_layer, load_listing_layer, load_search_layer, load_title_block_layer,
     };
     use crate::themes::process_theme_specs;
     use quarto_system_runtime::sass_native::compile_scss_with_embedded;
@@ -250,6 +252,7 @@ pub fn compile_with_doc_vars(
     let copy_code_layer = load_copy_code_layer()?;
     let equation_number_layer = load_equation_number_layer()?;
     let listing_layer = load_listing_layer()?;
+    let search_layer = load_search_layer()?;
     let mut user_layers = Vec::new();
     if config.title_block_layer {
         user_layers.push(load_title_block_layer()?);
@@ -260,6 +263,7 @@ pub fn compile_with_doc_vars(
         copy_code_layer,
         equation_number_layer,
         listing_layer,
+        search_layer,
     ]);
 
     let mut load_paths = default_load_paths();
@@ -375,7 +379,7 @@ pub fn compile_default_css(
 ) -> Result<String, SassError> {
     use crate::bundle::{
         load_copy_code_layer, load_embed_example_layer, load_equation_number_layer,
-        load_highlight_layer, load_listing_layer, load_title_block_layer,
+        load_highlight_layer, load_listing_layer, load_search_layer, load_title_block_layer,
     };
     use quarto_system_runtime::sass_native::compile_scss_with_embedded;
 
@@ -392,6 +396,7 @@ pub fn compile_default_css(
     let copy_code_layer = load_copy_code_layer()?;
     let equation_number_layer = load_equation_number_layer()?;
     let listing_layer = load_listing_layer()?;
+    let search_layer = load_search_layer()?;
 
     // Assemble SCSS: Bootstrap + Quarto + title block + highlight +
     // embed-example + copy-code + listing defaults
@@ -402,6 +407,7 @@ pub fn compile_default_css(
         copy_code_layer,
         equation_number_layer,
         listing_layer,
+        search_layer,
     ])?;
 
     // Get load paths and resources
@@ -523,7 +529,7 @@ pub async fn compile_with_doc_vars(
 ) -> Result<SassOutput, SassError> {
     use crate::bundle::{
         load_copy_code_layer, load_embed_example_layer, load_equation_number_layer,
-        load_highlight_layer, load_listing_layer, load_title_block_layer,
+        load_highlight_layer, load_listing_layer, load_search_layer, load_title_block_layer,
     };
     use crate::themes::process_theme_specs;
 
@@ -552,6 +558,7 @@ pub async fn compile_with_doc_vars(
     let copy_code_layer = load_copy_code_layer()?;
     let equation_number_layer = load_equation_number_layer()?;
     let listing_layer = load_listing_layer()?;
+    let search_layer = load_search_layer()?;
     let mut user_layers = Vec::new();
     if config.title_block_layer {
         user_layers.push(load_title_block_layer()?);
@@ -562,6 +569,7 @@ pub async fn compile_with_doc_vars(
         copy_code_layer,
         equation_number_layer,
         listing_layer,
+        search_layer,
     ]);
 
     let mut load_paths = default_load_paths();
@@ -631,7 +639,7 @@ pub async fn compile_default_css(
 ) -> Result<String, SassError> {
     use crate::bundle::{
         load_copy_code_layer, load_embed_example_layer, load_equation_number_layer,
-        load_highlight_layer, load_listing_layer, load_title_block_layer,
+        load_highlight_layer, load_listing_layer, load_search_layer, load_title_block_layer,
     };
 
     // Return cached version if available (only for minified, matching
@@ -654,6 +662,7 @@ pub async fn compile_default_css(
     let copy_code_layer = load_copy_code_layer()?;
     let equation_number_layer = load_equation_number_layer()?;
     let listing_layer = load_listing_layer()?;
+    let search_layer = load_search_layer()?;
 
     // Assemble SCSS: Bootstrap + Quarto + title block + highlight +
     // embed-example + copy-code + listing defaults
@@ -664,6 +673,7 @@ pub async fn compile_default_css(
         copy_code_layer,
         equation_number_layer,
         listing_layer,
+        search_layer,
     ])?;
 
     // Get load paths (these point to VFS paths populated by wasm-quarto-hub-client)
@@ -1371,6 +1381,18 @@ mod tests {
     /// (bd-57y4). Like Q1, the layer is unconditional for HTML — one
     /// assertion per assembly path, matching the highlight/copy-code
     /// regression pattern.
+    #[test]
+    fn test_compile_default_css_includes_search_rules() {
+        let runtime = NativeRuntime::new();
+        let css = compile_default_css(&runtime, true).unwrap();
+        assert!(
+            css.contains("#quarto-search-results"),
+            "default CSS must contain the search panel rules from quarto-search.scss"
+        );
+        assert!(css.contains(".search-result-doc"));
+        assert!(css.contains(".quarto-search-button"));
+    }
+
     #[test]
     fn test_compile_default_css_includes_listing_rules() {
         let runtime = NativeRuntime::new();

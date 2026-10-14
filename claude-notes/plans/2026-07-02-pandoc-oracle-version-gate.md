@@ -1,9 +1,14 @@
-# Pampa pandoc-oracle tests hard-fail on local pandoc newer than allowlist (bd-i9i5ad2t)
+---
+title: 'Pampa pandoc-oracle tests hard-fail on local pandoc newer than allowlist (bd-i9i5ad2t)'
+date: 2026-07-02
+description: 'Replaces the substring version check that makes pampa''s pandoc oracle tests hard-fail on newer local pandoc with a numeric range gate, an actionable failure message, and a `cargo xtask pandoc-check` command for bumping the calibrated range.'
+status: approved  # Design aligned 2026-07-02 — ready to implement (TDD). One prerequisite: bd-nj9nnkn1 (Windows clippy blocker) must be green for the final `cargo xtask verify`.
+braid:
+  strand: bd-i9i5ad2t
+  priority: P3
+---
 
-**Date:** 2026-07-02
-**Braid:** bd-i9i5ad2t
-**Worktree:** `.worktrees/bd-i9i5ad2t-pampa-pandoc-oracle-tests` (branch `braid/bd-i9i5ad2t-pampa-pandoc-oracle-tests`, based on `main` @ `51cf3707`)
-**Status:** Design aligned 2026-07-02 — ready to implement (TDD). One prerequisite: bd-nj9nnkn1 (Windows clippy blocker) must be green for the final `cargo xtask verify`.
+**Worktree:** `.worktrees/bd-i9i5ad2t-pampa-pandoc-oracle-tests` (branch `braid/bd-i9i5ad2t-pampa-pandoc-oracle-tests`, based on `main` \@ `51cf3707`)
 
 ## Triage verdict
 
@@ -84,7 +89,7 @@ In `test.rs`, rewrite `has_good_pandoc_version()`:
 1. First, if `PAMPA_PANDOC_ORACLE_BYPASS_VERSION_GATE=1`, return `true` (decision 5 — the calibration seam).
 2. Otherwise replace the `contains("3.x")` chain with `parse_pandoc_version()` + closed-range check `(3,6)..=(3,9)`.
 
-Keep the hard-`assert!` at the 4 test call sites (ledger signal preserved); leave the 3 internal helpers' skip behavior unchanged. The bypass lands **here**, not in Phase 3, so the xtask command layers cleanly on a finished seam (H4 — avoids Phase 3 rewriting Phase 2's assertions).
+Keep the hard-`assert!` at the 4 test call sites (ledger signal preserved); leave the 3 internal helpers\' skip behavior unchanged. The bypass lands **here**, not in Phase 3, so the xtask command layers cleanly on a finished seam (H4 — avoids Phase 3 rewriting Phase 2's assertions).
 
 ### Phase 2 — Actionable failure message
 

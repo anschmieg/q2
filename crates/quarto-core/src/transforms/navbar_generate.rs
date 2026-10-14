@@ -101,6 +101,16 @@ impl AstTransform for NavbarGenerateTransform {
             || quarto_sass::ThemeConfig::from_config_value(&ast.meta)
                 .is_ok_and(|c| c.dark.is_some());
 
+        // Search box (bd-eip0naf4): an explicit `navbar.search` wins;
+        // unset follows `website.search.location` (Quarto 1's
+        // `navbarEjsData` rule). The localized label rides along so
+        // the renderer needs no language table.
+        navbar.search = Some(crate::project::search::ui::navbar_search_enabled(
+            &ast.meta,
+            navbar.search,
+        ));
+        navbar.search_label = Some(crate::project::search::ui::search_label(&ast.meta));
+
         // bd-qor9a — resolve each href against the YAML file it was
         // authored in. Frontmatter-rooted hrefs become project-root-
         // relative; `_quarto.yml`-rooted ones (the common case for
@@ -229,7 +239,7 @@ mod tests {
             source_path: PathBuf::from(source),
             output_href: output_href.to_string(),
             format_id: "html".to_string(),
-            title: Some(title.to_string()),
+            title: Some(crate::document_profile::text(title)),
             ..DocumentProfile::default()
         }
     }

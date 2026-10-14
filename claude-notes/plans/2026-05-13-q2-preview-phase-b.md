@@ -1,10 +1,13 @@
-# q2 preview — Phase B plan
+---
+title: 'q2 preview — Phase B plan'
+date: 2026-05-13
+description: 'Broadens the `q2 preview` re-render trigger beyond `.qmd` files to config files, images, custom components and cross-document dependencies by widening the file watcher''s allow-list.'
+status: draft  # plan only — implementation in a later session.
+---
 
 **Epic:** bd-kw93 (q2 preview)
 **Predecessor:** Phase A, fully merged on `feature/q2-preview-command`
   (bd-0xmt, bd-yxqt, bd-o5wd, bd-501n, bd-mflk, bd-b5hf, bd-vpsy).
-**Date:** 2026-05-13
-**Status:** plan only — implementation in a later session.
 
 ## Goal
 
@@ -75,7 +78,7 @@ incrementally.
 
 **Recommendation:** rebuild on every change to a `.qmd` /
 `_quarto.yml` / `_metadata.yml`. Phase A's render is fast (<200ms
-for trivial fixtures, ~1s for non-trivial ones), and a stale
+for trivial fixtures, \~1s for non-trivial ones), and a stale
 dep-graph is worse than a slightly slow re-render. Optimize only
 if profile data says so.
 
@@ -83,7 +86,7 @@ if profile data says so.
 
 The remap was introduced for the no-frontmatter case. Once a user
 explicitly writes `format: html` in YAML they probably do mean
-plain HTML output. But `q2 preview`'s whole shape (AST iframe,
+plain HTML output. But `q2 preview`\'s whole shape (AST iframe,
 React reconciliation, DOM stability) is q2-preview-specific —
 falling back to `html` output is a degraded experience.
 
@@ -155,8 +158,8 @@ integration):**
   filter=PreviewBroad` — confirms `quarto-preview` is passing the
   broad filter through `HubConfig` end-to-end.
 - After editing `_quarto.yml`: `DEBUG File change detected
-  path=…/_quarto.yml` → `INFO Sync complete: filesystem →
-  automerge path=…/_quarto.yml new_len=48`.
+  path=…/\_quarto.yml` → `INFO Sync complete: filesystem →
+  automerge path=…/\_quarto.yml new_len=48`.
 - The samod-side propagation is what B.3/B.4 will verify drives a
   browser re-render. The watcher slice is verified end-to-end.
 

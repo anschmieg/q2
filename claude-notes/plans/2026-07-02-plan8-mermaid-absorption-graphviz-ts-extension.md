@@ -1,4 +1,9 @@
-# Plan 8 — HANDLED_LANGUAGES → claiming engines: absorb #241 (mermaid) + graphviz TS extension
+---
+title: 'Plan 8 — HANDLED_LANGUAGES → claiming engines: absorb #241 (mermaid) + graphviz TS extension'
+date: 2026-07-02
+description: 'Tombstoned plan that proposed having mermaid and graphviz `dot` cells handled by claiming engines to drain the `HANDLED_LANGUAGES` list; superseded because diagrams became a render transform and will not be implemented.'
+status: superseded  # ⛔ **TOMBSTONED 2026-07-24** — obsoleted by the "diagrams are not engines" decision on `main` (see banner). ~~plan — ready to implement (two workstreams).~~ **Created:** 2026-07-02.
+---
 
 > # ⛔ TOMBSTONED — 2026-07-24
 >
@@ -32,8 +37,6 @@
 > Original content is preserved below for historical reference only.
 > **Do not implement any of it.**
 
-**Status:** ⛔ **TOMBSTONED 2026-07-24** — obsoleted by the "diagrams are not engines" decision on `main` (see banner). ~~plan — ready to implement (two workstreams).~~ **Created:** 2026-07-02.
-
 > **Plan 10 opportunity (noted 2026-07-04, bd-4qflzhwh):** once Plan 10 lands,
 > any TS engine implementing `checkInstallation` automatically becomes a
 > `q2 check <name>` target. Part B's graphviz extension should implement a
@@ -45,7 +48,7 @@ extension stack for Part B). Part A (mermaid) is independent of the TS-engine
 subprocess and can land first; Part B (graphviz) needs Plans 1a–c + 1b + 2A.
 **Depends on:** Part A — `claims_language` / `LanguageClaim` + `resolve_engines`
 (plan1a-engine, landed) and PR **#241** (`feature/mermaid-engine`). Part B — the
-full TS-engine extension path (plan1a-*, 1b, 1c, 2A) + `q2 build-ts-extension`.
+full TS-engine extension path (plan1a-\*, 1b, 1c, 2A) + `q2 build-ts-extension`.
 **Enables:** Plan 6 Q4 (draining `HANDLED_LANGUAGES` so languages are not
 hard-coded).
 
@@ -111,7 +114,7 @@ today **only** by explicit `engine: mermaidjs` because `mermaid` is a
       Match `{mermaid}` + optional attribute list so the *transform* predicate
       matches the *claim* predicate (which is language-only). Without this, an
       attributed cell would be selected but silently passed through unrendered.
-- [ ] **Update the hard-coded lists in `jupyter/text_execute.rs`** (lines ~415,
+- [ ] **Update the hard-coded lists in `jupyter/text_execute.rs`** (lines \~415,
       451, 496, 558) that repeat `["ojs","mermaid","dot"]` — route them through
       the `HANDLED_LANGUAGES` constant (or the ownership projection) so there is
       one source of truth, not three. (These are the leave-alone lists jupyter

@@ -1,4 +1,9 @@
-# Plan 7b — Native content-processor registry: percent + spin (zero Pass-1 launch)
+---
+title: 'Plan 7b — Native content-processor registry: percent + spin (zero Pass-1 launch)'
+date: 2026-07-08
+description: 'Replaces per-file conversion of percent and spin scripts with a native, engine-agnostic processor registry, so project discovery and conversion never launch an engine process.'
+status: approved  # PLAN — design ratified with Gordon 2026-07-08 (session "spin-parse-rust"). Work items unstarted. **Reviewed for staleness/consistency 2026-09-24** (see § Review corrections below) — Phase 6 and the SourceInfo/sidecar section were rewritten; everything else held up. **No longer "not on the critical path"**: this is now the blocker for bundling the Julia engine into q2 by default (Q-16-10 fires on every render once julia ships bundled, because its `.jl` claim is a content sniff that cannot be declared statically without this plan's `processor:` field — see `.worktrees/workspace-5/CLAUDE.local.md` "Why this work exists now").
+---
 
 **Series root:** [2026-06-27-plan7-native-percent-spin-sourceinfo.md](2026-06-27-plan7-native-percent-spin-sourceinfo.md) (reframed as the 7-series *content-processor architecture* root)
 **Supersedes:** [2026-07-07-plan7a-static-content-pattern-claims.md](2026-07-07-plan7a-static-content-pattern-claims.md) (7a's arbitrary-regex claim mechanism is withdrawn; its surviving design points — discovery admission, one-predicate-two-sites coherence, built-ins-as-data, the Q6 membership-cache contract — migrate here)
@@ -9,14 +14,6 @@
 **Branch:** `plan7b-percent-spin-registry` off `main` (`feature/ts-engine-extensions`, which this
 plan originally targeted, merged to `main` via PR #416 in the interim — all four declared
 dependencies below are confirmed landed on `main`, code-verified 2026-09-24).
-**Date:** 2026-07-08
-**Status:** PLAN — design ratified with Gordon 2026-07-08 (session "spin-parse-rust"). Work items
-unstarted. **Reviewed for staleness/consistency 2026-09-24** (see § Review corrections below) —
-Phase 6 and the SourceInfo/sidecar section were rewritten; everything else held up. **No longer
-"not on the critical path"**: this is now the blocker for bundling the Julia engine into q2 by
-default (Q-16-10 fires on every render once julia ships bundled, because its `.jl` claim is a
-content sniff that cannot be declared statically without this plan's `processor:` field — see
-`.worktrees/workspace-5/CLAUDE.local.md` "Why this work exists now").
 
 ---
 
@@ -28,7 +25,7 @@ Gordon and resolved.
 1. **Phase 6 rewritten (was wrong, not just stale).** The original Phase 6 + Decision 3 built a
    native content-sniffing admission tier in `project/discovery.rs`, mirroring Q1. This plan's own
    later addendum (§ "Migration note," 2026-08-18) says the opposite — and ground-truth-checked
-   against `project/discovery.rs`'s current module doc, the addendum is what shipped: the
+   against `project/discovery.rs`\'s current module doc, the addendum is what shipped: the
    2026-08-13 merge's D1 discovery-widening is explicitly marked **superseded** in that file.
    Current model: gate 1 (extension has *any* static `FileClaim`, processor or not → renderable)
    + gate 2 (file matches an explicit user `project.render` pattern — no default widening) is
@@ -65,7 +62,7 @@ Gordon and resolved.
    documents 7a's withdrawn `content-pattern` design as the landing target and asserts a content
    sniff "is statically declarable" for **Pass-1 discovery** — exactly the premise correction #1
    above overturns. Phase 0's task is expanded accordingly.
-7. **Stale doc-comment, fix in passing.** `extension/types.rs:141`'s comment ("Plan 7a will grow
+7. **Stale doc-comment, fix in passing.** `extension/types.rs:141`\'s comment ("Plan 7a will grow
    this with an optional `content_pattern` field") predates 7a's tombstoning; Phase 1 touches this
    file anyway (adding `processor:`) — fix the comment there rather than as a separate task.
 
@@ -114,7 +111,7 @@ one.
   non-parameterized convention is the triple-quote `"""` raw/markdown block (keep constant).
 - Spin: **no portable converter exists.** Q1 does only the `#' ---` *detection* in TS;
   `markdownFromKnitrSpinScript` shells to R (`callR("spin", …)`). Native spin is a green-field
-  reimplementation of `knitr::spin`'s grammar (fully mapped below from `~/src/knitr/R/spin.R`), and
+  reimplementation of `knitr::spin`\'s grammar (fully mapped below from `~/src/knitr/R/spin.R`), and
   is *required* for A+ SourceInfo (the R path loses all provenance) **and** for a launch-free Pass-1.
 - `matchable` (knitr's "is this `#'`/`{{ }}` a real marker vs. text inside a multi-line string?"):
   reuse **`tree-sitter-r`**. q2 already depends on the published crates.io `tree-sitter-r = "1.2"` via
@@ -240,7 +237,7 @@ at all); `processor` is read exclusively at claim time (see below, REVISED 2026-
   params* (static data) and runs the processor's `sniff` natively — **REVISED 2026-09-24, see
   § Review corrections #1**: this is read once, at claim time, not during the discovery walk.
   Neither site ever constructs an engine or spawns a subprocess.
-- **One conversion path.** `markdown_for_file`'s default trait impl dispatches to the named processor
+- **One conversion path.** `markdown_for_file`\'s default trait impl dispatches to the named processor
   natively. The wire `markdownForFile` / `ClaimsFile` verbs survive **only** as the residual dynamic
   fallback (no processor declared). TS `markdown_for_file` is native-first, wire-only-if-no-processor.
 - **One predicate, one site — REVISED 2026-09-24** (was "one predicate, two sites," migrated from 7a
@@ -300,7 +297,7 @@ output branch. **`matchable` computed via `tree-sitter-r`.**
 
 **`matchable` via tree-sitter-r:** parse the script; a `#'`/`{{ }}` line is a *real* marker only if it
 starts a top-level token at column 1 — i.e. it is **not** inside a `string`/`string_content` span
-(walk for those node kinds' byte ranges) and begins a top-level `program` child. On
+(walk for those node kinds\' byte ranges) and begins a top-level `program` child. On
 `root_node().has_error()`, fall back to **all-matchable** (knitr's exact behaviour, `spin.R:73`).
 
 **SourceInfo:** `Concat` of prefix-stripped `Original` pieces (doc/`#'` lines, chunk bodies) +
@@ -348,7 +345,7 @@ The implementer MUST keep these general even though 7b only fills the percent/sp
       **Added 2026-08-17.** Percent and spin never surface this: they map back into the *original*
       file, which the caller already registered. ipynb's `Concat` pieces point at **virtual per-cell
       files that exist only in memory**, so the processor must hand them back for registration in
-      `SourceContext`. Without this field, 7c must change `convert`'s return type — exactly the
+      `SourceContext`. Without this field, 7c must change `convert`\'s return type — exactly the
       non-additive change these obligations exist to prevent. Cheap now, expensive later.
       **Verified 2026-09-24:** `Converted.files: Vec<(String, String)>` at mod.rs:85, empty for
       percent/spin as specified.
@@ -460,11 +457,11 @@ Everything lives in `quarto-core`, which feeds `wasm-quarto-hub-client` — full
       processor for `path` and run it natively. `TsEngine::markdown_for_file` native-first;
       wire-only-when-no-processor (retain the `markdownForFile`/`ClaimsFile` verbs for that residue).
       **Done 2026-09-24** — via a new provided trait method `native_markdown_for_file` (shared by the
-      default `markdown_for_file` and `TsEngine`'s override), plus a new `file_claims()` trait method
+      default `markdown_for_file` and `TsEngine`\'s override), plus a new `file_claims()` trait method
       (default empty; `TsEngine` returns its existing `claims_files`).
 
 **Cross-cutting finding surfaced mid-Phase-3 (2026-09-24, resolved with Gordon): `SourceConversionStage`
-discards `markdown_for_file`'s returned `SourceInfo` entirely, and `ParseDocumentStage` registers the
+discards `markdown_for_file`\'s returned `SourceInfo` entirely, and `ParseDocumentStage` registers the
 *converted* buffer as `Original` under a synthetic name ("C′") — faithful original-file remap ("A′") is
 explicitly deferred in existing code (`parse_document.rs`, citing plan1c §1060). This means NO engine
 today (including TsEngine's existing wire path, which only returns `SourceInfo::generated(By::unknown())`)
@@ -502,7 +499,7 @@ inserted before the rest of Phase 3.**
         "force an error, read the message" check belongs.
 
 ### Phase 3 — `percent` processor + SourceInfo
-- [x] Tests: port `percent-script.ts`'s behaviour — `[markdown]`/`[raw]` cells, `"""` blocks,
+- [x] Tests: port `percent-script.ts`\'s behaviour — `[markdown]`/`[raw]` cells, `"""` blocks,
       prefix strip, `#|` options, fence. Golden equivalence vs the TS helper / Q1. SourceInfo: an
       error in a markdown comment and in a code cell both report the **original file:line:col**.
       **Done 2026-09-24** — 12 tests in `content_processors::percent::tests`, including two
@@ -549,7 +546,7 @@ inserted before the rest of Phase 3.**
     classification — the *internal* chunk-delimiter (`rc`)/pipe-comment detection inside an
     already-code-classified block is a **pure textual regex match, not gated by `matchable` at all**.
     A `#+`-looking line *inside* a multi-line string still opens a new chunk in real knitr. Documented
-    in `spin.rs`'s module doc so it isn't re-litigated.
+    in `spin.rs`\'s module doc so it isn't re-litigated.
 - [x] Implement spin (tree-sitter-r `matchable` + the `spin.R` grammar, qmd branch only) + the
       `xtask`/script that regenerates goldens from a pinned knitr. **Done 2026-09-24** —
       `crates/quarto-core/tests/fixtures/spin-goldens/generate-goldens.R` (documents the knitr pin +
@@ -575,10 +572,10 @@ inserted before the rest of Phase 3.**
       no built-in engines there).
   - **Real gap found and fixed, not just plumbed through:** neither of the two production
     `RenderableExtensions::new(...)` call sites (`project/mod.rs`, `project/orchestrator.rs`) ever
-    consulted built-in engines' claims — only extension-contributed ones. Before this phase, a
+    consulted built-in engines\' claims — only extension-contributed ones. Before this phase, a
     percent `.py`/`.jl`/`.q` or spin `.r` failed discovery's gate 1 *even when explicitly listed* in
     `project.render`, because `.py` etc. were never in the renderable-extension set at all. Both call
-    sites now `.chain()` `builtin_file_claims()`'s extensions in. Without this fix, Phase 6's
+    sites now `.chain()` `builtin_file_claims()`\'s extensions in. Without this fix, Phase 6's
     "gate 1 already admits a processor-bearing FileClaim with zero changes to discovery.rs" claim
     would have been false for every built-in-claimed extension.
 
@@ -647,7 +644,7 @@ documents this for the author-facing side). The content sniff runs once, at clai
 - [x] Flip Plan 4's now-removed exclusion ("Julia claims by language only; no `claims_file` for `.jl`"
       → julia claims `.jl` percent via the processor). **Done 2026-09-24** — the fixture's
       `_extension.yml` gained `claims-files: [{extension: .jl, processor: {name: percent, language:
-      julia}}]`; `engine-resolution.md`'s stale `julia does NOT declare claims-files` example comment
+      julia}}]`; `engine-resolution.md`\'s stale `julia does NOT declare claims-files` example comment
       updated to match. Verified the existing live julia e2e suite (`julia_engine_e2e.rs`, gated on
       real `deno`+`julia` on `PATH`) still passes unchanged with this fixture edit — the claim is
       additive and does not touch execution.
@@ -668,7 +665,7 @@ documents this for the author-facing side). The content sniff runs once, at clai
       `ipykernel install --user --name phase8-py`) rather than touching the system/Homebrew Python,
       put it first on `PATH`, and reran: **all three files rendered, all three appeared with their
       converted YAML-frontmatter titles** ("Percent Python Notes", "Percent Julia Analysis", "Spin R
-      Report") in `_site/*.html`'s `<title>`. Cleaned up the venv + kernelspec afterward. The
+      Report") in `_site/*.html`\'s `<title>`. Cleaned up the venv + kernelspec afterward. The
       "zero Pass-1 launch" numeric proof itself is the Phase 6 `RSCRIPT_SPAWN_COUNT` unit-level
       regression tripwire (a real binary run can't cheaply instrument in-process counters from
       outside without adding new production instrumentation) — this real-binary run's job, and what
@@ -693,7 +690,7 @@ documents this for the author-facing side). The content sniff runs once, at clai
       call site that needed `parent_source_info` and wasn't getting it. **Fix:** all three call
       sites now use the existing `range_to_source_info_with_context` helper (already used by other
       node kinds for exactly this purpose) instead of building `SourceInfo` directly. **Verified via
-      TDD** (`pampa/src/readers/qmd.rs`'s new `yaml_frontmatter_source_info_reroots_through_concat_parent`
+      TDD** (`pampa/src/readers/qmd.rs`\'s new `yaml_frontmatter_source_info_reroots_through_concat_parent`
       test, confirmed RED against the original `document.rs` code, GREEN against the fix) and via
       the real binary: re-running the same broken `.R` file now shows `broken.R:2:4` — the **true
       original file, line, and column** — with the ariadne snippet displaying the real `#'`-prefixed

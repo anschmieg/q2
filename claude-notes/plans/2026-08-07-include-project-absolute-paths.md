@@ -1,8 +1,12 @@
-# Include shortcode: project-absolute (root-relative) path resolution
-
-**Strand:** bd-w9koo1i2
-**Status:** implemented; PR open — https://github.com/quarto-dev/q2/pull/468
-**Date:** 2026-08-07
+---
+title: 'Include shortcode: project-absolute (root-relative) path resolution'
+date: 2026-08-07
+description: 'Makes a leading slash in an `include` shortcode path mean project-root-relative, as in Quarto 1, instead of an OS-absolute path, and applies the same rule to the preview dependency graph.'
+status: done  # implemented; PR open — https://github.com/quarto-dev/q2/pull/468
+braid:
+  strand: bd-w9koo1i2
+  priority: P1
+---
 
 ## Overview
 
@@ -178,7 +182,7 @@ WASM/live-preview too. Verify during implementation what
       `sub/_includes/x.qmd`.
 - [x] Run the new tests, **verify they fail** for the expected reason.
       Verified 2026-08-07: the four leading-`/` integration tests fail
-      with Q-17-2 ("Could not read included file '/other/_b.qmd'" etc.),
+      with Q-17-2 ("Could not read included file '/other/\_b.qmd'" etc.),
       the relative-include guard passes; the preview test fails returning
       the raw `/sub/_includes/x.qmd` (RootDir fallback), not the
       project-relative form.
@@ -188,7 +192,7 @@ WASM/live-preview too. Verify during implementation what
 - [x] Add `resolve_include_target` and use it in `expand_blocks`
       (module + method docs updated to state the two anchors).
 - [x] Fix `extract_include_deps` leading-`/` handling (local branch in
-      `deps.rs`, mirroring the stage's anchors; kept deps' existing
+      `deps.rs`, mirroring the stage's anchors; kept deps\' existing
       lenient `..` normalization untouched to avoid scope creep).
 - [x] All new tests pass (43 include-related quarto-core tests, full
       quarto-preview suite 89/89).

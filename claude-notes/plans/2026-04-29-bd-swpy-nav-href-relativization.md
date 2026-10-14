@@ -1,11 +1,15 @@
-# Fix `bd-swpy` — Sidebar/navbar/footer/page-nav hrefs not relativized to current page
+---
+title: 'Fix `bd-swpy` — Sidebar/navbar/footer/page-nav hrefs not relativized to current page'
+date: 2026-04-29
+description: 'Sidebar, navbar, footer and page-nav links are emitted relative to the project root rather than the current page, so they 404 from pages in subdirectories; the plan threads the page-relative resolver used for body links through the navigation helper.'
+status: draft  # Diagnosis + plan draft. Pending user review before implementation.
+braid:
+  strand: bd-swpy
+  priority: P1
+---
 
-**Date:** 2026-04-29
-**Beads:** `bd-swpy` (bug, P1).
 **Discovered-from:** `bd-2jwk` (website example projects).
 **Parent:** `bd-0tr6` (website epic, closed).
-**Status:** Diagnosis + plan draft. Pending user review before
-implementation.
 
 ## Symptom
 
@@ -264,7 +268,7 @@ Generate transforms (which produce the source-path-relative input
 for these Renderers) are unchanged. `ResourceResolverContext` is
 unchanged. The body-link path is unchanged.
 
-**Public API:** `resolve_href_for_html`'s signature changes (one
+**Public API:** `resolve_href_for_html`\'s signature changes (one
 new `Option<&ResourceResolverContext>` parameter). The function
 is `pub` but only called from inside this crate's `transforms`
 module, so the blast radius is limited. Grep confirms 4 internal
@@ -305,7 +309,7 @@ agree.
 1. Add new tests 1–5 to `navigation_href.rs`. Confirm they
    compile and **fail** against today's signature.
 2. Extend the new signature; tests 1–5 pass.
-3. Update the four Render transforms' call sites to pass the
+3. Update the four Render transforms\' call sites to pass the
    resolver. Confirm existing tests still pass.
 4. Add Render-transform regression tests (one per transform, page
    at depth 1, resolver attached). Confirm they pass.
@@ -340,7 +344,7 @@ agree.
 3. **Documentation.** Update the doc comment on
    `resolve_href_for_html` to describe the new resolver
    semantics, and update the comparison table at
-   `resolve_doc_relative_href`'s comment to reflect that nav
+   `resolve_doc_relative_href`\'s comment to reflect that nav
    output is now also page-relative when a resolver is attached.
 
 Open question for the user before implementation: should the

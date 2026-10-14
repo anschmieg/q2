@@ -28,7 +28,7 @@ use crate::format::{
     Format, format_key_from_config_value, format_key_from_frontmatter, resolve_format_key,
 };
 use crate::pipeline::{
-    BookChapterPauseState, RenderOutput, build_html_pipeline_finishing_stages,
+    BookChapterPauseState, PartialKind, RenderOutput, build_html_pipeline_finishing_stages,
     render_qmd_to_ast_partial, run_pipeline_from_ast,
 };
 use crate::project::book::render_item::{BookRenderItem, BookRenderItemKind};
@@ -169,9 +169,8 @@ pub(crate) async fn render_book_multi_file_html(
         };
         // `chapter_seed_map` keys are canonicalized paths; match that
         // spelling for the lookup.
-        let seed_key = input_path
-            .canonicalize()
-            .unwrap_or_else(|_| input_path.clone());
+        let seed_key =
+            quarto_system_runtime::canonicalize(&input_path).unwrap_or_else(|_| input_path.clone());
         let chapter_seed = seeds.get(&seed_key).copied();
         let doc_info = DocumentInfo::from_path(&input_path);
         // Book-projects P6: only the designated references chapter keeps
@@ -219,17 +218,21 @@ pub(crate) async fn render_book_multi_file_html(
 
         let effective_options =
             apply_project_output_dir_to_options(render_options, project, &input_path);
-        let (output_path, output_dir, output_stem) =
-            match determine_output_paths(&input_path, &resolved_format, &effective_options) {
-                Ok(p) => p,
-                Err(e) => {
-                    failures.push(file_failure_from_error(input_path.clone(), e));
-                    if fail_fast {
-                        break;
-                    }
-                    continue;
+        let (output_path, output_dir, output_stem) = match determine_output_paths(
+            &input_path,
+            &resolved_format,
+            &effective_options,
+            runtime.as_ref(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push(file_failure_from_error(input_path.clone(), e));
+                if fail_fast {
+                    break;
                 }
-            };
+                continue;
+            }
+        };
         if let Err(e) = runtime.dir_create(&output_dir, true) {
             failures.push(file_failure_from_error(
                 input_path.clone(),
@@ -306,6 +309,7 @@ pub(crate) async fn render_book_multi_file_html(
             &mut ctx,
             runtime.clone(),
             TransformPhase::Navigation,
+            PartialKind::Native,
         )
         .await
         {
@@ -381,7 +385,13 @@ pub(crate) async fn render_book_multi_file_html(
             .input_path
             .parent()
             .map_or_else(|| project.dir.clone(), |p| p.to_path_buf());
-        match build_merged_bibliography(&config, &base_dir, &cited_order, references) {
+        match build_merged_bibliography(
+            &config,
+            &base_dir,
+            &cited_order,
+            references,
+            runtime.as_ref(),
+        ) {
             Ok(bib_blocks) => {
                 pampa::citeproc_filter::insert_bibliography(
                     &mut references_chapter.paused.ast.blocks,
@@ -495,14 +505,12 @@ pub(crate) async fn render_book_multi_file_html(
         .filter_map(|item| item.file.as_ref())
         .map(|f| {
             let p = project.dir.join(f);
-            p.canonicalize().unwrap_or(p)
+            quarto_system_runtime::canonicalize(&p).unwrap_or(p)
         })
         .collect();
     for doc in &project.files {
-        let key = doc
-            .input
-            .canonicalize()
-            .unwrap_or_else(|_| doc.input.clone());
+        let key =
+            quarto_system_runtime::canonicalize(&doc.input).unwrap_or_else(|_| doc.input.clone());
         if item_inputs.contains(&key) {
             continue;
         }

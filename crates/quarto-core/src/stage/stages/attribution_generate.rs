@@ -199,6 +199,7 @@ mod tests {
             source_context: SourceContext::new(),
             warnings: vec![],
             recorded_includes: Vec::new(),
+            derived_listing: Default::default(),
         }
     }
 
@@ -236,6 +237,29 @@ mod tests {
         let data = ctx.attribution_data.expect("provider populates sidecar");
         assert_eq!(data.runs.len(), 1);
         assert_eq!(data.identities.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pandoc_hybrid_formats_populate_sidecar() {
+        for name in ["docx", "pptx", "typst"] {
+            let format = Format::from_format_string(name).expect(name);
+            let json = r##"{
+                "runs": [{"start": 0, "end": 10, "actor": "alice@example.com", "time": 1}],
+                "identities": {}
+            }"##;
+            let provider: Arc<dyn crate::attribution::AttributionSourceProvider> =
+                Arc::new(PreBuiltAttributionProvider::new(json.to_string()));
+            let mut ctx = make_ctx(format, Some(provider));
+            let input = PipelineData::DocumentAst(make_doc());
+            let _ = AttributionGenerateStage::new()
+                .run(input, &mut ctx)
+                .await
+                .unwrap();
+            assert!(
+                ctx.attribution_data.is_some(),
+                "{name} must populate the sidecar for pampa-side filters"
+            );
+        }
     }
 
     #[tokio::test]

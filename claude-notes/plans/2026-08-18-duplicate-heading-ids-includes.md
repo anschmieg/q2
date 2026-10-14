@@ -1,9 +1,15 @@
-# Heading identifiers are not disambiguated across include boundaries (bd-duplicate-heading-ids-mou5z7ux)
+---
+title: 'Heading identifiers are not disambiguated across include boundaries (bd-duplicate-heading-ids-mou5z7ux)'
+date: 2026-08-18
+description: 'Disambiguates heading ids that repeat when one fragment is included several times, using a scoped pass after include expansion that matches Quarto 1''s numbering for repeated includes.'
+status: done  # **MERGED AND CLOSED.** PR #546 merged to `main` as `736d595a` (2026-08-18); strand bd-duplicate-heading-ids-mou5z7ux closed; origin strand br-duplicate-heading-ids-ye3j3gkr (connect-docs skein) commented — its verification against the full docs port waits on the next q2 release. Open follow-ups: **bd-4qjl87ax** (engine-output headings), **bd-8wf5brc8** (duplicate explicit-id diagnostic).
+braid:
+  strand: bd-duplicate-heading-ids-mou5z7ux
+  priority: P2
+  labels: [markdown]
+---
 
-**Date:** 2026-08-18
-**Braid:** bd-duplicate-heading-ids-mou5z7ux (p2, bug, label `markdown`)
-**Checkout:** main checkout, branch `main` @ `4eaede00` at investigation time (implementation branch TBD)
-**Status:** **MERGED AND CLOSED.** PR #546 merged to `main` as `736d595a` (2026-08-18); strand bd-duplicate-heading-ids-mou5z7ux closed; origin strand br-duplicate-heading-ids-ye3j3gkr (connect-docs skein) commented — its verification against the full docs port waits on the next q2 release. Open follow-ups: **bd-4qjl87ax** (engine-output headings), **bd-8wf5brc8** (duplicate explicit-id diagnostic).
+**Checkout:** main checkout, branch `main` \@ `4eaede00` at investigation time (implementation branch TBD)
 
 ## Design decisions (user-aligned, 2026-08-18)
 
@@ -80,7 +86,7 @@ End-to-end (per CLAUDE.md):
 
 ### Phase 1 — the scoped uniqueIdent routine
 
-- [x] Implemented as **`pampa::utils::autoid::dedup_scoped_heading_ids(doc: Pandoc, in_scope: impl FnMut(&Header) -> bool) -> Pandoc`** — home moved from the planned quarto-core location into `pampa`'s `autoid` module (deliberate improvement: pampa owns id-assignment semantics and the filter machinery; the generic scope predicate keeps include-provenance policy in the caller). Pass 1 seeds the seen-set (all non-renameable ids: explicit anywhere + out-of-scope headers); pass 2 probes renameable headers in document order (`base`, `base-1`, … set-membership), recomputing the base via `auto_generated_id`. `attr_source.id` stays `None`. Assigned via mutate-and-return-`Unchanged` (the `with_cite` precedent) — `FilterResult(_, true)` would re-apply the filter to the returned header and double-probe it.
+- [x] Implemented as **`pampa::utils::autoid::dedup_scoped_heading_ids(doc: Pandoc, in_scope: impl FnMut(&Header) -> bool) -> Pandoc`** — home moved from the planned quarto-core location into `pampa`\'s `autoid` module (deliberate improvement: pampa owns id-assignment semantics and the filter machinery; the generic scope predicate keeps include-provenance policy in the caller). Pass 1 seeds the seen-set (all non-renameable ids: explicit anywhere + out-of-scope headers); pass 2 probes renameable headers in document order (`base`, `base-1`, … set-membership), recomputing the base via `auto_generated_id`. `attr_source.id` stays `None`. Assigned via mutate-and-return-`Unchanged` (the `with_cite` precedent) — `FilterResult(_, true)` would re-apply the filter to the returned header and double-probe it.
 - [x] Traversal via pampa's standard `topdown_traverse` filter — same reach as the reader's `with_header`.
 - [x] Unit tests (5) in `crates/pampa/tests/integration/test_heading_auto_id.rs`: scope-only renaming, set-probe vs counter, explicit-id immunity, empty-scope identity, recompute-ignores-fragment-numbering. All pass.
 

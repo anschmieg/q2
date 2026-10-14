@@ -1,6 +1,12 @@
-# Login screen carries a "use test data, not real data" disclaimer
-
-**Strand:** bd-m6u9qu3u · **Scope:** `hub-client/` · **Related:** bd-g0uyp2v1 (landing page intro)
+---
+title: 'Login screen carries a "use test data, not real data" disclaimer'
+date: 2026-09-15
+description: 'Puts a visible test-data disclaimer on the hub-client login screen, built from structured strings and plain JSX because the markdown-rendering WASM pipeline is not loaded on the landing page.'
+braid:
+  strand: bd-m6u9qu3u
+  priority: P1
+  labels: [hub-client]
+---
 
 ## Overview
 
@@ -129,7 +135,7 @@ a layout choice; see Decisions §3.)
    footnote type size two extra paragraph gaps add height for no gain in
    scannability; the bold run already anchors the eye. **Confirmed: leads run into their body paragraph.**
 4. **Type size.** The invite-only footnote sits at `--text-2xs` (10px),
-   which is too small for ~120 words of prose. Set the disclaimer at
+   which is too small for \~120 words of prose. Set the disclaimer at
    `--text-xs` (11px) with `--leading-base`, heading at `--text-sm`
    semibold; colors `--text-secondary` for body, `--text-primary` for the
    heading and leads. Share the footnote's hairline top border so the
@@ -196,7 +202,7 @@ a layout choice; see Decisions §3.)
 - [x] `LoginScreen.css`: `.ls-disclaimer`, `.ls-disclaimer-heading`,
   `.ls-disclaimer p` — tokens only, logical properties only, opaque
   colors only (`.claude/rules/hub-client-theme.md`). Adjust
-  `.ls-footnote`'s bottom margin so footnote → disclaimer → CTA spacing is
+  `.ls-footnote`\'s bottom margin so footnote → disclaimer → CTA spacing is
   even; keep the CTA's own breathing room.
 - [x] Unit tests green (31/31 in the file, 1202/1202 suite-wide); `lint:css` clean.
 
@@ -205,7 +211,7 @@ a layout choice; see Decisions §3.)
 - [x] `npm run dev` in `hub-client`, open `#/dev/landing`,
   `#/dev/landing-expired`, `#/dev/landing-denied` in light and dark
   (the dev harness pages already exist). Check the card at a laptop
-  viewport height (~700px): the CTA must still be reachable without the
+  viewport height (\~700px): the CTA must still be reachable without the
   page feeling like a wall of text; if it is not, revisit Decisions §1–§4
   with the user rather than shrinking the type further.
 - [x] `npm run test:harness` (or the single spec) for the e2e geometry

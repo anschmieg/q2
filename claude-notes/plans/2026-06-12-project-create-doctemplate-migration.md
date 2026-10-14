@@ -1,8 +1,12 @@
-# Migrate quarto-project-create from EJS to quarto-doctemplate
-
-**Strand:** bd-kuxzj8su (blocks bd-3e3sam51, discovered-from bd-3e3sam51)
-**Created:** 2026-06-12
-**Status:** planned
+---
+title: 'Migrate quarto-project-create from EJS to quarto-doctemplate'
+date: 2026-06-12
+description: 'Moves `quarto-project-create` from EJS templates rendered through the JavaScript runtime to `quarto-doctemplate` `$title$` placeholders, making scaffolding synchronous and removing the last JavaScript template consumer.'
+status: draft  # planned
+braid:
+  strand: bd-kuxzj8su  # blocks bd-3e3sam51, discovered-from bd-3e3sam51
+  priority: P2
+---
 
 ## Overview
 
@@ -11,9 +15,9 @@
 what it does:
 
 - **Native:** `render_ejs` is implemented by `js_native.rs` via embedded
-  deno_core/V8 — pulling rusty_v8 (~100MB prebuilt downloads, no musl
+  deno_core/V8 — pulling rusty_v8 (\~100MB prebuilt downloads, no musl
   prebuilts) into every native binary. **No native code path ever calls it**
-  (`quarto-project-create`'s only dependent is `wasm-quarto-hub-client`).
+  (`quarto-project-create`\'s only dependent is `wasm-quarto-hub-client`).
 - **WASM:** `render_ejs` goes through `wasm_bindgen` externs
   (`crates/quarto-system-runtime/src/wasm.rs`) into hub-client's
   `src/wasm-js-bridge/template.js`, backed by an esbuild EJS bundle

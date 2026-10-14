@@ -1,12 +1,16 @@
-# `SourceInfo::map_offset` clones the whole file per call (bd-jn7r22g8)
+---
+title: '`SourceInfo::map_offset` clones the whole file per call (bd-jn7r22g8)'
+date: 2026-09-18
+description: 'Removes a per-call clone of the whole source file in `SourceInfo::map_offset` in the external source-map crate, which made parsing long lists quadratic, by borrowing the in-memory text with no public API change.'
+status: approved  # approved 2026-09-18 — option **A only** (user decision). q2 work on topic branch `braid/bd-jn7r22g8-map-offset-clone` in the main checkout; crate work in `~/repos/github/posit-dev/quarto-source-map` (commit + push, then watch CI). The `external-sources/` clone is used only for the throwaway timing experiment via an uncommitted `[patch.crates-io]`.
+braid:
+  strand: bd-jn7r22g8
+  priority: P1
+  labels: [perf]
+---
 
 **Strand:** bd-jn7r22g8 (P1, perf). Discovered from bd-5yektmwt; related to
 bd-is4q72tt (peak RSS).
-**Status:** approved 2026-09-18 — option **A only** (user decision). q2 work on
-topic branch `braid/bd-jn7r22g8-map-offset-clone` in the main checkout; crate
-work in `~/repos/github/posit-dev/quarto-source-map` (commit + push, then
-watch CI). The `external-sources/` clone is used only for the throwaway
-timing experiment via an uncommitted `[patch.crates-io]`.
 **External crate clone:** `external-sources/quarto-source-map` (at `e328ddd`,
 = released 0.1.3).
 
@@ -18,14 +22,14 @@ entire file `String` on every call so it can pass `&content` to
 `process_list` calls `map_offset(length)` up to twice per list item for
 loose/tight detection, so parsing a document costs
 O(list items × file size). On the 1.1 MB, 15,763-item Connect
-`api/index.qmd` that is ~31k transient 1.1 MB clones, and that document is
+`api/index.qmd` that is \~31k transient 1.1 MB clones, and that document is
 the wall-clock critical path of the whole 352-document project render.
 
 The fix lives in the external crate. The question this plan settles first is
 **whether it can be made without a breaking API change** (the user's concern
 going in). Conclusion below: **yes** — the minimal fix touches no public
 signature, and the two "nicer" variants are both additive. The genuinely
-breaking variant (changing `SourceFile.content`'s type) is not needed for
+breaking variant (changing `SourceFile.content`\'s type) is not needed for
 this strand and is recorded as a follow-up idea only.
 
 ## Reproduction (2026-09-18, this checkout, `target/release-perf/q2` built 11:16)
@@ -64,7 +68,7 @@ This matches the 2026-09-17 note (26 % of that document's CPU on the
 | 16,000 | 725 KB  | 1.54 s | 1.45 s | 2.3× |
 | 32,000 | 1.46 MB | 4.06 s | 3.88 s | **2.6×** |
 
-Doubling the input should ~double a linear pipeline; the ratio climbing past
+Doubling the input should \~double a linear pipeline; the ratio climbing past
 2 is the n² term (items × bytes) overtaking the linear part. Fixture
 generator and timings are in the session scratchpad; the generator is
 three lines of Python and is reproduced in "Verification" below.
@@ -107,7 +111,7 @@ O(file) cost per call.
 
 ### Who touches the relevant surface
 
-`quarto-source-map`'s public types involved: `SourceContext::get_file`,
+`quarto-source-map`\'s public types involved: `SourceContext::get_file`,
 `SourceFile { pub path, pub content: Option<String>, pub file_info, pub metadata }`,
 `FileInformation::offset_to_location(&self, usize, &str)`,
 `SourceInfo::map_offset / map_range`.
@@ -147,7 +151,7 @@ semantic change with zero API impact, and it ships as `quarto-source-map`
 q2 lockfile unifies `quarto-error-reporting`, `quarto-yaml`, and the
 workspace onto one version).
 
-**B is optional.** I'd hold it unless we want `map_offset`'s content
+**B is optional.** I'd hold it unless we want `map_offset`\'s content
 requirement gone on principle. If we do want it, do it in the same 0.1.4
 release (still non-breaking), and have `process_list` use it — but that is
 API design, not a perf need, so it should be a deliberate choice.

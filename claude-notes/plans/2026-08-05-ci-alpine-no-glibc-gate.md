@@ -1,8 +1,13 @@
-# CI gate: released linux binaries must run with no glibc (bd-3b47pxmm)
+---
+title: 'CI gate: released linux binaries must run with no glibc (bd-3b47pxmm)'
+date: 2026-08-05
+description: 'Adds a release CI gate that runs the musl Linux binary''s `--version` inside an Alpine container, failing the build if the binary needs glibc, and replaces the manual runbook check that tended to be skipped.'
+braid:
+  strand: bd-3b47pxmm  # filed 2026-08-05 by Carlos while cutting v0.11.0
+  priority: P2
+---
 
-**Date:** 2026-08-05
-**Braid:** bd-3b47pxmm (task, P2, filed 2026-08-05 by Carlos while cutting v0.11.0)
-**Branch:** `braid/bd-3b47pxmm-ci-assert-released-linux`, off `main` @ `c6ab84c2`
+**Branch:** `braid/bd-3b47pxmm-ci-assert-released-linux`, off `main` \@ `c6ab84c2`
 **Related:** bd-dofxhzaj (the musl switch this check guards), plan
 `claude-notes/plans/2026-07-28-linux-release-static-musl.md`
 
@@ -126,10 +131,10 @@ switch, so there are no published musl artifacts to test the check against.
   "annoying", not "dangerous".
 - **(b) Temporary spike workflow that builds q2 for musl on both arches** and
   runs the new step, deleted before merge. This is the bd-dofxhzaj precedent
-  (decision D1 there). Highest confidence, ~25 min per leg.
+  (decision D1 there). Highest confidence, \~25 min per leg.
 - **(c) Temporary spike workflow that builds a trivial static musl binary**
   instead of q2 and runs the identical snippet. Proves docker presence, the
-  `file` spellings, and the version parse in ~2 min per arch. Does not prove q2
+  `file` spellings, and the version parse in \~2 min per arch. Does not prove q2
   itself is static — but the spike already proved that, and the new step asserts
   it anyway.
 

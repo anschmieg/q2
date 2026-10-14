@@ -1,10 +1,14 @@
-# Hub-client visibility gating for text sync + presence
+---
+title: 'Hub-client visibility gating for text sync + presence'
+date: 2026-04-24
+description: 'Stops remote text and presence updates from replaying as a fast animation when a backgrounded `hub-client` tab is refocused, by stashing them while hidden and flushing once on return to visibility.'
+---
 
 ## Repro confirmation (2026-04-24)
 
 Two-line diagnostic added at the top of `handleImmediateSync` and on a
 `visibilitychange` listener in `useAutomergeSync.ts`. Manual two-window
-repro: background window A for ~30 s while typing from window B, then
+repro: background window A for \~30 s while typing from window B, then
 refocus window A. Observed console pattern:
 
 ```
@@ -46,7 +50,7 @@ Root cause:
   `notifySubscribers()` **per ephemeral message**, each triggering a
   `setRemoteUsers` state update and a `useLayoutEffect` render in
   `usePresence.ts:214` that recomputes Monaco decorations. Senders
-  broadcast at ~20 Hz (`broadcastThrottleMs: 50` in
+  broadcast at \~20 Hz (`broadcastThrottleMs: 50` in
   `presenceService.ts:76`).
 - Hidden tabs throttle `setTimeout`/`setInterval`, pause
   `requestAnimationFrame`, and queue MessagePort tasks from any
@@ -185,7 +189,7 @@ export function fireWindowFocus(): void {
    ```
 3. **Unmount discipline.** Every `renderHook(...)` call captures
    `unmount` and runs it (explicitly or via
-   `@testing-library/react`'s `cleanup`). Leaked
+   `@testing-library/react`\'s `cleanup`). Leaked
    `visibilitychange`/`focus` listeners on the jsdom globals are
    the most likely cross-test footgun.
 4. **Vitest environment pin.** Both files declare

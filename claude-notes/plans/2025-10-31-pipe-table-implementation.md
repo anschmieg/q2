@@ -1,7 +1,12 @@
-# Pipe Table Implementation Plan
-**Date**: 2025-10-31
-**Issue**: k-303
-**Status**: Ready to implement
+---
+title: 'Pipe Table Implementation Plan'
+date: 2025-10-31
+description: 'Wires the already-written pipe table helpers into the tree-sitter processor to handle header rows, alignment markers and body cells, skipping captions because the grammar has no caption node for pipe tables.'
+status: approved  # Ready to implement
+braid:
+  strand: k-303
+  priority: P2
+---
 
 ## Summary
 
@@ -168,7 +173,7 @@ Table
 ## Files to Modify
 
 - `src/pandoc/treesitter.rs` - Uncomment handlers (lines 1117-1124, skip caption)
-- `tests/test_treesitter_refactoring.rs` - Add ~8-10 new tests
+- `tests/test_treesitter_refactoring.rs` - Add \~8-10 new tests
 
 ## Complexity Assessment
 

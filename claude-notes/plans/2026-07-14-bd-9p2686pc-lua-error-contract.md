@@ -1,10 +1,15 @@
-# Lua marshaling error contract + divergence registry (bd-9p2686pc)
+---
+title: 'Lua marshaling error contract + divergence registry (bd-9p2686pc)'
+date: 2026-07-14
+description: 'Defines the error contract for Lua marshaling failures, with granular Q-11 codes, expected-versus-got messages and filter locations, plus a divergence registry and ratchet marker for intentional differences from Pandoc.'
+status: done  # investigation complete 2026-07-14; implementation not started. Catalog row 12 of `claude-notes/research/2026-07-13-lua-api-mismatch-catalog.md`.
+braid:
+  strand: bd-9p2686pc
+  priority: P2
+---
 
 **Strand**: bd-9p2686pc (Lua parity H). **Epic**: bd-grkrb9nj
 (`claude-notes/plans/2026-07-13-lua-api-pandoc-parity.md`, Phase 3.3 / 4.1).
-**Status**: investigation complete 2026-07-14; implementation not started.
-Catalog row 12 of
-`claude-notes/research/2026-07-13-lua-api-mismatch-catalog.md`.
 
 ## Overview
 
@@ -127,8 +132,8 @@ scope here.
       `invalid_value_error` (Q-11-3), `read_only_field_error`,
       `unknown_field_error` (Q-11-5); shipped element/`__newindex`
       sites deduped onto them (element unknown-field message kept
-      byte-identical; table parts gained "on <Type>").
-- [x] Sweep types.rs (~30 sites), constructors.rs (~50), list.rs (3).
+      byte-identical; table parts gained "on \<Type>").
+- [x] Sweep types.rs (\~30 sites), constructors.rs (\~50), list.rs (3).
       Conformance ratchet unchanged (Track-1 184/19) — none of the 19
       remaining xfails are message-dependent.
 - [x] Full verify + e2e through `q2 render` (Q-11-3 invalid math

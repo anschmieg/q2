@@ -1,4 +1,10 @@
-# P2 — Custom-node wire format: versioned shared schema
+---
+title: 'P2 — Custom-node wire format: versioned shared schema'
+date: 2026-08-20
+date-modified: 2026-09-18
+description: 'Promotes the `__quarto_custom_node` wire format to a versioned JSON schema, shared by the Rust producer, the TypeScript preview renderer, and the Lua filters, so per-type fields stop drifting apart.'
+status: draft  # Shape draft
+---
 
 **Date:** 2026-08-20  **Updated:** 2026-09-18 (two passes) — see `git log --oneline -- claude-notes/plans/2026-08-20-pandoc-hybrid-P2-wire-schema.md`
 for the full correction history. Latest (round 4 review, Reviewer A): the worked `Callout` schema
@@ -17,7 +23,6 @@ Also corrected the schema-version bullet's motivation (the "already-deployed Aut
 skew scenario didn't survive verification — the wire format isn't actually persisted in
 `quarto-automerge-schema`) and specified the Rust construction-site test must drive the real
 transform with per-conditional-branch fixtures, not a bare `CustomNode` literal.)
-**Status:** Shape draft
 **Design (authoritative):** [`../designs/pandoc-hybrid-architecture.md`](../designs/pandoc-hybrid-architecture.md)  |  Epic: `2026-08-20-pandoc-hybrid-epic.md`
 **Implementation task breakdown + test-seam prevalidation:** [`2026-09-18-pandoc-hybrid-P2-implementation.md`](2026-09-18-pandoc-hybrid-P2-implementation.md) — this plan's Coarse checklist converted into dispatchable `## Task N` units, each test bound to a named production seam and revert hunk.
 
@@ -30,7 +35,7 @@ the remaining 2 types have **no existing TS mirror at all** to promote from.
 
 ## The real type inventory (verified against code, not the plan's prior guess)
 
-The plan previously claimed "~12 known types (callout, float, theorem, proof, tabset,
+The plan previously claimed "\~12 known types (callout, float, theorem, proof, tabset,
 panel-layout, decorated-code-block, example-embed, crossref-resolved-ref, …)". That list was
 wrong on both count and membership. Grepping every non-test `CustomNode::new(...)` call site
 (`crates/quarto-core/src/transforms/*.rs`, `crates/quarto-core/src/crossref/*.rs`) gives exactly
@@ -55,7 +60,7 @@ node without cloning, never serialized to the wire format — so it doesn't belo
 inventory above, but a future re-run of this exact grep should expect 9 hits, not 8, and needs
 to recognize and exclude this one rather than treat the count mismatch as new drift.
 
-Two names in the old "~12" list are **fictional** — grepped and confirmed absent from the
+Two names in the old "\~12" list are **fictional** — grepped and confirmed absent from the
 codebase entirely: `PanelLayout`/`panel-layout` (no hits) and `DecoratedCodeBlock` (no
 `CustomNode::new` site; the only hit is a comment at `crates/quarto-core/src/render.rs:364`
 documenting that a `DecoratedCodeBlock` CustomNode was **considered and explicitly rejected** —
@@ -118,7 +123,7 @@ nothing in q2-preview to cross-check once authored, for either type.
 **Cross-plan resolution:** P1 (2026-09-16 rework) now has a concrete `Pandoc`-kind exclude-list
 derived from the design doc's §6 bucket table, which excludes `panel-tabset-resolve`,
 `example-embed-render`, `callout-resolve`, and the rest of B2/B4/Navigation, while *keeping*
-`panel-tabset`'s sugar half enabled (Pandoc needs the raw `Tabset` CustomNode P5's shim routes,
+`panel-tabset`\'s sugar half enabled (Pandoc needs the raw `Tabset` CustomNode P5's shim routes,
 unlike Preview). See P1 for the full list and reasoning; not re-derived here.
 
 ## Corrections owed to the design doc (§3 Route table) — flag only, fix during execution
@@ -136,7 +141,7 @@ bugs found during review are flagged and checklisted, not silently patched mid-r
   custom node at all** for equations; it's a plain Pandoc filter over `Para`/`Plain` blocks that
   detects `DisplayMath` inline content and does format-specific `RawInline` injection (LaTeX
   `\label{}`, Typst `#math.equation(numbering:...)`) directly on the existing `Math` inline —
-  there is no constructor to route into. Add `Tabset`'s row too, reclassified from `PanelTabset`/L
+  there is no constructor to route into. Add `Tabset`\'s row too, reclassified from `PanelTabset`/L
   to `Tabset`/**R** (see P5 for the evidence — its wire shape matches Q1's `constructor`, not its
   `parse`).
 
@@ -165,7 +170,7 @@ deciding, not as a preference call:
   it's pure hand-written TS with no Rust producer — it doesn't establish a Rust→TS codegen
   precedent, only the "single source, version const" shape P2 already wants.
 - **The drift this plan worries about already exists, with only 2 consumers, before Lua exists.**
-  `Callout.tsx`'s hand-written `CalloutPlainData` interface declares
+  `Callout.tsx`\'s hand-written `CalloutPlainData` interface declares
   `type, appearance, collapse, collapse_starts_collapsed, icon, ref_type` — but the real Rust
   `plain_data` (`callout.rs:276-294`) also sets `kind` and `identifier` when crossref-eligible.
   Neither field is in the TS interface today. **The demonstrated bug is "no test," not "no
@@ -198,7 +203,7 @@ JSON file (works everywhere with zero new dependencies). **Decided: JSON**, sinc
 already *is* JSON at the wire format, and all three consumers can load it with what they already
 have — `serde_json` (Rust, already a dependency), `JSON.parse` (TS, native), and Q1's own vendored
 `_json.lua` decoder (`src/resources/pandoc/datadir/_json.lua` — P4 already traces this tree for
-`init.lua`'s dependencies, so it costs P5's Lua contract test nothing new).
+`init.lua`\'s dependencies, so it costs P5's Lua contract test nothing new).
 
 - **Path:** `crates/quarto-pandoc-types/resources/custom-node-schema.json`, loaded via
   `include_str!` in Rust (both the producer-side test and any future consumer), fetched/embedded
@@ -244,7 +249,7 @@ have — `serde_json` (Rust, already a dependency), `JSON.parse` (TS, native), a
   `node.plain_data` for every node passing `has_crossref_plain_data` (FloatRefTarget, Theorem,
   and crossref-id'd Callout); `crossref_resolve.rs:316-317` does the same for
   `CrossrefResolvedRef`. Add the `order` field (per the shape above) to `Callout`,
-  `FloatRefTarget`, `Theorem`, and `CrossrefResolvedRef`'s schema entries. `Proof` correctly gets
+  `FloatRefTarget`, `Theorem`, and `CrossrefResolvedRef`\'s schema entries. `Proof` correctly gets
   none — design §3 says it "deliberately carries no `ref_type`," and `crossref_index.rs:255`
   early-returns without one.
   **This also means the schema needs a producer-stage notion, not just `required`/`when`:**
@@ -279,7 +284,7 @@ have — `serde_json` (Rust, already a dependency), `JSON.parse` (TS, native), a
   "The prefix is dropped because crossref references usually don't carry a leading textual
   prefix"), and `build_resolved_ref` (`crossref_resolve.rs:286-320`) never records citation mode
   or the label's original case. Without these three fields, the "Q1 is normative" decision cannot
-  actually be implemented as stated — add them to `CrossrefResolvedRef`'s schema entry (`required:
+  actually be implemented as stated — add them to `CrossrefResolvedRef`\'s schema entry (`required:
   false`, since HTML's own resolution has no matching concept for any of the three today).
 - Define a **single source of truth** for the per-type schema: `type_name → { slots, plain_data
   fields, route (L/R/N) }` — **corrected 2026-09-17** (was `(L/R)`, which can't express the two
@@ -372,7 +377,7 @@ have — `serde_json` (Rust, already a dependency), `JSON.parse` (TS, native), a
   - `FloatRefTarget` needs nothing — its Q1 constructor is unfiltered passthrough
     (`floatreftarget.lua:96-107`); confirmed mechanical.
   - **`Tabset` (Route R, decided) needs no new field either.** Audited against
-    `panel-tabset.lua`'s real `constructor(params)` (`params.level`, `params.attr`,
+    `panel-tabset.lua`\'s real `constructor(params)` (`params.level`, `params.attr`,
     `params.tabs` — a list of `{title, content, active}`): Q2's wire shape
     (`{level, tab_count, actives}` + `title-{i}`/`content-{i}` slots) zips cleanly into that
     list with no missing field. The extra `plain_data.group` Q2 sometimes sets is an HTML-only

@@ -1,4 +1,8 @@
-# hub-client: burn down axe color-contrast baseline
+---
+title: 'hub-client: burn down axe color-contrast baseline'
+date: 2026-08-28
+description: 'Fixes the CSS color contrast violations that the hub-client accessibility baseline had accepted as debt, adjusting theme tokens so every flagged text and button pair meets WCAG AA and the baseline regenerates empty.'
+---
 
 Strand: bd-7byucvr6
 Date: 2026-08-28
@@ -77,5 +81,5 @@ replay attribution hover) — see the strand linked
   or disappears FAILS the scan until the baseline is regenerated, so
   the regen step is mandatory, not optional.
 - Phase 5 branch (`hub-client-uiux-phase5`) does NOT contain these
-  fixes (it only adds setup-* entries); no conflict expected, but the
+  fixes (it only adds setup-\* entries); no conflict expected, but the
   token values touched here will need re-review at the Phase 5 gate.

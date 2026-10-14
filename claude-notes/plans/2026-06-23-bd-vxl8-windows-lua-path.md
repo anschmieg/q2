@@ -1,4 +1,12 @@
-# bd-vxl8: Windows path handling in pampa synthetic Lua io/dofile — Implementation Plan
+---
+title: 'bd-vxl8: Windows path handling in pampa synthetic Lua io/dofile — Implementation Plan'
+date: 2026-06-23
+description: 'Fixes Windows path handling in pampa''s synthetic Lua `io` and `dofile` by adding a shared `is_rooted` predicate and forward-slash test paths, so rooted VFS paths resolve on every target.'
+braid:
+  strand: bd-vxl8
+  priority: P2
+  labels: [lua, pampa, windows]
+---
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -132,7 +140,7 @@ WASM: `quarto-core` already depends on `quarto-util` normally and is in the
 - [ ] **Step 1: Move the dependency**
 
 In `crates/pampa/Cargo.toml`, remove `quarto-util.workspace = true` from the
-`[dev-dependencies]` block (line ~83) and add it to the `[dependencies]` block
+`[dev-dependencies]` block (line \~83) and add it to the `[dependencies]` block
 (e.g. alongside the other `quarto-*` path/workspace deps):
 
 ```toml
@@ -170,7 +178,7 @@ wasm32 transitively via quarto-core, so no new WASM build surface."
 
 **Files:**
 - Modify: `crates/pampa/src/lua/io_wasm.rs:41` (production `io.open` site)
-- Modify: `crates/pampa/src/lua/io_wasm.rs` (`#[cfg(test)] mod tests`, ~line 476 + 9 scripts)
+- Modify: `crates/pampa/src/lua/io_wasm.rs` (`#[cfg(test)] mod tests`, \~line 476 + 9 scripts)
 
 **Interfaces:**
 - Consumes: `quarto_util::is_rooted` (Task 1, available via Task 2), `quarto_util::to_forward_slashes`.
@@ -186,7 +194,7 @@ Lua `SyntaxError` (backslash escape) on Windows.
 
 - [ ] **Step 2: Apply the test-script escaping fix**
 
-In `io_wasm.rs` `mod tests`, add to the `use` block (~line 476):
+In `io_wasm.rs` `mod tests`, add to the `use` block (\~line 476):
 
 ```rust
     use quarto_util::to_forward_slashes;
@@ -218,7 +226,7 @@ insufficient.
 
 - [ ] **Step 4: Apply the production predicate fix**
 
-In `io_wasm.rs` `io.open` closure (~line 41), replace:
+In `io_wasm.rs` `io.open` closure (\~line 41), replace:
 
 ```rust
             let resolved_path = if path.starts_with('/') {
@@ -323,7 +331,7 @@ yields a `script_dir`-joined path. (On Linux/macOS both pass pre-fix because
 
 - [ ] **Step 3: Apply the production predicate fix**
 
-In `dofile_wasm.rs` `resolve_dofile_path` (~line 30), replace:
+In `dofile_wasm.rs` `resolve_dofile_path` (\~line 30), replace:
 
 ```rust
     let p = Path::new(path);

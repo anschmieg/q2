@@ -24,6 +24,9 @@
 //! - **`sort`** — multi-key stable sort over hydrated items.
 //! - **`placeholders`** — Q1-verbatim regex tokens shared with
 //!   the (future) L7 post-render upgrade.
+//! - **`metadata`** — the `meta.listings.<id>` bridge: every
+//!   resolved listing published into document metadata for Lua
+//!   consumers (user filters, lmd cells; bd-2oqen84t).
 //!
 //! The two AST transforms that consume these types live in
 //! `crate::transforms::listing_generate` and
@@ -34,6 +37,8 @@ pub mod config;
 pub mod filter;
 pub mod helpers;
 pub mod item;
+pub mod listjs;
+pub mod metadata;
 pub mod placeholders;
 pub mod record;
 pub mod sort;
@@ -66,7 +71,9 @@ pub use config::{
     parse_listings,
 };
 pub use glob_resolve::resolve_content_globs;
-pub use item::{ItemOrigin, ItemTarget, ListingItem, hydrate_item};
+pub use item::{
+    FieldSource, ItemOrigin, ItemTarget, ListingItem, flattened_prose_diagnostics, hydrate_item,
+};
 
 /// One fully-resolved listing — its config plus the hydrated item
 /// set in final sort order. Produced by `ListingGenerateTransform`

@@ -1,10 +1,16 @@
-# cargo xtask verify does not run hub-client lint:css (CI does) (bd-4bu7vwi5)
+---
+title: 'cargo xtask verify does not run hub-client lint:css (CI does) (bd-4bu7vwi5)'
+date: 2026-09-09
+description: 'Makes `cargo xtask verify` run the hub-client `lint:css` check that CI already runs, so CSS rule violations fail locally in the first step, with a `--skip-css-lint` escape hatch.'
+status: in-progress  # Approved 2026-09-09 — implementing. Decisions: step 1 placement; add `--skip-css-lint`; lint:css only (wider drift filed as bd-l7mcijfe + bd-ya2nacaa); doc rule, no structural lint.
+braid:
+  strand: bd-4bu7vwi5
+  priority: P3
+  labels: [hub-client, tooling]
+---
 
-**Date:** 2026-09-09
-**Braid:** bd-4bu7vwi5
 **Branch:** `braid/bd-4bu7vwi5-verify-lint-css` (remote `chore/bd-4bu7vwi5-verify-lint-css`), rebased onto `main` after #667 merged. **PR:** https://github.com/quarto-dev/q2/pull/669
 **Pre-flight:** `cargo xtask verify --skip-hub-build` green at HEAD (under Node 24 via fnm; the Homebrew `node` on PATH is v26 and trips the preflight).
-**Status:** Approved 2026-09-09 — implementing. Decisions: step 1 placement; add `--skip-css-lint`; lint:css only (wider drift filed as bd-l7mcijfe + bd-ya2nacaa); doc rule, no structural lint.
 
 ## Triage verdict
 
@@ -29,7 +35,7 @@ Confirmed at HEAD (`3ecabd28f`):
 - `.github/workflows/ts-test-suite.yml`, job `test-suite`, step `Lint hub-client CSS`: `npm run lint:css -w hub-client`, placed right after `npm ci` and before the WASM build, on both `ubuntu-latest` and `macos-latest`.
 - `hub-client/scripts/lint-css.mjs` is dependency-free Node; it walks `hub-client/src/**/*.css` and applies four rules (`no-hardcoded-color`, `no-bare-z-index`, `no-outline-none-without-focus-visible`, `no-physical-box-props`) against a grandfather list in `scripts/lint-css-exceptions.json`. Stale exceptions also fail.
 - Cost: `npm run lint:css -w hub-client` on main takes about 0.2 s wall clock and is clean.
-- `hub-client/design-system.md` names `lint:css` as the enforcement for its rules; `cargo xtask lint`'s `ci-test-suite-unwired` rule only reconciles `test` scripts against CI, so it cannot see this (its own header says so).
+- `hub-client/design-system.md` names `lint:css` as the enforcement for its rules; `cargo xtask lint`\'s `ci-test-suite-unwired` rule only reconciles `test` scripts against CI, so it cannot see this (its own header says so).
 
 ### Reproduction
 

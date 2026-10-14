@@ -1,0 +1,1853 @@
+# Elevate `quarto-hub-mcp` to a first-class Quarto Hub interface
+
+**Date:** 2026-10-05
+**Status:** Ready for implementation
+**Scope:** `ts-packages/quarto-hub-mcp`, `crates/quarto-mcp-launcher`, `ts-packages/quarto-sync-client` (small additive exports only: per-document delivery wait and release, public getters for identities/captures, re-export of the project-set helpers for CAP-3 — no behavior changes), `crates/quarto-hub` (Phase 6 only)
+
+> **Bookkeeping note (repo convention):** this plan was authored in Plan mode at
+> `.posit/assistant/plans/` and approved 2026-10-06. Filed in braid as parent
+> epic **bd-tbuerrg7** with phase epics: Phase 0 **bd-f1dr7gs1**, Phase 1
+> **bd-zv8u2sxi**, Phase 2 **bd-oqp2kva8**, Phase 3 **bd-3qe7unp7**, Phase 4
+> **bd-738mbhpj**, Phase 5 **bd-rpra6kpq**, Phase 6 **bd-8iv9jty5** (sequential
+> `blocks` chain; existing strands linked per §4).
+> `claude-notes/plans/CURRENT.md` still points at the author-ID
+> transition plan, which is in execution (bd-r62zad5b); this plan is listed
+> alongside it rather than displacing it — repoint once that plan closes.
+
+---
+
+## 1. Executive summary
+
+The MCP server is **mature where it matters most and thin where the protocol has
+moved on**. The hard parts — OAuth loopback+PKCE, OS-keyring credential storage,
+token refresh with typed failure modes, token redaction at every boundary, stdio
+hygiene (stdout protection, stdin-EOF exit, outbound sync drain), and a
+~5,500-line test suite including e2e auth against a mock IdP — are done well and
+in some cases better than most published MCP servers.
+
+The review finds four gaps:
+
+1. **Protocol surface:** the server implements exactly one MCP capability
+   (`tools`) and uses none of the features the spec has added since — no
+   structured output, no runtime input validation, no cancellation on data
+   tools, no resources, prompts, completion, or elicitation. The installed SDK
+   (`@modelcontextprotocol/sdk` 1.29.0, protocol `2025-11-25`) supports all of
+   these today — but it is now the **maintenance line**: the current spec is
+   `2026-07-28`, and the TypeScript SDK v2 (`@modelcontextprotocol/server`;
+   the v2 line is stable since 2026-07-27 (2.0.0), now at 2.3.1) implements it
+   while still serving `2025-11-25` clients. Building new surfaces on 1.x would target a revision
+   that has already removed or deprecated several of them (BP-16).
+2. **Capability surface:** 12 tools cover basic text-file CRUD and long-poll
+   watching. Nothing for binary files, folders, search, project discovery,
+   share URLs, presence, history, render/diagnostics, AST-aware editing, or the
+   embedded docs — most of which already have client-side APIs in
+   `quarto-sync-client` waiting to be wrapped.
+3. **Agent-ergonomics surface:** the tools work, but not the way a human
+   works. Writes are fire-and-forget (the agent says "done" before the hub has
+   the change); reads carry no content hash, so an agent cannot tell its view
+   is stale before it overwrites a collaborator's edit; large files arrive
+   whole with no range or truncation; error messages rarely say what to call
+   next; the server `instructions` cover only share-URL parsing; and nothing
+   measures how many turns an agent needs for a real task (§2.5).
+4. **Strategic surface:** stdio-only distribution means browser-hosted agents
+   (Claude.ai, ChatGPT connectors) can never reach Quarto Hub; the server is
+   not listed in the MCP Registry and has no one-click bundle; and there is no
+   user-facing docs page.
+
+**North star:** an agent should be able to *discover, read, write, watch,
+render, debug, and share* a Quarto Hub project entirely through MCP, with
+protocol-native ergonomics (structured results, cancellable long operations,
+subscribable resources, guided prompts) and the situational awareness a human
+editor takes for granted (knowing when its view is stale, knowing its write
+landed, knowing who else is in the document), while a human collaborator
+watches the agent's edits live in the web client.
+
+---
+
+## 2. Review findings: best-practice deviations
+
+IDs (BP-n, HY-n, ERG-n) are referenced by the phase checklists in §5.
+Evidence cites `ts-packages/quarto-hub-mcp/src/` as `$SRC`; line numbers are
+as of 2026-10-05 on `main`. Spec references name the revision that introduced
+a feature; `2026-07-28` is the current revision, and BP-16 covers adopting it.
+
+### 2.1 Protocol compliance and ergonomics
+
+| ID | Finding | Evidence | Spec reference | Impact |
+|----|---------|----------|----------------|--------|
+| BP-1 | **No structured tool output.** Every result is a plain text content block — some carry JSON text, others bare strings (`Updated …`, raw file contents); no `outputSchema`, no `structuredContent`. | `$SRC/tools.ts:28-30` (`text()` helper used for every result) | `structuredContent`/`outputSchema`, spec 2025-06-18; supported by installed SDK 1.29.0 | Hosts cannot machine-validate or render results; models parse JSON out of prose; newer clients increasingly prefer structured results |
+| BP-2 | **No runtime input validation.** Handlers blind-cast (`args.path as string`); a wrong-typed argument becomes a raw `TypeError` wrapped in `isError`. Hand-written JSON schemas duplicate handler expectations and can drift. | `$SRC/tools.ts:346,358-359,417-419`; the "avoids Zod v4" comment at `tools.ts:7-8` predates SDK 1.29's zod handling | SEP-1303 (2025-11-25): input-validation errors should be *tool execution errors* with useful messages | Confusing failures for agents; schema/handler drift is a silent regression class |
+| BP-3 | **Data tools ignore cancellation.** `extra.signal` is threaded only into the auth tools. `wait_for_change` — the one tool designed to block for up to 55 s — cannot be cancelled; the promise and its doc-handle listener outlive the client's cancel. | `$SRC/tools.ts:566-588` (the `CallToolRequestSchema` dispatcher forwards `extra` only to the auth tools; `handleTool` at `:309` and `handleWaitForChange` at `:376-414` never see it); `ConnectionManager.waitForChange` (`$SRC/connection-manager.ts:333-338`) takes no signal | `notifications/cancelled`, base spec | Hung server-side state per cancelled call; listener leaks on the automerge doc handle |
+| BP-4 | **No progress reporting on long operations.** Only `authenticate` emits `notifications/progress` (to surface the sign-in URL). `wait_for_change` could report elapsed/total when the client supplies a `progressToken`. | `$SRC/auth/auth-tools.ts:426-438` (the one good example); absent in `tools.ts` | Progress, base spec | Host UIs show a dead spinner during a 55 s poll. More importantly, SDK clients can reset their request timeout on each progress notification (`resetTimeoutOnProgress`), so progress is what lets a long poll outlive a host's default per-request timeout — the 55 s clamp exists precisely because there is no progress today |
+| BP-5 | **No resources.** The original design deferred resources explicitly ("Q6 Resources: Deferred"). Files are exactly the kind of read-only, subscribable context resources exist for; binary files could be exposed as blob resources (base64), which the tools API cannot cleanly do. | `capabilities: { tools: {} }` at `$SRC/index.ts:269-270`; deferred at `claude-notes/plans/2026-03-13-hub-mcp-server-design.md` L130 | Resources, resource templates, `notifications/resources/updated` (base spec). `resources/subscribe` was **removed** in 2026-07-28 in favor of `subscriptions/listen`; the SDK maps eras (BP-16) | Agents can only pull content tool-by-tool; humans using MCP-aware hosts cannot attach project files as context |
+| BP-6 | **No prompts.** No guided workflow templates (review-a-draft, fix-render-errors, collaborate-with-a-human). The repo has already learned that steering text matters — `wait_for_change`\'s description is a mini-protocol-spec. | absent | Prompts, base spec; the 2026-07-28 **Skills over MCP** extension (`ext-skills`) is the newer vehicle for the same guidance (§6) | Every host/user rediscovers the correct call patterns |
+| BP-7 | **No argument completion.** `project` (known/connected ids) and `path` (files in the project) are the two highest-value completion domains in any MCP server. | absent | Completion capability | Manual id/path entry in hosts that support completion |
+| BP-8 | **No elicitation, and the auth URL hack now has a standard replacement.** `authenticate` smuggles the sign-in URL to the user via a progress notification message. URL-mode elicitation (SEP-1036, 2025-11-25) exists precisely for secure out-of-band interactions like OAuth. | `$SRC/auth/auth-tools.ts:426-438` | Elicitation (2025-06-18); URL mode + enums (SEP-1036, SEP-1330, 2025-11-25). In 2026-07-28 server-initiated `elicitation/create` is replaced by **MRTR** (Multi Round-Trip Requests, SEP-2322): the tool returns `resultType: "input_required"` and the client retries the call with the answer | Non-standard UX that many clients render poorly; falls back silently when no `progressToken` |
+| BP-9 | **No `title` fields on tools; icons unadopted.** Names are snake_case and mostly verb-led — close to the `verb_noun` convention SEP-986 standardized (exceptions: `authenticate`, `authenticate_clear`, `wait_for_change`) — good — but host UIs get no human-friendly titles. Icons (SEP-973, 2025-11-25) are cheap chrome. | tool defs at `$SRC/tools.ts:51-225` and `$SRC/auth/auth-tools.ts:130-167` | SEP-986, SEP-973 (2025-11-25) | Minor presentation |
+| BP-10 | **Server reports version `0.0.1`, hardcoded.** The launcher already knows the embedded bundle's git commit and build time (`q2 mcp --launcher-info`); none of it reaches the MCP `Implementation` record. | `$SRC/index.ts:263-266` | `Implementation` version, base spec; 2025-11-25 also added `description`, `websiteUrl`, `icons` on `Implementation`, aligned with the registry `server.json` (CAP-15) | Support and debugging can't tell which build a client is running; version-gated behavior impossible |
+| BP-11 | **JSON Schema dialect unstated.** Schemas are plain draft-07-ish objects; 2025-11-25 makes JSON Schema 2020-12 the default dialect (SEP-1613). Harmless today (no 2020-12-only keywords), but the conformance harness (Phase 0) should pin this. | `$SRC/tools.ts` passim | SEP-1613 (2025-11-25); 2026-07-28 (SEP-2106) allows any 2020-12 keyword in `inputSchema`/`outputSchema` | Latent ambiguity for strict validators |
+| BP-15 | **Unknown tool name is reported as a tool-execution error, not a protocol error.** The dispatcher returns `isError: true` text for an unknown `name`; the spec reserves JSON-RPC `-32602` for unknown tools and keeps `isError` for failures *inside* a known tool. Hosts that distinguish the two (retry policy, telemetry) see a misclassified failure. | `$SRC/tools.ts:576-580` (and the `handleTool` default arm at `:341`) | Tools spec, "Error handling" (2025-06-18 onward) | Minor conformance; falls out of the BP-2/BP-16 work |
+| BP-16 | **Built on the SDK's maintenance line.** `@modelcontextprotocol/sdk` 1.x tops out at protocol `2025-11-25` (1.32.1 is the latest 1.x; bug-fix and security only, guaranteed to at least 2027-01). SDK v2 (`@modelcontextprotocol/server` / `client` / `core` 2.3.1; Node ≥ 20 — the repo pins 24) implements the current `2026-07-28` revision as a **dual-era** server: stateless per-request `_meta`, mandatory `server/discover` (which now carries `instructions`), `subscriptions/listen` replacing `resources/subscribe`, MRTR replacing server-initiated elicitation, the extensions framework (Tasks, Apps, Auth, Skills), deterministic `tools/list` order with `ttlMs`/`cacheScope` cache hints, and legacy `initialize` for `2025-11-25` clients. v2 validates tool input/output with Standard Schema (zod v4), which retires the `tools.ts:7-8` objection (Q-1) and gives BP-2 for free. | `ts-packages/quarto-hub-mcp/package.json` (`^1.12.1`, resolves 1.29.0); `$SRC/tools.ts:7-8` | [2026-07-28 changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog); SDK v2 migration docs (`docs/migration/upgrade-to-v2.md`, `support-2026-07-28.md`) | Every new surface in this plan (resources now; elicitation or tasks if §6 later adopts them) would otherwise be built against an API the current spec has removed or deprecated; the migration is the enabling step for Phases 1–5 |
+| BP-17 | **No cache hints; tool order undeclared.** 2026-07-28 asks servers to return `tools/list` in deterministic order (prompt-cache hits) and lets list/read results carry `ttlMs`/`cacheScope`. Our list is deterministic by construction (static arrays) but nothing says so and nothing carries hints. | `$SRC/tools.ts:557-564` | SEP-2549 (2026-07-28) | Minor; falls out of BP-16 |
+
+### 2.2 Security posture (mostly strong; three refinements)
+
+Done well, and worth preserving as invariants in all new work:
+
+- Loopback+PKCE (RFC 8252) with constant-time state check, RFC 9207 `iss`
+  validation, Host-header allowlist on the loopback listener (DNS-rebinding
+  defense), keyring-only storage, proactive refresh with in-flight mutex,
+  `invalid_grant` → store wipe + `ReauthRequired`, 403 keeps the keyring.
+- Token redaction on every log/error path including process-level
+  `uncaughtException`/`unhandledRejection` scrubbers
+  (`$SRC/index.ts:170-181`).
+- Insecure-transport gate (Bearer over `ws://` to non-loopback rejected).
+- Annotations present and honest on all 12 tools (destructive/idempotent/
+  readOnly/openWorld) — better than most servers.
+- Static tool descriptions: no tool-poisoning surface.
+- MCP-level authorization is correctly *absent*: the spec says stdio servers
+  SHOULD NOT implement MCP authorization and should take credentials from the
+  environment. The loopback+PKCE flow is the server acting as an OAuth
+  *client* to the hub (a downstream credential), which is the sanctioned
+  pattern. Keep that distinction crisp in CAP-16, where the hub becomes an
+  OAuth *resource server* and the rules invert.
+- The browser launcher spawns without a shell on every platform
+  (`$SRC/auth/browser.ts`), so a hostile URL cannot inject a command.
+
+Refinements:
+
+| ID | Finding | Evidence |
+|----|---------|----------|
+| BP-12 | **`authenticate` has no concurrency guard.** The doc comment argues hosts serialize `tools/call` and concurrent calls are "undefined-but-non-corrupting" (worst case two browser tabs) — a deliberate decision, not an oversight. Still worth a cheap mutex to make the behavior defined. | `$SRC/auth/auth-tools.ts:204-212` |
+| BP-13 | **No `authenticate_status` tool.** Deferred since the device-flow plan's "future work" list. Agents cannot ask "am I signed in, as whom, until when?" without risking a browser flow. | `claude-notes/plans/2026-05-05-hub-mcp-device-flow-implementation.md` L1426-1436 |
+| BP-18 | **Authorization URL is opened without validation.** The URL handed to the browser (and surfaced to the user) is built from `as.authorization_endpoint`, i.e. *fetched* authorization-server metadata; `openBrowser` applies no scheme or host check. The Security Best Practices page asks servers to accept only `http(s)`, reject `javascript:`/`data:`/`file:`, and treat metadata-derived URLs as SSRF input (HTTPS only, no private/link-local hosts). Low risk today (no shell, trusted IdP), but cheap to pin as an invariant — with BP-8 deferred (§6), the progress-notification hand-off it guards is the long-term path. | `$SRC/auth/auth-tools.ts:403`; `$SRC/auth/browser.ts` (`openBrowser`) |
+
+### 2.3 Code hygiene
+
+| ID | Finding | Evidence |
+|----|---------|----------|
+| HY-1 | **`read_file`\'s binary error names a tool that doesn't exist** (`read_binary_file_metadata`). Actively misleads agents into a doomed retry. | `$SRC/tools.ts:371` |
+| HY-2 | **Dead `registerAuthTools`** — an abandoned wiring whose standalone `CallToolRequestSchema` handler would conflict with `registerTools`\' if ever called (the SDK allows one handler per method). Never called from `index.ts`. | `$SRC/auth/auth-tools.ts:628-641` |
+| HY-3 | **Stale compiled device-flow artifacts linger in the local `dist/` build output** (`dist/auth/device-flow.*`) — the source was deleted when loopback+PKCE replaced it. `dist/` is **gitignored** (`.gitignore:48`), so nothing stale is committed; the risk is a test or packaging step that consumes `dist/` (the `McpTestClient` spawns `node dist/index.js`) picking up orphaned modules. Fix: `rm -rf dist` before every `tsc` build in the package scripts, and have the npm strand (bd-3tak0lyy) package from a clean build. | `ts-packages/quarto-hub-mcp/dist/` (local), `.gitignore:48`, `$SRC/mcp-test-client.ts` |
+| HY-4 | **`getWriteTools` omits `delete_folder`-class operations entirely** — not a bug, but the write-surface asymmetry (files yes, folders no) has no documented reason. | `$SRC/tools.ts:129-225` |
+| HY-5 | **No per-project disconnect.** `ConnectionManager` exposes `connect`/`disconnectAll` but nothing to drop one project; the sync client likewise only has whole-client `disconnect`. A long agent session touching many projects accumulates websocket + in-memory-doc state with no release valve. | `$SRC/connection-manager.ts:261,463`; `quarto-sync-client/src/client.ts:1449` |
+| HY-6 | **Startup stderr noise with a cached credential** — Node's `TimeoutNegativeWarning: -1` from the refresh timer, plus deprecated automerge `initSync()` parameter warnings. Harmless, but every host surfaces stderr to the user as "server errors", so it is the first thing a new user sees. Already tracked (bd-rgt8rglx open; bd-2qnnrwbd, un-deferred 2026-10-06); fold into Phase 1. | `braid show bd-rgt8rglx`, `braid show bd-2qnnrwbd` |
+
+### 2.4 Testing gaps
+
+| ID | Finding |
+|----|---------|
+| BP-14 | **No protocol-level conformance tests.** The suite is strong on behavior (e2e against in-process hub and mock IdP) but nothing validates the *wire contract*: that every `tools/list` entry validates against the SDK's `ToolSchema`, that every `inputSchema` is valid JSON Schema (2020-12 per SEP-1613), that results match declared `outputSchema`s, or that a cancelled request actually frees its listener. A schema-conformance harness would have caught BP-2's blind casts. `mcp-test-client.ts` is a hand-rolled raw JSON-RPC-over-stdio client that never schema-validates responses — right for the stdio-hygiene tests, wrong as a conformance foundation. The **official suite exists**: `npx @modelcontextprotocol/conformance server --url … --spec-version 2025-11-25\|2026-07-28` (0.1.x, with a GitHub Action and an `--expected-failures` baseline), plus `@modelcontextprotocol/inspector --cli` for smoke tests. The official suite drives servers over Streamable HTTP, so running it needs a loopback HTTP listener (test-only, or a dev `--http <port>` flag) — which Phase 6 wants anyway. |
+
+### 2.5 Agent ergonomics (the "as smooth as by hand" gap)
+
+A human editing in the web client sees collaborators\' text arrive live, sees
+their own keystrokes land, can scroll a long file, can undo, and gets an
+inline hint when something is wrong. Each row is a place where an agent
+driving the same project through MCP lacks the equivalent signal. Guidance
+references: Anthropic, ["Writing effective tools for AI
+agents"](https://www.anthropic.com/engineering/writing-tools-for-agents)
+(2025-09-11), and the MCP tools spec.
+
+| ID | Finding | Evidence | Fix / impact |
+|----|---------|----------|--------------|
+| ERG-1 | **No stale-view protection.** `read_file` returns bare text with no content hash; `write_file` takes whole-file content and applies it with automerge `updateText`, a diff against the *current* doc. If a collaborator edited between the agent's read and its write, the diff reverts their edit — silently, attributed to the agent's user. `patch_file` is safer (it splices against the latest merged text and fails if `old_string` is gone) but returns no post-write hash either. `wait_for_change` already computes `sha256:` hashes (`hashPayload`). | `$SRC/tools.ts:357-374` (no hash), `:416-440`; `quarto-sync-client/src/client.ts:1564-1572`; `$SRC/connection-manager.ts:136-143` | The one failure a human would never produce: overwriting what a collaborator just typed. `read_file`/`write_file`/`patch_file` return `hash`; write tools accept optional `expected_hash` and refuse on mismatch, returning the current content + hash — compare-and-swap, the CRDT equivalent of looking at the screen before typing |
+| ERG-2 | **Writes are fire-and-forget.** Write tools return `Updated …` the moment the local automerge change is made; delivery to the hub is asynchronous and only the process-exit drain (`drainOutbound`, bd-10deu8h4) ever waits for it. An agent that says "done, refresh your browser" before the hub has the bytes is the most visible "not like by hand" moment, and a crash or network blip in that window loses the edit with no signal to the agent. `isDelivered`/`remote-heads` already exist in the sync client but are not exported. | `$SRC/tools.ts:438-439`, `:477-478`; `quarto-sync-client/src/client.ts:1386`, `:1405-1439` | Bounded delivery wait on every write (default ≈2 s; `wait_for_sync: false` to opt out); result carries `synced: true\|false` and the new `hash`. Reverses the §6 deferral of "per-write delivery confirmation" — the substrate landed with the exit drain |
+| ERG-3 | **No range, size, or truncation handling on reads.** `read_file` returns the entire file; `list_files` entries carry `{path, type}` (plus `status`/`docId` on unavailable entries) — no size, mime type, or line count to help an agent decide what to read. A large `.qmd`, a notebook, or a data file fills the context window with no warning and no way to ask for less. | `$SRC/tools.ts:351-374`, `:284-294` | `read_file` gains `offset`/`limit` (lines) and `max_bytes`, returning `truncated: true` plus a continuation hint; `list_files` entries carry `size`, `mimeType`, and `lines` for text. Standard guidance: paginate or truncate with sensible defaults and steer the model toward targeted reads |
+| ERG-4 | **Error messages stop at the diagnosis.** `patch_file`\'s multi-match message is the model ("Provide a longer, unique string"); most others are terminal. `File not found: <path>` suggests neither `list_files` nor a near match; the share-URL server mismatch tells the user to restart the server (bd-qt7h8h5g removes that); wrong-type and unknown-tool errors (BP-2, BP-15) are raw. | `$SRC/tools.ts:368,455,510,525,528`; `:253-259` | Convention for Phase 1: every error names the failing parameter, the current state, and the next tool to call; path errors list up to three closest existing paths. Spec rationale: `isError` results exist "to enable model self-correction" |
+| ERG-5 | **No tool-surface budget.** §3 proposes roughly twenty new tools on top of twelve. Selection accuracy degrades as the list grows; the guidance is fewer, consolidated, high-impact tools with parameters for variants. | §3 | Rules applied to every CAP below: (a) same verb → same tool, varied by parameter (`read_file` returns an `image`/blob content block for binaries rather than a `read_binary_file` sibling; `write_file` takes `encoding: "base64"`); (b) read-only, browsable content moves to resources where the host supports them; (c) hard ceiling of **24 tools** in the default listing (opt-in render tools excluded); (d) one `get_project_info` instead of separate info tools |
+| ERG-6 | **Server `instructions` cover only share-URL parsing.** `instructions` is the one text every host injects into the model's context before any tool is called. Ours explains the `project` parameter and nothing else: no recommended workflow, no collaboration etiquette, no auth summary, no read-only notice. | `$SRC/index.ts:272-280` | Rewrite as a ~15-line operating guide: connect → read (keep the `hash`) → `patch_file` with `expected_hash` → check `synced` → `wait_for_change` before large rewrites; "prefer `patch_file`; never `write_file` a file a human is editing"; when to call `authenticate`; the untrusted-content note (ERG-10). Delivered via `initialize` to legacy clients and `server/discover` under 2026-07-28 — the SDK handles both |
+| ERG-7 | **Nothing measures agent experience.** §2.4 covers wire conformance; nothing in the repo runs a model against the server on a realistic task and records turns, tokens, wrong-tool calls, or validation retries. §9's criteria were qualitative. | — | A small **agent-task eval suite** (Phase 0): 5–8 scripted tasks (e.g. "from this share link, add a figure and fix the render error"; "a collaborator edited `intro.qmd`; summarize the change") run headless (`claude -p` or the Claude Agent SDK) against the in-process `test-hub`, scored on success, turns, tokens, and `isError` count. Run at phase gates by hand, not in CI (cost, nondeterminism); commit the transcripts. Evaluation-driven iteration is the most-repeated recommendation in current tool-design guidance |
+| ERG-8 | **Watching is per-file only.** `wait_for_change` requires `path`; a collaborating agent usually wants "did anything change in the project" (file added, removed, or edited by anyone), and it cannot tell its own writes from a collaborator's. | `$SRC/tools.ts:97-126`, `:376-414` | CAP-18: `path` becomes optional (project-wide watch returning changed paths + hashes); with ERG-1's write-side `hash` the agent passes its own post-write hash as `since_hash`, so its own edit is not reported back |
+| ERG-9 | **No undo.** Humans have Ctrl+Z and the web client's history view; an agent that made a bad `write_file` has no way back short of reconstructing the text. | — | CAP-19: `restore_file_version(path, to_hash)` as a new attributed change (CRDT-safe, never rewrites history); rides on CAP-9's history plumbing. Agent-appropriateness is Q-6 |
+| ERG-10 | **Untrusted-content posture is undocumented.** Hub documents are multi-author; text returned by `read_file`/`wait_for_change` can carry instructions aimed at the agent. The server cannot and should not filter it, but neither `instructions`, the README, nor the planned docs page says so. | — | One sentence in `instructions` (ERG-6) and a section in the docs page (CAP-17). Documentation only; no code change |
+
+---
+
+## 3. Review findings: missing capabilities
+
+IDs (CAP-n) referenced by §5. "Existing substrate" = the API already available
+today without hub-server changes.
+
+### 3.1 Discovery and sharing (today: impossible without a raw automerge id)
+
+| ID | Capability | Existing substrate | Notes |
+|----|-----------|--------------------|-------|
+| CAP-1 | Share URLs — embed `shareUrl` (the `https://quarto-hub.com/#/share/<id>?name=…&file=…` link for a connected project) in the `create_project`, `connect_project`, and `get_project_info` results, so an agent can hand a human a clickable link. | `share-url.ts` already parses this exact format (inverse operation is trivial) | Highest value-per-line in the whole review. **No standalone `get_share_url` tool** (ERG-5 budget): with `shareUrl` embedded in `get_project_info`, a separate tool would spend a listing slot on a redundant path. Also add an optional `name` to `create_project` — it has none today (`connection-manager.ts:374-376`), so the `name=` parameter cannot be filled |
+| CAP-2 | `get_project_info` — file/folder counts, contributors (identities), engine-capture summary, index doc id, server URL, auth mode, sync diagnostics. The "doctor" tool deferred from the exit-drain plan ("parent plan Phase 1.5"). | `getSyncDiagnostics`, `getDocInventory` (public); `getIdentitiesFromIndex`, `getCapturesFromIndex` are **internal** helpers (`client.ts:478,483`) and need a small public export; `ConnectionManager.lastObservedAuthMode()` | One tool; answers "what is this project and is my connection healthy" |
+| CAP-3 | `list_projects` — enumerate the caller's projects/collections. | `ProjectSetDocument` + `addProjectToSet` exist in `@quarto/quarto-automerge-schema` (`src/index.ts:192,237`; not re-exported by the sync client); **but** the project-set doc id is stored client-side only (IndexedDB singleton pointer, read at `hub-client/src/services/projectSetStorage.ts:20`, written at `:29-40`). There is no server-side per-user registry. | MVP: accept a project-set doc id (or share URL to one) and enumerate it. Full "list my projects" needs a hub-side, auth-keyed registry — a **hub feature**, scoped as a Phase 6 design item. The MVP lands in Phase 2 |
+
+### 3.2 Completing the file surface
+
+| ID | Capability | Existing substrate |
+|----|-----------|--------------------|
+| CAP-4 | Binary read **through `read_file`** (ERG-5): image mime types return an `image` content block, other binaries an embedded blob resource (base64), both with `structuredContent` `{mimeType, size, sha256}`; `metadata_only: true` returns just the metadata. The SDK already ships `ImageContentSchema`/`EmbeddedResourceSchema`. Closes HY-1 for real without a sibling tool. | `getBinaryFileContent`, `isFileBinary`, `BinaryDocumentContent` |
+| CAP-5 | Binary write **through `write_file`/`create_file`** with `encoding: "base64"` (ERG-5). Needed so agents can add images to projects — a render-blocking gap for real documents. | `createBinaryFile` |
+| CAP-6 | Folder CRUD: `create_folder`, `delete_folder`; `list_files` gains folder entries. (Folder *rename* is iterative — rename each contained file plus the folder marker — and can wait.) Resolves HY-4. | `createFolder`, `deleteFolder`, `getFolderPaths` (IndexDocument v3) |
+| CAP-7 | `search_files` — substring/regex content search across project text files with context snippets and a result cap. Client-side scan is fine at project scale (the web client's in-memory provider does the same). | Deferred Phase 2 item from the original design; `hub-client/src/services/search/inMemorySearchProvider.ts` as reference |
+
+### 3.3 Collaboration awareness
+
+| ID | Capability | Existing substrate | Notes |
+|----|-----------|--------------------|-------|
+| CAP-8 | `list_presence` — who is connected, on which file, cursor/selection, last-seen. | Presence rides automerge ephemeral messaging; `getIndexHandle()` exposes the project-scoped channel; message schema lives in `hub-client/src/services/presenceService.ts` | Read-only observation only — the MCP server must **not** inject fake cursor presence. See Q-3 |
+| CAP-9 | `get_file_history` — ordered change summaries per file using automerge heads (`A.getHeads`/`A.view`/`A.diff`): "what changed since yesterday", "show the last 5 changes and their authors"; optional `from_hash`/`to_hash` returns a diff between two heads (one tool, ERG-5 rule (a)). | Pure client-side automerge; `branchService.ts` demonstrates clone/merge viability, and `getHeads`/`view`/`diff` are already used in `attribution-runs.ts`/`debugApi.ts` | No hub changes needed; attribution via the index `identities` map |
+| CAP-10 | Engine-capture visibility: fold capture state (`idle/running/error`, `lastError`, staleness) into `get_project_info`; optionally `clear_capture` for stale entries. | `onCapturesChange`, `clearCapture` | Read surface in CAP-2; `clear_capture` is a maybe (Q-4) |
+| CAP-18 | Project-wide watch: `wait_for_change` with `path` omitted blocks until *any* file is added, removed, or edited, returning `[{path, hash, kind}]`; the agent's own writes are excluded via `since_hash` (ERG-8). | `onFileAdded`/`onFileChanged`/`onFileRemoved` already fan into per-path `fireWaiters` (the `SyncClientCallbacks` in `connect()`, `connection-manager.ts:278-296`) — a project-level waiter set is a few lines | Lands in Phase 3 with BP-4; the Phase 1 BP-3 rework should leave `path` ready to become optional |
+| CAP-19 | `restore_file_version` — revert a file to a prior `hash` as a new, attributed change (ERG-9). | Same automerge heads/`view` plumbing as CAP-9 | Q-6 decides agent-appropriateness; default: allowed, `destructiveHint: true`, result carries the pre-restore `hash` so the restore is itself reversible |
+
+### 3.4 Quarto-specific intelligence (the differentiators)
+
+These are what make this a *Quarto* MCP server rather than a generic CRDT file
+API.
+
+| ID | Capability | Existing substrate | Notes |
+|----|-----------|--------------------|-------|
+| CAP-11 | **AST-aware qmd editing**: `get_outline` (headings/sections) plus a `section` selector on `read_file`/`patch_file` — structural reads and edits instead of fragile string surgery (ERG-5 rule (a): same verbs, varied by parameter). | `getFileAst`/`updateFileAst` via `ASTOptions` — **requires a caller-supplied parser in Node** | Gated on spike S-1 (parser in Node: `wasm-qmd-parser` nodejs target staged into the bundle like the keyring addons, vs. a pampa napi-rs module) |
+| CAP-12 | **Render loop**: `render_project` / `render_file` — materialize the project to a temp dir, run `q2 render --json-errors`, return structured diagnostics (`quarto-error-reporting` JSON wire: codes, messages, source locations) plus output paths. Closes the agent loop: edit → render → see errors → fix. | `exportProjectAsZip` (fflate — pure JS, Node-safe, verified); `q2 render` already has `--json-errors` (`crates/quarto/src/commands/render.rs:84,801-802`); launcher can inject the `q2` binary path (`current_exe`) as an env var | **Security:** rendering executes user code (knitr/jupyter). Must be opt-in (`--allow-render` flag), documented, annotated |
+| CAP-13 | **Docs tool**: `docs` — `query` searches the embedded `agents-docs-dist` tree, `page` fetches one page's markdown (one tool, ERG-5 rule (a)) — the same corpus `q2 docs llms` serves, reachable without shelling out. | Tracked as **bd-dn81ol95**; "shares the embedded tree; no new artifact" — needs a small launcher/`q2 docs` seam to expose pages to the Node child; **bd-b6cocsxw** (`q2 docs llms --json` for `--list`/`--embed-info`) is that seam's natural first half | Absorb both strands into Phase 4 |
+| CAP-14 | YAML/front-matter validation surfaced as diagnostics — *covered by CAP-12* (render reports real diagnostics via `--json-errors`); a standalone `validate_file` is redundant unless Phase 4 experience says otherwise | — | Deliberately folded into CAP-12 |
+
+### 3.5 Distribution and reach
+
+| ID | Capability | Status |
+|----|-----------|--------|
+| CAP-15 | npm/npx distribution (`npx @quarto/hub-mcp`), **plus** a listing in the official MCP Registry (`server.json` + `mcpName` in `package.json`, published with `mcp-publisher`; the registry is in preview with the v0.1 API frozen since 2025-10-24) and a one-click Claude Desktop bundle (`.mcpb`, also a registry package type). Discovery and install are part of "first-class". | Tracked: **bd-3tak0lyy** (P4, gated on public-release readiness); the standalone tarball (bd-sca6g1tu, closed) was explicitly a stopgap. No `server.json` exists today |
+| CAP-16 | **Remote MCP: the hub serves MCP over Streamable HTTP** so browser-hosted agents (Claude.ai, ChatGPT connectors) connect directly. | Explicitly out of scope in the `q2 mcp` plan (2026-06-11, L226-227) — revisit now. The tool handlers are already transport-agnostic (`handleTool` knows nothing about stdio) — the real work is auth (hub as OAuth resource server: RFC 9728 Protected Resource Metadata, introduced in 2025-06-18 and given the `.well-known` fallback by SEP-985 in 2025-11-25; RFC 8707 resource indicators; client registration via CIMD per SEP-991 — Dynamic Client Registration was **deprecated** in 2026-07-28) and connection management under the 2026-07-28 **stateless** model (no sessions, no `Mcp-Session-Id`; SDK v2.3 is one-server-per-request). Phase 6 design doc gates implementation |
+| CAP-17 | User-facing docs page under `docs/` (setup for Claude Code/Desktop/Cursor, tool reference, auth walkthrough, the collaboration model — hashes, `synced` — and the untrusted-content note, ERG-10) | Unchecked item from the `q2 mcp` plan (L461); today only the 13.5 KB README; `docs/guides/projects/create.qmd` mentions MCP servers only generically |
+
+---
+
+## 4. Existing braid strands (link, don't duplicate)
+
+| Strand | Relation to this plan |
+|--------|----------------------|
+| **bd-qt7h8h5g** (P2 bug) — can't reach projects on non-default sync servers | **Fix in Phase 1.** Design: key `ConnectionManager` by `(serverUrl, indexDocId)`; accept an optional per-call `server` and honor `server=` in share URLs by connecting to that server (no-auth attempt first; Bearer tokens are audience-bound and must not be replayed to a foreign origin) |
+| **bd-dn81ol95** — expose embedded docs as `q2 mcp` tools | Absorbed as CAP-13 / Phase 4 |
+| **bd-b6cocsxw** — `q2 docs llms --json` for `--list`/`--embed-info` | First half of the CAP-13 seam; absorbed into Phase 4 |
+| **bd-rgt8rglx** (P3 bug) — `TimeoutNegativeWarning` at startup with a cached credential; **bd-2qnnrwbd** — stderr warts (un-deferred 2026-10-06; re-scoped to the `initSync()` params half — the timer warning stays with bd-rgt8rglx) | HY-6; fix in Phase 1; both are Phase 1 children in braid and gate its close |
+| **bd-3tak0lyy** — npm publish | Absorbed as CAP-15 / Phase 6 (with the registry listing and `.mcpb`); package from a clean build (HY-3) |
+| **bd-ra5ypj3s** — Google 400 for gmail accounts on the Desktop OAuth client | Auth-polish; Phase 6 operator work, investigated alongside CAP-16 |
+| **bd-qxgoti2b** — unify hub-client and hub-mcp auth on Auth Code + PKCE | Adjacent epic; CIMD/PRM work in Phase 6 should be coordinated, not duplicated |
+| **bd-8oyidg7h** — remove deprecated `/auth/actor` + hub-mcp fallback | Independent cleanup; touch-point in Phase 1 if `fetchAuthorId` is refactored |
+| **bd-r62zad5b** (in progress) — author-id transition Phase 5 (hub-mcp fetches author via Bearer) | **Coordinate**: Phase 1 edits the same connection/auth code; land ordering with its owner. Also the forum for Q-3: the MCP server fetches the *human's* per-project author id (`fetchAuthorId`), so a "Claude (via MCP)" identity would rename the human's own entry — agent attribution needs a distinct, user-linked author id minted by the hub |
+| Test-hygiene: bd-n6dhrz4j, bd-4qi4j3sa, bd-yw3mcdkg, bd-l0oc6se2, bd-c72wsugj, bd-fuw5gcni, bd-9itqqqe6, bd-8e96g942 | Not duplicated; Phase 0 harness must not add new flake modes (network-gated like existing live tests) |
+
+---
+
+## 5. The plan
+
+Process requirements for **every** phase (repo mandates, non-negotiable):
+
+- **TDD**: failing test first, then implementation (`AGENTS.md` TDD section).
+  Each phase below lists its test specifications *before* its work items.
+- **Build chain after any TS change**: `cargo xtask build-hub-mcp-bundle &&
+  cargo build --bin q2`, then confirm freshness with `q2 mcp --launcher-info`
+  (embed commit/dirty marker). A plain `cargo build` embeds a stale bundle.
+- **Phase-close gate**: `cargo xtask verify` (full — the hub-build leg is
+  affected by definition here) green, plus `npm run test -w
+  ts-packages/quarto-hub-mcp`.
+- **E2E per phase**: drive the new surface through a real MCP client
+  (the Phase 0 SDK-client fixture for CI; a live Claude Code/Desktop session
+  against the in-process `test-hub` and, for final validation,
+  quarto-hub.com). Record the invocation and observed output in the plan file.
+- Commit at clean phase boundaries per the approved-plan execution policy.
+- **Each phase is a separate PR in a stack of PRs.** Phase *n*\'s branch is
+  based on phase *n*−1's branch (not on `main`), so the stack lands in order
+  and each PR's diff shows only that phase's work. Rebase the rest of the
+  stack as each PR merges; keep every PR green on its own (the phase-close
+  gate runs against the branch tip, not the eventual merge base).
+- **Tool budget** (ERG-5): ≤ 24 tools in the default listing; a new tool must
+  say why a parameter on an existing tool, or a resource, does not serve.
+  Budget tally for this plan: 12 existing + 1 (Phase 1: `authenticate_status`)
+  + 6 (Phase 2: `create_folder`, `delete_folder`, `search_files`,
+  `get_project_info`, `list_projects`, `disconnect_project`) + 3 (Phase 3:
+  `list_presence`, `get_file_history`, `restore_file_version`) + 2 (Phase 4:
+  `get_outline`, `docs`) = **24, at ceiling**. Consolidations already applied
+  to stay inside: binary I/O rides `read_file`/`write_file` (CAP-4/5); no
+  standalone `get_share_url` (CAP-1 embeds `shareUrl`); `diff_file` is a mode
+  of `get_file_history` (CAP-9); section reads/edits are a `section`
+  parameter on `read_file`/`patch_file` (CAP-11); `docs_search`/`docs_fetch`
+  are one `docs` tool (CAP-13). Q-gated maybes (`clear_capture`, Q-4) and any
+  future tool enter the default listing only by freeing a slot.
+- **Every result structured** (BP-1) and **every error actionable** (ERG-4):
+  conventions enforced by the Phase 0 harness and applied to every tool a
+  phase touches.
+- **Agent-task evals at each phase gate** (ERG-7): run the suite; record
+  success, turns, and tokens in this plan next to the e2e transcript.
+- **Living steering text**: the server `instructions` (ERG-6) and the docs
+  page (CAP-17) describe only tools that exist as of their phase; both are
+  revised in every phase that adds a surface.
+- **Correctness before elegance**: a correctness fix lands in the earliest
+  phase it fits, even when a later phase reworks the same code — BP-3 threads
+  cancellation through `wait_for_change` in Phase 1, and BP-4/CAP-18 rework
+  it again in Phase 3. The second pass is deliberate, not an oversight.
+- **Differentiation before chrome**: Phase 4 (Quarto-specific tools)
+  precedes Phase 5 (protocol surfaces) because CAP-12's render loop and
+  CAP-11's AST editing are the differentiators and depend on nothing in
+  Phase 5; shipping them first closes the agent loop earlier. The prompts
+  surface follows so the render-flavored `fix-render-errors` prompt ships
+  alongside the other three templates. The official conformance suite backing
+  the registry listing's `2026-07-28` claim (CAP-15) is deferred to Phase 6,
+  where it gates the listing and can ride the CAP-16 HTTP transport if one
+  lands; until then the Phase 0 in-memory harness is the wire-contract net.
+
+### Phase 0 — Protocol conformance harness (test infrastructure first)
+
+The regression net everything else TDDs against. Pure test code and fixtures —
+no runtime additions, and nothing changes for stdio users.
+
+- [x] In-memory linked-transport fixture: SDK `Client` ↔ our `Server` over
+  `InMemoryTransport.createLinkedPair()`, booted against the in-process
+  `test-hub`. A *new* fixture, not an extension of `mcp-test-client.ts` —
+  that client is raw JSON-RPC over a spawned stdio process with no schema
+  validation; keep it for the stdio-hygiene tests. Write against the SDK
+  `Client` API so the fixture survives BP-16 (`@modelcontextprotocol/client`
+  in v2).
+- [x] `@modelcontextprotocol/inspector --cli … --method tools/list` smoke test
+  over stdio (no listener needed). The official conformance suite
+  (`@modelcontextprotocol/conformance`) is deferred to Phase 6: at 0.1.x its
+  marginal value over the in-memory fixture plus the schema-conformance tests
+  below does not justify a test-only HTTP transport and a maintained
+  expected-failures baseline.
+- [x] **Agent-task eval suite** (ERG-7): 5–8 scripted tasks + a runner
+  (headless `claude -p` or the Agent SDK, Q-7) against `test-hub`; scoring
+  (success, turns, tokens, `isError` count, validation retries); baseline
+  recorded in this plan before Phase 1 changes anything. Not in CI.
+- [x] **Test spec — security invariants**: the auth URL handed to the browser
+  is `http(s)` with a non-private host (BP-18); Bearer is never sent over
+  `ws://` to a non-loopback peer (exists; pin as a named conformance test).
+- [x] **Test spec — tool budget**: default `tools/list` count ≤ 24 (ERG-5).
+- [x] **Test spec — schema conformance**: every `tools/list` entry validates
+  against the SDK's `ToolSchema`; every `inputSchema` compiles as JSON Schema
+  2020-12 (BP-11, BP-14).
+- [x] **Test spec — result conformance**: for each tool with an `outputSchema`
+  (none yet — harness ships with the assertion wired and a placeholder schema
+  list), a golden call's `structuredContent` validates (BP-1's future net).
+- [x] **Test spec — cancellation hygiene**: cancelling `wait_for_change`
+  mid-poll resolves the request as cancelled and leaves zero listeners on the
+  doc handle. Land it as vitest `test.fails` in Phase 0 (green-by-construction
+  against the unfixed code, so the Phase 0 gate stays green); flip to a normal
+  test when the BP-3 fix lands in Phase 1.
+- [x] Wire into `vitest` + confirm no new network access (CI-flake policy:
+  offline by default, like the existing suite modulo its gated live tests).
+
+#### Phase 0 completion record (landed 2026-10-06, bd-f1dr7gs1)
+
+**Files.** `src/in-memory-fixture.ts` (fixture + `seedProject` + typed
+`callTool`), `src/conformance.test.ts` (14 tests: fixture smoke, tool
+budget, schema conformance, result-conformance net, security invariants,
+cancellation hygiene), `src/inspector-smoke.test.ts`,
+`eval/{run.mjs,tasks.mjs,README.md}` + `eval/results/2026-10-06T09-17-33/`
+(baseline transcripts). Runtime deltas, both behavior-preserving:
+`createServer` extracted from `main()` in `index.ts` (fixture and stdio
+entrypoint now share one construction, so the harness can't drift from
+what real clients see), and `ConnectionManager.pendingWaiterCount()` — a
+read-only conformance seam, the leak gauge for the BP-3 net. New devDeps:
+`ajv` (JSON Schema 2020-12 compilation), `@modelcontextprotocol/inspector`
+(smoke test).
+
+**Red-by-construction nets, verified failing for the right reason** (then
+landed as `it.fails`): BP-3 — client call rejects `AbortError` on cancel
+but the waiter count stays 1 (leak); BP-18 — the browser is handed
+`http://169.254.169.254/...?response_type=code&…` built straight from
+malicious IdP metadata. BP-18 ships as `it.fails` too (same flip rule as
+BP-3 when its Phase 1 fix lands) — a small extension of the plan's
+`test.fails` mechanism beyond the cancellation case.
+
+**E2E (per the phase-gate requirement).** The fixture smoke test is the
+CI e2e: real SDK `Client` → `InMemoryTransport` → real `Server` →
+test-hub; create → list → read round-trip. Plus the official-client leg:
+
+```
+node node_modules/.bin/mcp-inspector --cli node dist/index.js \
+  -e QUARTO_HUB_SERVER=ws://127.0.0.1:<port>/ws --method tools/list
+→ exit 0; stdout JSON with the 10 expected tools, each ToolSchema-valid;
+  stderr empty. (Invocation recorded in src/inspector-smoke.test.ts;
+  `-e` is required because the CLI parses `--server` as its own option.)
+```
+
+Note for Phase 6 (CAP-16): the inspector CLI parses `--server <name>` as
+*its* catalog option; server flags must reach the spawned process via
+`-e KEY=VALUE`.
+
+**Q-7 resolved: headless `claude -p`.** `--output-format stream-json
+--verbose` gives machine-readable transcripts (turns, tokens, cost,
+per-tool results) with zero new dependencies and exercises the Claude
+Code host; the Agent SDK would add a dependency for no scoring gain.
+7 tasks (the §5 "5–8"), scored on hub state + final answer, never on
+tool sequence. Suite: `npm run eval -w ts-packages/quarto-hub-mcp`.
+
+**Eval baseline (2026-10-06, claude-fable-5-1 via Claude Code 2.1.289,
+commit of branch tip; transcripts committed at
+`ts-packages/quarto-hub-mcp/eval/results/2026-10-06T09-17-33/`):**
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | nonMcp | duration |
+|------|---------|-------|-----------------|------|---------|---------|--------|----------|
+| create-project | PASS | 3 | 66/528 | \$0.0775 | 0 | 0 | 1 | 12s |
+| read-and-report | PASS | 4 | 98/645 | \$0.4918 | 0 | 0 | 1 | 13s |
+| patch-typo | PASS | 5 | 130/1358 | \$0.5463 | 0 | 0 | 1 | 25s |
+| write-new-file | PASS | 4 | 98/627 | \$0.4850 | 0 | 0 | 1 | 12s |
+| rename-file | PASS | 7 | 130/1425 | \$0.5568 | 0 | 0 | 1 | 25s |
+| collaborator-edit | PASS | 3 | 66/353 | \$0.4524 | 0 | 0 | 1 | 11s |
+| watch-live-edit | PASS | 4 | 98/1722 | \$0.5673 | 0 | 0 | 1 | 64s |
+
+7/7 PASS, median 4 turns, zero `isError`, zero validation retries. The
+`nonMcp=1` everywhere is Claude Code's ToolSearch discovery (host-side,
+not a server ergonomics gap). Baseline takeaways for Phase 1: the server
+is already adequate for one-file tasks; the watch task took 64 s
+(baseline for BP-4's progress reporting); nothing yet exercises a
+*failed* call path (wrong args, stale state) — that is where ERG-4's
+error-quality work will show up, and Phase 1 should add an
+error-recovery task to the suite.
+
+**Phase-close gate:** `cargo xtask verify` green (14/14; required fixing
+a pre-existing CI↔verify drift first — xtask's `lint:css` args lacked
+CI's `--if-present`, broken by npm 11 matching the nested
+`vscode-sync-experiment` workspace; landed as its own commit),
+`npm run test -w ts-packages/quarto-hub-mcp` green (24 files, 269
+passed + 2 expected-fail + 3 pre-existing skips). Bundle rebuilt and
+freshness confirmed via `q2 mcp --launcher-info`.
+
+### Phase 1 — Correctness and protocol hygiene
+
+Opens with the SDK v2 migration (BP-16), the enabling step for everything
+below; the remaining items are small and independently shippable once it
+lands. **Coordinate landing order with bd-r62zad5b (in progress, same
+code).**
+
+Test specifications (all red before implementation):
+
+- [x] Wrong-typed argument (`path: 42`, missing `project`) → `isError` result
+  naming the offending parameter and expected type (BP-2; SEP-1303 — tool
+  execution error, not protocol error).
+- [x] Client-cancelled `wait_for_change` → prompt cancellation, no listener
+  leak (BP-3; Phase 0 harness asserts).
+- [x] `list_files` result carries `structuredContent` matching its
+  `outputSchema`, with the JSON text fallback retained (BP-1).
+- [x] Dual-era handshake: a legacy client (`initialize`, `2025-11-25`) and a
+  modern client (`server/discover`, per-request `_meta`) both list and call
+  tools against the same process, and `instructions` arrives on both paths
+  (BP-16).
+- [x] `initialize`/`server/discover` reports the real embedded version plus
+  `description` and `websiteUrl` (BP-10).
+- [x] `read_file` returns `hash`; `write_file` with a stale `expected_hash`
+  is refused with the current content + hash and changes nothing;
+  `patch_file` with a matching `expected_hash` succeeds and returns the new
+  `hash` (ERG-1).
+- [x] `write_file` result carries `synced: true` once the in-process hub has
+  acknowledged the change; with the hub stalled, `synced: false` within the
+  bound, and the write still lands when the hub returns (ERG-2).
+- [x] `read_file` on a missing path names `list_files` and the closest
+  existing paths (ERG-4); an unknown tool name is a JSON-RPC `-32602` error,
+  not an `isError` result (BP-15).
+- [x] `tools/list` order is identical across calls and carries `ttlMs`
+  (BP-17).
+- [ ] Startup against a cached credential emits no `TimeoutNegativeWarning`
+  and no automerge deprecation warning on stderr (HY-6).
+- [x] Concurrent `authenticate` calls serialize (BP-12).
+- [x] `authenticate_status` reports `{authenticated, hub, identity?, expiry?}`
+  without triggering a flow (BP-13).
+- [x] Share URL naming a *different* `server=` now connects to that server
+  instead of erroring (bd-qt7h8h5g): unit tests for multi-server manager
+  keying + e2e against two in-process hubs; regression test that Bearer is
+  never replayed cross-origin.
+
+Work items:
+
+- [x] BP-16: migrate to SDK v2 (`@modelcontextprotocol/server` for the
+  server, `@modelcontextprotocol/client` in tests): `McpServer.registerTool`
+  with zod v4 input/output schemas, stdio transport from
+  `@modelcontextprotocol/server/stdio`, dual-era enabled. Keep `handleTool`\'s
+  shape (transport-agnostic): the migration touches registration and types,
+  not handler logic. Re-run `bundle.test.ts` and `q2 mcp --launcher-info`;
+  Node floor is ≥ 20 (repo pins 24). Record Q-1's outcome.
+- [x] BP-2: input validation comes from the v2 zod schemas (SEP-1303 error
+  shape); the hand-written JSON schemas are deleted, not duplicated.
+- [x] BP-15: unknown tool → protocol error. BP-17: `ttlMs`/`cacheScope` on
+  `tools/list` (static list → long TTL).
+- [x] **Checkpoint (intra-phase gate):** once the BP-16 migration and its
+  free fallout (BP-2, BP-15, BP-17) land, run the full phase-close gate
+  (`cargo xtask verify`, `npm run test -w ts-packages/quarto-hub-mcp`, eval
+  suite) and commit before starting the ergonomics batch (ERG-1 onward). The
+  dual-era handshake and wrong-typed-argument test specs must be green at
+  this point. The migration is the riskiest single change in this plan;
+  everything after it is small and independently revertable.
+
+#### Phase 1 checkpoint record (landed 2026-10-06, bd-zv8u2sxi)
+
+**BP-16 migration.** `@modelcontextprotocol/sdk` 1.x →
+`@modelcontextprotocol/server` 2.3.1 (pinned `~2.3.1`), with
+`@modelcontextprotocol/client` + `/core` 2.3.1 in devDeps for the harness.
+`registerTools` is now per-tool `McpServer.registerTool` calls with zod v4
+schemas (zod 4.4.3 dedupes workspace-wide); `handleTool` and every handler
+kept verbatim (transport-agnostic, revert = registration-only). The stdio
+entrypoint is `serveStdio(factory)` — the v2 entry that owns era
+classification and instance pinning — replacing hand-wired
+`server.connect(new StdioServerTransport())`, which in v2 serves **legacy
+only**: `supportedProtocolVersions` merely installs the discover handler;
+era pinning happens inside `serveStdio`\'s `connectInstance` (SDK-internal
+`setNegotiatedProtocolVersion`). One migration-found wire detail: the
+2026-07-28 `_meta` envelope keys are camelCase
+(`io.modelcontextprotocol/protocolVersion`), not kebab-case. `path` became
+schema-optional on the six share-URL-`file=`-defaultable tools (zod
+validation runs before `normalizeArgs` can default it); the requirement is
+now enforced post-normalization with a message naming the share-URL
+affordance. HY-2's dead `registerAuthTools` went away with the migration.
+
+**Q-1 outcome (recorded).** The zod objection (`tools.ts:7-8`) is fully
+retired: zod v4 schemas are the single source for the advertised JSON
+Schema and runtime validation; zod 4.4.3's `~standard.jsonSchema`
+conversion keeps `.describe()` text and emits draft 2020-12 with a
+`$schema` declaration (BP-11 closed as fallout). Friction was all in the
+dual-era enablement described above — the migration guide does not
+surface that `server.connect()` + `StdioServerTransport` is legacy-only,
+nor that `InMemoryTransport` carries no era classification (the dual-era
+tests therefore drive `serveStdio` over a stdio-shaped in-memory wire —
+the production path).
+
+**E2E (real binary, recorded).** `cargo xtask build-hub-mcp-bundle &&
+cargo build --bin q2`; freshness confirmed by `q2 mcp --launcher-info`.
+Legacy: `initialize` → `2025-11-25`, `tools/list` → 12 tools, clean exit
+on stdin EOF. Modern (camelCase envelope): `server/discover` →
+`supportedVersions: ["2026-07-28"]` + instructions; `tools/list` → 12
+tools, `ttlMs: 3600000, cacheScope: "private"`. Both invocations against
+`./target/debug/q2 mcp --server ws://127.0.0.1:1/ws`, output inspected.
+
+**Checkpoint gate.** `cargo xtask verify` green (14/14);
+`npm run test -w ts-packages/quarto-hub-mcp` green (25 files, 274 passed
++ 2 expected-fail + 3 skips — the BP-3/BP-18 `it.fails` nets still red by
+construction). Eval suite 7/7 PASS, median 4 turns, zero `isError`, zero
+retries (transcripts `eval/results/2026-10-06T10-32-53/`): turns/tokens
+in line with the Phase 0 baseline — the migration is agent-invisible, as
+intended.
+- [x] ERG-1: `hash` on `read_file`/`write_file`/`patch_file` results;
+  `expected_hash` on `write_file`/`patch_file` (compare-and-swap, reusing
+  `hashPayload`).
+- [x] ERG-2: bounded delivery wait on all write tools (`synced`, default
+  ≈2 s, `wait_for_sync: false` opt-out); needs one sync-client export
+  (`awaitDelivery(path, ms)` over the existing `isDelivered`/`remote-heads`
+  plumbing).
+- [x] ERG-4: error-message convention (parameter, state, next tool;
+  near-match paths) applied to every data tool.
+- [x] ERG-6: rewrite `instructions` as the operating guide (workflow,
+  etiquette, auth, read-only, untrusted content).
+- [x] BP-18: validate the authorization URL (`https`, non-private host)
+  before surfacing or opening it.
+- [x] HY-6: fix bd-rgt8rglx (`TimeoutNegativeWarning`) and bd-2qnnrwbd
+  (deprecated `initSync()` params — un-deferred and re-scoped to the
+  initSync wart only; both are Phase 1 children in braid, so both gate
+  this phase's close).
+- [x] BP-3: thread `extra.signal` through `handleTool` →
+  `ConnectionManager.waitForChange(..., { signal })` and connect paths where
+  feasible; abort unregisters listeners.
+- [x] BP-1: `outputSchema` + `structuredContent` for `connect_project`,
+  `list_files`, `wait_for_change`, `create_project`, and every write tool
+  (`{path, hash, synced}`) — and each tool added later; convention enforced
+  by the Phase 0 harness. (Extended to `read_file` too — Phase 1 reshaped
+  it for ERG-1, and the ERG-1 hash → `expected_hash` loop is exactly the
+  machine-read structuredContent is for. Auth tools stay prose-text: they
+  are interactive flows, not data.)
+- [x] BP-10: launcher injects `QUARTO_MCP_SERVER_VERSION` (embed commit +
+  workspace version); server reports it; fallback to a bundle-build-time
+  stamp when run standalone. Also set `Implementation.description` and
+  `websiteUrl` (shared with `server.json`, CAP-15).
+- [x] BP-9: add `title` to all tools (and a Quarto icon if trivial — else
+  defer icons to Phase 5). (Titles landed; icons deferred to Phase 5.)
+- [x] BP-12: `authenticate` mutex.
+- [x] BP-13: `authenticate_status` tool.
+- [x] HY-2: delete dead `registerAuthTools`. (Deleted with the BP-16
+  migration — it was v1-only wiring; see the checkpoint record.)
+- [x] HY-1: interim message fix — drop the phantom `read_binary_file_metadata`
+  reference (binary reads land in `read_file` in Phase 2, CAP-4).
+- [x] bd-qt7h8h5g: multi-server `ConnectionManager` (per-call `server`
+  override + share-URL `server=` honored; origin-scoped auth).
+- [x] HY-3: `rm -rf dist` before `tsc` in the package scripts; confirm no test
+  or packaging step consumes orphaned `dist/` modules.
+
+#### Phase 1 completion record (landed 2026-10-06, bd-zv8u2sxi)
+
+Everything above the checkpoint record plus the ergonomics batch, in
+twelve commits on `braid/bd-zv8u2sxi-hub-mcp-phase-1-correctness`
+(stacked on Phase 0's branch per the PR-stack rule):
+
+- **ERG-1** (9f1a91c63): `read_file` → `{path, hash, content}`;
+  `write_file`/`patch_file` → `{path, hash}` (+`created` on the create
+  arm) and accept `expected_hash` — a stale hash is refused with the
+  CURRENT content + hash and changes nothing (compare-and-swap).
+- **ERG-2** (06a72087a): every write waits ≤ 2 s for hub acknowledgement
+  and reports `synced: true|false` (`wait_for_sync: false` opts out);
+  new sync-client export `awaitDelivery(paths, ms)` over the exit
+  drain's `isDelivered`/`remote-heads` plumbing (additive, no behavior
+  change; the index doc always participates). Includes create_project.
+- **ERG-4 + HY-1** (491e3b862): every error names parameter / state /
+  next tool; path errors list ≤ 3 closest existing paths (bigram-Dice);
+  the phantom `read_binary_file_metadata` reference is gone.
+- **ERG-6 + ERG-10** (cc4ac70a4): `instructions` rewritten as the
+  ~15-line operating guide (workflow, hash etiquette, `synced`,
+  watching, auth, read-only notice when flagged, untrusted-content
+  note).
+- **BP-18** (5a41c8bea): authorization endpoint validated before
+  surfacing — https + public host, loopback only with the insecure
+  hatch; the Phase 0 `it.fails` net flipped. Also sank a latent
+  listener-promise leak the new early return exposed.
+- **HY-6** (cc2cf2dd7): the bundle's automerge init is now a generated
+  shim calling `initSync({ module })` (bd-2qnnrwbd closed);
+  `q2 mcp` startup emits zero stderr bytes. bd-rgt8rglx's
+  `TimeoutNegativeWarning` does not reproduce in the post-SDK-v2 stack;
+  a warm-keyring e2e pins both halves (closed).
+- **BP-3** (6d94d8abb): `ctx.mcpReq.signal` threads to
+  `waitForChange`; cancel unregisters the waiter + timer and rejects
+  AbortError (not a wrapped isError). The second `it.fails` net
+  flipped — zero expected-fails remain in the suite.
+- **BP-1** (ea3a8dba2): `outputSchema` + `structuredContent` on all ten
+  data tools (extended to `read_file` — the hash→`expected_hash` loop
+  is exactly what machine-readable structure is for). Text fallbacks
+  byte-compatible (`list_files` keeps the bare array; structure is
+  `{ files }`). Harness net armed: 10 golden cases + converse coverage
+  assertion.
+- **BP-10** (a2832908c): launcher injects `QUARTO_MCP_SERVER_VERSION` =
+  `0.32.0+<embed commit>[.dirty]`; standalone falls back to the bundle's
+  build-info stamp; `Implementation.description` + `websiteUrl` set and
+  verified on both eras.
+- **BP-9** (bf448859a): human titles on every tool; icons deferred to
+  Phase 5.
+- **BP-12 + BP-13** (2843f4a82): `authenticate` serialized (second call
+  sees the first's stored credential); `authenticate_status` reports
+  `{authenticated, hub, identity?, expiry?}` with no flow. Tool budget
+  13/24 with auth configured.
+- **HY-3** (54e12cff6): build script `rm -rf dist` first; bundle builds
+  from `src` so tests + `bin` were the only orphan consumers.
+- **bd-qt7h8h5g** (d404a005f, strand closed): manager keyed by
+  (server, indexDocId); share-URL `server=` routes the call, joined
+  authorless — the probe physically cannot attach a Bearer cross-origin;
+  foreign 401/403 → `ForeignHubAuthRequiredError`.
+
+**Phase-close gate.** `cargo xtask verify` green (14/14 — one
+pre-existing flake hit on the first run:
+`quarto-sync-client` `doc-inventory.test.ts` drops the binary doc under
+load, tracked as bd-c72wsugj / bd-fuw5gcni, unrelated to this phase's
+additive sync-client export; rerun green). `npm run test -w
+ts-packages/quarto-hub-mcp` green (29 files, 328 passed + 3 skips, 0
+expected-fail). e2e-auth 4/4 with the q2-launcher channel bound (embed
+at branch tip, freshness confirmed by `q2 mcp --launcher-info`).
+
+**E2E (real binary, recorded).** `./target/debug/q2 mcp --server
+ws://127.0.0.1:1/ws`, output inspected via jq: legacy `initialize` →
+`serverInfo { name: quarto-hub, version: 0.32.0+ea3a8dba2.dirty,
+description, websiteUrl }`, 2025-11-25; modern (camelCase envelope)
+`server/discover` → `supportedVersions: ["2026-07-28"]` + instructions,
+`tools/list` → `ttlMs: 3600000, cacheScope: "private"`; startup stderr
+zero bytes.
+
+**Eval suite (8 tasks — added `stale-write-recovery`, which drives a
+designed stale-hash refusal → merge → retry recovery):**
+`eval/results/2026-10-06T11-41-51/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 4 | 98/683 | \$0.75 | 0 | 0 | 23s |
+| read-and-report | PASS | 4 | 66/724 | \$0.50 | 0 | 0 | 13s |
+| patch-typo | PASS | 6 | 130/1030 | \$0.55 | 0 | 0 | 17s |
+| write-new-file | PASS | 6 | 130/1055 | \$0.55 | 0 | 0 | 20s |
+| rename-file | PASS | 7 | 130/1074 | \$0.56 | 0 | 0 | 21s |
+| collaborator-edit | PASS | 4 | 66/717 | \$0.50 | 0 | 0 | 29s |
+| watch-live-edit | PASS | 5 | 98/1025 | \$0.54 | 0 | 0 | 50s |
+| stale-write-recovery | PASS | 6 | 130/2160 | \$0.64 | 1 | 1 | 51s |
+
+8/8 PASS, median 5.5 turns (baseline 4 — inside noise; the watch and
+recovery tasks are the long poles by design). `stale-write-recovery`\'s
+single `isError` is the DESIGNED stale-hash refusal; the transcript
+shows the agent receiving the structured `stale_expected_hash` payload
+(current content + hash) and merging without an extra read. All other
+tasks\' zero-`isError` streak holds through the result-shape changes
+(ERG-1/2, BP-1).
+
+### Phase 2 — Complete the file and project surface
+
+No new protocol surfaces; pure tool additions over existing sync-client APIs.
+
+Test specifications (red first):
+
+- [x] Binary round-trip: `write_file` (`encoding: "base64"`) → `read_file`
+  returns an `image` block for a PNG and an embedded blob for a PDF, identical
+  bytes, correct `mimeType`/`size`/`sha256`; `metadata_only` returns no bytes;
+  the default tool count stays ≤ 24 (CAP-4/5, ERG-5, HY-1 closed for real).
+- [x] `read_file` with `offset`/`limit` returns the requested lines; a file
+  over `max_bytes` returns `truncated: true` and a continuation hint;
+  `list_files` entries carry `size`/`mimeType`/`lines` (ERG-3).
+- [x] Folder lifecycle: create/list/delete; `list_files` includes folders
+  (CAP-6).
+- [x] `search_files` returns ranked matches with snippets, honors a result
+  cap, skips binaries (CAP-7).
+- [x] `get_project_info` shape: counts, identities, captures, ids, server,
+  auth mode (CAP-2; golden-shape test through the Phase 0 harness).
+- [x] `create_project` (with `name`), `connect_project`, and
+  `get_project_info` results embed a `shareUrl` that round-trips through
+  `parseProjectRef` (CAP-1).
+- [x] `list_projects` enumerates a project-set document passed by doc id or
+  share URL (CAP-3 MVP).
+
+Work items:
+
+- [x] CAP-4, CAP-5, CAP-6, CAP-7, CAP-2, CAP-1, CAP-3 (MVP), ERG-3 (each with
+  `outputSchema` from day one; CAP-2 needs the
+  `getIdentitiesFromIndex`/`getCapturesFromIndex` exports from the sync
+  client; CAP-3 MVP uses the re-exported project-set helpers).
+- [x] HY-5: `disconnect_project` tool (per-project teardown in
+  `ConnectionManager`; may need a small per-document release in the sync
+  client).
+- [x] CAP-17: user-facing docs page `docs/tools/q2-mcp.qmd` (or similar):
+  install via `q2 mcp --print-config`, auth walkthrough, tool reference,
+  `--read-only`, share-URL semantics, the collaboration model (hashes,
+  `synced`), and the untrusted-content note (ERG-10). (Sidebar
+  entry per the docs lint rules.)
+
+#### Phase 2 completion record (landed 2026-10-06, bd-oqp2kva8)
+
+All of the above, in eight commits on
+`braid/bd-oqp2kva8-hub-mcp-phase-2-file-project-surface` (stacked on
+Phase 1's branch per the PR-stack rule):
+
+- **Sync-client substrate** (793e2f7cf): `getIdentitiesFromIndex` /
+  `getCapturesFromIndex` moved to module level and exported (pure move);
+  new additive exports `updateBinaryFileContent` (in-place binary
+  replace keeping the doc's hash invariant in the client) and
+  `readProjectSetDoc` (one-shot project-set read over a temporary
+  repo+adapter); project-set types + `projectSetKey` re-exported. 13
+  new tests; full sync-client suite 180/180.
+- **CAP-4/5 + HY-1** (0d1155d8f): binary rides `read_file`/`write_file`
+  (ERG-5 rule (a), no sibling tools). Binary read: `image` block for
+  image MIME, embedded blob resource otherwise, structured
+  `{path, hash, type, mimeType, size}`; `metadata_only` skips the bytes.
+  Binary write: `encoding: "base64"` + optional `mime_type` (extension
+  inference), strict base64 validation, `expected_hash` works on
+  binaries (the stale refusal names the current hash and points at
+  read_file — bytes can't ride the error as text). The HY-1 interim
+  error is gone; its error-convention test flipped to the new contract.
+  **Note for Q-2 (Phase 5):** the blob resource's URI is
+  `hub://<indexDocId>/<path>` — an ephemeral reference for the result
+  payload only; Q-2 decides the public `hub://` resources contract.
+- **ERG-3** (c69cde0b2): `read_file` gains `offset`/`limit` (1-based
+  lines) and `max_bytes` (default 64 KB, cap 1 MB). Reads not reaching
+  EOF return `truncated: true` + `next_offset` + hint; windows are
+  line-aligned and byte-exact (walking `next_offset` reassembles the
+  file, pinned by test); a single line over the cap is byte-cut
+  (UTF-8-safe) with no line continuation and an explanatory hint.
+  `list_files` entries carry `size`/`mimeType` always and `lines` for
+  text. Two conformance goldens updated to the new entry shape.
+- **CAP-6** (bb49a2bc8): `create_folder` (idempotent, refuses a path
+  taken by a file) / `delete_folder` (refuses non-empty without
+  `recursive: true`, which deletes contained files first and reports
+  `files_deleted`). `list_files` includes explicit folder markers as
+  `type: "folder"`; folders merely implied by file paths are NOT
+  listed (deliberate — an empty folder exists only once created).
+- **CAP-7** (fa317be59): `search_files` — substring (case-insensitive
+  default) or regex; one 200-char snippet per matching line; ranked by
+  per-file count then path; `max_results` cap (default 20, hard 100)
+  with `truncated`/`total_matches`; binaries skipped; invalid regex is
+  an actionable error. Read-only tool → on the `--read-only` surface.
+- **CAP-1/2/3 + HY-5** (c3546da8d): `buildShareUrl` (the inverse of
+  `parseProjectRef`; `server=` only off the default hub, which moved to
+  share-url.ts). `create_project` gains `name`; `create_project`,
+  `connect_project`, `get_project_info` embed `shareUrl`.
+  `get_project_info` reports counts (files/binary/folders/unavailable),
+  identities + engine captures from the index sidecars, ids, server,
+  auth mode (foreign projects report `no-auth`), sync diagnostics.
+  `list_projects` enumerates a project-set by id or share URL
+  (`server=` routes authorless, same policy as project routing), sorted
+  by `lastAccessed`, each entry with a round-tripping shareUrl; a
+  project index id gets an actionable not-a-project-set error naming
+  `connect_project`. `disconnect_project` drops one project's
+  websocket+docs (pending `wait_for_change` polls are interrupted with
+  an honest error, never left hanging; bounded drain reports `synced`;
+  next call transparently reconnects) — session hygiene, not a project
+  write, so it sits on the read-only surface too. Tool budget 16/24
+  data tools (19/24 with auth) — matches the plan's tally exactly.
+- **Instructions + docs** (2b8b043ef): server `instructions` revised
+  for the new surface (living steering text). `docs/tools/q2-mcp.qmd`
+  (CAP-17): setup via `q2 mcp --print-config`, sign-in walkthrough,
+  share-URL semantics, collaboration model (hashes, `synced`, watching,
+  ranges), full tool reference, `--read-only`, untrusted-content note;
+  new Tools sidebar group; rendered with `q2` (one smart-quote error
+  fixed — plural possessive "collaborators\'").
+- **Pin updates** (67653400f): `hub-mcp.test.ts` + `inspector-smoke.test.ts`
+  keep their own tool-list copies (dist-spawning; a stale dist masked
+  them locally — `cargo xtask verify`\'s fresh build caught them). The
+  live-suite binary-read test flipped to the CAP-4 contract.
+- **Eval** (7068ffff4): two new tasks (`add-image-binary`,
+  `search-and-report`).
+
+**Phase-close gate.** `cargo xtask verify` green (14/14 — one
+pre-existing flake on the first run: `quarto-sync-client`
+`doc-inventory.test.ts`, the same bd-c72wsugj/bd-fuw5gcni flake Phase 1
+recorded; rerun green). `npm run test -w ts-packages/quarto-hub-mcp`
+green (39 files, 376 passed + 3 skips). Bundle rebuilt and embedded;
+freshness confirmed by `q2 mcp --launcher-info` (embed at branch tip,
+not dirty).
+
+**E2E (real binary, recorded).** Drove `./target/debug/q2 mcp
+--server <test-hub>` over stdio JSON-RPC (`McpTestClient` with a custom
+command; one-off script, transcript reviewed and discarded after
+recording): `tools/list` → 16 tools; `create_project` with `name` →
+shareUrl `…#/share/<id>?server=ws://127.0.0.1:51869/ws&name=Phase+2+e2e`;
+`write_file` base64 PNG → `{hash, mimeType: image/png, size: 70,
+synced: true}`; `read_file` → `image` block, bytes round-trip exact,
+`metadata_only` variant carries no bytes; `create_folder` →
+`list_files` shows `type: "folder"` plus `size`/`mimeType`/`lines` on
+file entries; `search_files` → ranked snippets; `read_file` window →
+`truncated: true, next_offset: 3` with hint; `get_project_info` → full
+shape (`auth_mode: "no-auth"`, counts, peers); `list_projects` on a
+hub-minted collection → entry with round-tripping shareUrl;
+`disconnect_project` → `{disconnected: true, synced: true}`;
+`delete_folder` recursive → `files_deleted: 1`. Output inspected for
+every call.
+
+**Eval suite (10 tasks — added `add-image-binary` and
+`search-and-report`):** `eval/results/2026-10-06T13-24-19/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/508 | \$0.59 | 0 | 0 | 11s |
+| read-and-report | PASS | 4 | 98/531 | \$0.51 | 0 | 0 | 12s |
+| patch-typo | PASS | 6 | 130/1575 | \$0.62 | 0 | 0 | 25s |
+| write-new-file | PASS | 6 | 130/1096 | \$0.58 | 0 | 0 | 21s |
+| rename-file | PASS | 7 | 162/1218 | \$0.59 | 0 | 0 | 37s |
+| collaborator-edit | PASS | 4 | 98/899 | \$0.53 | 0 | 0 | 34s |
+| watch-live-edit | PASS | 5 | 130/1239 | \$0.58 | 0 | 0 | 50s |
+| stale-write-recovery | PASS | 6 | 162/1796 | \$0.65 | 1 | 1 | 49s |
+| add-image-binary | PASS | 6 | 130/1300 | \$0.61 | 0 | 0 | 25s |
+| search-and-report | PASS | 4 | 66/566 | \$0.50 | 0 | 0 | 25s |
+
+10/10 PASS, median 5 turns (Phase 1: 5.5 — inside noise, no
+regression). `add-image-binary` shows the agent discovering
+`encoding: "base64"` from the tool schema alone and landing a
+byte-exact PNG on the hub in 6 turns with zero errors;
+`search-and-report` answered `notes/deep.qmd:3` in 4 turns. The only
+`isError` remains the DESIGNED stale-hash refusal in
+`stale-write-recovery`.
+
+### Phase 3 — Collaboration awareness
+
+Test specifications:
+
+- [x] `list_presence` reflects a fake peer's ephemeral presence message on the
+  index channel (test-hub + hand-crafted message per `presenceService`\'s
+  schema); the MCP server itself emits **no** presence (CAP-8, Q-3).
+  *(presence.test.ts: file-channel, index-channel, leave, and wiretap
+  no-emit cases; presence-tracker.test.ts units staleness/pruning.)*
+- [x] `get_file_history` returns ordered change summaries with author
+  attribution; called with `from_hash`/`to_hash` it returns a diff between
+  the two heads matching an expected patch (CAP-9).
+  *(file-history.test.ts, incl. an attributed-collaborator case;
+  file-history-diff.test.ts units the unified-diff formatter.)*
+- [x] `wait_for_change` emits progress notifications when given a
+  `progressToken` (BP-4).
+  *(project-watch.test.ts wire case; wait-for-change-project-handler.test.ts
+  fake-timer cadence cases.)*
+- [x] `wait_for_change` without `path` returns the set of changed paths with
+  hashes; the agent's own write (its post-write `hash` passed as
+  `since_hash`) is not reported (CAP-18).
+  *(project-watch.test.ts: edit/add/remove kinds, exclusion + control.)*
+- [x] `restore_file_version` to a prior hash produces a new change whose
+  content equals the historical text and whose result carries the
+  pre-restore `hash` (CAP-19, if Q-6 says yes).
+  *(restore-file-version.test.ts, incl. reversal via `pre_restore_heads`.)*
+
+Work items:
+
+- [x] CAP-8 `list_presence` (passive only).
+- [x] CAP-18 project-wide watch; CAP-19 `restore_file_version` (Q-6: **yes** —
+  the plan's working answer held; `destructiveHint`, reversible result,
+  `expected_hash` CAS, no-op when already current).
+- [x] CAP-9 `get_file_history` (automerge `getHeads`/`view`/`diff`; bounded
+  `limit`; `from_hash`/`to_hash` diff mode).
+- [x] BP-4 progress on `wait_for_change`.
+- [x] Q-3 decision recorded (agent self-announcement). **DECIDED
+  2026-10-06:** the server never announces itself — it shares the human's
+  author id, so writing "Claude (via MCP)" into the `identities` map would
+  rename the human's own entry, and fake cursor presence would misrepresent
+  them. `list_presence` is passive-only (a wiretap test proves the server
+  emits nothing). Honest agent attribution needs a hub-minted, user-linked
+  agent author id so the web client can show "Charlie (via Claude)" — filed
+  as **bd-b2wpeud0** (related to bd-r62zad5b; same endpoint and identity
+  model, to be designed with that owner).
+
+**Eval suite (12 tasks — added `watch-project-edit` and
+`history-and-restore`):** `eval/results/2026-10-06T15-09-54/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/509 | \$0.58 | 0 | 0 | 11s |
+| read-and-report | PASS | 4 | 98/575 | \$0.52 | 0 | 0 | 12s |
+| patch-typo | PASS | 6 | 130/1087 | \$0.58 | 0 | 0 | 18s |
+| write-new-file | PASS | 6 | 130/1068 | \$0.58 | 0 | 0 | 32s |
+| rename-file | PASS | 7 | 162/1768 | \$0.63 | 0 | 0 | 30s |
+| collaborator-edit | PASS | 4 | 66/637 | \$0.51 | 0 | 0 | 13s |
+| watch-live-edit | PASS | 5 | 98/859 | \$0.55 | 0 | 0 | 49s |
+| stale-write-recovery | PASS | 6 | 130/2188 | \$0.67 | 1 | 1 | 36s |
+| add-image-binary | PASS | 5 | 130/1405 | \$0.61 | 0 | 0 | 37s |
+| search-and-report | PASS | 4 | 66/371 | \$0.49 | 0 | 0 | 16s |
+| watch-project-edit | PASS | 5 | 130/848 | \$0.56 | 0 | 0 | 57s |
+| history-and-restore | PASS | 10 | 194/2855 | \$0.77 | 0 | 0 | 49s |
+
+12/12 PASS, median 5 turns (Phase 2: 5 — no regression). The unnamed-tool
+prompts did their job: `watch-project-edit` discovered the no-`path`
+project-wide arm of `wait_for_change` from the tool description alone
+(3× `wait_for_change`), and `history-and-restore` drove the full
+investigate → restore loop (`get_file_history` ×5, `restore_file_version`
+×3, zero `isError` — the longer 10-turn path is investigation, not
+flailing). The only `isError` remains the DESIGNED stale-hash refusal in
+`stale-write-recovery`.
+
+**E2E (real binary, recorded).** Drove `./target/debug/q2 mcp
+--server <test-hub>` over stdio JSON-RPC (`McpTestClient` with a custom
+command; one-off script, transcript reviewed and discarded after
+recording): `tools/list` → **19 tools** including `list_presence`,
+`get_file_history`, `restore_file_version`; `create_project` (2 files,
+`name`) → shareUrl with `server=` + `name=` filled; `list_presence`
+after hub-side broadcasts → `E2E Xavier` on `notes.qmd` (file channel)
+and `Index Ivy` with `file_path: null` (index channel), both
+`active: true`; project-wide `wait_for_change` with a collaborator edit
+landing mid-wait → `{changed: true, changes: [{path: "live.qmd", kind:
+"edited", hash: sha256:556e…}]}`; `get_file_history` list → 2 entries,
+newest first, heads/hashes/authors/`added_chars`/`removed_chars` (4/4
+for the beta→BETA edit); diff mode `from_hash`/`to_hash` → exact
+unified diff `@@ -1,3 +1,3 @@ alpha -beta +BETA gamma`;
+`restore_file_version` → `{restored_from, pre_restore_hash,
+pre_restore_heads, hash, synced: true}` with `read_file` confirming
+`alpha\nbeta\ngamma\n` restored, then a second restore with
+`pre_restore_heads[0]` undoing the restore itself. Output inspected for
+every call. One fix found by inspection: automerge change `time` is
+seconds since epoch — entries now surface it ×1000 as ms (the JS
+convention) so `new Date(entry.time)` works.
+
+**Phase-close gate.** `cargo xtask verify` green (14/14, full — hub-build
+leg included). `npm run test -w ts-packages/quarto-hub-mcp` green (45
+files, 420 passed + 3 skips). Bundle rebuilt and embedded; freshness
+confirmed by `q2 mcp --launcher-info` (embed at branch tip 56557c70a,
+not dirty). Tool budget: 19/24 data tools (22/24 with auth) — matches
+the plan's tally exactly. Commits: CAP-18+BP-4 (4878e5b0b), CAP-8
+(f29caf637), CAP-9 (15258f24e), CAP-19 (30f020a87), Q-3+steering+docs
+(41a01bf0f), eval (27c2d332f), time-unit fix (f83142b50), pin updates
+(56557c70a).
+
+### Phase 4 — Quarto-specific intelligence
+
+- [x] **Spike S-1 (gates CAP-11):** qmd parser in Node. Compare (a)
+  `wasm-qmd-parser` built with a `nodejs` target and staged into the esbuild
+  bundle (precedent: keyring `.node` staging), vs. (b) napi-rs module for
+  `pampa`. Output: decision + measured bundle-size/startup cost. Time-boxed;
+  failure mode = CAP-11 slips, rest of phase proceeds.
+
+#### S-1 spike record (2026-10-06, bd-738mbhpj)
+
+**Decision: (a) — `wasm-qmd-parser --target nodejs`, staged as an external
+package in `dist-bundle/node_modules/wasm-qmd-parser/`** (exactly the
+keyring `.node` pattern: esbuild `external`, Node resolves real files at
+runtime, the pkg's own `__dirname`-relative `readFileSync` of the `.wasm`
+keeps working — bundling it would break that, same as automerge's node
+entrypoint).
+
+Measurements (Apple Silicon, Node 24, `--release` build with wasm-pack's
+bundled wasm-opt):
+
+| metric | value |
+|---|---|
+| `.wasm` size | 4.61 MB raw / 1.24 MB gzip |
+| `require` + instantiation | 3.8 ms |
+| first parse (cold) | 17 ms |
+| warm parse, ~1 KB doc | 0.11 ms |
+| warm parse, 34 KB doc | 28 ms (linear scaling) |
+| bundle impact | +4.6 MB raw to `dist-bundle/` and the q2 embed; ~1.24 MB to gzipped channels |
+
+Option (b) napi-rs rejected: a new crate plus per-platform `.node` builds is
+a build axis the repo does not have (keyring is vendored from npm, not built
+here), size multiplies per staged platform (~4–8 MB × 4–5 targets vs one
+4.6 MB all-platform wasm), and the parse latency win is irrelevant when a
+34 KB document parses in 28 ms and tool calls are network-bound. Option (a)
+also guarantees parser parity with the web preview — same crate, same pampa.
+
+API facts pinned by the spike:
+
+- `parse_qmd(qmd, "true")` returns `{"success":true,"ast":"<json string>"}`
+  (double-encoded); locations ride every node as
+  `l: {b: {c,l,o}, e: {c,l,o}, f}` with byte offsets `o` — everything a
+  section selector needs. Parse is error-tolerant (unclosed fence still
+  returns `success: true`).
+- AST → qmd is `convert(astJson, "json", "qmd")`. **`write_qmd` is misnamed**
+  — it round-trips JSON to JSON; filed bd-1ldys1z6.
+- The generated CJS pkg survives Node's `cjs-module-lexer`: named ESM
+  imports (`import { parse_qmd } from 'wasm-qmd-parser'`) work, so the MCP
+  source uses ordinary imports with the package marked external.
+- Lazy-load story: the parser is only needed once a project with `.qmd`
+  files connects; 3.8 ms init makes even eager loading invisible.
+
+Build fixes the spike had to land first (the crate did not compile on
+`main` for *any* target — `build-wasm.yml` is `workflow_dispatch`-only, so
+the rot was invisible; CI gap filed as bd-s0tm9sdq):
+
+1. **Duplicate strong symbols** (`memcmp`, `vsnprintf`, `fclose`, …):
+   tree-sitter 0.26 compiles `tree-sitter-language`\'s `wasm/src/*.c` into
+   `libtree_sitter.rlib`, colliding with the crate's `c_shim.rs`. Fixed with
+   the established repo pattern the crate was missing:
+   `[patch.crates-io] tree-sitter-language = { path =
+   "../tree-sitter-language-wasm-shim" }` (empty C stubs; see the 2026-04-20
+   wasm-shim-merge plan).
+2. **Undefined `snprintf`** after the patch: the crate's local `c_shim.rs`
+   predated the merged superset. Deleted it and swapped to the shared
+   `wasm-c-shim` crate (its symbol set is a strict superset; already used by
+   wasm-quarto-hub-client and pampa's wasm tests).
+3. **`panic_unwind does not have the panic strategy unwind`**: cargo
+   *concatenates* `target.*.rustflags` across config files, so the
+   workspace root's `panic=unwind,+exception-handling` (for hub-client's
+   Lua) leaks into this crate. Fixed in the crate's `.cargo/config.toml`
+   with a trailing `-C panic=abort` (rustc last-wins) — no Lua here, and
+   abort avoids the `-Zbuild-std`/rust-src requirement. Verified: bare
+   `wasm-pack build --target nodejs|--target web` both work with committed
+   config alone.
+
+Test specifications:
+
+- [x] `get_outline` on a fixture qmd returns the expected heading tree;
+  `read_file` with a `section` selector returns exactly that section's
+  content (CAP-11).
+- [x] `patch_file` with a `section` selector replaces exactly one section's
+  content; concurrent outside edits are preserved (CRDT merge) (CAP-11).
+- [x] `render_project` on a fixture project with a deliberate error returns
+  `structuredContent.diagnostics[]` with the expected `Q-` code and source
+  location; absent `--allow-render`, the tool is not listed (CAP-12).
+  *(render-real.test.ts: Q-17-2 with file/line/column from the real binary,
+  gated on target/debug/q2; render-tool.test.ts: fake-q2 wire cases incl.
+  both NDJSON envelope shapes, timeout, outputs, materialization +
+  path-escape guard; render-gating.test.ts: the three listing gates.)*
+- [x] `docs` with a `query` returns ranked pages; `docs` with a `page`
+  returns one page's markdown (CAP-13 / bd-dn81ol95).
+  *(docs-corpus.test.ts: corpus parse/rank/lookup units; docs.test.ts:
+  tool-level through a fake-q2 stub — ranking, snippets, max_results
+  truncation, miss suggestions, placeholder-embed error, read-only
+  surface; conformance golden case with its own stub.)*
+
+Work items:
+
+- [x] CAP-11 AST surface (post-S-1): `get_outline` + `section` selectors on
+  `read_file`/`patch_file`. **Design refinement recorded:** the section
+  splice is computed from the parser's line locations against the *current*
+  text and applied through `updateFileContent` (automerge's diff) — the
+  sync-client `getFileAst`/`updateFileAst` AST-cache path was evaluated and
+  rejected: `writeQmd` re-serializes the whole document (clobbering +
+  writer-normalization risk) for zero gain over a line-range splice.
+  `section` replaces the whole range read_file shows (heading included) —
+  read/patch agree exactly; an empty `new_string` deletes the section; all
+  math is line-based (never byte offsets: automerge text is UTF-16).
+- [x] CAP-12 `render_project` / `render_file`: launcher injects
+  `QUARTO_Q2_PATH` (`current_exe`); server materializes the project via
+  `exportProjectAsZip` → temp dir → `q2 render --json-errors`; parse the
+  JSON diagnostics wire into `structuredContent`; **opt-in via
+  `--allow-render`** (code-execution gate), documented with the security
+  model. **Design decisions recorded:** (1) consolidated to ONE `render`
+  tool with an optional `path` (the plan's own ERG-5 rule (a) — same verb,
+  varied by parameter; the CAP-9 diff-arm consolidation precedent).
+  (2) Materialization walks `state.files` directly — the server already
+  holds every payload; `exportProjectAsZip` is the browser-side API and a
+  zip round-trip buys nothing in Node. (3) Three render modes, because
+  `q2 render .` without `_quarto.yml` is Q-7-7 and bare `q2 render` is
+  Q-7-3: `file` (one `path`), `project` (directory render when
+  `_quarto.yml` exists), `files` (loose-projects fallback — each `.qmd`
+  passed explicitly, capped at 500 for argv safety). (4) `--read-only`
+  wins the `--allow-render` combination (code execution is beyond "look
+  but don't touch"); `QUARTO_Q2_PATH` falls back to `q2` on PATH for the
+  standalone/npx channel. (5) Diagnostics are relativized out of the temp
+  dir (realpath both sides — macOS /tmp symlink) and capped streams +
+  SIGTERM→SIGKILL timeout keep a runaway render bounded.
+- [x] CAP-13 `docs` tool (bd-dn81ol95 + bd-b6cocsxw; design the
+  `q2 docs llms --json` ↔ MCP seam). **Seam design recorded:** ONE
+  subprocess per process lifetime — `q2 docs llms --full` via
+  `QUARTO_Q2_PATH` (the CAP-12 launcher injection doubles as the CAP-13
+  seam; PATH fallback for standalone). The corpus's per-page
+  `---\ntitle:/url:` markers (assemble_llms_full) make page attribution
+  exact, so search and page fetches serve from the in-process cache.
+  Chosen over (a) launcher-extracted doc dirs (standalone channel would
+  need a second path) and (c) staging the corpus into dist-bundle (~1 MB
+  duplication plus a docs-render step in every bundle build). The
+  `--json` flag (bd-b6cocsxw) shipped anyway — structured
+  `--list`/`--embed-info` for other machine consumers; search is
+  term-tokenized (AND-matches rank first), snippets pick the
+  highest-term-density line. Both strands closed. Tool budget: 21/24
+  data, 24/24 with auth — at the ceiling exactly; Phase 5+ additions
+  must displace or consolidate.
+- [x] CAP-10 `clear_capture` decision (Q-4). **DECIDED 2026-10-06: no
+  tool — human-only.** `clearCapture` deletes an entry from the shared
+  index document, which drives *other* collaborators\' preview engines —
+  clearing a capture mid-session forces an unexpected re-execution in a
+  teammate's web preview, the same invisible-shared-mutation class Q-3
+  rejected. The agent's own render loop (CAP-12) renders in a temp dir
+  via `q2` and never touches hub-side captures, so there is no agent
+  need; the CAP-2 read surface (captures in `get_project_info`) lets the
+  agent *observe* a stale/errored capture and advise the human, who
+  clears it in the web client. Revisit only if a future capability
+  (agents driving hub-side preview execution) creates a real need.
+
+#### Phase 4 completion record (landed 2026-10-06/07, bd-738mbhpj)
+
+All of the above, in eight commits on
+`braid/bd-738mbhpj-hub-mcp-phase-4-quarto-intelligence` (stacked on
+Phase 3's branch per the PR-stack rule): S-1 spike + build un-rot
+(48b2b981f), CAP-11 + CI wiring (c851bd627, f0fd2b895), CAP-12
+(96a8f2732), CAP-13 (6c16af48a), Q-4 (b66b940a7), eval + dist fallback
+(25bdc75ae), and the e2e-driven fixes below (this commit).
+
+**E2E (real binary, recorded).** Drove `./target/debug/q2 mcp
+--allow-render` over stdio JSON-RPC (`McpTestClient` with a custom
+command; one-off script, transcript reviewed and discarded after
+recording): `tools/list` → **22 tools** (21 data + opt-in `render`, no
+auth env); `get_outline` → heading tree with ids and line ranges;
+`read_file section=Methods` → exact section with `section` metadata and
+`truncated: false` (the e2e caught truncation being reported against
+the file, not the section — fixed: a complete section read is
+`truncated: false, next_offset: null`, a max_bytes-cut section points
+its continuation inside the section); `patch_file section=Methods` →
+read-back confirms only the section changed; `docs query` → 48 ranked
+hits from the REAL embedded corpus (top hit `guides/authoring/
+figures.md` with a term-dense snippet); `docs page` → full markdown;
+`render` (files mode, broken include) → `Q-17-2` with
+file/line/column — the e2e ALSO caught `q2 render a.qmd b.qmd` being
+Q-7-4 (multiple paths require a project), so loose-files mode now runs
+one invocation per file under a shared deadline; `render` after
+patching → `ok: true` with real outputs; single-file mode → clean.
+Output inspected for every call; server stderr clean.
+
+**Eval suite (15 tasks — added `outline-and-section-edit`,
+`docs-lookup`, `fix-render-error`):**
+`eval/results/2026-10-06T23-22-28/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/441 | \$0.54 | 0 | 0 | 11s |
+| read-and-report | PASS | 4 | 98/785 | \$0.56 | 0 | 0 | 18s |
+| patch-typo | PASS | 6 | 130/1415 | \$0.64 | 0 | 0 | 33s |
+| write-new-file | PASS | 6 | 130/986 | \$0.60 | 0 | 0 | 17s |
+| rename-file | PASS | 7 | 130/1384 | \$0.63 | 0 | 0 | 36s |
+| collaborator-edit | PASS | 4 | 98/740 | \$0.56 | 0 | 0 | 24s |
+| watch-live-edit | PASS | 5 | 98/766 | \$0.57 | 0 | 0 | 50s |
+| stale-write-recovery | PASS | 6 | 162/2254 | \$0.71 | 1 | 0 | 38s |
+| add-image-binary | PASS | 6 | 130/1448 | \$0.65 | 0 | 0 | 25s |
+| search-and-report | PASS | 4 | 98/438 | \$0.55 | 0 | 0 | 10s |
+| watch-project-edit | PASS | 5 | 130/888 | \$0.59 | 0 | 0 | 58s |
+| history-and-restore | PASS | 9 | 130/2209 | \$0.76 | 0 | 0 | 32s |
+| outline-and-section-edit | PASS | 9 | 162/2004 | \$0.71 | 0 | 0 | 29s |
+| docs-lookup | PASS | 5 | 98/776 | \$0.59 | 0 | 0 | 15s |
+| fix-render-error | PASS | 7 | 162/1933 | \$0.71 | 0 | 0 | 30s |
+
+15/15 PASS, median 5 turns (Phases 2/3: 5 — no regression), zero
+`isError` except the DESIGNED stale-hash refusal in
+`stale-write-recovery`. The first outline run caught the tsc `dist/`
+build having no staged parser (only dist-bundle had one) — the agent
+recovered via `read_file` + `old_string` exactly as designed, and the
+gap is fixed (env-spec → staged-package → repo-relative fallback in
+`qmd-parser.ts`); the rerun shows the intended `get_outline` →
+`read_file section` → `patch_file section` (with `expected_hash`)
+sequence. `fix-render-error` drove the full CAP-12 loop: render →
+`Q-17-2` → fix → clean render.
+
+**Phase-close gate.** `cargo xtask verify` green (14/14, full — hub-build
+leg included; one pre-existing fix first: `--json` needed a manual
+pairing check because clap's group-`requires` doesn't propagate through
+the tuple-variant subcommand — the verify run caught it after the
+local run had masked it). `npm run test -w ts-packages/quarto-hub-mcp`
+green (49 files, 498 passed + 3 skips). Bundle rebuilt and embedded;
+freshness confirmed by `q2 mcp --launcher-info` (embed at branch tip).
+Docs embed staged (`cargo xtask build-agents-docs`, 331 artifacts) for
+the real-corpus e2e/eval. Tool budget: **21/24 data tools, 24/24 with
+auth — at the ERG-5 ceiling exactly**; Phase 5+ additions must
+displace, consolidate, or move to resources/prompts (the plan's own
+rules (a)/(b)). New strands filed this phase: bd-s0tm9sdq
+(wasm-qmd-parser CI coverage), bd-1ldys1z6 (`write_qmd` misnomer).
+
+### Phase 5 — MCP-native surfaces
+
+Test specifications:
+
+- [x] `resources/list` on a connected project enumerates files (paginated with
+  `nextCursor` on a 500-file fixture); `resources/read` returns text contents
+  and base64 blob contents for binaries; a modern client's
+  `subscriptions/listen` and a legacy client's `resources/subscribe` both
+  receive `notifications/resources/updated` on `onFileChanged` (BP-5; the
+  SDK maps eras).
+  *(resources.test.ts: URI contract units, 500-file pagination walk +
+  SDK-client aggregate, two-project enumeration, text/blob reads,
+  template advertisement, legacy subscribe gating + unsubscribe,
+  list_changed on add/remove, resource_link blocks. resources-modern.test.ts:
+  2026-07-28-pinned SDK client over the real stdio entry — negotiated
+  capabilities, listen → updated on the listened file only, silence after
+  close, list_changed to listChanged listeners.)*
+- [x] Write-tool results include a `resource_link` to the file's `hub://` URI
+  (BP-5).
+  *(write_file text+binary, create_file text+binary, patch_file both arms,
+  rename_file (links the NEW URI), restore_file_version both arms.)*
+- [x] `prompts/list` exposes the workflow templates; `prompts/get` renders
+  with arguments (BP-6).
+  *(prompts.test.ts: all four on the full surface, read-only drops the
+  edit/render pair, no-`--allow-render` drops fix-render-errors, args
+  schemas, content assertions per template, unknown-name protocol error.)*
+
+Work items:
+
+- [x] BP-5 resources + resource template + subscribe bridge over the
+  sync-client callbacks; `notifications/resources/list_changed` on file
+  add/remove; `resource_link` blocks in write results;
+  `ttlMs`/`cacheScope` on list results (BP-17). **Design decisions
+  recorded:**
+  (1) **Q-2 resolved:** `hub://project/<indexDocId>/<path>[?server=…]`.
+  The doc id rides in the PATH, not the host — RFC 3986 host normalizers
+  lowercase and automerge doc ids are case-sensitive base58 (Node's URL
+  parser happens to preserve opaque-host case, but this is a public
+  contract other parsers will normalize). The literal `project` segment
+  leaves room for other resource kinds (`hub://collection/…`). `?server=`
+  appears exactly when a share URL routed the project to a foreign hub,
+  mirroring the share-URL grammar — a resource URI identifies precisely
+  what a share URL identifies. The Phase 4 ephemeral blob URI
+  (`hub://<id>/<path>`, doc id in host position) is aligned to the
+  contract.
+  (2) **Handlers are hand-rolled on the low-level `Server`**, not
+  `McpServer.registerResource`: the SDK's built-in `resources/list`
+  handler does not paginate (ignores `cursor` entirely), and the contract
+  requires `nextCursor` (PAGE_SIZE 100; 500-file fixture walks five
+  pages). Registration order in createServer: declare
+  `capabilities.tools/prompts` with `listChanged: false` at construction
+  (the SDK's `?? true` registration default would otherwise claim change
+  notifications for lists that are fixed at construction — and would
+  contradict the long cache hints); `registerResources` then declares
+  `resources: {subscribe: true, listChanged: true}` on the underlying
+  server and sets the list/read/templates handlers.
+  (3) **Era bridge:** SDK v2.3.1 has no built-in legacy
+  `resources/subscribe` handler — the serving entry (serveStdio's listen
+  router) owns the modern `subscriptions/listen` path and filters the
+  instance's outbound change notifications per subscription (dropping
+  what nobody requested; the modern era never delivers un-requested
+  change types). So the server tracks legacy subscriptions itself
+  (per-instance Set, gated by `parseFileResourceUri`) and the bridge
+  emits `sendResourceUpdated` unconditionally on modern / subscription-
+  gated on legacy. `createServer` gains an `era` option fed by
+  `serveStdio`\'s factory context (`ctx.era`).
+  (4) **Event seam:** `ConnectionManager.onProjectEvent` —
+  `added/changed/removed` per file plus `connected/disconnected`
+  lifecycle. `list_changed` is debounced (150 ms trailing edge, unref'd
+  timer): a project connect fires one `added` per existing file, and the
+  notification says "the list changed", not "an entry changed".
+  Creation-time adds (doc id unknown until createNewProject resolves)
+  are deliberately dropped.
+  (5) **resources/list enumerates every connected project's files**
+  (the verb takes no project argument), sorted by URI for deterministic
+  pages; entries carry `uri/name/mimeType/size`.
+  (6) **Cache hints (BP-17):** long private TTL on `prompts/list` and
+  `resources/templates/list` (both static); `resources/list` /
+  `resources/read` keep the no-cache default — files are live-edited
+  data.
+
+  **Security considerations (Q-2):** a resource URI carries the
+  project's automerge doc id — a full bearer capability on no-auth
+  hubs, and a necessary (not sufficient) credential on authenticated
+  ones, where an allowlisted Bearer is also required. Share URLs
+  already distribute the (doc id, server) pair, but deliberately, by
+  the user's hand; resource URIs flow *automatically* — every
+  `resources/list` page, every `resource_link` in a write result,
+  every `resources/updated` notification, the `review-draft` embedded
+  resource — into model context, host transcripts, and provider logs,
+  channels that treat URIs as identifiers, not secrets (nothing
+  redacts doc ids the way `redactTokens` redacts Bearers). The leak
+  asymmetry matters: a leaked file's contents are a one-time
+  disclosure, but a leaked doc id is standing read/write access with
+  no rotation story (remediation is forking the document to a new
+  id), and `?server=` completes the locator+capability pair in one
+  string. Path placement remains correct — host normalizers lowercase
+  and base58 doc ids are case-sensitive — but it puts the capability
+  in the most-logged component of the URI; there is no better slot
+  (userinfo is deprecated and equally logged). Finally,
+  `resources/read` dials whatever `server=` names, which admits
+  prompt-injection-driven connects to foreign hubs via URIs embedded
+  in file contents; mitigations in place: the Bearer is never
+  replayed cross-origin (audience-bound), the insecure-transport gate
+  refuses Bearer over non-loopback `ws://`, and the no-auth attempt
+  runs first. Residual risk: a *no-auth* foreign hub connects
+  silently — a consent gate (dial only hubs previously seen from
+  user-supplied input) is the candidate fix, filed as bd-zc3ubxiv
+  with an implementation assessment.
+  User-facing warning added in `docs/tools/q2-mcp.qmd` ("Resources
+  and prompts").
+- [x] BP-6 prompts: `review-draft`, `collaborate-with-human`,
+  `safe-edit-workflow` (read → patch → confirm), plus the render-flavored
+  `fix-render-errors` (render → read diagnostics → patch → re-render) — all
+  four land here, now that CAP-12 has shipped in Phase 4. Gated by mode:
+  read-only drops the edit/render pair; fix-render-errors requires
+  `--allow-render`. `review-draft` embeds the draft as an embedded
+  resource under its hub:// URI. **Skills-over-MCP decided (§6 row):**
+  prompts are the portable baseline; no mainstream host advertises
+  ext-skills — revisit at Phase 6 registry listing.
+- [x] BP-9 icons. Quarto mark (from `hub-client/public/quarto-icon.svg`,
+  hand-minified, data-URI inlined for the single-file bundle) on the
+  `Implementation` record, the four prompts, and the resource template —
+  deliberately NOT on each of the 24 tools: ~600 chars × 24 entries on
+  every `tools/list` is ~15 KB of agent context per session for pure
+  chrome, and hosts fall back to the server icon for unadorned tools.
+
+#### Phase 5 completion record (landed 2026-10-07, bd-rpra6kpq)
+
+**E2E (real binary, recorded).** Drove `./target/debug/q2 mcp` over
+stdio with a 2026-07-28-pinned SDK client AND a default-negotiation
+legacy client (one-off `drive.mjs` script, transcript reviewed and
+discarded after recording). Modern leg: `server/discover` →
+capabilities `{prompts:{listChanged:false}, resources:{subscribe:true,
+listChanged:true}, tools:{listChanged:false}}`, Implementation carries
+the SVG icon + version `0.32.0+9ae309745.dirty`; `create_project` →
+`resources/list` → two entries with `hub://project/<id>/<path>` URIs,
+`text/markdown` mimeTypes and byte sizes; `resources/read` → the file's
+text; `listen({resourceSubscriptions: [index.qmd],
+resourcesListChanged: true})` → honored filter echoed → `write_file` →
+result content `[text, resource_link]` with the link's hub:// URI →
+`notifications/resources/updated` for exactly the listened URI;
+`write_file` of a new path → `notifications/resources/list_changed`;
+`prompts/list` → `review-draft, collaborate-with-human,
+safe-edit-workflow` (no `--allow-render`, so no fix-render-errors);
+`prompts/get review-draft` → `user:text` (review protocol) +
+`user:resource` (the draft embedded under its hub:// URI, current
+content). Legacy leg: `resources/subscribe` accepted; `write_file` →
+`notifications/resources/updated` for the subscribed URI. Output
+inspected for every call; server stderr clean.
+
+**Eval suite (same 15 tasks):** `eval/results/2026-10-07T08-19-49/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/518 | \$0.77 | 0 | 0 | 10s |
+| read-and-report | PASS | 4 | 98/592 | \$0.55 | 0 | 0 | 16s |
+| patch-typo | PASS | 6 | 130/1439 | \$0.64 | 0 | 0 | 25s |
+| write-new-file | PASS | 6 | 130/992 | \$0.60 | 0 | 0 | 20s |
+| rename-file | PASS | 7 | 162/1663 | \$0.65 | 0 | 0 | 30s |
+| collaborator-edit | PASS | 4 | 98/621 | \$0.54 | 0 | 0 | 14s |
+| watch-live-edit | PASS | 5 | 98/1106 | \$0.59 | 0 | 0 | 55s |
+| stale-write-recovery | PASS | 6 | 130/2355 | \$0.72 | 1 | 1 | 38s |
+| add-image-binary | PASS | 6 | 130/1175 | \$0.62 | 0 | 0 | 42s |
+| search-and-report | PASS | 4 | 66/366 | \$0.51 | 0 | 0 | 13s |
+| watch-project-edit | PASS | 5 | 130/812 | \$0.59 | 0 | 0 | 60s |
+| history-and-restore | PASS | 9 | 194/3091 | \$0.85 | 0 | 0 | 47s |
+| outline-and-section-edit | PASS | 8 | 162/1820 | \$0.69 | 0 | 0 | 43s |
+| docs-lookup | PASS | 5 | 98/676 | \$0.59 | 0 | 0 | 16s |
+| fix-render-error | PASS | 7 | 130/1529 | \$0.68 | 0 | 0 | 25s |
+
+15/15 PASS, median 5 turns (Phases 2/3/4: 5 — no regression), zero
+`isError` except the DESIGNED stale-hash refusal in
+`stale-write-recovery`. Phase 5's surfaces are host-facing (agents use
+tools), so no new eval tasks — the suite's job here is regression
+detection on the existing surface.
+
+**Phase-close gate.** `npm run test -w ts-packages/quarto-hub-mcp` green
+(58 files, 527 passed + 3 skips — 18 new legacy-era resource/prompt
+tests, 3 new modern-era stdio tests, 2 new capability/wire-schema
+conformance tests). `cargo xtask verify` green (full, hub-build leg
+included). Bundle rebuilt and embedded; freshness confirmed by
+`q2 mcp --launcher-info`. Tool budget unchanged: **21/24 data tools —
+resources and prompts are not tools, exactly the ERG-5 rule (b)
+escape.** Docs: `docs/tools/q2-mcp.qmd` gains a Resources-and-prompts
+section; the package README points at it (its tool tables were already
+stale on Phases 2–4 — filed bd-chtwjljk to refresh separately).
+
+**The verify catch that mattered.** The first `cargo xtask verify` run
+failed the hub-mcp leg with **82 unhandled rejections despite all 526
+assertions passing** — the debounced `sendResourceListChanged` fired
+after fixture teardown closed the transport, and `void promise` never
+attaches a `.catch`. The standalone suite had masked it (my grep
+filtered the summary lines; vitest exits nonzero on unhandled errors).
+Fixed at the root: the bridge's sends are guarded by `isConnected()`
+and swallow only the benign close-race `SdkError(NotConnected)` —
+anything else is logged to stderr, never thrown, because delivery
+failure must not break the sync callbacks the bridge rides on.
+Regression test pins it (`a debounced list_changed firing after server
+close does not reject unhandled` — verified red against the unfixed
+bridge with the exact `SdkError: Not connected`).
+
+### Phase 6 — Distribution and remote access
+
+Test specifications:
+
+- [x] Packaging smoke test: `npm pack` from a clean build, install the
+  tarball into a temp prefix, `npx @quarto/hub-mcp --help` runs, and the
+  installed server connects to the in-process test-hub (CAP-15).
+- [x] `server.json` validates against the MCP Registry schema; the `.mcpb`
+  bundle's one-click config shows the exact command and requires consent
+  (CAP-15).
+- [x] Official conformance suite green at `--spec-version 2026-07-28` with an
+  **empty** expected-failures baseline, run against the CAP-16 Streamable HTTP
+  transport if it has landed, else a test-only loopback listener; gates the
+  registry listing's conformance claim (satisfies §9).
+
+Work items:
+
+- [x] CAP-15 npm publish (bd-3tak0lyy): package layout from a clean build
+  (HY-3), license notices, install docs; `server.json` + `mcpName` and
+  `mcp-publisher` publication to the MCP Registry (a GitHub Actions flow
+  exists); `.mcpb` bundle for Claude Desktop one-click install (the one-click
+  config MUST show the exact command and require consent — Security Best
+  Practices). Retire the standalone tarball (bd-sca6g1tu) once npm ships.
+- [x] Official conformance suite (deferred from Phase 0): run
+  `npx @modelcontextprotocol/conformance server --spec-version 2026-07-28`
+  before the registry listing claims conformance — by now either the CAP-16
+  transport exists to run it against, or the listing itself justifies the
+  test-only loopback listener, and the suite will have matured past 0.1.x.
+  Empty expected-failures baseline is the bar.
+- [x] **Design doc first (gates implementation):** CAP-16 hub-served MCP over
+  Streamable HTTP. Must resolve: hub as OAuth resource server (RFC 9728 PRM
+  with `WWW-Authenticate` + `.well-known` fallback per SEP-985; RFC 8707
+  resource indicators; scope hints and `insufficient_scope` step-up per
+  SEP-835; CIMD per SEP-991 — DCR is deprecated; the 2026-07-28 Auth
+  extension for client-credentials/enterprise cases — coordinate with
+  bd-qxgoti2b and bd-ra5ypj3s); the Security Best Practices list applied to a
+  remote server (token passthrough prohibited — the hub validates tokens
+  issued *to the MCP endpoint*, never raw IdP tokens; confused-deputy consent;
+  SSRF rules on metadata URLs; `Origin` validation → 403); connection
+  lifecycle under the **stateless** model (no sessions; SDK v2.3 is
+  one-server-per-request, but the `ConnectionManager` holds per-project
+  websocket state — working assumption is a per-user pool keyed by token
+  subject with idle eviction, Q-5); multi-tenant fairness (one automerge
+  connection per user × N users).
+- [x] **Explore (no commitment):** MCP Apps extension
+  (`io.modelcontextprotocol/ui`) for an in-host rendered preview of a file —
+  the closest MCP equivalent of the web client's live preview. Gated on host
+  support; a one-page feasibility note only.
+- [x] CAP-3 full discovery: hub-side per-user project registry (auth-keyed),
+  if the design doc confirms the need; MVP shipped in Phase 2.
+- [x] Update `docs/` MCP page with npm + remote-connection instructions.
+
+#### Phase 6 completion record (landed 2026-10-07, bd-8iv9jty5)
+
+**CAP-15 packaging.** `scripts/pack-npm.mjs` (clean-build bundle →
+publish-shaped staging → `npm pack`): the npm package is the
+self-contained `dist-bundle/` payload with exactly one runtime
+dependency (`@napi-rs/keyring`, delivered per-platform by npm — the
+vendored addons would only bloat the tarball) plus the vendored
+`wasm-qmd-parser` (ours, unpublished). The publish manifest is
+generated (the workspace `package.json` stays `private` and dev-shaped)
+with `bin: hub-mcp` matching the unscoped name for bare `npx`, Node 24
+engines, and `mcpName: io.github.quarto-dev/hub-mcp` (registry
+ownership link). LICENSE/README/NOTICE.md ride along. `server.json`
+(registry listing, validated against the vendored 2025-12-11 schema —
+which caught the 100-char description cap) and `mcpb/manifest.json`
+(one-click: exact `node ${__dirname}/dist-bundle/index.mjs` command
+visible, credentials only via prompted `user_config`, secret marked
+`sensitive`) are the two public manifests. `scripts/pack-mcpb.mjs`
+vendors all eight keyring platforms into the `.mcpb` (no npm install in
+bundle hosts — same co-staging as the release tarball).
+`Implementation.version` now reports the npm version via a
+`build-info.json npmVersion` stamp when installed from npm
+(gitCommit-stamp standalone, launcher-injected under `q2 mcp`,
+package-floor 0.1.0 in dev). Version bumped 0.0.1 → 0.1.0 with a drift
+pin against the floor. **Not yet published**: the actual `npm publish`
++ registry submission is an operator decision (bd-3tak0lyy's
+public-release gate); `.github/workflows/publish-hub-mcp.yml` is the
+dry-run-by-default dispatch that packs/validates always and publishes
+only through the `npm-publish` environment + GitHub OIDC. The
+standalone tarball (bd-sca6g1tu) stays until the npm channel has
+shipped and soaked.
+
+**Official conformance suite.** Pinned
+`@modelcontextprotocol/conformance@0.2.0-alpha.12` (the 0.2.0 line
+carries the frozen requirement sets; still alpha — the plan's "past
+0.1.x" is half-true). Run as `--requirements 2026-07-28`, which is
+stricter and more honest than the plan's `--spec-version`: the frozen
+at-release set, not whatever the suite accumulates later.
+**37/37 required server scenarios pass (146 checks), empty
+expected-failures baseline, exit 0**; all 36 failing checks are in the
+suite's own not-scored roster (tasks extension, two pending scenarios
+whose reference fixture can't pass either) and are asserted to stay
+confined there. The suite drives the `test_*` fixture surface
+(`src/conformance-fixtures.ts`) through our real `createServer` —
+registered only behind `conformanceFixtures: true` (loopback-only; a
+guard test pins the default listing clean, ERG-5 untouched). Three
+findings worth remembering: (1) the per-request transport's `-32021` →
+HTTP 400 mapping only fires under `responseMode: 'auto'` — forced SSE
+commits 200 before the error exists; (2) MRTR `requestState` integrity
+is the SDK's HMAC codec installed at construction, verified by the seam
+before handlers run — tampering rejection is automatic; (3) client
+capabilities live in `ctx.mcpReq.envelope[CLIENT_CAPABILITIES_META_KEY]`,
+not `_meta` (reserved keys are lifted).
+
+**The loopback listener** (`src/http-loopback.ts`, test-only) is the
+CAP-16 rehearsal: SDK `createMcpHandler` per-request serving + Host/
+Origin guards (dns-rebinding scenario green) over a shared
+`ConnectionManager`. It exposed a real production bug class the stdio
+path never sees: per-request instances each registered a manager
+project-event listener forever — fixed at the root (the resource
+bridge unhooks on server close, debounce cancelled; leak test pins 25
+round-trips at baseline). The execFileSync-starves-the-loopback lesson
+(the suite's first runs: every scenario "timed out" at exactly the
+timeout because the sync spawn blocked the event loop) is recorded in
+the test's comment.
+
+**CAP-16 design doc** landed at
+`claude-notes/plans/2026-10-07-hub-mcp-streamable-http-design.md`:
+hub-minted JWT access tokens (no IdP passthrough; audience = endpoint),
+RFC 9728 PRM + SEP-985 fallback, CIMD (DCR rejected), capability
+scopes (`mcp:read`/`mcp:write`/`mcp:listen`) with `insufficient_scope`
+step-up, hub-side consent screen, SSRF rules reusing BP-18's endpoint
+validation, `Origin` → 403, legacy `reject`, `render`/`authenticate`
+omitted over HTTP. **Q-5 resolved**: per-user `ConnectionManager` pool
+on the hub — 500-entry LRU, 20 project connections/user, 15-minute
+idle TTL touched by live listen streams, 8 in-flight requests/user,
+429 + `Retry-After`. CAP-3 full registry confirmed needed (§9 of the
+design doc) and folded into the implementation plan recommendation.
+MCP Apps feasibility note at
+`claude-notes/research/2026-10-07-mcp-apps-feasibility.md`: worth
+doing, not yet — revisit on host GA or the extension's scenarios
+turning scored.
+
+**E2E (per the phase gate).** The packaging smoke test IS the e2e for
+distribution: real `npm pack` → real `npm install` into an empty
+prefix → the installed `.bin/hub-mcp` `--help` (exit 0, stderr usage,
+clean stdout) and an MCP handshake + `tools/list` from the installed
+payload against the in-process test-hub (invocation and assertions in
+`src/npm-pack.test.ts`; the `.mcpb` legs in `src/mcpb-pack.test.ts`
+unpack the bundle and verify the runnable payload incl. per-platform
+`.node` addons). The conformance run's invocation and full summary are
+in `src/conformance-official.test.ts` (the suite's transcript lands in
+a persisted log per run). Bundle rebuilt + `q2 mcp --launcher-info`
+freshness confirmed after each commit.
+
+**Eval suite (same 15 tasks, regression detection — Phase 6 adds no
+agent-facing surface):** `eval/results/2026-10-07T11-42-20/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/463 | \$0.79 | 0 | 0 | 16s |
+| read-and-report | PASS | 4 | 98/744 | \$0.56 | 0 | 0 | 16s |
+| patch-typo | PASS | 6 | 130/1504 | \$0.65 | 0 | 0 | 24s |
+| write-new-file | PASS | 5 | 130/898 | \$0.59 | 0 | 0 | 20s |
+| rename-file | PASS | 7 | 162/1361 | \$0.63 | 0 | 0 | 24s |
+| collaborator-edit | PASS | 4 | 98/700 | \$0.55 | 0 | 0 | 30s |
+| watch-live-edit | PASS | 5 | 130/1429 | \$0.62 | 0 | 0 | 51s |
+| stale-write-recovery | PASS | 6 | 130/2058 | \$0.69 | 1 | 1 | 33s |
+| add-image-binary | PASS | 6 | 130/1596 | \$0.65 | 0 | 0 | 27s |
+| search-and-report | PASS | 6 | 98/1011 | \$0.59 | 2 | 2 | 18s |
+| watch-project-edit | PASS | 5 | 130/1066 | \$0.60 | 0 | 0 | 58s |
+| history-and-restore | PASS | 9 | 130/2562 | \$0.79 | 0 | 0 | 53s |
+| outline-and-section-edit | PASS | 9 | 162/2404 | \$0.73 | 0 | 0 | 35s |
+| docs-lookup | PASS | 5 | 98/753 | \$0.59 | 0 | 0 | 25s |
+| fix-render-error | PASS | 7 | 130/2021 | \$0.71 | 0 | 0 | 34s |
+
+15/15 PASS, median 6 turns (Phases 2–5: 5 — within model variance, no
+surface change). `stale-write-recovery`\'s single `isError` is the
+DESIGNED refusal; `search-and-report`\'s two are validation retries the
+agent recovered from on the spot (transcript ends clean; the retry
+counter doing its job), not a server regression.
+
+**Phase-close gate.** `npm run test -w ts-packages/quarto-hub-mcp`
+green (62 files, 545 passed + 3 skips). `cargo xtask verify` green
+(full, hub-build leg included) — after fixing a race I introduced and
+caught only because verify runs the whole suite at once: the packaging
+tests rebuilt the shared `dist-bundle/` while `bundle.test.ts` spawned
+it (wipe-while-spawning; 3×30s timeouts, masked standalone).
+`scripts/bundle.mjs` now honors `HUB_MCP_BUNDLE_OUT` and both pack
+scripts build into private staging dirs — the workspace bundle is never
+touched during packaging. Docs: `docs/tools/q2-mcp.qmd` gains the
+npm/`.mcpb` channels + remote-access note; README leads with the three
+channels.
+
+### Phase 7 — Tool-surface consolidation (bd-1ilystml)
+
+A review of the landed Phase 0–6 stack (PRs #790–#799, 2026-10-13)
+against the ERG-5 rules found the ceiling already breached in the
+configuration real users run, three consolidations the plan\'s own rules
+bless, and one BP-1 violation. Phase 7 applies them; no capability is
+lost — each removed tool\'s behavior survives as a parameter on a
+sibling.
+
+#### Review findings (2026-10-13)
+
+1. **Ceiling breach + test blind spot.** The default listing is 22 data
+   tools + 3 auth tools = **25** when OAuth env is configured (the
+   production posture), over the ERG-5 budget of 24. The conformance
+   ceiling test cannot see it: its fixture registers no auth tools
+   (they need OAuth env), so it asserts against 22. The
+   `EXPECTED_RW_TOOLS` comment is also stale ("21 tools"; the list has
+   22 entries).
+2. **`create_file` is redundant with `write_file`.** `handleCreateFile`
+   duplicates `write_file`\'s create arm (same ghost-entry guard, same
+   binary arm, same result shape); `write_file`\'s description already
+   says "creates the file if it does not exist" and `outWriteFile`
+   already carries `created: true`. The only distinct behavior —
+   refuse-if-exists — is one boolean parameter, ERG-5 rule (a) exactly
+   (the same rule that put binary I/O on `write_file` instead of a
+   `write_binary_file` sibling).
+3. **`authenticate_status` is subsumed by `authenticate`.** The
+   documented "check before deciding" flow works without it:
+   `authenticate` already returns "Already authenticated as \<email\>"
+   without opening a browser when credentials are valid, and a failed
+   `connect_project` names `AuthRequiredError`/`ReauthRequired` — two
+   non-interactive probes already exist. (Pre-Phase-1 main shipped
+   exactly the surviving pair.)
+4. **`list_presence` is a separate info tool against ERG-5 rule (d).**
+   Rule (d) consolidated info tools into one `get_project_info` —
+   then Phase 3 added another. Presence is dynamic, but so is the
+   engine-capture state `get_project_info` already reports; an
+   `include: ["presence"]` parameter keeps the cheap pre-edit check
+   opt-in.
+5. **`get_errors` violates BP-1.** It is the only tool with no
+   `outputSchema`, and its handler returns unstructured `text()` where
+   every sibling returns `structured()`. The conformance net allows it
+   only because the golden-case coverage check is keyed on
+   `outputSchema` presence.
+6. **`PROJECT_PARAM_DESC` repetition.** ~370 chars × 22 tools ≈ 8 KB of
+   the `tools/list` payload for one shared parameter; the share-URL
+   semantics it carries are already in the server `instructions`
+   (ERG-6). Trim to one line.
+
+Explicitly **not** acted on, with rationale: `get_outline` →
+`read_file(format: "outline")` (a fifth arm on read_file\'s
+text|binary|metadata|section output union hurts more than one slot
+helps); `get_errors` vs `render` (different trust gates — always-on
+read-only WASM diagnostics vs opt-in code execution; `render` is
+already outside the budget); `create_folder`/`delete_folder`,
+`disconnect_project`, `restore_file_version` (merging any of these into
+siblings crosses the read/write boundary that `--read-only` gating and
+annotations depend on); `authenticate_clear` stays a separate tool
+(its `destructiveHint` must not contaminate the sign-in flow\'s
+annotations; MCP has no per-call annotations).
+
+#### Phase 7 checklist
+
+Budget tally after this phase: 20 data + 2 auth = **22 in production**
+(was 25); read-only mode 11 + 2 = 13.
+
+Test spec (write first, watch fail):
+
+- [x] Conformance: new ceiling test registers the auth tools
+  (production worst case, via a stubbed `AuthToolsState` fixture
+  option) and asserts ≤ 24 — red first at 25; `EXPECTED_RW_TOOLS`
+  drops `create_file`/`list_presence`, comment corrected
+- [x] `write_file` gains `create_only: true`: creates when absent
+  (`created: true`); refuses when the file exists, naming the file;
+  honored by the base64 arm; `create_only` + `expected_hash` is a
+  usage error (contradictory: expected_hash presumes existence)
+- [x] `get_project_info` gains `include: ["presence"]`: result carries
+  `presences` (same entry shape as today) + the passive-observation
+  message when empty; absence of `include` keeps today\'s payload
+  exactly; the `list_presence` integration tests move to the new arm
+- [x] `get_errors` declares `outGetErrors` and returns `structured()`;
+  golden case added (gated on the real WASM host like the other
+  render-tier cases) so the BP-1 coverage net pins it
+- [x] Auth definitions are exactly `authenticate` + `authenticate_clear`
+  (the BP-13 status tests are removed with the tool; the
+  already-authenticated no-op test on `authenticate` stays and is the
+  probe\'s regression net)
+- [x] Golden-case list updated: `create_file` case removed (the
+  `delete_file` case seeds its own file via `write_file`),
+  `list_presence` case folded into `get_project_info`\'s
+- [x] `write_file`\'s description documents `create_only`;
+  `get_project_info`\'s documents `include`; server `instructions`
+  steps 6/7 rewritten (presence via `get_project_info`);
+  `collaborate-with-human` prompt updated (`list_presence` mention);
+  README + `docs/tools/q2-mcp.qmd` tables updated
+- [x] `PROJECT_PARAM_DESC` trimmed to one line (share-URL semantics
+  stay in `instructions` step 1)
+
+Implementation:
+
+- [x] tools.ts: `create_only` on `write_file` (both arms); delete
+  `create_file` registration/handler/`outCreateFile`/dispatch/type
+  entries/`PATH_DEFAULTABLE` entry; migrate all test call sites
+  (`hub-mcp`, `binary-files`, `resources`, `exit-drain`,
+  `write-render-check`, `inspector-smoke`)
+- [x] tools.ts: `include` on `get_project_info`; delete `list_presence`
+  registration/handler/`outListPresence`/dispatch; migrate
+  `presence.test.ts` to the new arm
+- [x] auth-tools.ts: delete `authenticate_status` (definition,
+  `AuthToolName`, dispatch, `handleStatus`); update its test file
+- [x] tools.ts: `outGetErrors` + `structured()` return
+- [x] index.ts instructions, prompts.ts, README.md,
+  `docs/tools/q2-mcp.qmd`
+- [x] Eval suite re-run (same 15 tasks; record next to Phase 6\'s)
+- [x] Phase-close gate: `npm run test -w ts-packages/quarto-hub-mcp`
+  green; `cargo xtask verify` green (see the completion record for the
+  one flake carve-out, bd-pire6khc)
+
+#### Phase 7 completion record (landed 2026-10-13, bd-1ilystml)
+
+**The surface.** Default listing is now 20 data tools + 2 auth tools =
+**22 in the production posture** (was 25 — over budget); read-only mode
+11 + 2 = 13. `create_file` folded into `write_file`\'s `create_only`
+(identical refusal semantics on both write arms; the old "use
+write_file" error became "drop create_only"); `list_presence` folded
+into `get_project_info`\'s `include: ["presence"]` arm (`presences` +
+`presence_message` keys appear only when requested — the bare doctor
+payload is byte-identical); `authenticate_status` deleted outright
+(`authenticate`\'s already-valid short-circuit and connect_project\'s
+`AuthRequiredError` are the two non-interactive probes). Two conformance
+gaps closed along the way: `get_errors` finally carries BP-1 structure
+(`outGetErrors` + `structured()` — it was the last unstructured tool)
+and a BP-9 title (it had none); the golden-case harness gained a
+`requiresWasmHost` tier so the BP-1 net pins get_errors\'s real render.
+`PROJECT_PARAM_DESC` went from ~370 chars × 20 tools to one line
+(~4 KB off the listing payload).
+
+**The ceiling test that couldn\'t see production.** The old test ran
+the fixture without auth tools (they need OAuth env), so it asserted
+22 ≤ 24 while real users got 25. The fixture now takes an
+`authToolsState` option (stubbed deps, construction-only) and two new
+tests pin the production posture: exact expected names **and** ≤ 24,
+in both read-write and read-only. This is the test that fails first
+the next time anyone adds a tool without freeing a slot.
+
+**TDD record.** Tests first: conformance (production-posture budget,
+updated expected lists, golden cases), new `create-only.test.ts` (5
+tests), `presence.test.ts` rewritten against the include arm (incl. a
+pin that the bare payload carries no presence keys), auth definitions
+test. Watched red: 6 conformance + 5 create-only + 5 presence tests
+failed for the right reasons (25 > 24 with auth registered; listing
+mismatches; "tool declares no outputSchema" on the get_errors golden
+case; `presences` undefined). Two self-inflicted bugs caught by the
+red run: a double-wrapped `error(createOnlyRefusal(...))` (the SDK
+client rejected the malformed result — the wire validation doing its
+job) and a missed read-only expected list in hub-mcp.test.ts.
+
+**Eval suite (same 15 tasks, against the consolidated surface):**
+`eval/results/2026-10-13T15-12-25/`
+
+| task | success | turns | tokens (in/out) | cost | isError | retries | duration |
+|------|---------|-------|-----------------|------|---------|---------|----------|
+| create-project | PASS | 3 | 66/379 | \$0.95 | 0 | 0 | 10s |
+| read-and-report | PASS | 4 | 98/559 | \$0.89 | 0 | 0 | 14s |
+| patch-typo | PASS | 6 | 162/1254 | \$1.00 | 0 | 0 | 23s |
+| write-new-file | PASS | 5 | 130/904 | \$0.95 | 0 | 0 | 19s |
+| rename-file | PASS | 7 | 162/1248 | \$0.99 | 0 | 0 | 22s |
+| collaborator-edit | PASS | 4 | 98/533 | \$0.89 | 0 | 0 | 13s |
+| watch-live-edit | PASS | 5 | 130/944 | \$0.95 | 0 | 0 | 49s |
+| stale-write-recovery | PASS | 6 | 162/1670 | \$1.04 | 1 | 1 | 36s |
+| add-image-binary | PASS | 5 | 130/978 | \$0.96 | 0 | 0 | 18s |
+| search-and-report | PASS | 4 | 66/411 | \$0.89 | 0 | 0 | 9s |
+| watch-project-edit | PASS | 5 | 130/855 | \$0.94 | 0 | 0 | 52s |
+| history-and-restore | PASS | 11 | 226/2538 | \$1.17 | 1 | 1 | 41s |
+| outline-and-section-edit | PASS | 9 | 194/2163 | \$1.09 | 0 | 0 | 35s |
+| docs-lookup | PASS | 5 | 98/557 | \$0.93 | 0 | 0 | 12s |
+| fix-render-error | PASS | 7 | 130/1565 | \$1.03 | 0 | 0 | 26s |
+
+15/15 PASS, median 5 turns (Phase 6: 6, Phase 5: 5 — within model
+variance; no task regressed past its historical band).
+`write-new-file` passes with `create_file` gone (the agent picks
+`write_file` unprompted — the fold costs nothing); `search-and-report`
+improved 6 → 4. `history-and-restore`\'s 11 turns and 1 isError are
+the agent exploring the history/diff modes (transcript reviewed: it
+diffed against the wrong head first, self-corrected — not a server
+error); `stale-write-recovery`\'s isError is the designed refusal.
+
+**Phase-close gate.** `npm run test -w ts-packages/quarto-hub-mcp`
+green (68 files, 586 passed + 3 skips). `cargo xtask lint` green.
+`q2 render --strict` clean on this plan and `docs/tools/q2-mcp.qmd`.
+`cargo xtask build-hub-mcp-bundle` refreshed (the `q2 mcp` embed picks
+up the new surface). The `cargo xtask verify` Rust leg ran the full
+workspace twice: **15730/15731 passed both times** — the single
+failure is `quarto-system-runtime`
+`fetch_blocking_gives_up_on_a_stalled_connection`, a wall-clock
+assertion (`elapsed < 1200 ms` around a 200 ms timeout) that starves
+under suite-tail parallelism (~7 s elapsed, 3/3 runs); it passes in
+isolation (1.5 s) and the diff contains no Rust, so it cannot be a
+Phase 7 regression. Filed as **bd-pire6khc**; the remaining verify
+legs (hub-client build/tests — untouched by this phase) were skipped
+per user direction and the flake is fixed separately.
+
+---
+
+## 6. Explicitly considered and deferred
+
+| Item | Rationale |
+|------|-----------|
+| **Tasks** (SEP-1686, experimental in 2025-11-25; moved to the official `io.modelcontextprotocol/tasks` extension in 2026-07-28, SEP-2663, with `tasks/get` polling) | The natural eventual home for `wait_for_change`-class long operations and renders. Client support is nascent; cancellation + progress (Phase 1/3) covers today's need. Revisit once SDK v2 exposes the extension and a mainstream host advertises it |
+| **Remaining 2026-07-28 surfaces** after BP-16 (dual-era adopted in Phase 1) | Nothing in this plan builds on surfaces 2026-07-28 **removed** (`ping`, `logging/setLevel`, `resources/subscribe` — served via `subscriptions/listen` — the HTTP GET stream, SSE resumability) or **deprecated** (roots, sampling, logging, DCR, HTTP+SSE). Not adopted yet: `Mcp-Method`/`Mcp-Name` headers and OTel `traceparent` in `_meta` (HTTP-only; Phase 6), the error-code allocation policy (adopt when we define our own codes). Sources: [release post](https://blog.modelcontextprotocol.io/posts/2026-07-28/), [changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog), [deprecations](https://modelcontextprotocol.io/specification/2026-07-28/deprecated) |
+| **MRTR / URL-mode elicitation auth hand-off** (BP-8) | Same deferral logic as Tasks: MRTR (`resultType: "input_required"`, SEP-2322) replaced server-initiated elicitation in 2026-07-28, but no mainstream host advertises support yet. The existing progress-notification hand-off — the ultimate fallback in the original three-tier design — remains the single path, with BP-18's URL validation (Phase 1) as its security invariant. Adopt when a mainstream host ships MRTR; SDK v2's dual-era surface keeps it registration-level work |
+| **Argument completion** (BP-7) | Serves manual parameter entry in human-driven host UIs; this server's primary consumer is an agent that already discovers paths via `list_files` and projects via `connect_project`. Revisit if a mainstream host surfaces completion prominently for stdio servers |
+| **MCP Apps** (`ext-apps`, 2026-07-28 extension) — interactive HTML UI inside the host | Would give the agent's human partner an in-host preview of a rendered page, the closest thing to the web client's live preview. Host support is early; Phase 6 carries a one-page feasibility note, nothing more |
+| **Skills over MCP** (`ext-skills`) | Could ship a Quarto-authoring skill to hosts instead of, or alongside, BP-6 prompts. Decide in Phase 5 once host adoption is visible; prompts are the portable baseline |
+| **Logging capability** (`notifications/message`) | Deprecated in 2026-07-28; stderr is the sanctioned stdio log channel (2025-11-25, PR #670) and what hosts surface. Keep stderr clean (HY-6) instead |
+| **Comments/annotations tools** | No comments entity exists anywhere (hub server, automerge schema, or web client). That is a hub feature first — file a strand; MCP exposure follows naturally |
+| **Publishing tools** (`q2 publish`) | Publishing lives outside the hub (`crates/quarto-publish`); a `publish_project` tool could follow the CAP-12 pattern later — not in this plan |
+| **Rust-native MCP port** | Evaluated and rejected in the 2026-06-11 plan (auth maintained in two languages); nothing has changed that calculus |
+| ~~Per-write delivery confirmation~~ | **Promoted to Phase 1 as ERG-2.** The exit-drain work landed the substrate (`isDelivered`/`remote-heads`), and the "conflicts with tools.ts ownership" concern is moot now that this plan owns `tools.ts` |
+
+## 7. Open questions (resolve in the noted phase)
+
+- **Q-1 (Phase 1):** Resolved in review, pending confirmation during BP-16:
+  the `tools.ts:7-8` objection predates SDK zod-v4 support (1.x accepts
+  `^3.25 || ^4`, and the repo already resolves zod 4.4.3); SDK v2 is
+  zod-v4/Standard-Schema native. Record migration friction, not the yes/no.
+- **Q-2 (Phase 5):** Resource URI scheme (`hub://…`) and its stability as a
+  public contract.
+- **Q-3 (Phase 3):** Should the agent announce itself in presence/identities
+  (honest signaling to human collaborators) and if so, how? Recommendation:
+  yes — via a hub-minted agent author id linked to the user (Phase 3), because
+  the server currently shares the human's author id and would otherwise
+  rename their identity; never fake cursor presence.
+- **Q-4 (Phase 4):** Is `clear_capture` agent-appropriate (it mutates shared
+  project state) or human-only? **Resolved 2026-10-06: human-only.** It
+  deletes shared index state driving other collaborators\' preview engines;
+  the CAP-12 render loop never touches captures; CAP-2's read surface
+  covers observation. See the Phase 4 checklist entry.
+- **Q-5 (Phase 6):** **Resolved 2026-10-07** (CAP-16 design doc §7):
+  per-user `ConnectionManager` pool on the hub — 500-entry LRU keyed by
+  token subject, 20 project connections/user, 15-minute idle TTL touched
+  by live listen streams, 8 in-flight requests/user with 429 +
+  `Retry-After`. Numbers to be validated against production traffic
+  before launch (design D-4).
+- **Q-6 (Phase 3):** Is `restore_file_version` agent-appropriate? Working
+  answer: yes, with `destructiveHint: true` and a reversible result (it is how
+  a human uses Ctrl+Z); confirm with the web-client owners that a restore shows
+  up as an ordinary change in the history view.
+- **Q-7 (Phase 0):** Eval runner — headless `claude -p` (no new dependency,
+  exercises the Claude Code host) or the Claude Agent SDK (programmatic
+  scoring)? Pick whichever yields machine-readable transcripts with the least
+  ceremony; both are acceptable.
+
+## 8. Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| Landing conflict with bd-r62zad5b (author-id transition, in progress, same files) | Coordinate before Phase 1; prefer landing Phase 1 after it, or rebase plan |
+| Bundle-size growth (parser WASM, zip, docs corpus) erodes cold-start | Measure in S-1; keep CAP-11/CAP-13 lazily loaded where the bundler allows |
+| `render_project` normalizes arbitrary code execution through MCP | Opt-in flag, annotations, docs; never enabled by `--print-config` output |
+| New flake modes in an already-flaky test neighborhood (8 open hygiene strands) | Phase 0 harness is offline-only; live-hub tests gated like existing ones |
+| Remote-MCP design doc expands into a hub epic | Time-box the design doc; implementation is a separate plan if approved |
+| SDK v2 migration churn (the v2 line is ten weeks old; 2.3.0 shipped 2026-10-02 with the one-server-per-request change; 2.3.1 is current) | Pin the minor; keep `handleTool` transport- and SDK-agnostic so a revert is registration-only; the Phase 1 dual-era test catches host regressions |
+| Write acknowledgement adds latency to every write | Bounded (≈2 s default), per-call opt-out, and a hub ack is tens of milliseconds on a healthy link; measured by the eval suite |
+| Agent-task evals are costly and nondeterministic | Phase-gate only, small suite, committed transcripts; a trend instrument, not a pass/fail gate |
+| Tool count creeps past the budget as CAPs land | ERG-5 rules plus the Phase 0 count test |
+
+## 9. Success criteria
+
+An agent connected via `q2 mcp` can, with no shell access and starting from
+nothing but a share link:
+
+1. Connect to a project, report its shape and health, and enumerate the
+   caller's project collections (full "list my projects" without a
+   collection id is gated on the Phase 6 hub-side registry).
+2. Read, search, create, edit (string- and AST-level), rename, and delete text
+   and binary files; create and delete folders (folder rename is deferred,
+   CAP-6).
+3. Watch for collaborator edits with cancellable, progress-reporting calls —
+   or subscribe to resources in hosts that support them.
+4. See who else is in the project and what changed while it was away.
+5. Render the project and iterate on structured diagnostics until clean.
+6. Answer Quarto usage questions from the embedded docs.
+7. Hand the human a share URL for what it built.
+
+…with every result structured and schema-validated, every long operation
+cancellable, and every capability advertised through protocol-native discovery.
+
+Measured, not asserted (ERG-7 suite, recorded per phase):
+
+- Every write result reports `synced: true` against a healthy hub, and no eval
+  transcript contains a lost or clobbered collaborator edit when
+  `expected_hash` is supplied.
+- Median turns per eval task do not regress between phases; `isError` results
+  caused by argument shape or stale state trend to zero.
+- Default tool listing ≤ 24. Before the Phase 6 registry listing ships, the
+  official conformance suite is green at `--spec-version 2026-07-28` with an
+  empty expected-failures baseline.
+- A human watching in the web client sees the agent's edits attributed to the
+  agent (Q-3), not to themselves.

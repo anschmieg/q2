@@ -106,11 +106,12 @@ page is worth running even when the listing looks right.
 
 ## Descriptions and the placeholder envelope
 
-When an item has no `description:` in its front matter, Quarto can fill
-one in from the item page itself — the first paragraph of the rendered
-document, truncated at a word boundary. This happens *after* both
-documents are rendered, as a substitution pass over the host page, and
-it only happens inside a marker envelope your template emits:
+When an item has no description of its own — no `description:` under
+`listing-item:`, no `description:`, no `abstract:` — Quarto fills one in
+from the item page itself: the first paragraph of the rendered document,
+truncated at a word boundary. This happens *after* both documents are
+rendered, as a substitution pass over the host page, and it only happens
+inside a marker envelope your template emits:
 
 ```` markdown
 ::: {.listing-description}
@@ -128,12 +129,21 @@ $it.description-placeholder-end$
 :::
 ````
 
-Three things about that shape are load-bearing:
+Four things about that shape are load-bearing:
 
-**The markers go outside the `$if$`, not inside.** The envelope marks
-the *region* to substitute, so it has to exist for exactly the items
-that have no description — the ones the `$if$` skips. Emit it
-unconditionally.
+**The markers go outside the `$if$`, not inside.** An item with no
+paragraph Quarto could find before rendering (a page whose text comes
+from running code, say) has no `$it.description$`, but its rendered page
+may still have a paragraph. The envelope has to exist for exactly those
+items, so emit it unconditionally.
+
+**The markers are empty unless the item needs one.** For an item whose
+description was written by its author, both markers are empty strings
+and the description is shown as written. For an item whose description
+is derived, `$it.description$` holds the page's first paragraph *as
+written*, which is what shows where the substitution pass doesn't run
+(the browser-based editor); the pass replaces it with the rendered
+page's paragraph.
 
 **The markers are HTML comments,** so they belong in a raw-HTML block
 (```` ```{=html} ````). They are stripped from the finished page whether
@@ -144,16 +154,24 @@ with no block structure of its own, so a container gives it a styling
 hook and keeps it separated from the surrounding content. The built-ins
 use `.listing-description`.
 
-The built-in layouts gate the *whole* envelope on `$if(description)$`,
-so items with no front-matter description get no preview there. A custom
-template that emits the envelope unconditionally does better — this is
-one of the few places where a hand-written template beats the built-in.
+To keep the description linked, put the envelope inside the link, using
+inline raw HTML and guarding the empty markers. This is what the
+built-in `grid` layout does:
+
+```` markdown
+[$if(it.description-placeholder-begin)$`$it.description-placeholder-begin$`{=html}$endif$$if(it.description)$$it.description$$endif$$if(it.description-placeholder-end)$`$it.description-placeholder-end$`{=html}$endif$]($it.path$)
+````
 
 The truncation limit is the listing's `max-description-length` (default
-175). Setting it to `0` disables truncation. If no usable first
-paragraph is found the markers are simply removed, leaving whatever the
-`$if$` produced, and Quarto emits
-[`Q-12-13`](/errors/listing/Q-12-13.qmd).
+175). Setting it to `0` disables truncation. If the rendered page has no
+usable first paragraph, the markers are simply removed, leaving whatever
+the `$if$` produced; when that is a description found before rendering,
+Quarto emits [`Q-12-13`](/errors/listing/Q-12-13.qmd).
+
+`image-placeholder-begin` / `-end` work the same way for images: they
+are empty when the item's image was written by its author, and otherwise
+wrap the derived image (or the empty placeholder `<div>`), which the
+substitution pass upgrades to the rendered page's preview image.
 
 ## Guard optional values with `$if$`
 
@@ -162,7 +180,7 @@ have them, and reading an absent value directly is a warning, not a
 silent blank:
 
 ```
-Warning [Q-12-10]: Listing `listing-1` doctemplate produced
+Warning [Q-12-10]: Listing `listing` doctemplate produced
 1 diagnostic(s); first: Undefined variable: it.description
 ```
 
@@ -179,8 +197,13 @@ $if(it.subtitle)$[$it.subtitle$]{.listing-subtitle}$endif$
 
 A custom template is spliced into the same listing container as a
 built-in one, so matching the built-in class names is what lets your
-template inherit the listing CSS. Each built-in layout is a wrapper
-template that applies a per-item partial:
+template inherit the listing CSS. The container is a div with id
+`listing-<id>` — `#listing-listing` for a page's only listing when it
+sets no `id:` — and classes `quarto-listing` and
+`quarto-listing-container-<type>`; when the page has a `::: {#<id>}`
+slot for the listing, that div becomes the container and is renamed.
+Inside it, each built-in layout is a wrapper template that applies a
+per-item partial:
 
 | Layout | Wrapper element | Per-item partial |
 | --- | --- | --- |
@@ -212,6 +235,22 @@ $endfor$
 :::
 ```
 
+::: {.callout-warning}
+## Apply item partials inside `$for(items)$`, on a line of their own
+
+Quarto drops the final newline of a partial, as Pandoc does. Each
+built-in item partial ends with the `:::` that closes its div, so it is
+the line break after `$it:item-default()$` inside the loop that keeps
+one item's closing fence apart from the next item's opening fence.
+
+The shorthand `$items:item-default()$` applies the partial to every item
+with nothing in between. The output then contains lines like
+`:::::: {.quarto-post}`, which the parser reads as a single opening
+fence: every item opens inside the one before it, and with enough items
+the listing exceeds the nesting limit and is left out of the page. The
+same applies to any partial of yours that ends in a closing `:::`.
+:::
+
 The full sources are the best reference for idiomatic style, and they
 are short:
 [`crates/quarto-core/src/project/listing/templates/`](https://github.com/quarto-dev/q2/tree/main/crates/quarto-core/src/project/listing/templates).
@@ -232,13 +271,13 @@ extension warning stops firing.
 
 | Quarto 1 (EJS) | Quarto 2 (doctemplate) |
 | --- | --- |
-| `<%= item.title %>` | `$it.title$` |
+| `<%= item.title %>` | `$it.title$` in markdown; `$it.title-html$` inside raw HTML |
 | `<% for (const item of items) { %> … <% } %>` | `$for(items)$ … $endfor$` |
 | `<% if (item.image) { %> … <% } else { %> … <% } %>` | `$if(it.image)$ … $else$ … $endif$` |
 | `<%= item.myfield %>` | `$it.myfield$`, or `$it.extra.myfield$` |
 | `<a href="<%- item.path %>">` | `[$it.title$]($it.path$)` — **not** a raw anchor |
 | `<img src="<%= item.image %>">` | `![$it.image-alt$]($it.image$)` — **not** a raw `<img>` |
-| `<%= metadataAttrs(item) %>` | `` `$it.metadata-attrs$`{=html} `` — see below |
+| `<%= metadataAttrs(item) %>` | `::: {.item $it.metadata-attrs$}` — see below |
 | `<div class="card">` … `</div>` | `::: {.card}` … `:::` |
 | `<%= items.length %>`, string manipulation, `process.env` | No expressions — see [What doctemplates cannot do](#what-doctemplates-cannot-do) |
 
@@ -248,12 +287,20 @@ and image rows fail silently, and `metadataAttrs` fails in a way that
 looks like a typo in your CSS. Check those three twice.
 
 `$it.metadata-attrs$` is the direct equivalent of Quarto 1's
-`metadataAttrs()` helper, producing `data-index` and — when the item has
-categories — `data-categories`. It is the one value in the table that
-you **must** put inside a ```` ```{=html} ```` block: interpolated as markdown
-it goes through the typographic filter and comes out as
+`metadataAttrs()` helper: `data-index`, `data-categories` when the item
+has categories (base64, as Quarto 1 encodes them), and a
+`data-listing-<field>-sort` value for each date or number field the item
+has. It is attribute syntax, so put it where attributes go — inside a
+div's braces, `::: {.item $it.metadata-attrs$}`, which is what the
+built-in `item-default` and `item-grid` partials do, or on a tag inside
+a ```` ```{=html} ```` block. Anywhere else it is interpolated as markdown
+text, goes through the typographic filter, and comes out as
 `data-index=“0”` with curly quotes, which is not a valid attribute.
-Note that none of Quarto 2's built-in layouts emit it.
+
+The built-in `default` and `grid` layouts read these attributes in the
+browser to paginate and to filter by category. A `custom` listing gets
+none of that client-side behaviour, so in a custom template the
+attributes are only there for your own CSS or scripts.
 
 ### A worked example
 
@@ -351,9 +398,10 @@ listing.
 
 **`metadataAttrs(tile)` was dropped rather than translated.**
 `$it.metadata-attrs$` is bound per *item*, not per nested map, so the
-tiles have no equivalent. Since no built-in layout emits it either,
-dropping it changes nothing here — but it is the kind of helper call
-that needs a decision rather than a mechanical rewrite.
+tiles have no equivalent. Quarto 2 does not paginate or filter custom
+listings in the browser, so dropping it changes nothing here — but it is
+the kind of helper call that needs a decision rather than a mechanical
+rewrite.
 
 **The outer loop restructured.** The original grouped by
 `item.category`, emitting a heading per group; the port emits a heading
@@ -395,6 +443,12 @@ and `lowercase`, `chomp`, `nowrap`, `alpha`, `roman`, `first`, `last`,
 one" logic — have no direct form. `$sep$` covers separators between
 items, which is the common case; a genuine total has to come from
 metadata.
+
+**When the template is the wrong tool**, the listing can be built in
+Lua instead: every listing\'s resolved items are published into the
+page\'s metadata at `meta.listings.<id>`, and `type: metadata` declares
+a listing that resolves its items and leaves the markup to a filter.
+See [Listings as data](listings.qmd#listings-as-data).
 
 ## Verifying a port
 

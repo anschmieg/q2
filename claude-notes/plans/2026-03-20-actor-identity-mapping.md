@@ -1,4 +1,8 @@
-# Actor Identity Mapping Plan
+---
+title: 'Actor Identity Mapping Plan'
+date: 2026-03-20
+description: 'Stores a mapping from Automerge actor IDs to user screen names in the project''s index document, with a schema version, so replay can show readable author names instead of hashes.'
+---
 
 ## Overview
 
@@ -85,7 +89,7 @@ In the `indexHandle.on('change', ...)` handler, the sync client diffs both `file
 
 ### Stale Identities
 
-Identities persist in the Automerge document forever. This is intentional — the document history is immutable, and stale identity mappings are harmless (they only map actor ID to screen name). Old contributors' names remain resolvable in replay, which is a feature.
+Identities persist in the Automerge document forever. This is intentional — the document history is immutable, and stale identity mappings are harmless (they only map actor ID to screen name). Old contributors\' names remain resolvable in replay, which is a feature.
 
 ### Replay Changes
 

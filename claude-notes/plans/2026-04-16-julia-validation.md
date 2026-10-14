@@ -1,22 +1,14 @@
-# Plan 4: Julia Engine Validation
+---
+title: 'Plan 4: Julia Engine Validation'
+date: 2026-04-16
+description: 'Validates the TypeScript engine extension system end to end by running the real Julia engine extension from Quarto 1 against q2 documents with Julia code cells, fixing the integration gaps that surface.'
+status: done  # COMPLETE (2026-07-02). All 13 success criteria met; frozen seams J1–J6/J8/J9 green; V-1…V-7 evidence recorded (V-2 folded into J3); full `cargo xtask verify` green at `1a44b4e2e`. Headline: `julia-engine.ts` ran with ZERO source changes (rebundle byte-identical). Discovered-work strands: bd-uf4epv4w (smart typography vs frontmatter strings), bd-l9jhy5u0 (QNR worker leak on error path, P1 — reproduces under Q1 too), bd-cymkcyaf (presentation-format per-writer execute defaults), bd-677297ca (supporting-dir resource copy — FIXED+closed this session). Migration guide: `claude-notes/research/2026-07-02-julia-engine-migration-guide.md`; evidence trail: `…/2026-07-02-julia-engine-q2-compat.md` §1–§14. Julia-in-PATH stays a per-session check by design (this session: julia 1.11.7). The unticked observation sub-items in 4C/4H are honest divergence records (inline-MIME figures; GR emits no htmlDependency), not gaps.
+---
 
 **Grand plan:** [2026-04-16-ts-engine-extensions-subprocess.md](2026-04-16-ts-engine-extensions-subprocess.md)
 **Depends on:** Plans 1a/1b/1c, 2, 3, and 1c.2 P1.1+P1.1b — **all landed as of 2026-07-02** (see Prerequisites)
 **Blocks:** Plan 4b (shadow-engine feature validation)
 **Estimated sessions:** 2-3 (the net-new instrumentation in 4H/4I and the daemon test push this past the original 1-2 "pure debugging" estimate)
-**Status: COMPLETE (2026-07-02).** All 13 success criteria met; frozen seams
-J1–J6/J8/J9 green; V-1…V-7 evidence recorded (V-2 folded into J3); full
-`cargo xtask verify` green at `1a44b4e2e`. Headline: `julia-engine.ts` ran
-with ZERO source changes (rebundle byte-identical). Discovered-work strands:
-bd-uf4epv4w (smart typography vs frontmatter strings), bd-l9jhy5u0 (QNR
-worker leak on error path, P1 — reproduces under Q1 too), bd-cymkcyaf
-(presentation-format per-writer execute defaults), bd-677297ca
-(supporting-dir resource copy — FIXED+closed this session). Migration guide:
-`claude-notes/research/2026-07-02-julia-engine-migration-guide.md`; evidence
-trail: `…/2026-07-02-julia-engine-q2-compat.md` §1–§14. Julia-in-PATH stays a
-per-session check by design (this session: julia 1.11.7). The unticked
-observation sub-items in 4C/4H are honest divergence records (inline-MIME
-figures; GR emits no htmlDependency), not gaps.
 
 ## Overview
 
@@ -31,7 +23,7 @@ first action is to *confirm* them green, not to build anything.
 
 - [x] Plans 1a, 1b, and 1c complete: Rust subprocess infrastructure + Deno harness + extension integration, echo engine passes (grand-plan table: all ✓)
 - [x] Plan 2A complete: the `@quarto/api` package skeleton (`package.json`, `tsconfig.json`, exports map) and the `./config` key-list subpath are in place
-- [x] Plan 2 complete: the remaining QuartoAPI surface built on that skeleton — `@quarto/api`'s text/markdown/format/path/system/console/crypto subpaths, all QuartoAPI namespaces except `jupyter` wired in
+- [x] Plan 2 complete: the remaining QuartoAPI surface built on that skeleton — `@quarto/api`\'s text/markdown/format/path/system/console/crypto subpaths, all QuartoAPI namespaces except `jupyter` wired in
 - [x] Plan 3 complete: `@quarto/api/jupyter` with `toMarkdown` working and wired into engine-host
 - [ ] Julia installed on the test machine (`julia` in PATH) — machine-specific, verify per session
 - [x] **Plan 1c.2 P1.1 — LANDED** (commit `2b2113e6c`; e2e tests
@@ -72,11 +64,11 @@ those changes back upstream is deferred (Gordon's call).
   `src/resources/extension-build/import-map.json` — `path`, `path/posix`,
   `log`, `log/`, `fs/`, `encoding/` → pinned jsr `@std` packages
   (`@std/path@1.0.8`, `@std/log@0.224.0`, `@std/fs@1.0.16`,
-  `@std/encoding@1.0.9`). This is what lets `julia-engine.ts`'s bare imports
+  `@std/encoding@1.0.9`). This is what lets `julia-engine.ts`\'s bare imports
   (`"path"`, `"fs/exists"`, `"encoding/base64"`) bundle **unchanged**. The q2
   port of the config dropped these aliases (apparent oversight — no recorded
   decision); note the parity restoration against plan1c's config spec
-  (plan1c lines ~421-446).
+  (plan1c lines \~421-446).
 - [x] Copy `~/src/quarto-julia-engine` into
   `crates/quarto-core/tests/fixtures/extensions/julia-engine/` (the
   established extension-fixture location, next to `echo-engine/`), preserving
@@ -300,11 +292,11 @@ The simplest possible Julia document.
   (`this should fail gracefully`) and ideally the cell's source location; q2
   itself must not panic and the Deno subprocess must not be left wedged
   (a subsequent render of the 4B document still works) — **confirmed, J4
-  GREEN, RED-proven via the named revert in `TsEngineHost::request`'s
+  GREEN, RED-proven via the named revert in `TsEngineHost::request`\'s
   `FromEngine::Error` arm (`ts_process.rs:~693`).** Note: the first draft of
   the test's error-message assertion (`contains("this should fail
   gracefully")` alone) turned out to be vacuous against this exact revert —
-  `TsEngine::execute`'s generic fallback error message still contains that
+  `TsEngine::execute`\'s generic fallback error message still contains that
   substring via its `{:?}` Debug dump. Strengthened before freezing (see the
   4CD task report and compat log §10 for the full RED/GREEN/named-revert
   trail, done twice — once exposing the vacuous assertion, once against the
@@ -390,11 +382,11 @@ specific logic, so this phase is a smoke test of the integration.
   `julia-website/`). `plot.qmd` uses the file-based-figure mechanism
   (`GKSwstype=100` + `savefig` + an `image/png`-only `PngFigure` wrapper —
   see the 4H task report §1; `fig-format: png` was investigated and rejected
-  as insufficient for Plots' `text/html`-showable default).
+  as insufficient for Plots\' `text/html`-showable default).
   ```
   crates/quarto-core/tests/fixtures/extensions/julia-website/
-    _quarto.yml             # project.type: website
-    _extensions/julia-engine/   # populated from ../julia-engine/_extensions/julia-engine
+    \_quarto.yml             # project.type: website
+    \_extensions/julia-engine/   # populated from ../julia-engine/\_extensions/julia-engine
     index.qmd               # markdown only
     plot.qmd                # ```{julia} plot(...) ``` with figures
   ```
@@ -423,7 +415,7 @@ specific logic, so this phase is a smoke test of the integration.
         *(accepted-untested — if-observed only; not observed)*
   - [x] Sidebar/navbar transforms run normally (the `_quarto.yml` navbar
         rendered) *(observation only — accepted-untested)*
-- [x] Verify the `Arc<TsEngineHost>` is shared across both files' renders:
+- [x] Verify the `Arc<TsEngineHost>` is shared across both files\' renders:
   **J8 (observable) landed + unit-tested TDD-first; J6 (assertion) GREEN.**
   Net-new production `tracing::info!(target: "engine_host", pid, …)` in
   `ensure_started_inner` — GREEN, RED→GREEN + named-revert proven
@@ -478,7 +470,7 @@ only; no `claims_file` wiring for `.jl` percent scripts in v1).
   resolution-complete and at the first Julia execute. — confirmed: one
   `engine-host spawned` line, after both `engine resolution complete`
   lines, immediately followed by the child's own execute-time stderr
-  (`Running [1/1] at line 27...`, the first line of `plot.qmd`'s cell).
+  (`Running [1/1] at line 27...`, the first line of `plot.qmd`\'s cell).
   Full log snippet in compat log §12.
 - [x] If `claims_file` is wired for `.jl` percent scripts later, the
   subprocess will spawn during Pass 1 — note that as expected
@@ -487,7 +479,7 @@ only; no `claims_file` wiring for `.jl` percent scripts in v1).
 
 ### Phase 4J: Julia-in-preview validation (V-7 — added 2026-07-02, user-requested)
 
-Plan 1c's **R5** wired TS engines into `q2 preview`'s **native** capture →
+Plan 1c's **R5** wired TS engines into `q2 preview`\'s **native** capture →
 splice pipeline (all three call sites: eager `capture_driver.rs`,
 `preview_record`/`cache.rs`, `re_execute.rs`) and proved it with the echo
 engine (P2-14). Nothing has validated a *real* engine through preview. This
@@ -635,7 +627,7 @@ always go through the TempDir copy.
   source listing present → RED. (Discriminator check: assert both halves —
   output-present + source-absent — so "render failed entirely" can't fake a
   pass.) Cell-level `#|` variants are the 4E manual greps, binding
-  `toMarkdown`'s cell-option path instead.
+  `toMarkdown`\'s cell-option path instead.
 - **J3 — exeflags through the julia block (4E).** Tier: integration,
   julia+deno-gated. Unit: P1.1b threading of the `julia:` frontmatter subtree
   → `format.metadata` → serialized options → QuartoNotebookRunner. Seam: doc

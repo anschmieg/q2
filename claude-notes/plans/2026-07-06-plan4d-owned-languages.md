@@ -1,4 +1,8 @@
-# Plan 4d: `owned_languages` — a positive engine-ownership wire field
+---
+title: 'Plan 4d: `owned_languages` — a positive engine-ownership wire field'
+date: 2026-07-06
+description: 'Adds a positive `owned_languages` field to the engine-execute wire, so TypeScript engines can ask directly which languages q2 assigned to them instead of inferring this from the leave-alone `handled_languages` set.'
+---
 
 **Grand plan:** [2026-04-16-ts-engine-extensions-subprocess.md](2026-04-16-ts-engine-extensions-subprocess.md)
 **Depends on:** the shipping resolver + TS-engine wire (Plans 1a–c, 2, 3, 4). No new
@@ -62,8 +66,8 @@ duplicate of `handled_languages`:
    `resolution.rs:987-1007`; design §4.3/§6.1/§10).
 2. **`!handled.includes(L)` is therefore ambiguous** — it means "L owned by me
    **or** L owned by nobody," not "owned by me." With both projections a language
-   is exactly one of {`owned` = mine, `handled` = someone else's / a cell handler,
-   neither = owned by nobody}. `owned_languages` is the only signal that isolates
+   is exactly one of \{`owned` = mine, `handled` = someone else's / a cell handler,
+   neither = owned by nobody\}. `owned_languages` is the only signal that isolates
    the positive set. (The existing `handled_languages` wire doc comment overstates
    this as "coincide"; Phase 4d-D corrects it.)
 3. **Resolution is one-shot and never re-run.** `resolve_engines` is called once
@@ -137,7 +141,7 @@ the Rust field keeps every deserialize path (round-trip tests) tolerant of its a
 - `EngineResolution::owned_languages_for(&self, engine: &str) -> Vec<String>`
 - `ExecutionContext.owned_languages: Vec<String>` + `ExecutionContext::with_owned_languages(self, Vec<String>) -> Self`
 
-- [ ] **Step 1: Write the failing test** — append to the `tests` module in `resolution.rs` (mirrors `test_handled_languages_for`'s setup at `:1062`):
+- [ ] **Step 1: Write the failing test** — append to the `tests` module in `resolution.rs` (mirrors `test_handled_languages_for`\'s setup at `:1062`):
 
 ```rust
 /// `owned_languages_for` returns { lang present in doc : owned by this engine }.

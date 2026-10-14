@@ -12,6 +12,7 @@ This directory contains SCSS resources used for Bootstrap/theme compilation in R
 - `html/templates/` - HTML template SCSS files
   - `title-block.scss` - Title block styling
   - `quarto-listing.scss` - Listing cards / table / category-chip styling (bd-57y4)
+  - `quarto-search.scss` - Website search box, results panel, and placement rules (bd-eip0naf4); ported from Quarto 1's `search/quarto-search.scss` plus the search bits of `navigation/quarto-nav.scss`, see the file header for the deviations
 
 ## Source
 
@@ -19,6 +20,7 @@ These files are copied from:
 - `quarto-cli/src/resources/formats/html/bootstrap/` (Bootstrap and themes)
 - `quarto-cli/src/resources/formats/html/templates/` (title-block.scss)
 - `quarto-cli/src/resources/projects/website/listing/` (quarto-listing.scss)
+- `quarto-cli/src/resources/projects/website/search/` (quarto-search.scss; hand-merged, not a straight copy)
 
 ## Updating
 

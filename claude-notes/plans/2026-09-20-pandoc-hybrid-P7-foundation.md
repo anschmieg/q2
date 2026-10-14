@@ -1,7 +1,10 @@
-# P7-foundation — format-agnostic Pandoc CLI plumbing (extracted from P7)
+---
+title: 'P7-foundation — format-agnostic Pandoc CLI plumbing (extracted from P7)'
+date: 2026-09-20
+description: 'Adds format-agnostic CLI plumbing for pandoc-hybrid output: a multi-format render warning, a project-mode containment gate, and routing of `docx` and `pptx` renders through the shared pandoc render entry point.'
+status: draft  # Shape draft — extracted, not yet re-reviewed as its own plan.
+---
 
-**Date:** 2026-09-20
-**Status:** Shape draft — extracted, not yet re-reviewed as its own plan.
 **Design (authoritative):** [`../designs/pandoc-hybrid-architecture.md`](../designs/pandoc-hybrid-architecture.md)  |  Epic: `2026-08-20-pandoc-hybrid-epic.md`
 **Implementation task breakdown + test-seam prevalidation:** [`2026-09-20-pandoc-hybrid-P7-foundation-implementation.md`](2026-09-20-pandoc-hybrid-P7-foundation-implementation.md) — migrated verbatim from P7's companion Tasks 1, 2, 3, and 7 (renumbered 1-4 here), with only cross-reference fixes, no scope change.
 **Depends on:** P1, P2, P4 — **all already landed**. Does not need P5 or P6 to compile or to be tested at the structural level this plan asserts (content correctness through the shim is a separate concern — see "What this plan does not claim" below).
@@ -26,9 +29,9 @@ Landing this plan makes `q2 render f.qmd --to docx` and `--to pptx` **reach pand
 ## In scope (= P7's former Tasks 1, 2, 3, 7)
 
 - **The multi-format render warning** — a pure diagnostic (`Q-18-*`) naming the used and skipped keys when `format:` declares more than one, wired in *before* the gate relaxation lands so the guardrail the relaxation removes has a replacement the moment it's needed.
-- **The project-mode containment gate** — gate `WebsiteProjectType::post_render`'s hook sequence on `format.identifier.is_html_based()`, so a website/book/manuscript project rendered to a Pandoc target doesn't write an HTML sitemap/alias-redirect set that doesn't correspond to what was actually produced.
+- **The project-mode containment gate** — gate `WebsiteProjectType::post_render`\'s hook sequence on `format.identifier.is_html_based()`, so a website/book/manuscript project rendered to a Pandoc target doesn't write an HTML sitemap/alias-redirect set that doesn't correspond to what was actually produced.
 - **Relax the `render.rs:680-684` native-format gate** to admit `Docx` and `Pptx` (the two formats P1/P4 already support end-to-end machinery for), route `Pandoc(fmt)` profiles through P4's `render_qmd_to_pandoc`, and wire the multi-format warning in at the same call site. Verified end-to-end for both formats, since they fail at two different lines today (docx at the gate itself, pptx one line earlier at `Format::from_format_string`).
-- **B3 shared services wired into the Pandoc tail** — confirm, with tests, that `ResourceCollector`'s mediabag/resource staging and `LinkRewriteTransform` run before the wire-format handoff, so images and relative links resolve in the produced file.
+- **B3 shared services wired into the Pandoc tail** — confirm, with tests, that `ResourceCollector`\'s mediabag/resource staging and `LinkRewriteTransform` run before the wire-format handoff, so images and relative links resolve in the produced file.
 
 ## Out of scope (stays in P7, or belongs to a later format's own plan)
 

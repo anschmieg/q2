@@ -1,8 +1,11 @@
-# tree-sitter-qmd Cleanup - Completion Summary
+---
+title: 'tree-sitter-qmd Cleanup - Completion Summary'
+date: 2025-10-31
+description: 'Describes removing the unused inline tree-sitter grammar from `tree-sitter-qmd`, leaving a single unified grammar in the build, exports, documentation and tests.'
+status: done  # ✅ COMPLETE
+---
 
-**Date**: 2025-10-31
-**Status**: ✅ COMPLETE
-**Time Taken**: ~1.5 hours
+**Time Taken**: \~1.5 hours
 
 ## What Was Done
 
@@ -44,7 +47,7 @@ Removed all inline grammar exports:
 - Removed `INJECTION_QUERY_INLINE` constant
 - Removed `NODE_TYPES_INLINE` constant
 
-Also renamed exports to remove "_BLOCK" suffix:
+Also renamed exports to remove "\_BLOCK" suffix:
 - `HIGHLIGHT_QUERY_BLOCK` → `HIGHLIGHT_QUERY`
 - `INJECTION_QUERY_BLOCK` → `INJECTION_QUERY`
 - `NODE_TYPES_BLOCK` → `NODE_TYPES`
@@ -127,7 +130,7 @@ cargo build --release -p tree-sitter-qmd
 ### 2. Clearer API ✅
 - Only exports what's actually used
 - No confusing INLINE_LANGUAGE constant
-- Removed misleading "_BLOCK" suffixes
+- Removed misleading "\_BLOCK" suffixes
 
 ### 3. Better Documentation ✅
 - README accurately describes architecture
@@ -180,7 +183,7 @@ These internal names are fine and don't cause confusion since they're not part o
 
 Could potentially:
 - Delete tree-sitter-markdown-inline directory entirely (after confirming no one needs historical reference)
-- Rename internal fields from "block_*" to more generic names (low priority)
+- Rename internal fields from "block\_\*" to more generic names (low priority)
 
 ## Success Criteria Met
 
@@ -221,7 +224,7 @@ exactly where to look (tree-sitter-markdown/grammar.js line 531).
 - Phase 8 (archive): 10 minutes
 - Phase 9 (README): 10 minutes
 - Testing: 20 minutes
-- **Total**: ~1.5 hours (faster than estimated 2-2.5 hours!)
+- **Total**: \~1.5 hours (faster than estimated 2-2.5 hours!)
 
 ## References
 

@@ -1,7 +1,13 @@
-# Broken `main`: PWA precache limit + changelog unclosed-subscript
+---
+title: 'Broken `main`: PWA precache limit + changelog unclosed-subscript'
+date: 2026-07-07
+description: 'Repairs a red `main` build by raising the PWA precache size limit for the large WASM file and closing an unclosed subscript in the changelog, plus a process to prevent similar churn.'
+braid:
+  strand: bd-q5o7ekzn
+  priority: P0
+  labels: [ci]
+---
 
-**Strand:** `bd-q5o7ekzn`
-**Date:** 2026-07-07
 **Branch under repair:** `main`
 **Failing check:** `TS Test Suite` (both `ubuntu-latest` and `macos-latest`)
 
@@ -32,9 +38,9 @@ records both.
   ```
 - **Root cause:** `hub-client/vite.config.ts` capped
   `maximumFileSizeToCacheInBytes` at **35 MB** (comment: *"largest is
-  ~32MB"*). Workbox globs the WASM into the precache manifest; when a
+  \~32MB"*). Workbox globs the WASM into the precache manifest; when a
   globbed asset exceeds the size limit it emits a *warning*, and
-  `vite-plugin-pwa`'s `logWorkboxResult` **throws that warning as fatal**.
+  `vite-plugin-pwa`\'s `logWorkboxResult` **throws that warning as fatal**.
   #379 (`render_printable` + self-contained inliner) grew the WASM past 35 MB.
 - **Why macOS-only at first:** the margin was razor-thin. Local/ubuntu WASM
   = 36,689,700 B (≈10 KB *under* 35 MiB); macOS CI = 36,701,150 B (≈990 B
@@ -129,7 +135,7 @@ the fix is a single fast command; a reminder is enough.
       `hub-client/changelog.md` and injects `additionalContext` (visible to
       the agent) with the exact command `cd hub-client && npm run test:wasm`
       and the qmd-delimiter warning. Registered in `.claude/settings.json`
-      next to `format-rust.sh`. Non-blocking, ~0 latency; does **not** run
+      next to `format-rust.sh`. Non-blocking, \~0 latency; does **not** run
       the test (that would add latency and needs a built WASM). Verified: it
       fired live on the edit that added the header note below, and stays
       silent for `.rs` files and `docs/changelog.md`.

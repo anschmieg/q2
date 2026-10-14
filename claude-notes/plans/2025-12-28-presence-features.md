@@ -1,6 +1,11 @@
-# Presence Features for Quarto Hub
-
-**Beads Issue:** `k-evpj` - Add presence features (cursors, selections) to quarto-hub
+---
+title: 'Presence Features for Quarto Hub'
+date: 2025-12-28
+description: 'Shows the cursors and text selections of collaborators in the quarto-hub Monaco editor by broadcasting presence over Automerge ephemeral messages and rendering them with the monaco-collab-ext library.'
+braid:
+  strand: k-evpj
+  priority: P2
+---
 
 ## Overview
 
@@ -170,7 +175,7 @@ Create `hub-client/src/services/presenceService.ts`:
 
 **Core responsibilities:**
 - Subscribe to ephemeral messages on file DocHandles
-- Broadcast local presence changes (throttled to ~50ms)
+- Broadcast local presence changes (throttled to \~50ms)
 - Maintain presence state: `Map<userId, PresenceState>`
 - Detect stale presence (e.g., >5 seconds without update → assume disconnected)
 - Emit presence change events

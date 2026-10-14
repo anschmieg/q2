@@ -1,9 +1,15 @@
-# qmd-syntax-helper: AST-based rules report unparseable files as clean (bd-syntax-helper-parse-masking-w88mhedp)
+---
+title: 'qmd-syntax-helper: AST-based rules report unparseable files as clean (bd-syntax-helper-parse-masking-w88mhedp)'
+date: 2026-08-17
+description: 'Makes `qmd-syntax-helper` report files that fail to parse as unanalyzable rather than clean, so AST-based rules no longer give a false all-clear in `check` and `convert`.'
+status: approved  # Design aligned 2026-08-17 (see "Design decisions" below) — **pending user go-ahead to implement.**
+braid:
+  strand: bd-syntax-helper-parse-masking-w88mhedp
+  priority: P2
+  labels: [diagnostics, syntax-helper]
+---
 
-**Date:** 2026-08-17
-**Braid:** bd-syntax-helper-parse-masking-w88mhedp
 **Checkout:** main checkout, branch `main` (investigation only — no implementation branch yet)
-**Status:** Design aligned 2026-08-17 (see "Design decisions" below) — **pending user go-ahead to implement.**
 
 ## Triage verdict
 
@@ -66,7 +72,7 @@ where "leave it alone" becomes "report clean".
 | `literal-brackets` | `literal_brackets.rs:82` (check), `:133` (convert) | via `analyze()` → default = clean |
 | `q-2-30` | `diagnostics/q_2_30.rs:70` | `Err(_) => return Ok(Vec::new())` — same masking, independent of `analyze()` |
 
-**Not affected:** the ~20 `q_2_*` conversion rules, `apostrophe-quotes`,
+**Not affected:** the \~20 `q_2_*` conversion rules, `apostrophe-quotes`,
 `attribute-ordering`, `div-whitespace` are *diagnostic-driven* — a parse `Err`
 is their **input** (they scan the returned diagnostics for their code), so
 `Ok(_) => clean` is correct for them. `parse` and `syntax` obviously report

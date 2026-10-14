@@ -42,10 +42,13 @@ website:
             - guides/projects/render-list.qmd
             - guides/projects/aliases.qmd
             - guides/projects/llms-txt.qmd
+            - guides/projects/website-search.qmd
             - guides/embedded-docs.qmd
             - guides/projects/scripts.qmd
             - guides/projects/environment.qmd
             - guides/projects/profiles.qmd
+            - guides/hub/unix-socket.qmd
+            - guides/extensions/ts-engines-node.qmd
             - guides/publishing/index.qmd
             - guides/formats/epub/index.qmd
             - guides/formats/typst/index.qmd
@@ -57,6 +60,7 @@ website:
           href: guides/authoring/index.qmd
           contents:
             - guides/authoring/markdown-basics.qmd
+            - guides/authoring/migrating-markdown.qmd
             - guides/authoring/figures.qmd
             - guides/authoring/tables.qmd
             - guides/authoring/diagrams.qmd
@@ -73,8 +77,13 @@ website:
             - guides/authoring/engines.qmd
             - guides/authoring/navigation.qmd
             - guides/authoring/extensions.qmd
+            - guides/authoring/components.qmd
             - guides/authoring/templates.qmd
             - guides/publishing/index.qmd
+    - id: tools
+      title: "Tools"
+      contents:
+        - tools/q2-mcp.qmd
     - id: guide
       collapse-level: 1
       contents:
@@ -225,6 +234,7 @@ website:
             - errors/listing/Q-12-23.qmd
             - errors/listing/Q-12-24.qmd
             - errors/listing/Q-12-25.qmd
+            - errors/listing/Q-12-26.qmd
         - section: "xml"
           contents:
             - errors/xml/Q-9-1.qmd
@@ -316,6 +326,9 @@ website:
             - errors/project/Q-5-35.qmd
             - errors/project/Q-5-36.qmd
             - errors/project/Q-5-37.qmd
+            - errors/project/Q-5-38.qmd
+            - errors/project/Q-5-39.qmd
+            - errors/project/Q-5-40.qmd
         - section: "include"
           contents:
             - errors/include/Q-17-1.qmd
@@ -386,6 +399,7 @@ website:
             - errors/pandoc/Q-20-6.qmd
             - errors/pandoc/Q-20-7.qmd
             - errors/pandoc/Q-20-8.qmd
+            - errors/pandoc/Q-20-9.qmd
         - section: "typst"
           contents:
             - errors/typst/Q-21-1.qmd
@@ -410,6 +424,33 @@ website:
         - section: "citeproc"
           contents:
             - errors/citeproc/Q-23-1.qmd
+        - section: "import"
+          contents:
+            - errors/import/Q-24-1.qmd
+            - errors/import/Q-24-2.qmd
+            - errors/import/Q-24-3.qmd
+            - errors/import/Q-24-4.qmd
+            - errors/import/Q-24-5.qmd
+            - errors/import/Q-24-6.qmd
+            - errors/import/Q-24-7.qmd
+            - errors/import/Q-24-8.qmd
+            - errors/import/Q-24-9.qmd
+            - errors/import/Q-24-10.qmd
+            - errors/import/Q-24-11.qmd
+            - errors/import/Q-24-12.qmd
+            - errors/import/Q-24-13.qmd
+            - errors/import/Q-24-14.qmd
+        - section: "components"
+          contents:
+            - errors/components/Q-25-1.qmd
+            - errors/components/Q-25-2.qmd
+            - errors/components/Q-25-3.qmd
+            - errors/components/Q-25-4.qmd
+            - errors/components/Q-25-5.qmd
+            - errors/components/Q-25-6.qmd
+            - errors/components/Q-25-7.qmd
+            - errors/components/Q-25-8.qmd
+            - errors/components/Q-25-9.qmd
 
 format:
   html:

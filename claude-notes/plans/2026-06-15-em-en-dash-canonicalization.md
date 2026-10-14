@@ -1,8 +1,13 @@
-# Em-dash / en-dash parsing + canonicalization
-
-**Strand:** bd-k2h1x7bu
-**Date:** 2026-06-15
-**Status:** PLAN — awaiting go-ahead before implementation
+---
+title: 'Em-dash / en-dash parsing + canonicalization'
+date: 2026-06-15
+description: 'Makes unspaced `---` and `--` runs in `.qmd` text parse as em and en dashes, and writes Unicode dashes back as ASCII so the source stays ASCII-clean and round-trips.'
+status: approved  # PLAN — awaiting go-ahead before implementation
+braid:
+  strand: bd-k2h1x7bu
+  priority: P2
+  labels: [bug]
+---
 
 ## Overview
 
@@ -183,7 +188,7 @@ implement old-dashes.)
 
 **Chosen rule (simple, faithful):** scan each prose node for maximal runs of
 `-`; consume the run greedily 3-at-a-time as em-dash while ≥3 remain, then a
-trailing 2 as en-dash, leaving a lone 1 as hyphen. This is ~10 lines and
+trailing 2 as en-dash, leaving a lone 1 as hyphen. This is \~10 lines and
 matches the table exactly. Per the user, exact Pandoc parity is low priority;
 this rule happens to *be* Pandoc's, so we take it. `...` → `…` (U+2026) by the
 same scan.

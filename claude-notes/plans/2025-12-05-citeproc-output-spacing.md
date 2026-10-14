@@ -1,8 +1,13 @@
-# Fix Bibliography Spacing in quarto-citeproc to_blocks() Conversion
-
-**Beads Issue:** k-vku8
-**Created:** 2025-12-05
-**Status:** Planning
+---
+title: 'Fix Bibliography Spacing in quarto-citeproc to_blocks() Conversion'
+date: 2025-12-05
+description: 'Fixes missing punctuation and spacing in bibliography entries produced by the `to_blocks()` conversion in `quarto-citeproc`, where delimiters between author, year and title are lost.'
+status: draft  # Planning
+braid:
+  strand: k-vku8
+  priority: P1
+  labels: [citeproc, output]
+---
 
 ## Problem Statement
 
@@ -212,7 +217,7 @@ Based on investigation, likely fixes:
 
 | Aspect | render() | to_blocks() |
 |--------|----------|-------------|
-| Output type | String | Vec<Block> |
+| Output type | String | `Vec<Block>` |
 | Delimiter handling | `join_with_smart_delim()` | Manual in `to_inlines_inner()` |
 | Used by | CSL conformance tests | Citeproc filter |
 | Current status | Works correctly | Missing delimiters |

@@ -1,0 +1,11 @@
+---
+title: "Building this tag filter"
+date: 2026-10-14
+categories: [react, lua, notes]
+description: "The lmd cell, the props, and the component, step by step."
+---
+
+The lmd cell, the props, and the component, step by step.
+
+This post is part of the interactive-listing example; its tags are
+`react`, `lua`, `notes`.

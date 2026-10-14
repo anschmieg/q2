@@ -1,7 +1,12 @@
-# Block Handlers Implementation Plan
+---
+title: 'Block Handlers Implementation Plan'
+date: 2025-10-31
+description: 'Wires up the remaining block-level handlers in the tree-sitter visitor, starting with fenced divs and fenced note definitions and then pipe tables, reusing helper functions that already exist.'
+braid:
+  strand: k-274  # tree-sitter grammar refactoring - block handlers phase
+  priority: P0
+---
 
-**Date**: 2025-10-31
-**Beads Issue**: k-274 (tree-sitter grammar refactoring - block handlers phase)
 **Context**: Inline handlers are complete. Need to implement remaining block-level handlers.
 
 ## Current Status
@@ -26,7 +31,7 @@
 - Note references ([^ref])
 - Quotes, superscript, subscript, strikeout
 - Editorial marks (insert, delete, highlight, comment)
-- Shortcodes ({{< shortcode >}})
+- Shortcodes ({{{< shortcode >}}})
 - Links and images
 - Math (inline and display)
 
@@ -297,7 +302,7 @@ For each handler:
 ## Success Criteria
 
 1. ✅ All three block handlers have match arms in treesitter.rs
-2. ✅ No "[TOP-LEVEL MISSING NODE]" warnings for supported constructs
+2. ✅ No "\[TOP-LEVEL MISSING NODE\]" warnings for supported constructs
 3. ✅ All basic tests pass for each handler
 4. ✅ All edge case tests pass for each handler
 5. ✅ Full test suite passes (135+ tests)

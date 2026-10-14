@@ -1,10 +1,13 @@
-# Sidebar default title: inherit from `website.title`
+---
+title: 'Sidebar default title: inherit from `website.title`'
+date: 2026-04-29
+description: 'Makes the sidebar header inherit `website.title` by default, with `sidebar.title: false` to hide it and a custom string to override it, wrapped in a home link as Quarto 1 does.'
+status: approved  # Draft — answers to clarifying questions (2026-04-29) folded in; awaiting go-ahead to implement.
+---
 
-**Date:** 2026-04-29
 **Beads:** TBD (to be created — needs `br` from another shell)
 **Parent epic:** `claude-notes/plans/2026-04-23-website-project-epic.md`
 **Related:** `claude-notes/plans/2026-04-29-website-sidebar-layout.md` (bd-mgoh — left-column placement; precursor to this).
-**Status:** Draft — answers to clarifying questions (2026-04-29) folded in; awaiting go-ahead to implement.
 
 ## Symptom
 
@@ -163,7 +166,7 @@ data structure.
       confirm no `.sidebar-header` block.
 - [x] Toggle `_quarto.yml` to `sidebar.title: "Custom"`, re-render,
       confirm header contains `Custom`.
-- [~] Reload at `127.0.0.1:8000/_site/` and verify visually. — *not done; HTML inspection above is sufficient evidence; leave to user when reloading the running 127.0.0.1:8000 server.*
+- \[\~\] Reload at `127.0.0.1:8000/_site/` and verify visually. — *not done; HTML inspection above is sufficient evidence; leave to user when reloading the running 127.0.0.1:8000 server.*
 - [x] Capture observed HTML snippets in this plan's "End-to-end
       verification" section before declaring done.
 

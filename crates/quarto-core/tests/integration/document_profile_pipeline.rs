@@ -155,7 +155,14 @@ async fn pipeline_profile_matches_metadata() {
 
     assert_eq!(profile.profile_version, DocumentProfile::VERSION);
     assert_eq!(profile.format_id, "html");
-    assert_eq!(profile.title.as_deref(), Some("Profile fixture"));
+    assert_eq!(
+        profile
+            .title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Profile fixture")
+    );
     assert_eq!(profile.authors, vec!["Jane Example".to_string()]);
     assert_eq!(profile.date.as_deref(), Some("2026-04-23"));
     assert_eq!(
@@ -587,8 +594,20 @@ Body paragraph.
 async fn pipeline_extracts_listing_item_from_frontmatter() {
     let bundle = run_head_pipeline(LISTING_ITEM_FIXTURE_QMD).await;
     let li = &bundle.profile.listing_item;
-    assert_eq!(li.title.as_deref(), Some("Listing title"));
-    assert_eq!(li.description.as_deref(), Some("Listing desc"));
+    assert_eq!(
+        li.title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Listing title")
+    );
+    assert_eq!(
+        li.description
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Listing desc")
+    );
     assert_eq!(li.reading_time_minutes, Some(12));
     assert_eq!(li.categories, vec!["a".to_string(), "b".to_string()]);
     let status = li
@@ -645,17 +664,23 @@ This is the first paragraph that L1 will harvest as the description.\n\
 
 #[tokio::test]
 async fn pipeline_listing_item_autofill_end_to_end() {
-    // No `listing-item:` key in frontmatter; L1 derives every field
-    // from the AST and mtime, then DocumentProfileStage extracts a
-    // populated ListingItemInfo into the profile.
+    // No `listing-item:` key in frontmatter. L1 derives the
+    // description and image into the `derived_listing` side-channel
+    // (never into the authored `listing_item` slots —
+    // bd-listing-description-precedence-x4bh6w3m) and fills the
+    // numeric fields into `meta.listing-item`; DocumentProfileStage
+    // carries both into the profile.
     let bundle = run_head_pipeline(L1_FIXTURE_QMD).await;
-    let li = &bundle.profile.listing_item;
-
+    let derived = &bundle.profile.derived_listing;
     assert_eq!(
-        li.description.as_deref(),
+        derived.description.as_deref(),
         Some("This is the first paragraph that L1 will harvest as the description.")
     );
-    assert_eq!(li.image.as_deref(), Some("figs/cover.png"));
+    assert_eq!(derived.image.as_deref(), Some("figs/cover.png"));
+
+    let li = &bundle.profile.listing_item;
+    assert_eq!(li.description, None);
+    assert_eq!(li.image, None);
     // 12 words in the paragraph (image alt-text excluded; image is
     // its own block-level paragraph in the AST but contributes no
     // word-bearing prose).
@@ -679,7 +704,18 @@ async fn pipeline_listing_item_author_overrides_winner() {
     let fixture: &[u8] = b"---\ntitle: Hello\nlisting-item:\n  description: Author wrote this\n---\n\nAuto-fill would have used this paragraph instead.\n";
     let bundle = run_head_pipeline(fixture).await;
     let li = &bundle.profile.listing_item;
-    assert_eq!(li.description.as_deref(), Some("Author wrote this"));
+    assert_eq!(
+        li.description
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Author wrote this")
+    );
+    // The derived value is still recorded, separately.
+    assert_eq!(
+        bundle.profile.derived_listing.description.as_deref(),
+        Some("Auto-fill would have used this paragraph instead.")
+    );
 }
 
 #[tokio::test]
@@ -695,7 +731,10 @@ async fn pipeline_clone_and_resume_listing_item_visible_in_profile() {
 
     // FIXTURE_QMD has paragraphs ("Hello.", "More hello.", "Goodbye.")
     // separated by headings. L1's first non-empty paragraph wins.
-    assert_eq!(li.description.as_deref(), Some("Hello."));
+    assert_eq!(
+        bundle.profile.derived_listing.description.as_deref(),
+        Some("Hello.")
+    );
     // Word count: "Hello.", "More hello.", "Goodbye." plus heading
     // text ("Section one", "Subsection", "Section two") = 9 words.
     assert_eq!(li.word_count, Some(9));
@@ -749,7 +788,14 @@ async fn render_qmd_to_html_bridges_document_profile_to_ctx() {
         .document_profile
         .as_ref()
         .expect("RenderContext must carry the bridged document profile");
-    assert_eq!(profile.title.as_deref(), Some("Bridged"));
+    assert_eq!(
+        profile
+            .title
+            .as_deref()
+            .map(quarto_pandoc_types::inlines_to_plain_text)
+            .as_deref(),
+        Some("Bridged")
+    );
     let texts: Vec<&str> = profile.comments.iter().map(|c| c.text.as_str()).collect();
     assert_eq!(texts, vec!["needs work"]);
 }

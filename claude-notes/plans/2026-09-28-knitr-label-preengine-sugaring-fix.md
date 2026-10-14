@@ -1,4 +1,11 @@
-# Fix: restore knitr label visibility through PreEngineSugaringStage
+---
+title: 'Fix: restore knitr label visibility through PreEngineSugaringStage'
+date: 2026-09-28
+description: 'Restores label-derived knitr figure filenames, such as `fig-cars-1.svg`, by re-injecting the `label` option into the engine input that pre-engine sugaring had removed.'
+braid:
+  strand: bd-2lxj10z0
+  priority: P2
+---
 
 **Strand:** bd-2lxj10z0 — knitr label stripped by PreEngineSugaring breaks
 label-based figure filenames (`fig-cars-1.svg` -> `unnamed-chunk-1-1.svg`)
@@ -85,7 +92,7 @@ the fix — `unnamed-chunk-1-1.png` — GREEN with it — `fig-cars-1.png`), and
 hypothesized.
 
 **D4 — Census of what else is consumed: nothing else needs this fix.**
-`codeblock_shorthand.rs`'s consumed set is `label` (crossref-classified only),
+`codeblock_shorthand.rs`\'s consumed set is `label` (crossref-classified only),
 `<reftype>-cap` (registry-driven — `fig-cap`/`tbl-cap`/`lst-cap`/etc.), `fig-scap`
 (only on the *unlabelled* Figure path), and `fig-alt` (only on diagram/mermaid
 cells). Checked each against knitr's native semantics
@@ -181,7 +188,7 @@ this session's uncommitted changes):**
     code cells).
   - `quarto-test runner::tests::should_error_respects_project_render_context`
     — fails identically with or without the fix. Its fixture chapter has no
-    `label:` option at all, so `codeblock_shorthand`'s desugar never
+    `label:` option at all, so `codeblock_shorthand`\'s desugar never
     produces a wrapper Div for it and `label_reinject::inject` is
     necessarily a no-op on this AST; not investigated further as it is out
     of this strand's scope (D1), but ruled out as a regression.

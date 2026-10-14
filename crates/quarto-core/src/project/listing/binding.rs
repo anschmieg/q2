@@ -20,12 +20,15 @@
 
 use std::collections::HashMap;
 
+use pampa::filter_context::FilterContext;
+use pampa::filters::{Filter, FilterReturn, topdown_traverse_inlines};
 use quarto_doctemplate::{TemplateContext, TemplateValue};
-use quarto_pandoc_types::ConfigValue;
+use quarto_pandoc_types::inline::{Inline, Inlines, Space, split_string_to_inlines};
+use quarto_pandoc_types::{ConfigValue, inlines_to_plain_text};
 
 use super::config::{GridItemAlign, ImageAlign, Listing, ListingCategoriesMode, ListingType};
 use super::helpers;
-use super::item::{ItemOrigin, ItemTarget, ListingItem};
+use super::item::{FieldSource, ItemTarget, ListingItem};
 use crate::dates::{DateStyle, format_date, parse_date};
 
 /// Build the full [`TemplateContext`] for one [`Listing`] +
@@ -53,26 +56,13 @@ pub fn build_listing_context(
 ) -> TemplateContext {
     let mut ctx = TemplateContext::new();
 
-    // Effective date style for date-typed item fields (bd-13f821l5):
-    // listing-level `date-format` > document `date-format` > `medium`
-    // — Q1's precedence in website-listing-template.ts, with items
-    // pre-formatted before the (logic-less) template interpolates
-    // them, exactly like Q1 pre-formats its EJS records.
-    let date_style = listing
-        .date_format
-        .clone()
-        .or_else(|| {
-            project_meta
-                .get("date-format")
-                .and_then(|v| v.as_plain_text())
-        })
-        .map_or(DateStyle::Medium, |s| DateStyle::parse(&s));
+    let date_style = effective_date_style(listing, project_meta);
     // Effective field set: author-explicit `fields:` verbatim;
     // defaulted sets presence-filtered against the items (Q1
     // parity, bd-listing-table-fields-peg1w3b3). Everything below
     // (the `listing.fields` binding, `show.*`, the table
     // header/rows) reads this list, not `listing.fields`.
-    let fields = effective_fields(listing, items, &date_style);
+    let fields = effective_fields(listing, items);
     ctx.insert("listing", build_listing_map(listing, &fields));
     ctx.insert(
         "items",
@@ -83,6 +73,25 @@ pub fn build_listing_context(
     ctx
 }
 
+/// Effective date style for date-typed item fields (bd-13f821l5):
+/// listing-level `date-format` > document `date-format` > `medium`
+/// — Q1's precedence in website-listing-template.ts, with items
+/// pre-formatted before the (logic-less) template interpolates
+/// them, exactly like Q1 pre-formats its EJS records. The
+/// `meta.listings.<id>` bridge ([`super::metadata`]) formats its
+/// `date` fields with the same style so the two contracts agree.
+pub(crate) fn effective_date_style(listing: &Listing, project_meta: &ConfigValue) -> DateStyle {
+    listing
+        .date_format
+        .clone()
+        .or_else(|| {
+            project_meta
+                .get("date-format")
+                .and_then(|v| v.as_plain_text())
+        })
+        .map_or(DateStyle::Medium, |s| DateStyle::parse(&s))
+}
+
 /// Q1 parity (`website-listing-read.ts` suggested-fields filter):
 /// a *defaulted* field set keeps only fields at least one item
 /// carries — `image` always survives (a listing-level
@@ -90,23 +99,31 @@ pub fn build_listing_context(
 /// empties the list, keep the unfiltered defaults (defensive;
 /// `title` is non-optional on [`ListingItem`], so built-in default
 /// sets can never fully empty). Author-explicit `fields:` is used
-/// verbatim.
-fn effective_fields(
-    listing: &Listing,
-    items: &[ListingItem],
-    date_style: &DateStyle,
-) -> Vec<String> {
+/// verbatim. A `custom` listing has no type default; like Q1's
+/// `defaultFields(Custom, itemFields)` it gets every field some
+/// item carries ([`fields_items_carry`]); so does a `metadata`
+/// listing, whose consumer is code reading `meta.listings.<id>`.
+pub(crate) fn effective_fields(listing: &Listing, items: &[ListingItem]) -> Vec<String> {
     if listing.fields_explicit {
         return listing.fields.clone();
+    }
+    if matches!(listing.kind, ListingType::Custom | ListingType::Metadata) {
+        return fields_items_carry(items);
     }
     let filtered: Vec<String> = listing
         .fields
         .iter()
         .filter(|f| {
             f.as_str() == "image"
-                || items
-                    .iter()
-                    .any(|it| item_field_display_value(it, f, date_style).is_some())
+                || items.iter().any(|it| {
+                    // Presence only — the date style doesn't matter.
+                    item_field_cell(it, f, &DateStyle::Medium).is_some()
+                        // A description L7 may still derive counts as
+                        // present (Q1: every document item carries
+                        // the placeholder).
+                        || (f.as_str() == "description"
+                            && derivable(it, it.description_source))
+                })
         })
         .cloned()
         .collect();
@@ -117,12 +134,56 @@ fn effective_fields(
     }
 }
 
+/// Every field at least one item carries: the curated fields in a
+/// fixed order, then custom (`extra`) keys in first-seen order. A
+/// description or image L7 may still derive counts as carried (Q1:
+/// every document item carries both placeholders).
+fn fields_items_carry(items: &[ListingItem]) -> Vec<String> {
+    const CURATED: &[&str] = &[
+        "date",
+        "title",
+        "author",
+        "subtitle",
+        "image",
+        "image-alt",
+        "description",
+        "categories",
+        "reading-time",
+        "word-count",
+        "filename",
+        "file-modified",
+    ];
+    let mut fields: Vec<String> = CURATED
+        .iter()
+        .filter(|f| {
+            items.iter().any(|it| match **f {
+                "image" => it.image.is_some() || derivable(it, it.image_source),
+                // Presence only — the date style doesn't matter.
+                "description" => {
+                    item_field_cell(it, "description", &DateStyle::Medium).is_some()
+                        || derivable(it, it.description_source)
+                }
+                f => item_field_cell(it, f, &DateStyle::Medium).is_some(),
+            })
+        })
+        .map(|f| f.to_string())
+        .collect();
+    for it in items {
+        for k in it.extra.keys() {
+            if !fields.contains(k) {
+                fields.push(k.clone());
+            }
+        }
+    }
+    fields
+}
+
 fn build_listing_map(listing: &Listing, fields: &[String]) -> TemplateValue {
     let mut m = HashMap::new();
     m.insert("id".to_string(), TemplateValue::String(listing.id.clone()));
     m.insert(
         "type".to_string(),
-        TemplateValue::String(listing_type_name(listing.kind).to_string()),
+        TemplateValue::String(listing.kind.name().to_string()),
     );
     m.insert(
         "fields".to_string(),
@@ -154,7 +215,7 @@ fn build_listing_map(listing: &Listing, fields: &[String]) -> TemplateValue {
     );
     m.insert(
         "page-size".to_string(),
-        TemplateValue::String(listing.page_size.to_string()),
+        TemplateValue::String(listing.page_size().to_string()),
     );
     if let Some(max) = listing.max_items {
         m.insert(
@@ -164,9 +225,12 @@ fn build_listing_map(listing: &Listing, fields: &[String]) -> TemplateValue {
     }
     m.insert(
         "filter-ui".to_string(),
-        TemplateValue::Bool(listing.filter_ui),
+        TemplateValue::Bool(listing.filter_ui()),
     );
-    m.insert("sort-ui".to_string(), TemplateValue::Bool(listing.sort_ui));
+    m.insert(
+        "sort-ui".to_string(),
+        TemplateValue::Bool(listing.sort_ui()),
+    );
     m.insert(
         "max-description-length".to_string(),
         TemplateValue::String(listing.max_description_length.to_string()),
@@ -246,7 +310,7 @@ fn build_items_list(
 
 /// Format a raw item date for display; unparseable values pass
 /// through unchanged (the item metadata may carry arbitrary strings).
-fn display_date(raw: &str, style: &DateStyle) -> String {
+pub(crate) fn display_date(raw: &str, style: &DateStyle) -> String {
     match parse_date(raw) {
         Some(parsed) => format_date(&parsed, style).0,
         None => raw.to_string(),
@@ -266,12 +330,32 @@ fn build_item_map(
     // Curated fields. Optional fields are only inserted when
     // present so $if(<field>)$ correctly skips undefined values
     // (rather than seeing an empty-string truthy false).
+    //
+    // Title, subtitle and description are markdown prose: they are
+    // bound as markdown (`prose_markdown`), never as their plain
+    // text, because the templates interpolate them into markdown
+    // that is parsed again (bd-8a9eum6p).
+    //
+    // Each also has an `-html` twin (`prose_html`) for custom templates
+    // that place it inside a raw HTML block, where markdown would show
+    // as source — the same convention as `image-html`/`category-html`.
     m.insert(
         "title".to_string(),
-        TemplateValue::String(item.title.clone()),
+        TemplateValue::String(prose_markdown(&item.title)),
+    );
+    m.insert(
+        "title-html".to_string(),
+        TemplateValue::String(prose_html(&item.title)),
     );
     if let Some(s) = item.subtitle.as_deref() {
-        m.insert("subtitle".to_string(), TemplateValue::String(s.to_string()));
+        m.insert(
+            "subtitle".to_string(),
+            TemplateValue::String(prose_markdown(s)),
+        );
+        m.insert(
+            "subtitle-html".to_string(),
+            TemplateValue::String(prose_html(s)),
+        );
     }
     if let Some(s) = item.description.as_deref() {
         // bd-pcmdb7qg: explicit descriptions are truncated at the
@@ -281,14 +365,20 @@ fn build_item_map(
         // is per-listing — the same item may appear in two listings
         // with different limits. Derived descriptions are truncated
         // separately by the post-render envelope substitution.
+        // The cut works on the inlines, so the markup that survives
+        // it stays intact (plan D7).
         let description = if listing.max_description_length > 0 {
-            helpers::truncate_text_at_space(s, listing.max_description_length as usize)
+            helpers::truncate_inlines_at_space(s, listing.max_description_length as usize)
         } else {
-            s.to_string()
+            s.to_vec()
         };
         m.insert(
             "description".to_string(),
-            TemplateValue::String(description),
+            TemplateValue::String(prose_markdown(&description)),
+        );
+        m.insert(
+            "description-html".to_string(),
+            TemplateValue::String(prose_html(&description)),
         );
     }
     if let Some(s) = item.author.as_deref() {
@@ -404,20 +494,25 @@ fn build_item_map(
     );
     m.insert(
         "metadata-attrs".to_string(),
-        TemplateValue::String(helpers::metadata_attrs(item, index)),
+        TemplateValue::String(helpers::metadata_attrs(item, index, listing)),
     );
-    // L7 placeholders only for document-origin items (plan §D6): a
-    // record's description/image are final strings, and the
-    // post-render substitution keys on the document's output href.
-    let placeholders = item.origin == ItemOrigin::Document;
+    // L7 placeholders per field, only where the value is derived or
+    // absent and a rendered document exists to upgrade it from
+    // (bd-listing-description-precedence-x4bh6w3m). An authored value
+    // — `listing-item.*`, top-level `description` / `abstract` /
+    // `image`, or a record's own — is final, as in Q1, where the
+    // placeholder is only the `description || abstract || …` fallback.
+    let desc_placeholders = derivable(item, item.description_source);
+    let img_placeholders = derivable(item, item.image_source);
     // Description envelope (L7 plan §"How the begin / end markers
-    // reach the templates"). Both keys are always populated;
-    // `$description-placeholder-begin$` and `-end$` flank the L1
-    // fallback `$description$` block in the templates so the L7
-    // post-render step has a region to substitute.
+    // reach the templates"). Both keys are always present (empty when
+    // inactive) so custom templates can reference them
+    // unconditionally; `$description-placeholder-begin$` and `-end$`
+    // flank the L1 fallback `$description$` so the L7 post-render step
+    // has a region to substitute.
     m.insert(
         "description-placeholder-begin".to_string(),
-        TemplateValue::String(if placeholders {
+        TemplateValue::String(if desc_placeholders {
             helpers::description_placeholder_begin(item, listing)
         } else {
             String::new()
@@ -425,22 +520,26 @@ fn build_item_map(
     );
     m.insert(
         "description-placeholder-end".to_string(),
-        TemplateValue::String(if placeholders {
+        TemplateValue::String(if desc_placeholders {
             helpers::description_placeholder_end()
         } else {
             String::new()
         }),
     );
-    // Image envelope. Always populated regardless of whether
-    // `item.image` is set: the templates only reference these keys
-    // inside the `$if(image-html)$ ... $else$ ... $endif$` block, so
-    // markers for image-present items never reach the rendered
-    // output. Keeping the binding unconditional keeps the template
-    // logic simple — the decision lives in `$if(image-html)$`, not
-    // in the binding.
+    // The description block shows when there is a description *or*
+    // L7 may still derive one: a page whose prose only exists in its
+    // rendered output (engine output first) has no L1 description,
+    // and the envelope is where L7 puts the rendered paragraph
+    // (bd-listing-default-no-derived-desc-m0wrr8ty).
+    if item.description.is_some() || desc_placeholders {
+        m.insert("show-description".to_string(), TemplateValue::Bool(true));
+    }
+    // Image envelope. Active when the image is derived (it then wraps
+    // the derived `<img>`, which L7 may upgrade to the rendered page's
+    // preview image) or absent (it wraps the empty placeholder div).
     m.insert(
         "image-placeholder-begin".to_string(),
-        TemplateValue::String(if placeholders {
+        TemplateValue::String(if img_placeholders {
             helpers::image_placeholder_begin(item, listing, index)
         } else {
             String::new()
@@ -448,7 +547,7 @@ fn build_item_map(
     );
     m.insert(
         "image-placeholder-end".to_string(),
-        TemplateValue::String(if placeholders {
+        TemplateValue::String(if img_placeholders {
             helpers::image_placeholder_end()
         } else {
             String::new()
@@ -534,6 +633,79 @@ fn display_name(field: &str, overrides: &std::collections::BTreeMap<String, Stri
         .to_string()
 }
 
+/// Item prose — a title, subtitle or description — as the markdown a
+/// listing template interpolates (bd-8a9eum6p).
+///
+/// Written back with the qmd writer, so markup survives and literal
+/// text is escaped (`_scope` stays a word, `<anonymous>` stays text):
+/// the template output is parsed again, and the result must read back
+/// as these inlines. Before writing:
+///
+/// - links and notes are dropped (`strip_links_and_notes`): every
+///   built-in template wraps the title — and the grid its subtitle and
+///   description — in the item's link, and anchors may not nest; a
+///   footnote would land on the listing page;
+/// - soft and hard line breaks become spaces, so the result is one
+///   line: titles sit in ATX headings and table cells, where a newline
+///   ends the construct.
+///
+/// One line with every literal `|` escaped by the writer (code spans
+/// and math protect their own), so the result is also a safe pipe-table
+/// cell as-is.
+fn prose_markdown(inlines: &[Inline]) -> String {
+    let inlines = prose_inlines(inlines);
+    let mut buf = Vec::new();
+    match pampa::writers::qmd::write_inlines_fragment(&inlines, &mut buf) {
+        Ok(()) => String::from_utf8_lossy(&buf).into_owned(),
+        // Writing into a `Vec` cannot fail for I/O reasons; a writer
+        // diagnostic would mean an inline kind it cannot spell. Fall
+        // back to the plain text, still written as literal text so it
+        // cannot be misread as markdown.
+        Err(_) => {
+            let literal = split_string_to_inlines(&inlines_to_plain_text(&inlines));
+            let mut buf = Vec::new();
+            match pampa::writers::qmd::write_inlines_fragment(&literal, &mut buf) {
+                Ok(()) => String::from_utf8_lossy(&buf).into_owned(),
+                Err(_) => String::new(),
+            }
+        }
+    }
+}
+
+/// Item prose rendered to HTML, for a custom template that writes it
+/// inside a raw HTML block (`` `<span>$it.title-html$</span>`{=html} ``).
+/// Same preparation as [`prose_markdown`] — links and notes dropped, one
+/// line, so it also fits an inline raw-HTML span — then the HTML inline
+/// writer, as TOC labels are rendered.
+fn prose_html(inlines: &[Inline]) -> String {
+    let inlines = prose_inlines(inlines);
+    let mut out = Vec::new();
+    match pampa::writers::html::write_inlines_to(&inlines, &mut out) {
+        // Writing to a Vec cannot fail.
+        Ok(()) => String::from_utf8_lossy(&out).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Item prose as the inlines every consumer of an item sees: links
+/// and notes dropped, one line. [`prose_markdown`] and [`prose_html`]
+/// write these out; the `meta.listings.<id>` bridge
+/// ([`super::metadata`]) publishes them as `PandocInlines`, so a Lua
+/// consumer gets the same value as a template, in its native type.
+pub(crate) fn prose_inlines(inlines: &[Inline]) -> Inlines {
+    single_line(crate::transforms::strip_links_and_notes(inlines))
+}
+
+/// `inlines` with every `SoftBreak` / `LineBreak` (at any depth)
+/// replaced by a `Space`.
+fn single_line(inlines: Inlines) -> Inlines {
+    let space = |source_info| vec![Inline::Space(Space { source_info })];
+    let mut filter = Filter::new()
+        .with_soft_break(move |b, _| FilterReturn::FilterResult(space(b.source_info), false))
+        .with_line_break(move |b, _| FilterReturn::FilterResult(space(b.source_info), false));
+    topdown_traverse_inlines(inlines, &mut filter, &mut FilterContext::new())
+}
+
 /// Make a string safe inside one markdown pipe-table cell:
 /// newlines flatten to spaces (a cell is one line by definition)
 /// and `|` is escaped so it can't terminate the cell.
@@ -561,6 +733,13 @@ fn table_header(
     )
 }
 
+/// Whether a field with this source gets an L7 envelope: the value is
+/// derived or absent, and the item links a project document whose
+/// rendered output L7 can read.
+fn derivable(item: &ListingItem, source: FieldSource) -> bool {
+    !source.is_authored() && item.target.output_href().is_some()
+}
+
 /// The pre-rendered per-item `table-row` value.
 fn table_row(
     item: &ListingItem,
@@ -577,10 +756,14 @@ fn table_row(
             if field == "image" {
                 return escape_table_cell(image_html);
             }
-            let Some(value) = item_field_display_value(item, field, date_style) else {
+            let value = if field == "description" {
+                description_cell(item, listing)
+            } else {
+                item_field_cell(item, field, date_style)
+            };
+            let Some(value) = value else {
                 return String::new();
             };
-            let value = escape_table_cell(&value);
             if !value.is_empty() && !path.is_empty() && linked.iter().any(|l| l == field) {
                 // Same link shape the templates use for titles;
                 // LinkRewriteTransform rewrites the `.qmd` target
@@ -594,20 +777,48 @@ fn table_row(
     format!("| {} |", cells.join(" | "))
 }
 
-/// Display value for one field of one item — the table-cell
+/// The description cell: the description's markdown, wrapped in the L7
+/// envelope (as inline raw HTML) when the description is derived or
+/// absent, so tables derive descriptions like the other listing types
+/// do. `None` when there is neither.
+fn description_cell(item: &ListingItem, listing: &Listing) -> Option<String> {
+    let value = item.description.as_deref().map(prose_markdown);
+    if !derivable(item, item.description_source) {
+        return value;
+    }
+    Some(format!(
+        "`{}`{{=html}}{}`{}`{{=html}}",
+        helpers::description_placeholder_begin(item, listing),
+        value.unwrap_or_default(),
+        helpers::description_placeholder_end()
+    ))
+}
+
+/// One field of one item as the markdown of its table cell — the
 /// equivalent of Q1's `readField` + item-record pre-formatting.
 /// `None` means "the item doesn't carry this field" (renders as an
 /// empty cell; also drives presence filtering of defaulted field
 /// sets).
+///
+/// Prose fields keep their markup ([`prose_markdown`], already
+/// cell-safe); every other value is plain text made cell-safe by
+/// [`escape_table_cell`].
+fn item_field_cell(item: &ListingItem, field: &str, date_style: &DateStyle) -> Option<String> {
+    match field {
+        "title" => Some(prose_markdown(&item.title)),
+        "subtitle" => item.subtitle.as_deref().map(prose_markdown),
+        "description" => item.description.as_deref().map(prose_markdown),
+        _ => item_field_display_value(item, field, date_style).map(|v| escape_table_cell(&v)),
+    }
+}
+
+/// Plain-text display value for one non-prose field of one item.
 fn item_field_display_value(
     item: &ListingItem,
     field: &str,
     date_style: &DateStyle,
 ) -> Option<String> {
     match field {
-        "title" => Some(item.title.clone()),
-        "subtitle" => item.subtitle.clone(),
-        "description" => item.description.clone(),
         "author" => item.author.clone(),
         "authors" => (!item.authors.is_empty()).then(|| item.authors.join(", ")),
         "date" => item.date.as_deref().map(|s| display_date(s, date_style)),
@@ -661,7 +872,7 @@ fn config_value_cell_string(cv: &ConfigValue) -> Option<String> {
 /// stay project-relative — the `LinkRewriteTransform` resolver
 /// handles either form, but the host-relative form keeps the
 /// emitted markdown closer to what an author would write by hand.
-fn host_relative_qmd(source_path: &std::path::Path, host_dir: &str) -> String {
+pub(crate) fn host_relative_qmd(source_path: &std::path::Path, host_dir: &str) -> String {
     let project_relative = source_path
         .components()
         .filter_map(|c| match c {
@@ -721,15 +932,6 @@ fn config_value_to_template_value(cv: &ConfigValue) -> TemplateValue {
     config_to_template_value(cv, &mut conv)
 }
 
-fn listing_type_name(t: ListingType) -> &'static str {
-    match t {
-        ListingType::Default => "default",
-        ListingType::Grid => "grid",
-        ListingType::Table => "table",
-        ListingType::Custom => "custom",
-    }
-}
-
 fn image_align_name(a: ImageAlign) -> &'static str {
     match a {
         ImageAlign::Left => "left",
@@ -764,9 +966,11 @@ mod tests {
 
     fn item(title: &str) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Derived,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
-            description: Some("A descr.".to_string()),
+            description: Some(crate::document_profile::text("A descr.")),
             author: Some("Jane".to_string()),
             authors: vec!["Jane".to_string()],
             date: Some("2026-01-01".to_string()),
@@ -871,7 +1075,9 @@ mod tests {
         let mut l = listing();
         l.max_description_length = 20;
         let mut it = item("Hello");
-        it.description = Some("The quick brown fox jumps over.".to_string());
+        it.description = Some(crate::document_profile::text(
+            "The quick brown fox jumps over.",
+        ));
         let ctx = build_listing_context(&l, &[it], "posts", &ConfigValue::default());
         let TemplateValue::List(arr) = ctx.get("items").unwrap() else {
             panic!("items not a list");
@@ -880,10 +1086,11 @@ mod tests {
             panic!("item not a map");
         };
         // Q1-exact cut: first 20 chars, drop one, cut at last
-        // space, append `…`.
+        // space, append `…` — bound as markdown, where the writer
+        // spells `…` as `...` (the re-parse reads it back as `…`).
         assert_eq!(
             m.get("description"),
-            Some(&TemplateValue::String("The quick brown…".to_string()))
+            Some(&TemplateValue::String("The quick brown...".to_string()))
         );
     }
 
@@ -895,7 +1102,7 @@ mod tests {
         l.max_description_length = 0;
         let long = "This explicit description is much longer than any default limit would allow.";
         let mut it = item("Hello");
-        it.description = Some(long.to_string());
+        it.description = Some(crate::document_profile::text(long));
         let ctx = build_listing_context(&l, &[it], "posts", &ConfigValue::default());
         let TemplateValue::List(arr) = ctx.get("items").unwrap() else {
             panic!("items not a list");
@@ -1223,6 +1430,90 @@ mod tests {
         assert_eq!(row_of(&ctx), "| [X](foo.qmd){.no-external} |  |");
     }
 
+    /// Parse `md` as one paragraph and return its inlines.
+    fn parse_inlines(md: &str) -> Inlines {
+        let mut sink = std::io::sink();
+        let (doc, _, diags) =
+            pampa::readers::qmd::read(md.as_bytes(), false, "t.qmd", &mut sink, true, None)
+                .unwrap_or_else(|d| panic!("`{md}` does not parse: {d:?}"));
+        assert!(
+            diags.is_empty(),
+            "`{md}` parses with diagnostics: {diags:?}"
+        );
+        match doc.blocks.as_slice() {
+            [quarto_pandoc_types::block::Block::Paragraph(p)] => p.content.clone(),
+            other => panic!("`{md}` is not one paragraph: {other:?}"),
+        }
+    }
+
+    // bd-8a9eum6p: the markdown a listing interpolates must read back
+    // as the same inlines — one line, cleanly parsed, a fixpoint.
+    #[test]
+    fn prose_markdown_round_trips() {
+        for (source, expected) in [
+            ("Fix \\_scope: regression", "Fix \\_scope: regression"),
+            ("Plan `_scope` and *emph*", "Plan `_scope` and *emph*"),
+            ("About `<anonymous>` frames", "About `<anonymous>` frames"),
+            (
+                "A \\<p\\> tag and a \\@ and \\*",
+                "A \\<p> tag and a \\@ and \\*",
+            ),
+            ("Pipes `a|b` and c\\|d", "Pipes `a|b` and c\\|d"),
+            ("Math $x_1$ here", "Math $x_1$ here"),
+            // Links unwrap (the title is itself a link); notes go.
+            ("See [the docs](u.html) now", "See the docs now"),
+            ("Noted^[a note] title", "Noted title"),
+            // Line breaks become spaces: one line for headings and cells.
+            ("one\ntwo", "one two"),
+        ] {
+            let md = prose_markdown(&parse_inlines(source));
+            assert_eq!(md, expected, "prose_markdown of `{source}`");
+            assert_eq!(
+                prose_markdown(&parse_inlines(&md)),
+                md,
+                "`{md}` is not a fixpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_has_html_twins_for_raw_html_templates() {
+        let mut it = item("unused");
+        it.title = parse_inlines("Fix `<x>` and *emph* [link](u.html)");
+        it.subtitle = Some(parse_inlines("Sub \\_y"));
+        it.description = Some(parse_inlines("A **b** & c"));
+        let ctx = build_listing_context(&listing(), &[it], "posts", &ConfigValue::default());
+        let TemplateValue::List(arr) = ctx.get("items").unwrap() else {
+            panic!("items not a list");
+        };
+        let TemplateValue::Map(m) = &arr[0] else {
+            panic!("item not a map");
+        };
+        let get = |k: &str| match m.get(k) {
+            Some(TemplateValue::String(s)) => s.clone(),
+            other => panic!("{k}: {other:?}"),
+        };
+        assert_eq!(
+            get("title-html"),
+            "Fix <code>&lt;x&gt;</code> and <em>emph</em> link"
+        );
+        assert_eq!(get("subtitle-html"), "Sub _y");
+        assert_eq!(get("description-html"), "A <strong>b</strong> &amp; c");
+    }
+
+    #[test]
+    fn table_row_keeps_pipe_inside_code_span_unescaped() {
+        let l = table_listing(&["title"]);
+        let mut i = item("unused");
+        i.title = parse_inlines("Pipes `a|b` and c\\|d");
+        i.date = None;
+        let ctx = ctx_for(&l, &[i]);
+        assert_eq!(
+            row_of(&ctx),
+            "| [Pipes `a|b` and c\\|d](foo.qmd){.no-external} |"
+        );
+    }
+
     #[test]
     fn table_row_escapes_pipes_and_flattens_newlines() {
         let l = table_listing(&["title"]);
@@ -1364,6 +1655,95 @@ mod tests {
         assert_eq!(row_of(&ctx), "| X |  |");
     }
 
+    // Q1 `defaultFields(Custom, itemFields)`: a custom listing
+    // without `fields:` shows every field some item carries, so a
+    // custom template wrapping `$items:item-default()$` still draws
+    // its cards (bd-p80b9jy9).
+    #[test]
+    fn custom_listing_without_fields_uses_fields_items_carry() {
+        let mut l = Listing {
+            kind: ListingType::Custom,
+            ..Listing::default()
+        };
+        super::super::config::apply_type_defaults(&mut l);
+        assert!(l.fields.is_empty() && !l.fields_explicit);
+        let mut a = item("A");
+        a.author = None;
+        a.authors = Vec::new();
+        a.extra.insert(
+            "venue".to_string(),
+            ConfigValue::new_string("ICML", quarto_source_map::SourceInfo::for_test()),
+        );
+        let mut b = item("B");
+        b.image = Some("b.png".to_string());
+        let ctx = ctx_for(&l, &[a, b]);
+        let TemplateValue::List(fields) =
+            ctx.get("listing").unwrap().get_path(&["fields"]).unwrap()
+        else {
+            panic!("fields not a list");
+        };
+        let names: Vec<&str> = fields
+            .iter()
+            .map(|f| match f {
+                TemplateValue::String(s) => s.as_str(),
+                _ => panic!("non-string field"),
+            })
+            .collect();
+        for f in ["title", "author", "date", "image", "venue"] {
+            assert!(names.contains(&f), "missing `{f}` in {names:?}");
+        }
+        assert!(
+            !names.contains(&"subtitle"),
+            "no item has a subtitle: {names:?}"
+        );
+    }
+
+    fn field_names(ctx: &TemplateContext) -> Vec<String> {
+        let TemplateValue::List(fields) =
+            ctx.get("listing").unwrap().get_path(&["fields"]).unwrap()
+        else {
+            panic!("fields not a list");
+        };
+        fields
+            .iter()
+            .map(|f| match f {
+                TemplateValue::String(s) => s.clone(),
+                _ => panic!("non-string field"),
+            })
+            .collect()
+    }
+
+    // A custom listing without `fields:` keeps `description` and
+    // `image` when L7 can still derive them, so `$items:item-default()$`
+    // emits their envelopes instead of dropping them.
+    #[test]
+    fn custom_listing_without_fields_keeps_derivable_fields() {
+        let mut l = Listing {
+            kind: ListingType::Custom,
+            ..Listing::default()
+        };
+        super::super::config::apply_type_defaults(&mut l);
+        let mut i = item("X");
+        i.description = None;
+        i.description_source = FieldSource::Absent;
+        i.image = None;
+        i.image_source = FieldSource::Absent;
+        let names = field_names(&ctx_for(&l, &[i.clone()]));
+        for f in ["description", "image"] {
+            assert!(names.contains(&f.to_string()), "missing `{f}` in {names:?}");
+        }
+
+        // A record with no link has nothing to derive from.
+        i.target = crate::project::listing::item::ItemTarget::None;
+        let names = field_names(&ctx_for(&l, &[i]));
+        for f in ["description", "image"] {
+            assert!(
+                !names.contains(&f.to_string()),
+                "unexpected `{f}` in {names:?}"
+            );
+        }
+    }
+
     // `image` is exempt from presence filtering (Q1: placeholders
     // can fill it at render time even when no item declares one).
     #[test]
@@ -1485,13 +1865,143 @@ mod tests {
 
     #[test]
     fn record_over_document_keeps_path_but_no_placeholders() {
+        // The record supplied the description, so it is authored.
         let mut i = item("Card");
         i.origin = ItemOrigin::RecordOverDocument;
+        i.description_source = FieldSource::Record;
         let m = first_item_map(i);
         assert!(m.contains_key("path"));
         assert_eq!(
             m.get("description-placeholder-begin"),
             Some(&TemplateValue::String(String::new()))
+        );
+    }
+
+    // ─── bd-listing-description-precedence-x4bh6w3m ─────────────────
+
+    fn placeholder(m: &HashMap<String, TemplateValue>, key: &str) -> String {
+        match m.get(key) {
+            Some(TemplateValue::String(s)) => s.clone(),
+            other => panic!("{key}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn description_envelope_only_for_derived_or_absent_document_descriptions() {
+        for (source, want) in [
+            (FieldSource::ListingItem, false),
+            (FieldSource::Document, false),
+            (FieldSource::Abstract, false),
+            (FieldSource::Record, false),
+            (FieldSource::Derived, true),
+            (FieldSource::Absent, true),
+        ] {
+            let mut i = item("X");
+            i.description_source = source;
+            let m = first_item_map(i);
+            assert_eq!(
+                !placeholder(&m, "description-placeholder-begin").is_empty(),
+                want,
+                "{source:?}"
+            );
+            assert_eq!(
+                !placeholder(&m, "description-placeholder-end").is_empty(),
+                want,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_envelope_without_a_document_to_derive_from() {
+        let mut i = item("X");
+        i.target = ItemTarget::Href("https://example.com".to_string());
+        i.description_source = FieldSource::Absent;
+        i.image_source = FieldSource::Absent;
+        let m = first_item_map(i);
+        assert!(placeholder(&m, "description-placeholder-begin").is_empty());
+        assert!(placeholder(&m, "image-placeholder-begin").is_empty());
+    }
+
+    #[test]
+    fn show_description_when_description_or_envelope() {
+        // Description present.
+        let m = first_item_map(item("X"));
+        assert_eq!(m.get("show-description"), Some(&TemplateValue::Bool(true)));
+        // No description, but L7 may derive one.
+        let mut i = item("X");
+        i.description = None;
+        i.description_source = FieldSource::Absent;
+        let m = first_item_map(i);
+        assert_eq!(m.get("show-description"), Some(&TemplateValue::Bool(true)));
+        assert!(!m.contains_key("description"));
+        // No description and nothing to derive from.
+        let mut i = item("X");
+        i.description = None;
+        i.description_source = FieldSource::Absent;
+        i.target = ItemTarget::None;
+        let m = first_item_map(i);
+        assert!(!m.contains_key("show-description"));
+    }
+
+    #[test]
+    fn image_envelope_follows_image_source() {
+        for (source, want) in [
+            (FieldSource::Document, false),
+            (FieldSource::ListingItem, false),
+            (FieldSource::Record, false),
+            (FieldSource::Derived, true),
+            (FieldSource::Absent, true),
+        ] {
+            let mut i = item("X");
+            i.image = (source != FieldSource::Absent).then(|| "posts/a.png".to_string());
+            i.image_source = source;
+            let m = first_item_map(i);
+            assert_eq!(
+                !placeholder(&m, "image-placeholder-begin").is_empty(),
+                want,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_description_cell_wraps_derivable_descriptions() {
+        let mut l = table_listing(&["title", "description"]);
+        l.field_links = Some(Vec::new());
+        let mut derived = item("D");
+        derived.description_source = FieldSource::Derived;
+        let mut authored = item("A");
+        authored.description_source = FieldSource::Document;
+        let mut absent = item("N");
+        absent.description = None;
+        absent.description_source = FieldSource::Absent;
+        let row = |i: ListingItem| row_of(&ctx_for(&l, &[i]));
+        let d = row(derived);
+        assert!(
+            d.contains("`<!-- desc-begin(") && d.contains("A descr."),
+            "{d}"
+        );
+        let a = row(authored);
+        assert!(!a.contains("desc-begin") && a.contains("A descr."), "{a}");
+        let n = row(absent);
+        assert!(n.contains("desc-begin"), "{n}");
+    }
+
+    #[test]
+    fn derivable_description_keeps_defaulted_table_column() {
+        let mut l = table_listing(&[]);
+        l.fields = vec!["title".to_string(), "description".to_string()];
+        l.fields_explicit = false;
+        l.field_links = Some(Vec::new());
+        let mut i = item("X");
+        i.description = None;
+        i.description_source = FieldSource::Absent;
+        let ctx = ctx_for(&l, &[i]);
+        assert!(
+            header_of(&ctx).contains("Description"),
+            "{}",
+            header_of(&ctx)
         );
     }
 }

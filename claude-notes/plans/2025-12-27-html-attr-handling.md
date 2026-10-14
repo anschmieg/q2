@@ -1,4 +1,8 @@
-# HTML Attribute Handling Fix Plan
+---
+title: 'HTML Attribute Handling Fix Plan'
+date: 2025-12-27
+description: 'Fixes the pampa HTML writer so that only non-standard key-value attributes receive a `data-` prefix, leaving standard HTML5, RDFa, aria, and already-prefixed attributes unchanged as Pandoc does.'
+---
 
 ## Problem Statement
 
@@ -32,7 +36,7 @@ This unconditionally prefixes all attributes with `data-`.
 
 Pandoc uses sophisticated logic (from `src/Text/Pandoc/Writers/HTML.hs`):
 
-1. Check if attribute is in `html5Attributes` set (~140 standard attributes)
+1. Check if attribute is in `html5Attributes` set (\~140 standard attributes)
 2. Check if attribute is in `rdfaAttributes` set
 3. Check if attribute already starts with `data-` or `aria-`
 4. Check if attribute contains `:` (namespace prefix like `epub:type`)
@@ -157,7 +161,7 @@ fn is_rdfa_attribute(attr: &str) -> bool {
 
 For efficient lookup, we have options:
 
-1. **Sorted array with binary search** (simplest, ~O(log n))
+1. **Sorted array with binary search** (simplest, \~O(log n))
 2. **HashSet** (O(1) but more memory)
 3. **phf crate** for perfect hash at compile time (O(1), zero runtime cost)
 

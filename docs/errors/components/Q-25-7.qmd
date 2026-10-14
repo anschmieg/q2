@@ -1,0 +1,41 @@
+---
+title: "Unknown component name on element"
+description: "An element asks for a component that `components:` does not declare, by `component=<name>` or by `quarto.component` in Lua. The element keeps its static content."
+code: Q-25-7
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-7` — Unknown component name on element
+
+> An element asks for a component that `components:` does not declare, by `component=<name>` or by `quarto.component` in Lua. The element keeps its static content.
+
+## What this means
+
+An element can name its component directly, with the `component`
+attribute (`::: {component=carousel}`), or a Lua filter or lmd cell can
+build the element with `quarto.component("carousel", props, blocks)`. Either
+way the name must match a `components:` entry, which is where the module
+(`src`) comes from. When it does not, Quarto warns, leaves the element
+unbound, and the page shows the element's static content.
+
+## Why this happens
+
+- The entry is missing from `components:`, or its `name` is spelled
+  differently.
+- The declaration lives in another document's front matter rather than in
+  `_quarto.yml`, so this page does not see it.
+
+## How to fix
+
+Add the entry under `components:` (in the document, or in `_quarto.yml`
+for the whole project), or write the module path directly on the element:
+`component=./carousel.js` declares it on the spot.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

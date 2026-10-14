@@ -1,8 +1,14 @@
-# WASM C-shim merge: unify with tree-sitter-language upstream sysroot
+---
+title: 'WASM C-shim merge: unify with tree-sitter-language upstream sysroot'
+date: 2026-04-20
+description: 'Unifies the C stdlib shims in the WASM build by patching `tree-sitter-language` to empty stdio sources and extending the single `c_shim.rs` printf family so Lua and tree-sitter grammars link without duplicate symbols.'
+status: done  # **complete 2026-04-20**. All work items below merged on the `feature/quarto-2-highlighting` branch. Shim crate at `crates/tree-sitter-language-wasm-shim/`, merged snprintf/vsnprintf implementation factored into the new `crates/wasm-printf-fmt/` crate (29 unit tests). c_shim.rs reduced to a thin wasm-bindgen wrapper; `fputc`/`fputs`/`fwrite` now no-op instead of panic.
+braid:
+  strand: bd-n7x2  # overall syntax-highlighting epic
+  priority: P2
+---
 
 - **Parent plan**: `claude-notes/plans/2026-04-20-syntax-highlighting-phase-3.md` (this is a sub-plan of Phase 3.1)
-- **Beads**: bd-n7x2 (overall syntax-highlighting epic)
-- **Status**: **complete 2026-04-20**. All work items below merged on the `feature/quarto-2-highlighting` branch. Shim crate at `crates/tree-sitter-language-wasm-shim/`, merged snprintf/vsnprintf implementation factored into the new `crates/wasm-printf-fmt/` crate (29 unit tests). c_shim.rs reduced to a thin wasm-bindgen wrapper; `fputc`/`fputs`/`fwrite` now no-op instead of panic.
 
 ## Problem
 
@@ -71,13 +77,13 @@ Rationale for fputc/fputs/fwrite: panicking would be wrong if any code path insi
 - [ ] Change `fputc`, `fputs`, `fwrite` from `panic!` to no-op returning success-like values. Match upstream's return conventions exactly (`fputc` returns `c`, `fputs` returns 0, `fwrite` returns `size * nmemb`).
 - [ ] Add a doc comment block above the stdio section in `c_shim.rs` explaining:
   - This is the single source of truth for these symbols in the WASM binary.
-  - `tree-sitter-language`'s upstream `wasm/src/*.c` files are neutralized via the patch crate.
+  - `tree-sitter-language`\'s upstream `wasm/src/*.c` files are neutralized via the patch crate.
   - Format-specifier coverage is the union of Lua's needs + tree-sitter upstream's coverage.
   - Link to this plan file for full rationale.
 
 ### Tests
 
-- [ ] Add unit tests in `c_shim.rs`'s test module covering:
+- [ ] Add unit tests in `c_shim.rs`\'s test module covering:
   - `%d`, `%i`, `%u`, `%ld`, `%lld`, `%zu`, `%x`, `%X`, `%p`, `%s`, `%c`, `%%` — spot-check each specifier.
   - Flag combinations: `%-10d`, `%010d`, `%+d`, `% d`, `%#x`.
   - Width and precision: `%5.2d`, `%.3s`, `%10.5s`.
@@ -106,7 +112,7 @@ A `CHECK_UPSTREAM.md` at the root of the patch crate (or a `# Upstream sync` sec
 
 ## Alternatives deliberately not taken
 
-- **Migrate fully to upstream's sysroot** (delete `c_shim.rs`'s 8 stdio functions). Would require upstream to cover `%lld`, `%llu`, `%g`, `%Lg`. Not worth blocking Phase 3 on upstream PRs.
+- **Migrate fully to upstream's sysroot** (delete `c_shim.rs`\'s 8 stdio functions). Would require upstream to cover `%lld`, `%llu`, `%g`, `%Lg`. Not worth blocking Phase 3 on upstream PRs.
 - **Separate `c_shim.rs` for the grammar subset and another for Lua**. Same link-conflict problem at a different granularity.
 - **Custom allocator override**. Orthogonal to the stdio conflict; doesn't help.
 

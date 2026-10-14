@@ -1,7 +1,10 @@
-# Unified LSP and Hub Architecture Design
+---
+title: 'Unified LSP and Hub Architecture Design'
+date: 2025-12-11
+description: 'Analyzes merging the language server and collaboration hub into one process, making automerge documents the single source of content that editor changes flow into and remote edits flow out of.'
+status: draft  # Design Analysis
+---
 
-**Created:** 2025-12-11
-**Status:** Design Analysis
 **Related Documents:**
 - 2025-12-09-filesystem-sync-design.md (filesystem sync algorithm)
 - 2025-12-08-quarto-hub-mvp.md (hub architecture)
@@ -50,7 +53,7 @@ The Rust LSP will provide:
    - Folding ranges, selection ranges
    - Diagnostics (link validation, YAML)
 
-2. **Custom JSON-RPC Methods** (~50 total)
+2. **Custom JSON-RPC Methods** (\~50 total)
    - Pandoc integration, bibliography, citations
    - Crossref, Zotero, dictionary
    - Code view assistance
@@ -412,7 +415,7 @@ Periodic timer or file watcher triggers sync
    - `listen()` method processes `didOpen`, `didChange`, `didClose` notifications
    - Stores documents in `BTreeMap<Uri, FullTextDocument>`
    - **Limitation**: Only supports UTF-16 position encoding
-   - ~27K downloads/month, used by 5 crates
+   - \~27K downloads/month, used by 5 crates
 
 2. **[ropey](https://crates.io/crates/ropey)** - Rope data structure for efficient text manipulation
    - Recommended by rust-analyzer patterns

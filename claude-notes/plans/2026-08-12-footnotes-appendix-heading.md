@@ -1,10 +1,14 @@
-# Footnotes appendix section omits the visible 'Footnotes' heading that Quarto 1 emits (bd-v9zs83zj)
+---
+title: 'Footnotes appendix section omits the visible \''Footnotes\'' heading that Quarto 1 emits (bd-v9zs83zj)'
+date: 2026-08-12
+description: 'Adds the visible Footnotes heading to the footnotes appendix, localized through the language table, and removes the horizontal rule that Quarto 1 drops when it inserts the heading.'
+status: approved  # Design settled 2026-08-12 — **ready to implement.** All four questions answered by the user; see "Design answers" below.
+braid:
+  strand: bd-v9zs83zj
+  priority: P3
+---
 
-**Date:** 2026-08-12
-**Braid:** bd-v9zs83zj
-**Checkout:** main @ `de2375f0` (no worktree/branch created — this skill ran in the main checkout)
-**Status:** Design settled 2026-08-12 — **ready to implement.** All four questions
-answered by the user; see "Design answers" below.
+**Checkout:** main \@ `de2375f0` (no worktree/branch created — this skill ran in the main checkout)
 
 ## Triage verdict
 
@@ -377,7 +381,7 @@ Chased to ground before continuing:
 Filed as **`bd-7ilvb5r2`**. Worth knowing because the failure is indistinguishable from a
 real grammar regression and points at a file the session never touched.
 
-A process note that cost real time here: `cargo xtask verify | tail -30` reports **`tail`'s**
+A process note that cost real time here: `cargo xtask verify | tail -30` reports **`tail`\'s**
 exit code, not xtask's, so a failed verify looks like it exited 0. Run it unpiped when the
 exit status matters.
 

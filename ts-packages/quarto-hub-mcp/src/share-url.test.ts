@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseProjectRef, serversMatch } from './share-url.js';
+import { buildShareUrl, DEFAULT_SERVER_URL, parseProjectRef, serversMatch } from './share-url.js';
 
 // The canonical share link quarto-hub.com hands users. Note that file/server/
 // name live inside the URL *fragment* (after `#`), which `new URL().searchParams`
@@ -54,6 +54,77 @@ describe('parseProjectRef', () => {
     expect(ref).toEqual({ project: '3fA4nXRpYK1JPkeyef3KXFMEs4aN', name: 'Untitled' });
     expect('file' in ref).toBe(false);
     expect('server' in ref).toBe(false);
+  });
+
+  // The web client's copy-link form for a project *set* (collection) —
+  // a different fragment route than a project's #/share/ link (bd-lirpxs1u).
+  const LINK_PROJECT_SET_URL =
+    'https://quarto-hub.com/#/link-project-set/3yJCerqv62bwjT3rqFJMFrNMSdM4' +
+    '?server=wss%3A%2F%2Fquarto-hub.com%2Fws';
+
+  it('extracts id and server from a link-project-set URL', () => {
+    expect(parseProjectRef(LINK_PROJECT_SET_URL)).toEqual({
+      project: '3yJCerqv62bwjT3rqFJMFrNMSdM4',
+      server: 'wss://quarto-hub.com/ws',
+    });
+  });
+
+  it('handles a link-project-set URL with no query params', () => {
+    expect(
+      parseProjectRef('https://quarto-hub.com/#/link-project-set/3yJCerqv62bwjT3rqFJMFrNMSdM4'),
+    ).toEqual({ project: '3yJCerqv62bwjT3rqFJMFrNMSdM4' });
+  });
+
+  it('extracts the collection id from a join-collection invite URL', () => {
+    expect(
+      parseProjectRef(
+        'https://quarto-hub.com/#/join-collection/3yJCerqv62bwjT3rqFJMFrNMSdM4' +
+          '?server=wss%3A%2F%2Fquarto-hub.com%2Fws&name=Team+notes&from=Charlie',
+      ),
+    ).toEqual({
+      project: '3yJCerqv62bwjT3rqFJMFrNMSdM4',
+      server: 'wss://quarto-hub.com/ws',
+      name: 'Team notes',
+    });
+  });
+});
+
+describe('buildShareUrl', () => {
+  // hub-client's share route treats server, file, and name as all required
+  // and rejects the link as "incomplete" when any is missing (bd-jtl4o0pt)
+  // — so buildShareUrl must emit server= even for the production hub.
+  it('includes server=, file=, and name= even for the production hub', () => {
+    const url = buildShareUrl({
+      server: DEFAULT_SERVER_URL,
+      indexDocId: '3fA4nXRpYK1JPkeyef3KXFMEs4aN',
+      file: 'index.qmd',
+      name: 'My book',
+    });
+    expect(url).toBe(
+      'https://quarto-hub.com/#/share/3fA4nXRpYK1JPkeyef3KXFMEs4aN' +
+        '?server=wss%3A%2F%2Fquarto-hub.com%2Fws&file=index.qmd&name=My+book',
+    );
+    expect(parseProjectRef(url)).toEqual({
+      project: '3fA4nXRpYK1JPkeyef3KXFMEs4aN',
+      server: DEFAULT_SERVER_URL,
+      file: 'index.qmd',
+      name: 'My book',
+    });
+  });
+
+  it('encodes a slashy file path and a non-default hub, and round-trips', () => {
+    const url = buildShareUrl({
+      server: 'ws://127.0.0.1:4321/ws',
+      indexDocId: 'abc123',
+      file: 'docs/intro.qmd',
+      name: 'A `quarto-hub` update',
+    });
+    expect(parseProjectRef(url)).toEqual({
+      project: 'abc123',
+      server: 'ws://127.0.0.1:4321/ws',
+      file: 'docs/intro.qmd',
+      name: 'A `quarto-hub` update',
+    });
   });
 });
 

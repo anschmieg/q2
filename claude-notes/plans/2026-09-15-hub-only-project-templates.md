@@ -1,8 +1,14 @@
-# Hub-only project templates (surface-gated `ProjectChoice`)
+---
+title: 'Hub-only project templates (surface-gated `ProjectChoice`)'
+date: 2026-09-15
+description: 'Adds a surface gate to project templates so some appear only in the hub-client New project menu and not in `q2 create project`, using a placeholder template until a real one replaces it.'
+status: in-progress  # Phases 1–4 complete and verified; Phase 5 hand-off to Carlos (replace `hub-placeholder`, then PR). Branch `braid/bd-d147nkqx-hub-only-project-templates`.
+braid:
+  strand: bd-d147nkqx
+  priority: P2
+---
 
-**Strand:** bd-d147nkqx
 **PR:** https://github.com/quarto-dev/q2/pull/684 (draft; remote branch `feature/bd-d147nkqx-hub-only-project-templates`)
-**Status:** Phases 1–4 complete and verified; Phase 5 hand-off to Carlos (replace `hub-placeholder`, then PR). Branch `braid/bd-d147nkqx-hub-only-project-templates`.
 **Related:** `claude-notes/plans/2026-01-12-hub-client-create-project.md` (original
 create-project port), `claude-notes/plans/2026-06-12-project-create-doctemplate-migration.md`
 
@@ -87,7 +93,7 @@ directive path must emit the same diagnostic as JSON (matches the existing
   `hub-client/src/types/wasm-quarto-hub-client.d.ts` and
   `ts-packages/preview-runtime/src/wasm-quarto-hub-client.d.ts`.
 - `hub-client/src/components/ProjectsHome.tsx` — it already renders whatever
-  `getProjectChoices` returns. `App.tsx`'s `handleProjectCreated` receives the
+  `getProjectChoices` returns. `App.tsx`\'s `handleProjectCreated` receives the
   choice id as `_projectType` and does not persist it (verified 2026-09-15), so
   nothing downstream assumes the id is a CLI choice.
 - `get_scaffold` / `templates.rs` structure — a hub-only template is one more

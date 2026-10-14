@@ -88,6 +88,10 @@ enum KeyForms {
     /// Scalar or array; array items may be smart-include maps, whose
     /// `file:` value (only) is a path (`include-*`).
     Include,
+    /// A list of component entries; each map's `src:` value is a path
+    /// (`components`, bd-react-components-a8flgldm). An `npm:` source is
+    /// a URL by `is_external_url`'s rule and is left as written.
+    Components,
 }
 
 /// The path-shaped format keys marked at each metadata-merge layer —
@@ -147,6 +151,11 @@ const FORMAT_PATH_KEYS: &[(&str, MarkPolicy, KeyForms)] = &[
         KeyForms::Entries,
     ),
     ("csl", MarkPolicy::ExistenceSilent, KeyForms::Entries),
+    // bd-react-components-a8flgldm: a component module is always a file
+    // path, so it is rebased like `include-*`; a missing file is reported
+    // once, at copy time, by the resource-copy drain (Q-5-6 at the `src`
+    // entry), not here.
+    ("components", MarkPolicy::Always, KeyForms::Components),
 ];
 
 /// Apply `f` to a value's string-bearing leaves: the scalar forms
@@ -257,6 +266,14 @@ pub(crate) fn mark_format_path_values(
                     }
                 } else {
                     mark_entry(entry, *policy, &ctx, &mut diagnostics);
+                }
+            }),
+            KeyForms::Components => for_each_entry_mut(value, |entry| {
+                // Only `src:` is a path; `name`, `bind`, `export`,
+                // `content` are vocabulary. A non-map entry is left for
+                // `parse_components` to diagnose.
+                if let Some(src) = entry.get_mut("src") {
+                    mark_entry(src, *policy, &ctx, &mut diagnostics);
                 }
             }),
         }
@@ -410,6 +427,72 @@ mod tests {
             ConfigValueKind::Path("../../styles.css".to_string()),
             "expected Path kind rebased to the document dir"
         );
+    }
+
+    /// `components[].src` is rebased like `include-*`: always, with no
+    /// existence check (the copy drain reports a missing module), and an
+    /// `npm:` source is left as written for `parse_components` to
+    /// diagnose (bd-react-components-a8flgldm).
+    #[test]
+    fn components_src_is_marked_document_relative_without_existence_check() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().canonicalize().unwrap();
+        let doc_dir = project.join("docs");
+        std::fs::create_dir_all(&doc_dir).unwrap();
+
+        let entry = |src: &str| {
+            ConfigValue::new_map(
+                vec![
+                    ConfigMapEntry {
+                        key: "name".to_string(),
+                        key_source: SourceInfo::for_test(),
+                        value: scalar("c"),
+                    },
+                    ConfigMapEntry {
+                        key: "src".to_string(),
+                        key_source: SourceInfo::for_test(),
+                        value: scalar(src),
+                    },
+                ],
+                SourceInfo::for_test(),
+            )
+        };
+        let mut meta = key_map(
+            "components",
+            vec![
+                entry("lib/missing.js"),
+                entry("/root.js"),
+                entry("npm:pkg@1"),
+                scalar("not-a-map"),
+            ],
+        );
+        let diags = mark_format_path_values(
+            &mut meta,
+            &project,
+            &project,
+            &doc_dir,
+            &NativeRuntime::new(),
+        );
+        assert!(
+            diags.is_empty(),
+            "components never diagnose at marking: {diags:?}"
+        );
+        let items = meta.get("components").unwrap().as_array().unwrap();
+        let src = |i: usize| items[i].get("src").unwrap().value.clone();
+        assert_eq!(
+            src(0),
+            ConfigValueKind::Path("../lib/missing.js".to_string())
+        );
+        assert_eq!(src(1), ConfigValueKind::Path("../root.js".to_string()));
+        assert!(
+            matches!(src(2), ConfigValueKind::Scalar { .. }),
+            "npm: source stays Scalar"
+        );
+        assert_eq!(
+            items[2].get("src").unwrap().as_plain_text().as_deref(),
+            Some("npm:pkg@1")
+        );
+        assert!(matches!(items[3].value, ConfigValueKind::Scalar { .. }));
     }
 
     /// Missing file → untouched value + one Q-5-29 naming the entry.

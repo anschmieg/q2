@@ -1,7 +1,12 @@
-# K-380: Error Infrastructure Extraction - Deep Analysis
+---
+title: 'K-380: Error Infrastructure Extraction - Deep Analysis'
+date: 2025-11-24
+description: 'Analyzes which parts of the error infrastructure in `quarto-markdown-pandoc` are already generic enough to move into a separate `quarto-parse-errors` crate, and what small signature and build script changes remain.'
+braid:
+  strand: k-380
+  priority: P1
+---
 
-**Date**: 2025-11-24
-**Issue**: k-380
 **Epic**: k-379 (Pandoc Template Port)
 **Phase**: 0.1 - Extract quarto-parse-errors crate
 
@@ -349,7 +354,7 @@ Actually, on second thought, keep it simple - just document the command line inv
 
 **Recommendation**: Document the interface:
 
-```markdown
+````markdown
 ## Binary Interface Contract
 
 Your parser binary must support:
@@ -380,15 +385,15 @@ Output format (JSON to stdout):
   ]
 }
 ```
-```
+````
 
 ### 4. Missing from Original Plan: Error Corpus File Format Spec
 
-**Issue**: No formal spec for Q-*.json format.
+**Issue**: No formal spec for Q-\*.json format.
 
 **Recommendation**: Document with schema:
 
-```markdown
+````markdown
 ## Error Corpus File Format
 
 Each error code has one JSON file with this structure:
@@ -425,7 +430,7 @@ Each error code has one JSON file with this structure:
   ]
 }
 ```
-```
+````
 
 ### 5. Missing from Original Plan: Testing Strategy Details
 

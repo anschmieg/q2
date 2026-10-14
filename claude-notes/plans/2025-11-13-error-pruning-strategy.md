@@ -1,6 +1,9 @@
-# Error Pruning Strategy for quarto-markdown-pandoc
+---
+title: 'Error Pruning Strategy for quarto-markdown-pandoc'
+date: 2025-11-13
+description: 'Compares strategies for reducing the flood of diagnostics that tree-sitter error recovery produces inside large error regions, and recommends a size-threshold hybrid that keeps the top-scoring diagnostic per region.'
+---
 
-**Date**: 2025-11-13
 **Context**: We're emitting too many error diagnostics due to tree-sitter error recovery branching
 
 ## Problem Analysis
@@ -83,8 +86,8 @@ The file `~/today/categorical-predictors.qmd` demonstrates the issue:
 5. Group diagnostics and keep highest-scoring per region
 
 **Expected Results**:
-- For test file: ERROR node 1 (1 byte) + ~35 inner nodes from ERROR node 2
-- Would reduce 49 → ~25-30 diagnostics
+- For test file: ERROR node 1 (1 byte) + \~35 inner nodes from ERROR node 2
+- Would reduce 49 → \~25-30 diagnostics
 
 **Pros**:
 - Balances between too few and too many errors

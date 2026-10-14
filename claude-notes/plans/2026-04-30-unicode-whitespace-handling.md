@@ -1,8 +1,12 @@
-# Unicode whitespace handling in the qmd parser
-
-**Beads:** bd-rmx3 (bug), bd-8oe4 (audit task, discovered-from bd-rmx3)
-**Date:** 2026-04-30
-**Status:** Plan — awaiting user review before implementation
+---
+title: 'Unicode whitespace handling in the qmd parser'
+date: 2026-04-30
+description: 'Lets the qmd parser accept non-ASCII whitespace such as U+202F, which breaks pasted chat transcripts, by treating it as content as Pandoc does and auditing scanners that test only for ASCII whitespace.'
+status: draft  # Plan — awaiting user review before implementation
+braid:
+  strand: bd-rmx3  # also bd-8oe4, discovered-from bd-rmx3
+  priority: P1
+---
 
 ## Overview
 
@@ -173,7 +177,7 @@ are byte-literals inline in a `tests/test_*.rs` file (see
 
 `crates/tree-sitter-qmd` is a **unified** grammar — block + inline
 in one parser, contrary to the older `CLAUDE.md` description of two
-grammars. There is one external scanner (`scanner.c`, ~2381 lines,
+grammars. There is one external scanner (`scanner.c`, \~2381 lines,
 purely block-structural) and one grammar (`grammar.js`) whose
 `pandoc_str` rule is a JS regex with Unicode flag. There is no
 separate `tree-sitter-markdown-inline` directory in the repo, despite

@@ -1,0 +1,11 @@
+---
+title: "lmd: markdown fragments as Lua expressions"
+date: 2026-02-09
+categories: [lua, notes]
+description: "A first look at `{=: ... :=}` and why it reads like JSX."
+---
+
+A first look at `{=: ... :=}` and why it reads like JSX.
+
+This post is part of the interactive-listing example; its tags are
+`lua`, `notes`.

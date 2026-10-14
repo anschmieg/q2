@@ -11,9 +11,9 @@ discover.
 
 ## What a release produces
 
-A GitHub Release at tag `vX.Y.Z` with, for five platforms
+A GitHub Release at tag `vX.Y.Z` with, for six platforms
 (`linux_amd64`, `linux_arm64`, `darwin_amd64`, `darwin_arm64`,
-`windows_amd64`):
+`windows_amd64`, `windows_arm64`):
 
 - `q2-<version>-<platform>.tar.gz` (`.zip` on Windows) — just the `q2`
   binary; the hub MCP server, preview SPA, trace viewer, and the docs
@@ -30,10 +30,12 @@ server bundle (bd-sca6g1tu):
 - `quarto-hub-mcp-<version>.tar.gz` — the same MCP server that's embedded
   in `q2`, packaged as a self-contained Node bundle so it can be run
   directly (`node index.mjs`) without installing `q2`. One *universal*
-  bundle (not per-platform): `index.mjs` is byte-identical everywhere and
-  every `@napi-rs/keyring` platform addon is co-staged, so it runs on any
-  OS/arch with Node 24+. Built by the `hub-mcp-bundle` job; includes a
-  `README.md` and `NOTICE`.
+  bundle (not per-platform): `index.mjs` is byte-identical everywhere,
+  every `@napi-rs/keyring` platform addon is co-staged, and the
+  platform-independent `wasm-qmd-parser` pkg (CAP-11) is built once in
+  `web-payloads` and staged by every bundle leg without rebuilding, so it
+  runs on any OS/arch with Node 24+. Built by the `hub-mcp-bundle` job;
+  includes a `README.md` and `NOTICE`.
 - `quarto-hub-mcp-<version>.tar.gz.sha256` / `.minisig` — checksum +
   signature (same minisign key as the binaries; its `.sha256` is also
   folded into `checksums.sha256`).
@@ -95,7 +97,7 @@ cargo build --bin q2 --locked && ./target/debug/q2 --version        # must print
 ```
 
 `cargo update --workspace` (not a full `cargo update`) touches only the
-workspace members' own version entries — external deps stay pinned. The
+workspace members\' own version entries — external deps stay pinned. The
 `--locked` build is the real check: CI builds with `--locked`, so the
 lockfile must already be in sync or every build leg fails.
 
@@ -105,7 +107,7 @@ which means it carries a *separate* `Cargo.lock` recording the versions
 of every path dependency it pulls from `crates/`. A root
 `cargo update --workspace` does not touch it. Miss it and nothing fails
 loudly — the WASM build simply rewrites the file, so the next person to
-run `cargo xtask verify` (without `--skip-hub-build`) finds ~17 lines of
+run `cargo xtask verify` (without `--skip-hub-build`) finds \~17 lines of
 unrequested churn in their working tree. The v0.17.0 bump missed it;
 v0.15.0 and v0.16.0 did not. Both locks should appear in the bump commit.
 
@@ -123,7 +125,7 @@ the new version, or it just breaks again next cadence (bd-yomgkxoc).
 
 ### 3. Tag the merged commit and push
 
-After the bump PR is merged, tag `origin/main`'s new HEAD:
+After the bump PR is merged, tag `origin/main`\'s new HEAD:
 
 ```bash
 git switch main && git pull --ff-only
@@ -192,7 +194,7 @@ git tag -a vX.Y.Z -m "q2 vX.Y.Z" && git push origin vX.Y.Z
 ```
 
 Re-pushing the tag re-fires the workflow from the new commit. The
-`release` job only publishes when **all five** legs succeed, so a
+`release` job only publishes when **all six** legs succeed, so a
 partial run leaves no half-published release.
 
 ### 6. Verify the published release
@@ -244,7 +246,7 @@ if `main` has unreleased changes**, builds it through the same
 prerelease**. Nothing here changes the release procedure above; this
 section is what to know when the two interact.
 
-- **What "unreleased" means.** `scripts/nightly-gate.sh` skips iff `main`'s
+- **What "unreleased" means.** `scripts/nightly-gate.sh` skips iff `main`\'s
   HEAD is exactly the newest `v*` tag (you just released) or exactly the
   current `nightly` tag (last night already built it). Any other HEAD
   builds — a docs-only commit included. A skipped night is one small
@@ -269,12 +271,12 @@ section is what to know when the two interact.
   `install.ps1 -Nightly` (README has the one-liners); the installers
   resolve the `nightly` release by tag and pick the platform asset by
   name. Same signing key.
-- **It is also the installers' only CI.** After publishing, the
+- **It is also the installers\' only CI.** After publishing, the
   `install-smoke` job runs both README one-liners on linux, macOS and
   Windows against the fresh nightly and asserts `q2 --version`. A red
   `install-smoke` with a green pipeline means the installers or the
   release-notes contract regressed, not the build. The smoke steps pass
-  the job's `GH_TOKEN` so the installers' API lookup is not subject to
+  the job's `GH_TOKEN` so the installers\' API lookup is not subject to
   the shared-runner anonymous rate limit, and the installers retry the
   lookup through the seconds right after the release is replaced
   (bd-n9yh30c8). The installer's error names the HTTP status: a 403
@@ -307,13 +309,21 @@ section is what to know when the two interact.
   no glibc floor, Alpine works with no `gcompat` shim. **There is no gnu
   artifact** — anyone who needs a dynamically-linked build uses
   `install.sh --from-source`. Both legs build *natively*, so
-  `musl-tools`' `musl-gcc` is the right compiler on each runner; the
+  `musl-tools`\' `musl-gcc` is the right compiler on each runner; the
   `Install musl-tools` step is gated `if: contains(matrix.target,
   'musl')`. History worth knowing: musl was originally blocked by
   `rusty_v8` (via `deno_core` → `quarto-system-runtime`), which shipped
   no musl prebuilts — both musl legs 404'd at the v8 download in the
   v0.1.0 dry-run, which is why the matrix was gnu from PR #280 until
   bd-dofxhzaj. That dependency was removed in bd-3e3sam51.
+- **Windows ships two native builds**: `windows_amd64`
+  (`x86_64-pc-windows-msvc` on `windows-latest`) and `windows_arm64`
+  (`aarch64-pc-windows-msvc` on `windows-11-arm`). The ARM64 leg builds
+  natively for the same reason `linux_arm64` does: an x64 host cannot
+  execute an ARM64 binary, and the verify steps run it. `install.ps1`
+  picks the asset from the OS architecture and falls back to
+  `windows_amd64` (which ARM64 Windows runs under emulation) for releases
+  that predate the ARM64 asset (bd-windows-arm64-nightly-xms5p652).
 - **Because the binaries are static, the runner image no longer sets a
   compatibility floor.** The old `ubuntu-22.04` pin existed *only* to
   keep the glibc requirement low; with musl it bought nothing, so the
@@ -323,7 +333,7 @@ section is what to know when the two interact.
   particular `aws-lc-sys` — long feared to be the hard part — is a
   non-issue at v0.40.0: it ships pregenerated bindings for both musl
   triples, so there is **no `bindgen` step and no `libclang`
-  requirement**, and it compiled in ~17 s per leg in the bd-dofxhzaj
+  requirement**, and it compiled in \~17 s per leg in the bd-dofxhzaj
   spike (run 30375857883). If a future `aws-lc-sys` bump ever *does*
   start wanting cmake or libclang, that is a real regression worth
   pinning rather than papering over with extra apt packages.

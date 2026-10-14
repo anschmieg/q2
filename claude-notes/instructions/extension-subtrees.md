@@ -10,7 +10,7 @@ regular `resources/extensions/` bundle — mirroring Quarto 1's
 
 Two real subtrees are registered: **orange-book** (book-projects P2 item
 80, the default Typst book extension, subtreed from `quarto-ext/orange-book`)
-and **julia-engine**, subtreed from the `q2-static-declarations` branch of
+and **julia-engine**, subtreed from the `q2/node-port` branch of
 `gordonwoodhull/quarto-julia-engine` (the parent epic's Step 4,
 `claude-notes/plans/2026-09-03-julia-engine-static-declarations-epic.md`).
 The `synth-echo` fake (`crates/quarto-core/tests/fixtures/extension-subtrees/synth-echo/`,
@@ -37,7 +37,7 @@ remains the hermetic test fixture.
                name: "julia-engine".to_string(),
                prefix: "resources/extension-subtrees/julia-engine".to_string(),
                remote_url: "https://github.com/gordonwoodhull/quarto-julia-engine.git".to_string(),
-               remote_branch: "q2-static-declarations".to_string(),
+               remote_branch: "q2/node-port".to_string(),
            },
            // ... new rows here
        ]
@@ -49,7 +49,7 @@ remains the hermetic test fixture.
    performs `git subtree add --squash`; subsequent runs no-op or
    `git subtree pull --squash` depending on whether upstream has new
    commits — see the command's `--help` and
-   `crates/xtask/src/pull_extension_subtree.rs`'s module doc for the exact
+   `crates/xtask/src/pull_extension_subtree.rs`\'s module doc for the exact
    `git-subtree-dir`/`git-subtree-split` trailer mechanics.
 
    **Running from a linked worktree (`.worktrees/<name>/`): set
@@ -76,7 +76,7 @@ remains the hermetic test fixture.
    checkout). **Only embed that subtree's own `_extensions/` payload**, not
    the whole vendored tree (F8 / design decision D1) — embedding whole
    repos would put unrelated bytes (tests, CI config, potentially many MB)
-   into the shipped binary. In `crates/quarto-core/src/extension/mod.rs`'s
+   into the shipped binary. In `crates/quarto-core/src/extension/mod.rs`\'s
    native `builtin` module:
 
    ```rust
@@ -111,7 +111,7 @@ remains the hermetic test fixture.
 
    The WASM side embeds **per-subtree `_extensions/` dirs**, exactly like
    native — never the whole `resources/extension-subtrees/` tree (that would
-   put the vendored repos' tests/CI config into the WASM blob, and the root
+   put the vendored repos\' tests/CI config into the WASM blob, and the root
    shape would be wrong: `discover_extensions` scans each root's *children*
    as extensions, so a root must be a `_extensions/` dir, not the parent
    `extension-subtrees/` dir).

@@ -1,8 +1,11 @@
-# Lua Runtime Abstraction Layer Design
+---
+title: 'Lua Runtime Abstraction Layer Design'
+date: 2025-12-03  # (Updated: 2025-12-03)
+description: 'Designs a trait-based Lua runtime abstraction that injects system operations, so Lua filters can run in browser WASM builds and in sandboxed low-permission modes with captured output.'
+status: draft  # Design Document
+---
 
-**Date**: 2025-12-03 (Updated: 2025-12-03)
 **Related Issues**: k-475, k-473
-**Status**: Design Document
 
 ---
 
@@ -1894,7 +1897,7 @@ Current design is per-filter. Future consideration:
 | os | difftime | Safe | (passthrough) |
 | package | require | High | (disabled) |
 | package | loadlib | Critical | (disabled) |
-| debug | * | Critical | (disabled) |
+| debug | \* | Critical | (disabled) |
 
 ### Pandoc API
 
@@ -1921,6 +1924,6 @@ Current design is per-filter. Future consideration:
 | pandoc.system | arch | Safe | arch |
 | pandoc.system | cputime | Safe | cpu_time |
 | pandoc.path | exists | Low | path_exists |
-| pandoc.path | * (others) | Safe | (pure functions) |
+| pandoc.path | \* (others) | Safe | (pure functions) |
 | pandoc.mediabag | fetch | High | fetch_url |
-| pandoc.mediabag | * (others) | Low | (memory only) |
+| pandoc.mediabag | \* (others) | Low | (memory only) |

@@ -1,8 +1,12 @@
-# Ship the standalone `quarto-hub-mcp` bundle as a GH release artifact
-
-**Strand:** `bd-sca6g1tu`
-**Status:** planned (awaiting go-ahead to implement)
-**Date:** 2026-06-19
+---
+title: 'Ship the standalone `quarto-hub-mcp` bundle as a GH release artifact'
+date: 2026-06-19
+description: 'Attaches a universal, checksummed and signed Node bundle of the Hub MCP server to each GitHub release as a temporary stopgap until an npm distribution channel exists, reusing the existing bundle build.'
+status: approved  # planned (awaiting go-ahead to implement)
+braid:
+  strand: bd-sca6g1tu
+  priority: P2
+---
 
 > ## ⚠️ TEMPORARY / STOPGAP
 >
@@ -100,7 +104,7 @@ platform-independent JS artifact. Not worth the worse UX.
 - [x] **Runbook**: documented in
       `claude-notes/instructions/release-runbook.md` ("What a release
       produces" + "Files involved").
-- [~] **Dry-run e2e verification**: done *locally* — built the universal
+- \[\~\] **Dry-run e2e verification**: done *locally* — built the universal
       bundle (all 9 keyring platforms; 8 fetched via `npm pack`), ran the
       exact YAML-dedented packaging script, extracted the tarball fresh, and
       confirmed `node index.mjs --help` exits 0 (keyring addon resolves on

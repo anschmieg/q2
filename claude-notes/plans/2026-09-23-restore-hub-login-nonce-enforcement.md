@@ -1,4 +1,8 @@
-# Restore universal hub login nonce enforcement (GH #564, reverse PR #446)
+---
+title: 'Restore universal hub login nonce enforcement (GH #564, reverse PR #446)'
+date: 2026-09-23
+description: 'Reverses the temporary nonce bypass on the hub''s `POST /auth/callback` so nonce-less ID tokens are rejected again, with a `stale_client` redirect when no login-state cookie is present.'
+---
 
 ## Overview
 
@@ -101,7 +105,7 @@ which stays.
 
 ### Behavior restored
 
-`check_login_nonce`'s cookie-absent branch again distinguishes the two
+`check_login_nonce`\'s cookie-absent branch again distinguishes the two
 readings using the signature-validated token's own `nonce` claim: nonce-less
 ⇒ `stale_client` (no current client produces this; a reload fixes it),
 nonce-bearing ⇒ `missing` (cookie lost in transit or replay). The
@@ -113,7 +117,7 @@ only") is accurate again now that the bypass is gone.
 ### Security posture restored
 
 Without the nonce binding, a captured Google ID token could be replayed to
-the callback for its full (~1 h) validity from a browser that never ran the
+the callback for its full (\~1 h) validity from a browser that never ran the
 pre-flight. The sealed-cookie nonce binding ties the token to *this*
 browser's login attempt.
 

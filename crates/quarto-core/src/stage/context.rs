@@ -287,6 +287,19 @@ pub struct StageContext {
     /// provider was installed.
     pub attribution_data: Option<Arc<crate::attribution::AttributionData>>,
 
+    /// Resolved listings for this page, produced by the
+    /// `listing-resolve` stage before `lmd-execute` and bridged into
+    /// `RenderContext::resolved_listings` by `AstTransformsStage`, so
+    /// the listing render / categories / feed transforms consume the
+    /// same set the metadata bridge published at `meta.listings.<id>`
+    /// (bd-2oqen84t, M2). Empty when the page declares no listing.
+    pub resolved_listings: Vec<crate::project::listing::ResolvedListing>,
+
+    /// Whether `listing-resolve` ran for this page. Bridged to
+    /// `RenderContext::listings_resolved`; see its docs for why the
+    /// `Vec` alone is not enough.
+    pub listings_resolved: bool,
+
     /// Code-block decoration sideband (book-projects P5 bridge):
     /// `CodeBlockGenerateTransform` (Normalization) writes it and
     /// `CodeBlockRenderTransform` (Finalization) reads it — both inside
@@ -329,6 +342,21 @@ pub struct StageContext {
     /// default (citeproc runs when `"citeproc"` appears in
     /// `meta["filters"]`).
     pub defer_citeproc: bool,
+
+    /// Input-only host options for [`crate::stage::stages::PandocPrepareStage`],
+    /// bridged one way from [`crate::render::RenderContext::prepare_options`].
+    /// When set, `run_pipeline` also pre-seeds this context's temp dir with
+    /// `temp_root` (see [`StageContext::with_temp_dir`]).
+    pub prepare_options: Option<crate::pandoc_request::PrepareOptions>,
+
+    /// Output of [`crate::stage::stages::PandocPrepareStage`], restored into
+    /// [`crate::render::RenderContext::pandoc_request`] by `run_pipeline`.
+    pub pandoc_request: Option<crate::pandoc_request::PandocRequest>,
+
+    /// Engine cells left after the capture splice, counted by
+    /// [`crate::stage::stages::UnexecutedCellCountStage`] and restored into
+    /// [`crate::render::RenderContext::unexecuted_cells`] by `run_pipeline`.
+    pub unexecuted_cells: usize,
 
     /// This chapter's harvested citation manifest (book-projects P6),
     /// set by [`crate::stage::stages::UserFiltersStage`] from the
@@ -433,10 +461,15 @@ impl StageContext {
             cancellation: Cancellation::new(),
             attribution_provider: None,
             attribution_data: None,
+            resolved_listings: Vec::new(),
+            listings_resolved: false,
             code_block_decorations: std::collections::HashMap::new(),
             format_options: crate::render::FormatOptions::default(),
             user_grammar_provider: None,
             defer_citeproc: false,
+            prepare_options: None,
+            pandoc_request: None,
+            unexecuted_cells: 0,
             chapter_seed: None,
             cross_chapter_crossref_registry: None,
             citation_manifest: None,
@@ -987,6 +1020,29 @@ mod tests {
         let ctx = StageContext::new(runtime, format, project, doc).unwrap();
         assert_eq!(ctx.claimed_engine_name, None);
     }
+
+    #[test]
+    fn variables_yaml_syntax_error_warning_names_the_position() {
+        // bd-x30aq7ae: quarto-yaml >= 0.4.0 keeps the position out of the
+        // message, so the warning's prose must spell it out. The unclosed
+        // flow sequence fails at the `:` of `b:` (line 3, column 2).
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("_quarto.yml"),
+            "project:\n  type: default\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("_variables.yml"), "a: 1\nlist: [x\nb: 2\n").unwrap();
+        std::fs::write(tmp.path().join("index.qmd"), "# Hi\n").unwrap();
+        let runtime = quarto_system_runtime::NativeRuntime::new();
+        let project = ProjectContext::discover(tmp.path(), &runtime).unwrap();
+
+        let mut diagnostics = Vec::new();
+        assert!(load_project_variables(&runtime, &project, &mut diagnostics).is_none());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let text = diagnostics[0].to_text(None);
+        assert!(text.contains("(line 3, column 2)"), "{text}");
+    }
 }
 
 /// Resolve the path to built-in extensions.
@@ -1026,7 +1082,7 @@ fn load_project_variables(
                 .problem(format!(
                     "`{}` could not be parsed: {}; `var` shortcodes will not resolve",
                     path.display(),
-                    e
+                    pampa::utils::yaml_syntax_error::describe_yaml_error(&content, e)
                 ))
                 .build(),
             );

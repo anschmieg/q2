@@ -17,9 +17,17 @@
 
 use base64::Engine;
 
-use super::config::Listing;
+use quarto_pandoc_types::inline::{
+    Cite, Code, Emph, Highlight, Inline, Inlines, Insert, Link, Quoted, SmallCaps, Span, Str,
+    Strikeout, Strong, Subscript, Superscript, Underline,
+};
+use quarto_pandoc_types::inlines_to_plain_text;
+use quarto_source_map::{By, SourceInfo};
+
+use super::config::{ColumnType, Listing};
 use super::item::ListingItem;
 use super::placeholders;
+use crate::dates::parse_date;
 
 /// Build the `<img>` HTML string for a listing item, or an empty
 /// string when no image was discovered. Intentionally minimal in
@@ -108,25 +116,73 @@ pub(crate) fn is_remote_src(src: &str) -> bool {
         || src.starts_with("//")
 }
 
-/// Build the `data-*` attributes string used by `list.min.js` for
-/// per-item filter / sort / category tracking. Empty when the
-/// listing has no `metadata-attrs`-relevant fields configured.
+/// Build the per-item `data-*` attributes the client-side list reads
+/// — Q1's `utilities.metadataAttrs` (`website-listing-template.ts`):
 ///
-/// Q1 emits e.g. `data-categories="rust,design" data-listing-date="…"`.
-/// v1 emits `data-index` plus `data-categories` if any. The
-/// list.min.js sort/filter UI is gated on these attrs.
-pub fn metadata_attrs(item: &ListingItem, item_index: usize) -> String {
-    let mut parts = vec![format!(r#"data-index="{}""#, item_index)];
+/// - `data-index` — the item's position, List.js's "default order"
+///   sort key;
+/// - `data-categories` — the categories joined with `,` and encoded
+///   with Q1's `b64EncodeUnicode`, which `quarto-listing.js`'s
+///   category filter decodes (omitted when the item has none);
+/// - `data-listing-<field>-sort` — for each date / number / minutes
+///   typed field (`listing.field_types`) the item has a value for, a
+///   value that sorts correctly as text: epoch milliseconds for dates,
+///   the number otherwise. Values that don't parse are left out.
+///
+/// The string is attribute syntax shared by HTML and qmd, so the
+/// built-in item templates splice it into the item div's `{…}`
+/// (`listjs` emits the List.js `valueNames` that read it back). Every
+/// value is base64 or a number, so none needs escaping.
+pub fn metadata_attrs(item: &ListingItem, item_index: usize, listing: &Listing) -> String {
+    let mut parts = vec![format!(r#"data-index="{item_index}""#)];
     if !item.categories.is_empty() {
-        let cats = item
-            .categories
-            .iter()
-            .map(|c| c.replace('"', "&quot;"))
-            .collect::<Vec<_>>()
-            .join(",");
-        parts.push(format!(r#"data-categories="{}""#, cats));
+        parts.push(format!(
+            r#"data-categories="{}""#,
+            b64_encode_unicode(&item.categories.join(","))
+        ));
+    }
+    for (field, ty) in &listing.field_types {
+        let is_attr_safe = field
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !is_attr_safe {
+            continue;
+        }
+        if let Some(value) = sort_value(item, field, *ty) {
+            parts.push(format!(r#"data-{}="{value}""#, sort_attr_name(field)));
+        }
     }
     parts.join(" ")
+}
+
+/// The List.js value name (and, prefixed with `data-`, the item
+/// attribute) carrying `field`'s sortable value — Q1's
+/// `sortAttrValue`.
+pub fn sort_attr_name(field: &str) -> String {
+    format!("listing-{field}-sort")
+}
+
+/// A typed field's value in a form that sorts correctly as text (Q1
+/// `resolveItemForTemplate`): epoch milliseconds for dates, the number
+/// for number / minutes. `None` for string-typed fields, absent
+/// values, and values that don't parse as the declared type.
+fn sort_value(item: &ListingItem, field: &str, ty: ColumnType) -> Option<String> {
+    let raw: Option<String> = match field {
+        "date" => item.date.clone(),
+        "date-modified" | "file-modified" => item.date_modified.clone(),
+        "reading-time" => item.reading_time_minutes.map(|n| n.to_string()),
+        "word-count" => item.word_count.map(|n| n.to_string()),
+        _ => item.extra.get(field).and_then(|v| v.as_plain_text()),
+    };
+    let raw = raw?;
+    match ty {
+        ColumnType::Date => parse_date(&raw).map(|d| d.unix_millis().to_string()),
+        ColumnType::Number | ColumnType::Minutes => {
+            let n: f64 = raw.trim().parse().ok().filter(|n: &f64| n.is_finite())?;
+            Some(n.to_string())
+        }
+        ColumnType::String => None,
+    }
 }
 
 /// Build the description envelope's begin marker for an item.
@@ -253,7 +309,7 @@ fn encode_uri_component(s: &str) -> String {
     out
 }
 
-fn escape_attr(s: &str) -> String {
+pub(crate) fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
@@ -320,16 +376,197 @@ pub(crate) fn truncate_text_at_space(s: &str, max: usize) -> String {
     format!("{trimmed}…")
 }
 
+/// [`truncate_text_at_space`] for markdown prose kept as inlines
+/// (bd-8a9eum6p, plan D7).
+///
+/// The cut point comes from the string algorithm applied to the
+/// plain-text projection, so a description with no markup truncates
+/// exactly as before. The inlines are then cut after that many
+/// plain-text characters, keeping every wrapper (emphasis, code, ...)
+/// that starts before the cut, and `…` is appended. Text inside `Str`
+/// and `Code` may be cut mid-run; `Math` and `Image` are kept whole or
+/// not at all, since half a formula or half an alt text is not
+/// meaningful — so a cut that lands in one ends slightly early.
+pub(crate) fn truncate_inlines_at_space(inlines: &[Inline], max: usize) -> Inlines {
+    let plain = inlines_to_plain_text(inlines);
+    if max == 0 || plain.chars().count() < max {
+        return inlines.to_vec();
+    }
+    // `truncate_text_at_space` always appends exactly one `…`.
+    let keep = truncate_text_at_space(&plain, max).chars().count() - 1;
+    let mut budget = keep;
+    let mut out = take_plain_prefix(inlines, &mut budget);
+    out.push(Inline::Str(Str {
+        text: "…".to_string(),
+        source_info: SourceInfo::generated(By::unknown()),
+    }));
+    out
+}
+
+/// The longest prefix of `inlines` whose plain-text projection (as
+/// [`inlines_to_plain_text`] computes it) is at most `budget` chars;
+/// decrements `budget` by what it kept.
+///
+/// Exhaustive on purpose, like `strip_links_and_notes`: each variant's
+/// contribution here must agree with `inlines_to_plain_text`.
+fn take_plain_prefix(inlines: &[Inline], budget: &mut usize) -> Inlines {
+    /// Keep at most `budget` chars of `text`.
+    fn cut(text: &str, budget: &mut usize) -> String {
+        let n = text.chars().count();
+        if n <= *budget {
+            *budget -= n;
+            text.to_string()
+        } else {
+            let kept = text.chars().take(*budget).collect();
+            *budget = 0;
+            kept
+        }
+    }
+    /// Keep `inline` whole if its `n` chars fit, else stop here.
+    fn whole(inline: &Inline, n: usize, budget: &mut usize, out: &mut Inlines) {
+        if n <= *budget {
+            *budget -= n;
+            out.push(inline.clone());
+        } else {
+            *budget = 0;
+        }
+    }
+    macro_rules! container {
+        ($out:ident, $variant:ident, $node:ident, $budget:ident) => {
+            $out.push(Inline::$variant($variant {
+                content: take_plain_prefix(&$node.content, $budget),
+                ..$node.clone()
+            }))
+        };
+    }
+    let mut out = Inlines::new();
+    for inline in inlines {
+        if *budget == 0 {
+            break;
+        }
+        match inline {
+            Inline::Str(s) => out.push(Inline::Str(Str {
+                text: cut(&s.text, budget),
+                ..s.clone()
+            })),
+            Inline::Code(c) => out.push(Inline::Code(Code {
+                text: cut(&c.text, budget),
+                ..c.clone()
+            })),
+            Inline::Space(_) | Inline::SoftBreak(_) | Inline::LineBreak(_) => {
+                whole(inline, 1, budget, &mut out)
+            }
+            Inline::Math(m) => whole(inline, m.text.chars().count(), budget, &mut out),
+            Inline::Image(i) => whole(
+                inline,
+                inlines_to_plain_text(&i.content).chars().count(),
+                budget,
+                &mut out,
+            ),
+            Inline::Emph(e) => container!(out, Emph, e, budget),
+            Inline::Underline(u) => container!(out, Underline, u, budget),
+            Inline::Strong(s) => container!(out, Strong, s, budget),
+            Inline::Strikeout(s) => container!(out, Strikeout, s, budget),
+            Inline::Superscript(s) => container!(out, Superscript, s, budget),
+            Inline::Subscript(s) => container!(out, Subscript, s, budget),
+            Inline::SmallCaps(s) => container!(out, SmallCaps, s, budget),
+            Inline::Quoted(q) => container!(out, Quoted, q, budget),
+            Inline::Cite(c) => container!(out, Cite, c, budget),
+            Inline::Link(l) => container!(out, Link, l, budget),
+            Inline::Span(s) => container!(out, Span, s, budget),
+            Inline::Insert(i) => container!(out, Insert, i, budget),
+            Inline::Highlight(h) => container!(out, Highlight, h, budget),
+            // No plain text: kept when they come before the cut.
+            Inline::Note(_)
+            | Inline::NoteReference(_)
+            | Inline::RawInline(_)
+            | Inline::Shortcode(_)
+            | Inline::Attr(_)
+            | Inline::Delete(_)
+            | Inline::EditComment(_)
+            | Inline::Custom(_) => out.push(inline.clone()),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_inlines(md: &str) -> Inlines {
+        let mut sink = std::io::sink();
+        let (doc, _, _) =
+            pampa::readers::qmd::read(md.as_bytes(), false, "t.qmd", &mut sink, true, None)
+                .expect("parse");
+        match doc.blocks.as_slice() {
+            [quarto_pandoc_types::block::Block::Paragraph(p)] => p.content.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        }
+    }
+
+    // D7: on text without markup the inline cut is the string cut.
+    #[test]
+    fn truncate_inlines_matches_string_cut_on_plain_text() {
+        let samples = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Short.",
+            "Alpha, beta: gamma/delta epsilon zeta eta theta",
+            "Supercalifragilisticexpialidocious and more",
+        ];
+        for text in samples {
+            let inlines = quarto_pandoc_types::inline::split_string_to_inlines(text);
+            for max in [0, 1, 5, 10, 17, 20, 30, 200] {
+                assert_eq!(
+                    inlines_to_plain_text(&truncate_inlines_at_space(&inlines, max)),
+                    truncate_text_at_space(text, max),
+                    "`{text}` at {max}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_inlines_keeps_markup_before_the_cut() {
+        let inlines = parse_inlines("The *quick brown* fox `jumps_over` the lazy dog.");
+        let cut = truncate_inlines_at_space(&inlines, 20);
+        assert_eq!(inlines_to_plain_text(&cut), "The quick brown…");
+        assert!(
+            cut.iter().any(|i| matches!(i, Inline::Emph(e)
+                if inlines_to_plain_text(&e.content) == "quick brown")),
+            "{cut:?}"
+        );
+        // A cut inside a code span (at a space in its text) keeps the
+        // code span, shortened.
+        let inlines = parse_inlines("Run `cargo xtask verify now` today");
+        let cut = truncate_inlines_at_space(&inlines, 20);
+        assert_eq!(inlines_to_plain_text(&cut), "Run cargo xtask…");
+        assert!(
+            cut.iter()
+                .any(|i| matches!(i, Inline::Code(c) if c.text == "cargo xtask")),
+            "{cut:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_inlines_never_splits_math() {
+        let inlines = parse_inlines("See $a+b+c+d+e$ here");
+        let cut = truncate_inlines_at_space(&inlines, 10);
+        assert!(
+            !cut.iter().any(|i| matches!(i, Inline::Math(_))),
+            "math that does not fit is dropped whole: {cut:?}"
+        );
+        assert!(inlines_to_plain_text(&cut).ends_with('…'));
+    }
     use crate::project::listing::config::{Listing, ListingType};
     use crate::project::listing::item::{ItemOrigin, ItemTarget, ListingItem};
     use std::collections::BTreeMap;
 
     fn make_item_with_image(image: Option<&str>) -> ListingItem {
         ListingItem {
-            title: "Title".to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text("Title"),
             subtitle: None,
             description: None,
             author: None,
@@ -407,19 +644,115 @@ mod tests {
         assert_eq!(host_relative_url("/abs.png", "posts"), "/abs.png");
     }
 
-    #[test]
-    fn metadata_attrs_includes_index() {
-        let item = make_item_with_image(None);
-        let attrs = metadata_attrs(&item, 7);
-        assert!(attrs.contains(r#"data-index="7""#));
+    /// A listing with the type defaults applied — the field types
+    /// that decide which `data-listing-<field>-sort` attrs exist.
+    fn hydrated_listing() -> Listing {
+        let mut l = make_listing();
+        crate::project::listing::config::apply_type_defaults(&mut l);
+        l
     }
 
     #[test]
-    fn metadata_attrs_includes_categories_when_present() {
+    fn metadata_attrs_includes_index() {
+        let item = make_item_with_image(None);
+        let attrs = metadata_attrs(&item, 7, &hydrated_listing());
+        assert!(attrs.contains(r#"data-index="7""#), "{attrs}");
+    }
+
+    // bd-nbv80e33: quarto-listing.js reads the item's categories as
+    // `decodeURIComponent(atob(value)).split(",")`, so the attr carries
+    // Q1's `b64EncodeUnicode(categories.join(","))`.
+    #[test]
+    fn metadata_attrs_categories_are_b64_of_uri_encoded_join() {
         let mut item = make_item_with_image(None);
-        item.categories = vec!["rust".to_string(), "design".to_string()];
-        let attrs = metadata_attrs(&item, 0);
-        assert!(attrs.contains(r#"data-categories="rust,design""#));
+        item.categories = vec!["rust".to_string(), "café".to_string()];
+        let attrs = metadata_attrs(&item, 0, &hydrated_listing());
+        // btoa(encodeURIComponent("rust,café")) == btoa("rust%2Ccaf%C3%A9")
+        assert!(
+            attrs.contains(r#"data-categories="cnVzdCUyQ2NhZiVDMyVBOQ==""#),
+            "{attrs}"
+        );
+    }
+
+    #[test]
+    fn metadata_attrs_omits_categories_when_absent() {
+        let item = make_item_with_image(None);
+        let attrs = metadata_attrs(&item, 0, &hydrated_listing());
+        assert!(!attrs.contains("data-categories"), "{attrs}");
+    }
+
+    // Q1 `metadataAttrs`: every date/number/minutes-typed field the
+    // item has carries a sortable value in `data-listing-<field>-sort`
+    // — epoch milliseconds for dates, the number itself otherwise.
+    #[test]
+    fn metadata_attrs_carry_sort_values_for_typed_fields() {
+        let mut item = make_item_with_image(None);
+        item.date = Some("2026-01-02".to_string());
+        item.date_modified = Some("2026-01-03T00:00:01Z".to_string());
+        item.reading_time_minutes = Some(4);
+        item.word_count = Some(812);
+        let attrs = metadata_attrs(&item, 0, &hydrated_listing());
+        assert!(
+            attrs.contains(r#"data-listing-date-sort="1767312000000""#),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains(r#"data-listing-date-modified-sort="1767398401000""#),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains(r#"data-listing-file-modified-sort="1767398401000""#),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains(r#"data-listing-reading-time-sort="4""#),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains(r#"data-listing-word-count-sort="812""#),
+            "{attrs}"
+        );
+    }
+
+    #[test]
+    fn metadata_attrs_skip_sort_values_the_item_lacks_or_cannot_parse() {
+        let mut item = make_item_with_image(None);
+        item.date = Some("someday".to_string());
+        let attrs = metadata_attrs(&item, 0, &hydrated_listing());
+        assert!(!attrs.contains("-sort="), "{attrs}");
+    }
+
+    // An author `field-types:` entry makes a custom field sortable;
+    // a value that is not a number is skipped rather than emitted.
+    #[test]
+    fn metadata_attrs_sort_values_for_author_typed_custom_fields() {
+        let mut listing = hydrated_listing();
+        listing.field_types.insert(
+            "rank".to_string(),
+            crate::project::listing::config::ColumnType::Number,
+        );
+        listing.field_types.insert(
+            "label".to_string(),
+            crate::project::listing::config::ColumnType::Number,
+        );
+        let mut item = make_item_with_image(None);
+        item.extra.insert(
+            "rank".to_string(),
+            quarto_pandoc_types::ConfigValue::new_string(
+                "12",
+                quarto_source_map::SourceInfo::for_test(),
+            ),
+        );
+        item.extra.insert(
+            "label".to_string(),
+            quarto_pandoc_types::ConfigValue::new_string(
+                "x\"y",
+                quarto_source_map::SourceInfo::for_test(),
+            ),
+        );
+        let attrs = metadata_attrs(&item, 0, &listing);
+        assert!(attrs.contains(r#"data-listing-rank-sort="12""#), "{attrs}");
+        assert!(!attrs.contains("data-listing-label-sort"), "{attrs}");
     }
 
     #[test]

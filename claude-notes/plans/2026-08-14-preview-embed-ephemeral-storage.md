@@ -1,4 +1,8 @@
-# Preview-embed ephemeral storage mode
+---
+title: 'Preview-embed ephemeral storage mode'
+date: 2026-08-14
+description: 'Stops the preview-embed hub-client build from accumulating IndexedDB data across sessions by using in-memory storage behind a build flag, with reloads recovered through the preview config.'
+---
 
 ## Overview
 
@@ -111,7 +115,7 @@ via `storage: 'memory'`, PreviewApp.tsx:829).
 All three `quarto-hub` consumers funnel through `getDb()`; the IDB
 surface they use is small (`get`/`put`/`delete`,
 `transaction→objectStore→index→{get,getAll}`, `objectStoreNames.contains`,
-`close`). One facade (~100 lines) replaces ~23 branch points across 15
+`close`). One facade (\~100 lines) replaces \~23 branch points across 15
 exported functions, and the node-environment unit tests prove the
 ephemeral path never touches the real `indexedDB` global (it is
 undefined there, so any leak throws).

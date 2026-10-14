@@ -1,16 +1,18 @@
-# Migrate remaining glob consumers onto the shared glob API
+---
+title: 'Migrate remaining glob consumers onto the shared glob API'
+date: 2026-08-06
+description: 'Migrates the remaining glob consumers (`project.render`, `resources:`, `sidebar.auto:`) onto the shared glob API so a pattern means the same thing everywhere, fixing silent failures such as ignored negation and dropped leading slashes.'
+status: in-progress  # Phases 0–6 complete. All four consumers are migrated onto the shared API, every failure mode is diagnosed, and full `cargo xtask verify` (including the hub-client WASM leg) passes. Two small items remain — a user-facing docs page and `sidebar.auto` invalid-pattern reporting; see "Remaining".
+braid:
+  strand: bd-mt7a6uc4  # discovered-from:bd-v7ixzsp5
+  priority: P3
+---
 
-**Braid strand:** bd-mt7a6uc4 (task, P3) — `discovered-from:bd-v7ixzsp5`
 **Stacks on:** PR [#460](https://github.com/quarto-dev/q2/pull/460)
 (`bugfix/bd-v7ixzsp5-listing-contents-globs`), branch
 `braid/bd-mt7a6uc4-glob-consumer-migration`
 **Parent plan:** `claude-notes/plans/2026-08-06-listing-glob-provenance.md`
 (decision 3)
-**Status:** Phases 0–6 complete. All four consumers are migrated onto
-the shared API, every failure mode is diagnosed, and full
-`cargo xtask verify` (including the hub-client WASM leg) passes. Two
-small items remain — a user-facing docs page and `sidebar.auto`
-invalid-pattern reporting; see "Remaining".
 
 > **Base-branch caveat.** #460 has not been through CI (GitHub Actions
 > outage, 2026-08-06). This branch stacks on it anyway; if review
@@ -288,7 +290,7 @@ future divergence shows up as a test diff instead of a surprise.
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | Unify the matcher without losing `[...]` classes, and without hitting the filesystem. | **Resolved by investigation** (2026-08-06): no fork or new library is needed. `glob`'s *matching* half is already pure — `glob::Pattern::matches_with` does no I/O; only the `glob()` walker touches `std::fs`, and that is the half we replace with `SystemRuntime` enumeration. Adopt `glob::Pattern` as the matcher engine for **all** consumers and delete the hand-rolled `wildcard_match`/`segment_match`. Full syntax kept, zero new dependencies, VFS-capable. See §"D1 in detail". |
+| D1 | Unify the matcher without losing `[...]` classes, and without hitting the filesystem. | **Resolved by investigation** (2026-08-06): no fork or new library is needed. `glob`\'s *matching* half is already pure — `glob::Pattern::matches_with` does no I/O; only the `glob()` walker touches `std::fs`, and that is the half we replace with `SystemRuntime` enumeration. Adopt `glob::Pattern` as the matcher engine for **all** consumers and delete the hand-rolled `wildcard_match`/`segment_match`. Full syntax kept, zero new dependencies, VFS-capable. See §"D1 in detail". |
 | D2 | Leading `/` = project root, everywhere? | **Yes.** A `/`-leading pattern resolves against the Quarto project root, in every consumer. Side benefit: listings regain an escape hatch for the pre-#460 project-relative behavior (`contents: /posts/*.qmd`). |
 | D3 | `!` negation everywhere? | **Yes.** |
 | D4 | Bare literal directory = everything beneath, everywhere? | **Yes.** |
@@ -366,7 +368,7 @@ if per-listing matching shows up in a profile.
 Three sibling hazards remain in the enumeration swap and need pinning
 tests regardless:
 
-1. **Exclusion-policy leakage.** `discovery.rs`'s walker skips `_`- and
+1. **Exclusion-policy leakage.** `discovery.rs`\'s walker skips `_`- and
    `.`-prefixed components, `node_modules`, and `README`. Those are
    *discovery* policy, not glob semantics. Resource expansion must not
    inherit them, or `resources: [".nojekyll"]` and `_data/x.csv` break.
@@ -529,7 +531,7 @@ Two design decisions worth recording:
 - [x] Swap `glob::glob` for `expand()` over `SystemRuntime` (D1);
       containment check routed through `runtime.canonicalize()`.
 - [x] WASM/VFS coverage — see the deviation below.
-- [x] `quarto-preview`'s call sites follow with only a `runtime`
+- [x] `quarto-preview`\'s call sites follow with only a `runtime`
       argument added.
 
 Four things worth recording:
@@ -560,7 +562,7 @@ Four things worth recording:
 
 The plan called for seeding a `WasmRuntime` VFS. `WasmRuntime` is
 `#[cfg(target_arch = "wasm32")]`, so a native test cannot instantiate
-it. Instead `glob::expand`'s tests run against an in-memory mock
+it. Instead `glob::expand`\'s tests run against an in-memory mock
 `SystemRuntime` — which proves the property that actually matters
 (expansion never touches `std::fs`) and runs on every `cargo nextest`.
 The wasm32 build leg of `cargo xtask verify` proves it compiles for the
@@ -687,7 +689,7 @@ directory into the worktree.
    The wiring is easy (`expand_spec` already carries a diagnostics
    buffer); the catch is that `AutoSpec` has no `SourceInfo`, so the
    diagnostics would be span-less unless provenance is threaded through
-   `quarto-navigation`'s parser first.
+   `quarto-navigation`\'s parser first.
 
 ### Phase 7 — bookkeeping
 

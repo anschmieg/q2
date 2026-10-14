@@ -1,9 +1,15 @@
-# Parser rejects combining characters / join controls in prose (bd-96fswwce)
+---
+title: 'Parser rejects combining characters / join controls in prose (bd-96fswwce)'
+date: 2026-08-10
+description: 'Lets the QMD parser accept Unicode combining marks and the ZWNJ and ZWJ join controls in prose, so decomposed text, Hindi vowel signs and similar content parse as ordinary words instead of raising errors.'
+status: done  # Implemented 2026-08-10; all verification legs green (piecewise — see Phase 2 caveat).
+braid:
+  strand: bd-96fswwce  # discovered-from bd-named-entities-w6xbfftj
+  priority: P2
+  labels: [pampa, tree-sitter-qmd]
+---
 
-**Date:** 2026-08-10
-**Braid:** bd-96fswwce (bug, P2 — arguably P1, see scope), discovered-from bd-named-entities-w6xbfftj
 **Checkout:** main (on top of the entity-decode work, PR #488)
-**Status:** Implemented 2026-08-10; all verification legs green (piecewise — see Phase 2 caveat).
 
 ## Problem
 
@@ -82,7 +88,7 @@ generated `parser.c` into the Rust crate).
       **Caveat:** three consecutive single-shot `cargo xtask verify` runs
       failed on *different*, unrelated network-dependent tests (quarto-hub
       auth, q2-preview listener, sync-client websocket), each passing in
-      isolation. Root cause is environmental: ~2,300 orphaned Jupyter
+      isolation. Root cause is environmental: \~2,300 orphaned Jupyter
       ipykernel processes (started 2026-08-06, PPID 1) hold 13,973 of the
       16,384 ephemeral ports, so parallel test bursts hit EADDRNOTAVAIL on
       loopback. Cleanup (`pkill -f ipykernel_launcher`) left to the user —

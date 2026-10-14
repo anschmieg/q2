@@ -1,9 +1,15 @@
-# Project `_environment` files are not loaded (bd-environment-files-372u9qbs)
+---
+title: 'Project `_environment` files are not loaded (bd-environment-files-372u9qbs)'
+date: 2026-08-09
+description: 'Loads Quarto 1 `_environment` files into a project-scoped value map that the `env` shortcode and subprocess spawn sites read, without mutating the process environment, with real variables still taking precedence.'
+status: approved  # Design questions answered by user (2026-08-10, recorded below); dotenv-parser research done. Awaiting follow-up on the parser recommendation before implementation.
+braid:
+  strand: bd-environment-files-372u9qbs
+  priority: P1
+  labels: [parity]
+---
 
-**Date:** 2026-08-09
-**Braid:** bd-environment-files-372u9qbs (feature, P1, label `parity`)
 **Checkout:** committed on `main` in the bd-eb2wnxkp worktree (the checkout `/investigate-beads` was invoked in; no new branch created — user decides where implementation lands)
-**Status:** Design questions answered by user (2026-08-10, recorded below); dotenv-parser research done. Awaiting follow-up on the parser recommendation before implementation.
 **Follow-up strand:** bd-ev8mk1rp (render profiles) — filed 2026-08-10, `discovered-from` this strand.
 
 ## Design policy: Quarto 2 does not mutate the process environment
@@ -23,15 +29,15 @@ env (`std::env::var`) remains fine; it always wins over file-defined values.
 
 ## Issue context
 
-q2 never reads Quarto 1's project environment-variable files (`_environment`, `_environment.local`, `_environment.required`, `_environment-<profile>`). `EnvShortcodeHandler` resolves `{{< env NAME >}}` against `std::env::var` only, so a variable defined solely in `_environment` renders the unresolved marker `?env:NAME` plus a Q-16-5 warning per use.
+q2 never reads Quarto 1's project environment-variable files (`_environment`, `_environment.local`, `_environment.required`, `_environment-<profile>`). `EnvShortcodeHandler` resolves `{{{< env NAME >}}}` against `std::env::var` only, so a variable defined solely in `_environment` renders the unresolved marker `?env:NAME` plus a Q-16-5 warning per use.
 
-Real-world hit: the Posit Connect docs port (352 pages) sets `CONNECT_VERSION` etc. in `_environment`; every `{{< env … >}}` use renders `?env:CONNECT_VERSION` site-wide unless the caller exports the variables manually.
+Real-world hit: the Posit Connect docs port (352 pages) sets `CONNECT_VERSION` etc. in `_environment`; every `{{{< env … >}}}` use renders `?env:CONNECT_VERSION` site-wide unless the caller exports the variables manually.
 
 Strand filed 2026-08-10 (yesterday, UTC) by Carlos from the connect-docs porting effort (origin strand in that skein: `br-environment-files-n0joqkug`). Fresh — no stale assumptions.
 
 ## Dependency graph
 
-- **related (incoming):** bd-shortcodes-in-metadata-bp06aub8 (open, P1) — filed alongside this one from the same connect-docs port. Shortcodes in `website.title` / `page-footer` / include files are not expanded at all (a *different* failure: config strings never pass through `ShortcodeResolveTransform`). The two compose: even after this strand is fixed, `{{< env CONNECT_VERSION >}}` in `website.title` stays literal until that one is fixed too. Whatever mechanism this strand introduces (project env map vs. process env) must be consumable from wherever that strand ends up expanding config-string shortcodes — worth designing with one eye on it.
+- **related (incoming):** bd-shortcodes-in-metadata-bp06aub8 (open, P1) — filed alongside this one from the same connect-docs port. Shortcodes in `website.title` / `page-footer` / include files are not expanded at all (a *different* failure: config strings never pass through `ShortcodeResolveTransform`). The two compose: even after this strand is fixed, `{{{< env CONNECT_VERSION >}}}` in `website.title` stays literal until that one is fixed too. Whatever mechanism this strand introduces (project env map vs. process env) must be consumable from wherever that strand ends up expanding config-string shortcodes — worth designing with one eye on it.
 
 No blocks edges, no discovered-from in the braid skein (origin context lives in the connect-docs skein).
 
@@ -92,13 +98,13 @@ Confirmed at HEAD (`8518ac79`); pre-flight `cargo xtask verify --skip-hub-build`
 
 Question: can `dotenvy` give us event-based parsing we could hang
 `quarto-source-map` annotations on (the way `quarto-yaml` builds
-`YamlWithSourceInfo` from `yaml-rust2`'s `MarkedEventReceiver` events, each
+`YamlWithSourceInfo` from `yaml-rust2`\'s `MarkedEventReceiver` events, each
 carrying a `Marker`)? Answer: **no — hand-roll.**
 
 **dotenvy** (inspected from git `allan2/dotenvy`, scratchpad clone; released
 0.15.7 is 2023-03-22, git main is an unreleased 0.16 rework):
 
-- The parser (`dotenvy/src/parse.rs`, ~620 lines) is an internal
+- The parser (`dotenvy/src/parse.rs`, \~620 lines) is an internal
   **line-oriented** recursive-descent parser: `parse_line(&str, …) ->
   Option<(String, String)>`. Not event-based; there is no callback/visitor
   surface to intercept. The public API is an iterator of `(String, String)`
@@ -213,7 +219,7 @@ Q1 accepts them).
 
 ### Phase 3 — env shortcode consults the map
 
-- [x] Tests: `{{< env NAME >}}` resolves from map when real env unset (map
+- [x] Tests: `{{{< env NAME >}}}` resolves from map when real env unset (map
   beats fallback arg); real env wins over map; Q-16-5 still fires when
   absent everywhere (hint updated to mention `_environment`).
 - [x] `EnvShortcodeHandler::new(project_env)` plumbed like `variables`
@@ -234,7 +240,7 @@ Q1 accepts them).
   spawn-tested (no R/jupyter in CI; replay bypasses spawning).
 - [x] Injection at all sites, real-env-wins preserved by pre-filtering with
   `env_for_subprocess` (children inherit the real env; we only add keys it
-  lacks): knitr `CallROptions::project_env` → `call_r`'s `Command::envs`;
+  lacks): knitr `CallROptions::project_env` → `call_r`\'s `Command::envs`;
   jupyter `JupyterDaemon::get_or_start_session(..., extra_env)` →
   `start_kernel` spawn (spawn-time input; session key unchanged — a reused
   session keeps its birth env, fine while a process serves one project);

@@ -1,12 +1,12 @@
-# q2 preview — Phase F plan
+---
+title: 'q2 preview — Phase F plan'
+date: 2026-05-14
+description: 'Brings cross-page navigation, Bootstrap JavaScript and website chrome such as the navbar, sidebar, footer and table of contents into the `q2 preview` iframe, so docs-site pages preview as they render.'
+status: done  # Phase F complete (2026-05-14). Both sub-tasks merged on `feature/q2-preview-command`. The chrome state-preservation trade-off (chrome rebuilds clear open dropdown state) is tracked as the longer-term **bd-d8fo** React-components rewrite.
+---
 
 **Epic:** bd-kw93 (q2 preview)
 **Predecessor:** Phases A, B, C, D all merged on `feature/q2-preview-command`.
-**Date:** 2026-05-14
-**Status:** Phase F complete (2026-05-14). Both sub-tasks merged on
-`feature/q2-preview-command`. The chrome state-preservation
-trade-off (chrome rebuilds clear open dropdown state) is tracked
-as the longer-term **bd-d8fo** React-components rewrite.
 
 ## Progress
 
@@ -48,7 +48,7 @@ as the longer-term **bd-d8fo** React-components rewrite.
   scroll effect now only marks the epoch consumed when the target
   element was actually found in the DOM — so the next pass with
   the new astJson succeeds on retry.
-- Pre-existing bug found & fixed: `previewServer.ts`'s URL parser
+- Pre-existing bug found & fixed: `previewServer.ts`\'s URL parser
   appended `/` to the matched URL even when the URL had a query
   string (Phase D.2's CLI-side `?page=` injection produced URLs
   the helper then mutated to `?page=index.qmd/`). Replaced with
@@ -104,7 +104,7 @@ as the longer-term **bd-d8fo** React-components rewrite.
 - React side (`PreviewDocument.tsx`): five chrome slots
   (`NavbarSlot`, `SidebarSlot`, `PageNavSlot`, `FooterSlot`,
   `TocSlot`) + a `HeaderIncludesEffect` for `<head>` tags. Each
-  slot is `React.memo`'d on its HTML string so an identical re-post
+  slot is `React.memo`\'d on its HTML string so an identical re-post
   doesn't tear down the chrome DOM. Wrapper structure mirrors
   `template.rs:178-254` byte-for-byte.
 - Body-classes: PreviewDocument now reads
@@ -235,7 +235,7 @@ None blocking; deferred to sub-task plans:
 
 ## Dependency order
 
-Phase F is **two sub-tasks** by design (carlos@ 2026-05-14): one for
+Phase F is **two sub-tasks** by design (carlos\@ 2026-05-14): one for
 the cross-page navigation + Bootstrap-JS infrastructure, one
 bundling all five chrome injections plus the favicon and the docs
 update. Fewer sub-tasks → fewer hand-offs → less mid-flight
@@ -407,7 +407,7 @@ changes, the page-nav's prev/next change, the TOC changes).
 - **Locale picker.** Not yet a Q2 feature server-side.
 - **Breadcrumbs.** Not yet a Q2 feature server-side.
 - **Title-block parity.** The current React `PreviewTitleBlock`
-  + minimal-mode synthesis handles the common cases. carlos@
+  + minimal-mode synthesis handles the common cases. carlos\@
   (2026-05-14) noted `q2 render` itself doesn't render title
   blocks perfectly; if a specific painful gap shows up while
   building the docs site, file as a follow-up rather than
@@ -473,7 +473,7 @@ Recorded so future sessions don't re-derive these:
 
 - **q2-preview pipeline stage exclusions** at
   `crates/quarto-core/src/pipeline.rs::Q2_PREVIEW_STAGE_EXCLUDED`
-  (line ~1000): `code-highlight`, `math-js`, `render-html-body`,
+  (line \~1000): `code-highlight`, `math-js`, `render-html-body`,
   `apply-template`. All four are HTML-string emission stages.
 - **q2-preview transform exclusions** at
   `Q2_PREVIEW_TRANSFORM_EXCLUDED` (line 1057): includes the five

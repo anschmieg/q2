@@ -42,19 +42,28 @@ crates/quarto/tests/smoke-all/**/*.typ
 
 # Claude Code session-specific plan symlink
 claude-notes/plans/CURRENT.md
+
+# claude-notes is a q2 website (bd-uk8zgkha); its render output is regenerable.
+claude-notes/_site/
+claude-notes/.quarto/
 node_modules/
 # Hub server secret — never commit this (matches any project subdirectory)
 **/.quarto/hub/hub.json
 ts-packages/*/dist/
 ts-packages/*/dist-bundle/
-# Exception: the engine-host-deno bundle is embedded into the q2 binary via
+# Exception: the engine-host-node bundle is embedded into the q2 binary via
 # include_str! (plan1a-host "Bundle embedding"), so the single bundle file must
 # be tracked even though it lives under an otherwise-ignored dist/. A committed
 # placeholder lets fresh clones compile; Plan 1b overwrites it with the real
 # esbuild output (same path, new bytes). Other dist/ artifacts stay ignored.
-!ts-packages/quarto-engine-host-deno/dist/
-ts-packages/quarto-engine-host-deno/dist/*
-!ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js
+!ts-packages/quarto-engine-host-node/dist/
+ts-packages/quarto-engine-host-node/dist/*
+!ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs
+# Likewise the ts-bundle driver (rollup) embedded by quarto-core for
+# `q2 call build-ts-extension`.
+!ts-packages/quarto-ts-bundle/dist/
+ts-packages/quarto-ts-bundle/dist/*
+!ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs
 ts-packages/*/*.tsbuildinfo
 q2-demos/*/dist/
 crates/wasm-quarto-hub-client/pkg/
@@ -94,11 +103,25 @@ AGENTS.local.md
 # committed stub is unaffected — a gitignore entry cannot untrack an
 # already-tracked file.
 crates/quarto-core/tests/fixtures/extensions/*/dist/
-resources/extension-build/deno.lock
 
-# Posit Assistant per-machine settings
-.posit/assistant/settings.json
+# Posit Assistant per-machine settings and state
+.posit/
 
 # `q2 docs llms` staged embed (cargo xtask build-agents-docs) — generated
 # from docs/_site; never commit it (bd-hwop1zii).
 agents-docs-dist/
+
+# hub-mcp eval suite raw stream-json (bulky; the condensed transcript-*.md
+# and summary.json ARE committed per the plan's "commit the transcripts").
+ts-packages/quarto-hub-mcp/eval/results/*/raw/
+ts-packages/quarto-hub-mcp/.qmd-parser-unavailable
+
+# pandoc.wasm download cache and the served asset (scripts/fetch-pandoc-wasm.mjs)
+.cache/pandoc-wasm/
+# typst.ts wasm asset and default fonts (same script)
+.cache/typst-assets/
+.cache/pdfjs/
+
+# hub-mcp eval suite raw stream-json (bulky; the condensed transcript-*.md
+# and summary.json ARE committed per the plan's "commit the transcripts").
+ts-packages/quarto-hub-mcp/eval/results/*/raw/

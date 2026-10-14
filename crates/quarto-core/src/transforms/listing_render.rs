@@ -46,14 +46,16 @@ use quarto_doctemplate::{
 };
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::attr::AttrSourceInfo;
-use quarto_pandoc_types::block::{Block, Div};
+use quarto_pandoc_types::block::{Block, Div, RawBlock};
 use quarto_pandoc_types::pandoc::Pandoc;
 use quarto_source_map::{By, SourceInfo};
 
 use crate::Result;
+use crate::format::PipelineProfile;
 use crate::project::listing::ResolvedListing;
-use crate::project::listing::binding::build_listing_context;
-use crate::project::listing::config::ListingType;
+use crate::project::listing::binding::{build_listing_context, effective_fields};
+use crate::project::listing::config::{Listing, ListingType};
+use crate::project::listing::listjs;
 use crate::project::listing::templates::{builtins_resolver, top_level_template_source};
 use crate::render::RenderContext;
 use crate::transform::{AstTransform, TransformPhase};
@@ -120,19 +122,42 @@ impl AstTransform for ListingRenderTransform {
         // directory (Q1-parity).
         let host_input: PathBuf = ctx.document.input.clone();
 
+        // The List.js bootstrap is for rendered HTML pages (`q2 render`,
+        // `q2 preview --static`). The hub-client preview renders the AST
+        // itself and runs no List.js (bd-4dfdo8vi), and non-HTML writers
+        // would only drop it.
+        let emit_listjs = matches!(
+            ctx.pipeline_profile,
+            PipelineProfile::HtmlRender | PipelineProfile::RevealjsRender
+        );
+
+        let mut rendered_any = false;
         for r in &resolved {
-            render_one(ast, r, &host_dir, &host_input, &mut diags);
+            // A `metadata` listing is consumed by Lua code reading
+            // `meta.listings.<id>` (bd-2oqen84t, M3); it has no markup
+            // of its own: no template, no container, no "No matching
+            // items" div, no List.js bootstrap.
+            if r.listing.kind == ListingType::Metadata {
+                continue;
+            }
+            render_one(ast, r, &host_dir, &host_input, emit_listjs, &mut diags);
+            rendered_any = true;
         }
 
-        // Register the vendored client-side JS artifacts so the
-        // sort/filter UI markup our templates emit is functional.
+        // Register the vendored client-side JS artifacts that the
+        // List.js bootstrap (see `listjs`) drives. Like Q1, every
+        // page with a rendered listing links them, whatever the
+        // listings' types; a page whose listings are all `metadata`
+        // has nothing for them to drive.
         // The `js:` key prefix is the convention `ApplyTemplateStage`
         // recognizes for auto-emitting `<script>` tags into the
         // rendered HTML; the resolver maps the relative path to
         // `_site/site_libs/listing/<file>.js` (or the WASM VFS
         // equivalent). `ArtifactStore::store` overwrites by key, so
         // re-running across files is fine.
-        register_listing_js_artifacts(&mut ctx.artifacts);
+        if rendered_any {
+            register_listing_js_artifacts(&mut ctx.artifacts);
+        }
 
         // Restore; downstream stages can still read resolved
         // listings if they want (e.g. L5 categories sidebar).
@@ -175,6 +200,7 @@ fn render_one(
     r: &ResolvedListing,
     host_dir: &str,
     host_input: &Path,
+    emit_listjs: bool,
     diags: &mut Vec<DiagnosticMessage>,
 ) {
     // Build the binding. The host page's meta is used to extract
@@ -231,7 +257,10 @@ fn render_one(
 
     // Re-parse the markdown. Discard the fresh SourceContext
     // (bd-0jyl tracks proper threading); collect any parse
-    // diagnostics into a single host-page warning.
+    // diagnostics into a single host-page diagnostic: a warning when
+    // the parse succeeded, an error when it failed and the listing is
+    // skipped (bd-8a9eum6p) — a page that silently ships without its
+    // listing is too easy to miss.
     let mut sink = std::io::sink();
     let parse_result = pampa::readers::qmd::read(
         markdown.as_bytes(),
@@ -241,7 +270,7 @@ fn render_one(
         true,
         None,
     );
-    let parsed_blocks: Vec<Block> = match parse_result {
+    let mut parsed_blocks: Vec<Block> = match parse_result {
         Ok((parsed, _ctx, parse_diags)) => {
             if !parse_diags.is_empty() {
                 push_diag(
@@ -258,7 +287,7 @@ fn render_one(
             parsed.blocks
         }
         Err(parse_diags) => {
-            push_diag(
+            push_error(
                 diags,
                 "Q-12-10",
                 format!(
@@ -275,52 +304,75 @@ fn render_one(
         }
     };
 
-    // Splice into the AST.
-    let outcome = try_replace_explicit_slot(ast, &r.listing.id, &parsed_blocks);
-
-    // A section is never the host (see `fill_in_blocks`), so the
-    // section's content is safe either way — but the author still
-    // has a heading and a listing competing for one HTML anchor,
-    // and only they can decide which should keep the id. Report it
-    // on the pass that actually renders, so a second pass over an
-    // already-rendered document stays quiet.
-    if outcome != SlotOutcome::AlreadyRendered
-        && let Some(heading) = find_colliding_section(&ast.blocks, &r.listing.id)
-    {
-        let which = if heading.is_empty() {
-            "a section".to_string()
-        } else {
-            format!("the section for heading \u{201c}{heading}\u{201d}")
+    // The List.js bootstrap (bd-nbv80e33): the pagination `<nav>`
+    // (List.js looks for `.pagination` inside the container, so it has
+    // to be here) and the init script, after the no-matching
+    // placeholder as in Q1's `_pagination.ejs.md`. Q1 puts the script
+    // in the page header; inside the container it travels with the
+    // listing, and it waits for `DOMContentLoaded` either way.
+    if emit_listjs && listjs::supports_listjs(r.listing.kind) {
+        let fields = effective_fields(&r.listing, &r.items);
+        let raw_html = |text: String| {
+            Block::RawBlock(RawBlock {
+                format: "html".to_string(),
+                text,
+                source_info: SourceInfo::generated(By::programmatic_config()),
+            })
         };
-        push_diag(
-            diags,
-            "Q-12-25",
-            format!(
-                "Listing `{id}` has the same id as {which}. The section keeps its \
-                 content and the listing renders separately, but both elements claim \
-                 the `#{id}` anchor, so links to it are ambiguous. Rename the \
-                 listing's `id:` (along with any `::: {{#{id}}}` slot that matches \
-                 it), or give the heading an explicit id of its own.",
-                id = r.listing.id,
-            ),
-        );
+        if let Some(nav) = listjs::pagination_nav(&r.listing, r.items.len()) {
+            parsed_blocks.push(raw_html(nav));
+        }
+        parsed_blocks.push(raw_html(listjs::init_script(
+            &r.listing,
+            &fields,
+            r.items.len(),
+        )));
     }
 
-    if outcome == SlotOutcome::NotFound {
-        // No explicit slot — append a fresh wrapper Div.
-        let mut attrs = LinkedHashMap::new();
-        attrs.insert("data-listing-rendered".to_string(), "1".to_string());
-        ast.blocks.push(Block::Div(Div {
-            attr: (
-                r.listing.id.clone(),
-                vec!["quarto-listing".to_string()],
-                attrs,
-            ),
+    // Splice into the AST: into the author's slot when there is one,
+    // else into a fresh container appended to the page. Either way the
+    // element ends up as Q1's `listing-<id>` with Q1's container
+    // classes. (Because the container never keeps the bare id, a slot
+    // that shares its id with the heading of the section it sits in no
+    // longer leaves two elements claiming one anchor; Q-12-25, which
+    // reported that, is no longer emitted — bd-nbv80e33.)
+    if try_replace_explicit_slot(ast, &r.listing, &parsed_blocks) == SlotOutcome::NotFound {
+        let mut div = Div {
+            attr: (String::new(), vec![], LinkedHashMap::new()),
             content: parsed_blocks,
             source_info: SourceInfo::generated(By::programmatic_config()),
             attr_source: AttrSourceInfo::empty(),
-        }));
+        };
+        mark_as_container(&mut div, &r.listing);
+        ast.blocks.push(Block::Div(div));
     }
+}
+
+/// The marker attribute on a rendered listing container; it makes a
+/// second pass over the same document a no-op.
+const RENDERED_ATTR: &str = "data-listing-rendered";
+
+fn is_rendered_container(div: &Div) -> bool {
+    div.attr.2.get(RENDERED_ATTR).map(String::as_str) == Some("1")
+}
+
+/// Turn `div` into `listing`'s rendered container: Q1's id
+/// (`listing-<id>`) and classes (`quarto-listing`,
+/// `quarto-listing-container-<type>`, after any the author gave the
+/// slot), plus the idempotency marker.
+fn mark_as_container(div: &mut Div, listing: &Listing) {
+    div.attr.0 = listing.container_id();
+    for class in [
+        "quarto-listing".to_string(),
+        format!("quarto-listing-container-{}", listing.kind.name()),
+    ] {
+        if !div.attr.1.contains(&class) {
+            div.attr.1.push(class);
+        }
+    }
+    div.attr
+        .2
+        .insert(RENDERED_ATTR.to_string(), "1".to_string());
 }
 
 /// The class `SectionizeTransform` puts on the Div it wraps around a
@@ -336,30 +388,43 @@ fn is_section(div: &Div) -> bool {
 enum SlotOutcome {
     /// An author's slot was found and populated by this pass.
     Filled,
-    /// An author's slot was found, but a previous pass populated it.
+    /// A previous pass already rendered this listing — into the
+    /// author's slot or an appended container.
     AlreadyRendered,
     /// The document has no slot for this listing.
     NotFound,
 }
 
-/// Walk the host AST looking for a Div with the given id.
-/// Replaces its content + marks it with `data-listing-rendered="1"`.
+/// Walk the host AST for `listing`'s slot: a Div whose id is the
+/// listing's id. Fills it, renames it to the container id and marks it
+/// rendered (see [`mark_as_container`]).
 ///
 /// Recursion is needed because the SectionizeTransform (which runs
 /// in the Normalization phase, ahead of Navigation) wraps top-level
 /// headings in `Div .section` containers, so a user's
 /// `::: {#my-blog}` slot inside a section is no longer a top-level
-/// block by the time the listing renders. Q1 recurses too. Already-
-/// rendered slots short-circuit so the recursion is idempotent.
-fn try_replace_explicit_slot(ast: &mut Pandoc, id: &str, blocks: &[Block]) -> SlotOutcome {
-    fill_in_blocks(&mut ast.blocks, id, blocks)
+/// block by the time the listing renders. Q1 recurses too.
+///
+/// Idempotency: a rendered container carries the container id, not
+/// the listing id, so finding *that* (with the marker) first means a
+/// previous pass already rendered this listing — whether into an
+/// author's slot or an appended container.
+fn try_replace_explicit_slot(ast: &mut Pandoc, listing: &Listing, blocks: &[Block]) -> SlotOutcome {
+    fill_in_blocks(&mut ast.blocks, listing, &listing.container_id(), blocks)
 }
 
-fn fill_in_blocks(blocks_in: &mut Vec<Block>, id: &str, payload: &[Block]) -> SlotOutcome {
+fn fill_in_blocks(
+    blocks_in: &mut Vec<Block>,
+    listing: &Listing,
+    container_id: &str,
+    payload: &[Block],
+) -> SlotOutcome {
     for block in blocks_in.iter_mut() {
         if let Block::Div(div) = block {
             // `Attr` is the tuple `(id, classes, attributes)`.
-            //
+            if div.attr.0 == container_id && is_rendered_container(div) {
+                return SlotOutcome::AlreadyRendered;
+            }
             // A section Div is never the host, even when its id
             // matches. It is not something an author wrote to hold a
             // listing — it is the wrapper SectionizeTransform built
@@ -369,24 +434,19 @@ fn fill_in_blocks(blocks_in: &mut Vec<Block>, id: &str, payload: &[Block]) -> Sl
             // collides by construction; filling the section would
             // replace the heading and every other block in it. Walk
             // past it to the author's real slot nested inside.
-            if div.attr.0 == id && !is_section(div) {
-                // Idempotency: if we already populated this slot,
-                // skip the second pass.
-                let already_rendered =
-                    div.attr.2.get("data-listing-rendered").map(String::as_str) == Some("1");
-                if already_rendered {
-                    return SlotOutcome::AlreadyRendered;
-                }
+            //
+            // Nor is another listing's rendered container, which can
+            // carry this listing's id when the two ids are `x` and
+            // `listing-x`.
+            if div.attr.0 == listing.id && !is_section(div) && !is_rendered_container(div) {
                 div.content = payload.to_vec();
-                div.attr
-                    .2
-                    .insert("data-listing-rendered".to_string(), "1".to_string());
+                mark_as_container(div, listing);
                 return SlotOutcome::Filled;
             }
             // Recurse into the Div's content. Handles nested
             // sections (from SectionizeTransform) as well as nested
             // user Divs.
-            let inner = fill_in_blocks(&mut div.content, id, payload);
+            let inner = fill_in_blocks(&mut div.content, listing, container_id, payload);
             if inner != SlotOutcome::NotFound {
                 return inner;
             }
@@ -395,36 +455,18 @@ fn fill_in_blocks(blocks_in: &mut Vec<Block>, id: &str, payload: &[Block]) -> Sl
     SlotOutcome::NotFound
 }
 
-/// Find a section Div carrying `id`, returning the text of its
-/// heading (empty when it has none) so the collision diagnostic can
-/// name the heading the author actually wrote.
-fn find_colliding_section(blocks: &[Block], id: &str) -> Option<String> {
-    for block in blocks {
-        let Block::Div(div) = block else { continue };
-        if div.attr.0 == id && is_section(div) {
-            return Some(section_heading_text(div));
-        }
-        if let Some(found) = find_colliding_section(&div.content, id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn section_heading_text(section: &Div) -> String {
-    section
-        .content
-        .iter()
-        .find_map(|b| match b {
-            Block::Header(h) => Some(crate::transforms::inlines_to_plain_text(&h.content)),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
 fn push_diag(diags: &mut Vec<DiagnosticMessage>, code: &str, message: impl Into<String>) {
     diags.push(
         DiagnosticMessageBuilder::warning(message)
+            .with_code(code)
+            .build(),
+    );
+}
+
+/// Like [`push_diag`], at error severity.
+fn push_error(diags: &mut Vec<DiagnosticMessage>, code: &str, message: impl Into<String>) {
+    diags.push(
+        DiagnosticMessageBuilder::error(message)
             .with_code(code)
             .build(),
     );
@@ -691,9 +733,14 @@ mod tests {
 
     fn make_item(title: &str, date: Option<&str>) -> ListingItem {
         ListingItem {
-            title: title.to_string(),
+            description_source: crate::project::listing::FieldSource::Absent,
+            image_source: crate::project::listing::FieldSource::Absent,
+            title: crate::document_profile::text(title),
             subtitle: None,
-            description: Some(format!("{} description", title)),
+            description: Some(crate::document_profile::text(format!(
+                "{} description",
+                title
+            ))),
             author: Some("Jane".to_string()),
             authors: vec!["Jane".to_string()],
             date: date.map(String::from),
@@ -908,8 +955,80 @@ mod tests {
         let Block::Div(div) = &ast.blocks[0] else {
             panic!()
         };
-        assert_eq!(div.attr.0, "main-listing");
+        assert_eq!(div.attr.0, "listing-main-listing");
         assert!(div.attr.1.iter().any(|c| c == "quarto-listing"));
+    }
+
+    // bd-2oqen84t (M3): a `metadata` listing renders nothing — no
+    // container appended, an author's slot left alone, no List.js
+    // artifacts registered — while its resolved set stays on the
+    // context for the categories sidebar, the feed and `llms.txt`.
+    #[tokio::test]
+    async fn metadata_listing_renders_nothing_and_registers_no_js() {
+        let listing = make_listing(ListingType::Metadata);
+        let items = vec![make_item("a", Some("2026-01-01"))];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let mut ast = pandoc_with_slot("main-listing");
+        let project = make_project();
+        let doc = DocumentInfo::from_path("/project/posts/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let index = Arc::new(ProjectIndex::new(Vec::<DocumentProfile>::new()));
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ctx.resolved_listings = resolved;
+        ListingRenderTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(ast.blocks.len(), 1, "nothing appended");
+        let Block::Div(div) = &ast.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(div.attr.0, "main-listing", "the slot is left as written");
+        assert!(div.content.is_empty());
+        assert!(div.attr.1.is_empty(), "no container classes");
+        assert!(ctx.artifacts.is_empty(), "no List.js artifacts");
+        assert_eq!(ctx.resolved_listings.len(), 1, "still on the context");
+        assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+    }
+
+    // A page mixing a `metadata` listing with a rendered one still
+    // gets the List.js artifacts, for the rendered one.
+    #[tokio::test]
+    async fn mixed_page_registers_js_for_the_rendered_listing() {
+        let mut data = make_listing(ListingType::Metadata);
+        data.id = "data".to_string();
+        let shown = make_listing(ListingType::Default);
+        let resolved = vec![
+            ResolvedListing {
+                listing: data,
+                items: vec![make_item("a", Some("2026-01-01"))],
+            },
+            ResolvedListing {
+                listing: shown,
+                items: vec![make_item("b", Some("2026-01-02"))],
+            },
+        ];
+        let mut ast = empty_pandoc();
+        let project = make_project();
+        let doc = DocumentInfo::from_path("/project/posts/index.qmd");
+        let format = Format::html();
+        let binaries = BinaryDependencies::new();
+        let index = Arc::new(ProjectIndex::new(Vec::<DocumentProfile>::new()));
+        let mut ctx =
+            RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
+        ctx.resolved_listings = resolved;
+        ListingRenderTransform::new()
+            .transform(&mut ast, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            ast.blocks.len(),
+            1,
+            "one container, for the default listing"
+        );
+        assert!(ctx.artifacts.contains("js:listing:list.min.js"));
     }
 
     // 35. render_idempotent_on_repeat
@@ -1248,10 +1367,11 @@ mod tests {
              :::\n",
         );
         let mut listing = make_custom_listing("fields.template");
-        // apply_type_defaults for `Custom` leaves fields empty; set
-        // explicitly so this test exercises the binding the way an
-        // author would.
+        // Set `fields:` the way config parsing does for an author
+        // who wrote it (a custom listing without `fields:` gets
+        // every field its items carry, which would include author).
         listing.fields = vec!["title".to_string(), "date".to_string()];
+        listing.fields_explicit = true;
         let items = vec![make_item("alpha", Some("2026-01-01"))];
         let resolved = vec![ResolvedListing { listing, items }];
         let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
@@ -1679,14 +1799,15 @@ mod tests {
         );
     }
 
-    // L7 plan §"Tests" Phase 2 #12. With a static image, the image
-    // envelope must NOT appear in the rendered output (the template's
-    // $if(image-html)$ branch fires, not $else$).
+    // L7 plan §"Tests" Phase 2 #12. With an authored image, the image
+    // envelope must NOT appear in the rendered output: the image is
+    // final (bd-listing-description-precedence-x4bh6w3m).
     #[tokio::test]
-    async fn render_omits_image_placeholder_when_l1_image_set() {
+    async fn render_omits_image_placeholder_when_image_authored() {
         let listing = make_listing(ListingType::Default);
         let mut item = make_item("foo", Some("2026-01-01"));
         item.image = Some("/img/foo.png".to_string());
+        item.image_source = crate::project::listing::FieldSource::Document;
         let items = vec![item];
         let resolved = vec![ResolvedListing { listing, items }];
         let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
@@ -1708,6 +1829,33 @@ mod tests {
         assert!(
             diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
             "expected no Q-12-10 from static-image branch; got: {diags:?}"
+        );
+    }
+
+    // A derived (L1 body) image renders directly *inside* the envelope,
+    // so it shows where L7 does not run (hub client) and L7 can still
+    // upgrade it to the rendered page's preview image.
+    #[tokio::test]
+    async fn render_wraps_derived_image_in_placeholder_envelope() {
+        let listing = make_listing(ListingType::Default);
+        let mut item = make_item("foo", Some("2026-01-01"));
+        item.image = Some("/img/foo.png".to_string());
+        item.image_source = crate::project::listing::FieldSource::Derived;
+        let items = vec![item];
+        let resolved = vec![ResolvedListing { listing, items }];
+        let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+        let serialized = format!("{:?}", ast);
+        let begin = serialized
+            .find("img-begin(9CEB782EFEE6)")
+            .expect("envelope");
+        let img = serialized.find("/img/foo.png").expect("derived image");
+        let end = serialized
+            .find("img-end(9CEB782EFEE6)")
+            .expect("envelope end");
+        assert!(begin < img && img < end, "{serialized}");
+        assert!(
+            diags.iter().all(|d| d.code.as_deref() != Some("Q-12-10")),
+            "{diags:?}"
         );
     }
 
@@ -1813,6 +1961,101 @@ mod tests {
         let mut out = String::new();
         walk_blocks(&ast.blocks, &mut out);
         out
+    }
+
+    /// An item carrying every field the grid/default templates have a
+    /// slot for, each value tagged so a Debug dump of the AST shows
+    /// whether it rendered.
+    fn item_with_every_field(title: &str, image: bool) -> ListingItem {
+        let mut i = make_item(title, Some("2026-01-01"));
+        i.subtitle = Some(crate::document_profile::text(format!("SUB-{title}")));
+        i.author = Some(format!("AUTH-{title}"));
+        i.authors = vec![format!("AUTH-{title}")];
+        i.categories = vec![format!("CAT-{title}")];
+        if image {
+            i.image = Some(format!("/img/IMG-{title}.png"));
+        }
+        i
+    }
+
+    /// bd-p80b9jy9: the grid and default item templates gate every
+    /// field block on `show.<field>` (Q1's `fields.includes(...)`), so
+    /// an explicit `fields:` subset drops the image (and its
+    /// placeholder), subtitle, author, reading time and categories.
+    #[tokio::test]
+    async fn grid_and_default_render_only_explicit_fields() {
+        for kind in [ListingType::Grid, ListingType::Default] {
+            let mut listing = make_listing(kind);
+            listing.fields = ["date", "title", "description"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+            listing.fields_explicit = true;
+            let items = vec![
+                item_with_every_field("a", true),
+                item_with_every_field("b", false),
+            ];
+            let resolved = vec![ResolvedListing { listing, items }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?} diags: {diags:?}");
+            let rendered = format!("{ast:?}");
+            for absent in [
+                "IMG-a",
+                "listing-item-img-placeholder",
+                "SUB-a",
+                "AUTH-a",
+                "CAT-a",
+                // The class, quoted: Q1's metadata attrs still carry
+                // `data-listing-reading-time-sort` for List.js sorting
+                // whatever `fields:` shows (bd-nbv80e33).
+                "\"listing-reading-time\"",
+            ] {
+                assert!(
+                    !rendered.contains(absent),
+                    "{kind:?}: `{absent}` rendered although not in fields:\n{rendered}"
+                );
+            }
+            for present in ["listing-title", "listing-date", "listing-description"] {
+                assert!(
+                    rendered.contains(present),
+                    "{kind:?}: `{present}` missing:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// bd-p80b9jy9: without `fields:`, the defaulted field set keeps
+    /// every block, including the image and the placeholder for an
+    /// image-less item (Q1 parity).
+    #[tokio::test]
+    async fn grid_and_default_render_every_field_by_default() {
+        for kind in [ListingType::Grid, ListingType::Default] {
+            let listing = make_listing(kind);
+            let items = vec![
+                item_with_every_field("a", true),
+                item_with_every_field("b", false),
+            ];
+            let resolved = vec![ResolvedListing { listing, items }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?} diags: {diags:?}");
+            let rendered = format!("{ast:?}");
+            for present in [
+                "IMG-a",
+                "listing-item-img-placeholder",
+                "SUB-a",
+                "AUTH-a",
+                "CAT-a",
+                "listing-reading-time",
+                "listing-title",
+                "listing-date",
+                "listing-description",
+            ] {
+                assert!(
+                    rendered.contains(present),
+                    "{kind:?}: `{present}` missing:\n{rendered}"
+                );
+            }
+        }
     }
 
     fn item_with_categories(title: &str, cats: &[&str]) -> ListingItem {
@@ -2076,7 +2319,8 @@ mod tests {
             .content
             .iter()
             .find_map(|b| match b {
-                Block::Div(d) if d.attr.0 == "main-listing" => Some(d),
+                // The slot is renamed to the listing's container id.
+                Block::Div(d) if d.attr.0 == "listing-main-listing" => Some(d),
                 _ => None,
             })
             .expect("author's slot Div should still be a direct child of the section");
@@ -2132,31 +2376,51 @@ mod tests {
         let Block::Div(div) = appended else {
             panic!("expected an appended Div")
         };
-        assert_eq!(div.attr.0, "main-listing");
+        assert_eq!(div.attr.0, "listing-main-listing");
         assert!(div.attr.1.iter().any(|c| c == "quarto-listing"));
     }
 
-    /// The collision itself is reported — an author whose slot and
-    /// heading share an id has two elements competing for one HTML
-    /// anchor, whichever one we pick as host.
+    /// bd-nbv80e33: the rendered container is `listing-<id>` (Q1), so
+    /// a slot that shares its section's id no longer leaves two
+    /// elements claiming one anchor — and Q-12-25 is no longer emitted.
     #[tokio::test]
-    async fn colliding_section_id_emits_q_12_25() {
+    async fn colliding_section_id_no_longer_collides_after_container_rename() {
         let listing = make_listing(ListingType::Default);
         let items = vec![make_item("a", Some("2026-01-01"))];
         let resolved = vec![ResolvedListing { listing, items }];
         let ast = sectionized(vec![header(2, "Main listing"), slot("main-listing")]);
 
-        let (_, diags) = run_transform(ast, resolved).await;
+        let (ast, diags) = run_transform(ast, resolved).await;
 
-        let hit = diags
-            .iter()
-            .find(|d| d.code.as_deref() == Some("Q-12-25"))
-            .unwrap_or_else(|| panic!("expected Q-12-25, got: {:?}", diags));
         assert!(
-            hit.title.contains("main-listing"),
-            "diagnostic should name the colliding id, got: {}",
-            hit.title
+            !diags.iter().any(|d| d.code.as_deref() == Some("Q-12-25")),
+            "{diags:?}"
         );
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter().filter(|id| *id == "main-listing").count(),
+            1,
+            "only the section keeps the bare id: {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+    }
+
+    fn collect_div_ids(blocks: &[Block], out: &mut Vec<String>) {
+        for b in blocks {
+            if let Block::Div(d) = b {
+                if !d.attr.0.is_empty() {
+                    out.push(d.attr.0.clone());
+                }
+                collect_div_ids(&d.content, out);
+            }
+        }
     }
 
     /// Control: a listing whose id differs from every section id is
@@ -2176,24 +2440,252 @@ mod tests {
             "expected no diagnostics, got: {:?}",
             diags
         );
-        let slot = find_div(&ast.blocks, "other-id").expect("slot should still exist");
+        let slot = find_div(&ast.blocks, "listing-other-id").expect("slot should still exist");
         assert_eq!(
             slot.attr.2.get("data-listing-rendered").map(String::as_str),
             Some("1")
         );
     }
 
-    /// Re-running the transform must not re-report the collision.
-    #[tokio::test]
-    async fn colliding_section_diagnostic_is_not_repeated_on_second_pass() {
-        let listing = make_listing(ListingType::Default);
-        let items = vec![make_item("a", Some("2026-01-01"))];
-        let resolved = vec![ResolvedListing {
-            listing: listing.clone(),
-            items: items.clone(),
-        }];
-        let mut ast = sectionized(vec![header(2, "Main listing"), slot("main-listing")]);
+    // ─────────────────────────────────────────────────────────────
+    // bd-nbv80e33: List.js bootstrap.
+    // ─────────────────────────────────────────────────────────────
 
+    /// First Div (depth-first) carrying `class`.
+    fn find_div_with_class<'a>(blocks: &'a [Block], class: &str) -> Option<&'a Div> {
+        for b in blocks {
+            if let Block::Div(d) = b {
+                if d.attr.1.iter().any(|c| c == class) {
+                    return Some(d);
+                }
+                if let Some(found) = find_div_with_class(&d.content, class) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    /// List.js treats the element children of `.list` as the items, so
+    /// that is where Q1's `metadataAttrs` go — the `.quarto-post` for
+    /// the default layout, the outer `.g-col-1` for grid. The attrs
+    /// must survive the doctemplate → qmd re-parse as real attributes.
+    #[tokio::test]
+    async fn item_metadata_attrs_land_on_the_list_children() {
+        for kind in [ListingType::Default, ListingType::Grid] {
+            let items = vec![
+                item_with_categories("a", &["rust"]),
+                item_with_categories("b", &[]),
+            ];
+            let resolved = vec![ResolvedListing {
+                listing: make_listing(kind),
+                items,
+            }];
+            let (ast, diags) = run_transform(empty_pandoc(), resolved).await;
+            assert!(diags.is_empty(), "{kind:?}: {diags:?}");
+            let list = find_div_with_class(&ast.blocks, "list")
+                .unwrap_or_else(|| panic!("{kind:?}: no .list div"));
+            let children: Vec<&Div> = list
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Div(d) => Some(d),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(children.len(), 2, "{kind:?}: {:?}", list.content);
+            assert_eq!(list.content.len(), 2, "{kind:?}: only item divs in .list");
+            for (i, child) in children.iter().enumerate() {
+                let attrs = &child.attr.2;
+                assert_eq!(
+                    attrs.get("data-index").map(String::as_str),
+                    Some(i.to_string().as_str()),
+                    "{kind:?} item {i}: {attrs:?}"
+                );
+                assert_eq!(
+                    attrs.get("data-listing-date-sort").map(String::as_str),
+                    Some("1767225600000"),
+                    "{kind:?} item {i}: {attrs:?}"
+                );
+            }
+            // btoa(encodeURIComponent("rust"))
+            assert_eq!(
+                children[0]
+                    .attr
+                    .2
+                    .get("data-categories")
+                    .map(String::as_str),
+                Some("cnVzdA=="),
+                "{kind:?}"
+            );
+            assert!(
+                !children[1].attr.2.contains_key("data-categories"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Run the transform twice over the same AST, as a re-render does.
+    async fn run_transform_twice(
+        ast: Pandoc,
+        resolved: Vec<ResolvedListing>,
+    ) -> (Pandoc, Vec<DiagnosticMessage>) {
+        let (ast, mut diags) = run_transform(ast, resolved.clone()).await;
+        let (ast, more) = run_transform(ast, resolved).await;
+        diags.extend(more);
+        (ast, diags)
+    }
+
+    /// Q1 (`website-listing-template.ts`, `processRendered`): the
+    /// listing's element is `listing-<id>` with classes
+    /// `quarto-listing` and `quarto-listing-container-<type>`.
+    #[tokio::test]
+    async fn implicit_container_gets_q1_id_and_classes() {
+        for (kind, name) in [
+            (ListingType::Default, "default"),
+            (ListingType::Grid, "grid"),
+            (ListingType::Table, "table"),
+        ] {
+            let resolved = vec![ResolvedListing {
+                listing: make_listing(kind),
+                items: vec![make_item("a", None)],
+            }];
+            let (ast, _) = run_transform(empty_pandoc(), resolved).await;
+            let div = find_div(&ast.blocks, "listing-main-listing")
+                .unwrap_or_else(|| panic!("{name}: no #listing-main-listing"));
+            assert!(div.attr.1.iter().any(|c| c == "quarto-listing"), "{name}");
+            assert!(
+                div.attr
+                    .1
+                    .iter()
+                    .any(|c| *c == format!("quarto-listing-container-{name}")),
+                "{name}: {:?}",
+                div.attr.1
+            );
+            assert!(find_div(&ast.blocks, "main-listing").is_none(), "{name}");
+        }
+    }
+
+    /// Q1 renames the author's `::: {#id}` slot to `listing-<id>` and
+    /// adds the container classes, keeping the author's own.
+    #[tokio::test]
+    async fn explicit_slot_is_renamed_and_gains_container_classes() {
+        let mut ast = pandoc_with_slot("main-listing");
+        if let Block::Div(d) = &mut ast.blocks[0] {
+            d.attr.1.push("mine".to_string());
+        }
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Grid),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform(ast, resolved).await;
+        assert_eq!(
+            ast.blocks.len(),
+            1,
+            "slot filled in place, nothing appended"
+        );
+        let Block::Div(div) = &ast.blocks[0] else {
+            panic!("expected the slot Div")
+        };
+        assert_eq!(div.attr.0, "listing-main-listing");
+        for class in ["mine", "quarto-listing", "quarto-listing-container-grid"] {
+            assert!(
+                div.attr.1.iter().any(|c| c == class),
+                "{class}: {:?}",
+                div.attr.1
+            );
+        }
+        assert_eq!(
+            div.attr.2.get("data-listing-rendered").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn renamed_containers_stay_idempotent_across_passes() {
+        // Implicit container.
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform_twice(empty_pandoc(), resolved.clone()).await;
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+        // Explicit slot.
+        let (ast, _) = run_transform_twice(pandoc_with_slot("main-listing"), resolved).await;
+        assert_eq!(ast.blocks.len(), 1, "{:?}", ast.blocks);
+        let mut ids = Vec::new();
+        collect_div_ids(&ast.blocks, &mut ids);
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "listing-main-listing")
+                .count(),
+            1,
+            "{ids:?}"
+        );
+    }
+
+    /// A listing whose id is another listing's container id (`x` and
+    /// `listing-x`): neither may mistake the other's rendered
+    /// container for its own slot, in either order, on any pass.
+    #[tokio::test]
+    async fn listing_ids_that_prefix_each_other_render_separately() {
+        let mut a = make_listing(ListingType::Default);
+        a.id = "x".to_string();
+        let mut b = make_listing(ListingType::Default);
+        b.id = "listing-x".to_string();
+        for order in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+            let resolved: Vec<ResolvedListing> = order
+                .into_iter()
+                .map(|listing| ResolvedListing {
+                    listing,
+                    items: vec![make_item("a", None)],
+                })
+                .collect();
+            let (ast, _) = run_transform_twice(empty_pandoc(), resolved).await;
+            let mut ids = Vec::new();
+            collect_div_ids(&ast.blocks, &mut ids);
+            assert_eq!(
+                ids.iter().filter(|id| *id == "listing-x").count(),
+                1,
+                "{ids:?}"
+            );
+            assert_eq!(
+                ids.iter().filter(|id| *id == "listing-listing-x").count(),
+                1,
+                "{ids:?}"
+            );
+        }
+    }
+
+    /// The raw-HTML blocks directly inside the listing's container,
+    /// in order.
+    fn container_raw_html(ast: &Pandoc, container_id: &str) -> Vec<String> {
+        let div = find_div(&ast.blocks, container_id)
+            .unwrap_or_else(|| panic!("no #{container_id} in {:?}", ast.blocks));
+        div.content
+            .iter()
+            .filter_map(|b| match b {
+                Block::RawBlock(rb) if rb.format == "html" => Some(rb.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Like [`run_transform`], under a given pipeline profile.
+    async fn run_transform_with_profile(
+        ast: Pandoc,
+        resolved: Vec<ResolvedListing>,
+        profile: crate::format::PipelineProfile,
+    ) -> Pandoc {
+        let mut ast = ast;
         let project = make_project();
         let doc = DocumentInfo::from_path("/project/posts/index.qmd");
         let format = Format::html();
@@ -2201,27 +2693,129 @@ mod tests {
         let index = Arc::new(ProjectIndex::new(Vec::<DocumentProfile>::new()));
         let mut ctx =
             RenderContext::new(&project, &doc, &format, &binaries).with_project_index(index);
-
-        ctx.resolved_listings = resolved.clone();
-        ListingRenderTransform::new()
-            .transform(&mut ast, &mut ctx)
-            .await
-            .unwrap();
+        ctx.pipeline_profile = profile;
         ctx.resolved_listings = resolved;
         ListingRenderTransform::new()
             .transform(&mut ast, &mut ctx)
             .await
             .unwrap();
+        ast
+    }
 
-        let count = ctx
-            .diagnostics
-            .iter()
-            .filter(|d| d.code.as_deref() == Some("Q-12-25"))
-            .count();
-        assert_eq!(
-            count, 1,
-            "Q-12-25 should be emitted once, got: {:?}",
-            ctx.diagnostics
+    fn paged_listing(kind: ListingType) -> Vec<ResolvedListing> {
+        let mut listing = make_listing(kind);
+        listing.page_size = Some(1);
+        vec![ResolvedListing {
+            listing,
+            items: vec![make_item("a", None), make_item("b", None)],
+        }]
+    }
+
+    /// Default and grid listings carry the List.js bootstrap inside
+    /// their container, after the no-matching placeholder: the
+    /// pagination `<nav>` (List.js looks for `.pagination` inside the
+    /// container) and the init script.
+    #[tokio::test]
+    async fn default_and_grid_listings_carry_the_listjs_bootstrap() {
+        for kind in [ListingType::Default, ListingType::Grid] {
+            let (ast, diags) = run_transform(empty_pandoc(), paged_listing(kind)).await;
+            assert!(diags.is_empty(), "{kind:?}: {diags:?}");
+            let raw = container_raw_html(&ast, "listing-main-listing");
+            let [.., nav, script] = raw.as_slice() else {
+                panic!("{kind:?}: expected nav + script, got {raw:?}")
+            };
+            assert!(
+                nav.starts_with("<nav id=\"main-listing-pagination\""),
+                "{kind:?}: {nav}"
+            );
+            assert!(
+                script.contains(r#"new List("listing-main-listing", options)"#),
+                "{kind:?}: {script}"
+            );
+            assert!(script.contains(r#""page":1"#), "{kind:?}: {script}");
+            assert_eq!(
+                script.matches("<script>").count(),
+                1,
+                "{kind:?}: one script per listing"
+            );
+
+            // Both follow the no-matching placeholder.
+            let div = find_div(&ast.blocks, "listing-main-listing").unwrap();
+            let placeholder = div
+                .content
+                .iter()
+                .position(|b| matches!(b, Block::Div(d) if d.attr.1.iter().any(|c| c == "listing-no-matching")))
+                .expect("no-matching placeholder");
+            let nav_pos = div
+                .content
+                .iter()
+                .position(|b| matches!(b, Block::RawBlock(rb) if rb.text.starts_with("<nav")))
+                .unwrap();
+            assert!(placeholder < nav_pos, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_that_fits_one_page_gets_the_script_but_no_nav() {
+        let resolved = vec![ResolvedListing {
+            listing: make_listing(ListingType::Default),
+            items: vec![make_item("a", None)],
+        }];
+        let (ast, _) = run_transform(empty_pandoc(), resolved).await;
+        let raw = container_raw_html(&ast, "listing-main-listing").join("\n");
+        assert!(raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+        assert!(!raw.contains(r#""page""#), "{raw}");
+    }
+
+    /// Table listings have no `.list` yet (bd-bl1e00r6), and custom
+    /// listings are left to their template (design decision 3).
+    #[tokio::test]
+    async fn table_listing_gets_no_listjs_bootstrap() {
+        let (ast, _) = run_transform(empty_pandoc(), paged_listing(ListingType::Table)).await;
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn custom_listing_gets_no_listjs_bootstrap_even_with_a_list_element() {
+        let (_tmp, root, host) = custom_template_project(
+            "list.template",
+            "::: {.list}\n$for(items)$\n::: {.item}\n$it.title$\n:::\n\n$endfor$\n:::\n",
         );
+        let mut listing = make_custom_listing("list.template");
+        listing.page_size = Some(1);
+        let resolved = vec![ResolvedListing {
+            listing,
+            items: vec![make_item("a", None), make_item("b", None)],
+        }];
+        let (ast, diags) = run_transform_at(empty_pandoc(), resolved, &root, &host).await;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            find_div_with_class(&ast.blocks, "list").is_some(),
+            "custom template rendered"
+        );
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+    }
+
+    /// The hub-client preview renders the AST itself and does not run
+    /// List.js (bd-4dfdo8vi); the bootstrap is for rendered HTML only.
+    #[tokio::test]
+    async fn preview_profile_gets_no_listjs_bootstrap() {
+        use crate::format::PipelineProfile;
+        let ast = run_transform_with_profile(
+            empty_pandoc(),
+            paged_listing(ListingType::Default),
+            PipelineProfile::HtmlPreview,
+        )
+        .await;
+        let raw = collect_raw_html(&ast);
+        assert!(!raw.contains("new List("), "{raw}");
+        assert!(!raw.contains("listing-pagination"), "{raw}");
+        // The listing itself still renders.
+        assert!(find_div(&ast.blocks, "listing-main-listing").is_some());
     }
 }

@@ -1,4 +1,8 @@
-# QMD Writer Context Refactoring Analysis
+---
+title: 'QMD Writer Context Refactoring Analysis'
+date: 2025-11-24
+description: 'Evaluates a refactoring that replaces the incompletely threaded `errors` parameter in the QMD writer with a `QmdWriterContext` struct, which also tracks emphasis delimiters to avoid ambiguous markers.'
+---
 
 ## Summary
 
@@ -15,12 +19,12 @@ The qmd writer has a clear two-tier structure:
 1. **Block-level functions** (`write_block`, `write_paragraph`, `write_bulletlist`, etc.)
    - These already take `errors: &mut Vec<DiagnosticMessage>` parameter
    - They call each other recursively to handle nested structures
-   - Total: ~13 functions with `errors` parameter
+   - Total: \~13 functions with `errors` parameter
 
 2. **Inline-level functions** (`write_inline`, `write_emph`, `write_strong`, etc.)
    - These currently do NOT take an `errors` parameter
    - They handle formatting within blocks
-   - Total: ~30 functions without `errors` parameter
+   - Total: \~30 functions without `errors` parameter
 
 ### Current Threading
 
@@ -156,7 +160,7 @@ fn write_block(
 ) -> std::io::Result<()>
 ```
 
-Functions affected (~13):
+Functions affected (\~13):
 - `write_meta`
 - `write_blockquote`
 - `write_div`
@@ -192,7 +196,7 @@ fn write_inline(
 ) -> std::io::Result<()>
 ```
 
-This affects ~30 functions. Most just need to pass `ctx` through.
+This affects \~30 functions. Most just need to pass `ctx` through.
 
 ### Phase 3: Implement Emphasis Stack Logic
 
@@ -267,7 +271,7 @@ Special attention needed for:
 
 ### Medium Risk
 - Adding context to inline functions (Phase 2)
-- Many call sites to update (~100+ locations)
+- Many call sites to update (\~100+ locations)
 - Mechanical but tedious
 
 ### Low Risk
@@ -304,7 +308,7 @@ Your proposal is **excellent and viable**. The existing architecture naturally s
 - Makes error reporting available to inline functions (bonus!)
 
 ⚠️ **Challenges:**
-- Many call sites to update (~13 block + ~30 inline functions)
+- Many call sites to update (\~13 block + \~30 inline functions)
 - Need to carefully test edge cases (notes, YAML metadata)
 - Some inline functions called from contexts that don't currently have errors
 

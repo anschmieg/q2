@@ -1,12 +1,17 @@
-# RevealJS auto-stretch: image not sized because `r-stretch` img stays wrapped in `<p>`
-
-**Strand:** bd-zkstclhl (figure follow-up: bd-38ioql41)
-**Date:** 2026-06-17
-**Status:** investigation complete, design decided, implementation not started
+---
+title: 'RevealJS auto-stretch: image not sized because `r-stretch` img stays wrapped in `<p>`'
+date: 2026-06-17
+description: 'Fixes reveal not sizing a lone slide image because it stays wrapped in a paragraph, by unwrapping the container in the AST instead of adding a DOM postprocessor as Quarto 1 does.'
+status: approved  # investigation complete, design decided, implementation not started
+braid:
+  strand: bd-zkstclhl  # figure follow-up: bd-38ioql41
+  priority: P1
+  labels: [revealjs]
+---
 
 ## Decisions (locked 2026-06-17, with user)
 
-- **Scope:** fix the **Paragraph[Image]** case now (the reported bug). The
+- **Scope:** fix the **Paragraph\[Image\]** case now (the reported bug). The
   Pandoc **Figure** case is a follow-up (strand **bd-38ioql41**).
 - **Architecture:** fix at the **AST level** in the existing
   `RevealAutoStretchTransform`. **Do NOT** introduce a DOM-postprocessor stage
@@ -186,7 +191,7 @@ added but not the block type. Add assertions that after stretching, the image's
 container block is `Plain` (not `Paragraph`). Update the `stretch_classes`
 helper or add a sibling helper that returns the container block kind.
 
-- [ ] `lone_paragraph_image_becomes_plain` — Paragraph[Image] → Plain[Image]
+- [ ] `lone_paragraph_image_becomes_plain` — Paragraph\[Image\] → Plain\[Image\]
       with `r-stretch`.
 - [ ] non-stretched images (auto-stretch false, nostretch, sized, two-image)
       keep their original `Paragraph` container (no unwrap when not stretching).
@@ -249,14 +254,14 @@ alongside the figure-unwrap follow-up bd-38ioql41.)
 
 ## Work items
 
-- [x] Write failing unit test: stretched Paragraph[Image] becomes Plain[Image].
+- [x] Write failing unit test: stretched Paragraph\[Image\] becomes Plain\[Image\].
       (`lone_paragraph_image_becomes_plain` + `non_stretched_image_keeps_paragraph`;
       confirmed failing: `left "Paragraph", right "Plain"`.)
 - [x] Write failing render-path test: bare `section > img.r-stretch`, no `<p>`.
       (`revealjs_auto_stretch_img_is_direct_section_child`; confirmed failing on
       `<p><img ... class="r-stretch" /></p>`.)
 - [x] Implement unwrap (Paragraph → Plain) in `maybe_stretch_section`.
-      (Restructured into `decide_stretch` + `StretchOutcome`; Paragraph[Image]
+      (Restructured into `decide_stretch` + `StretchOutcome`; Paragraph\[Image\]
       becomes `Plain[Image]` when stretched. All 18 unit+integration tests pass.)
 - [x] Decide + implement/defer the Figure caption case. (Deferred to bd-38ioql41;
       figure still gets `.r-stretch` in place for now.)

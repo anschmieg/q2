@@ -1,8 +1,12 @@
-# Cargo upgrade execution plan — 2026-05-04 majors
+---
+title: 'Cargo upgrade execution plan — 2026-05-04 majors'
+date: 2026-05-04
+description: 'Tracks the sixteen major and pre-1.0 Cargo dependency upgrades from a 2026 survey, one branch each, noting the API migrations each needed and which were deferred or paused.'
+status: in-progress  # 12 of 16 merged to main (1 deferred, 3 paused). Stopped here per user request to avoid disturbing parallel work in the project.
+---
 
 **Survey:** `claude-notes/plans/2026-05-04-cargo-upgrade-survey.md`
 **Tracking:** bd-hb8h (parent), 16 children
-**Status:** 12 of 16 merged to main (1 deferred, 3 paused). Stopped here per user request to avoid disturbing parallel work in the project.
 
 ## Merged-to-main summary
 
@@ -12,7 +16,7 @@ during conflict resolution. The WASM `Cargo.lock` was restored to
 origin/main's pre-merge state at the end (the merge re-resolution
 drifted it onto a wasm-bindgen 0.2.120 that conflicts with the
 locally-installed wasm-bindgen-cli 0.2.108 and the vendored
-`wasm-bindgen-futures-patch`'s `=0.2.108` pins).
+`wasm-bindgen-futures-patch`\'s `=0.2.108` pins).
 
 Final verification: `cargo xtask verify` (full, with hub-client +
 WASM + trace-viewer) passes on the merged main.
@@ -68,17 +72,17 @@ For each entry:
 
 ## Progress tracker
 
-- [x] 1. similar 2 → 3 (bd-zh24) — branch `deps/similar-3` @ `82c725f1`
-- [x] 2. tree-sitter pair (bd-c083, bd-wjpd) — branch `deps/tree-sitter-026` @ `3c73b49d` (named_child API: usize → u32)
-- [x] 3. RustCrypto trio (bd-gz6k, bd-znva, bd-fyuo) — branch `deps/rustcrypto` @ `9ee17613` (digest 0.10→0.11: GenericArray→Array, KeyInit trait split)
-- [x] 4. quick-xml (bd-8356) — branch `deps/quick-xml-039` @ `3f6c765c` (BytesText::unescape removed; Event::GeneralRef coalescing)
+- [x] 1. similar 2 → 3 (bd-zh24) — branch `deps/similar-3` \@ `82c725f1`
+- [x] 2. tree-sitter pair (bd-c083, bd-wjpd) — branch `deps/tree-sitter-026` \@ `3c73b49d` (named_child API: usize → u32)
+- [x] 3. RustCrypto trio (bd-gz6k, bd-znva, bd-fyuo) — branch `deps/rustcrypto` \@ `9ee17613` (digest 0.10→0.11: GenericArray→Array, KeyInit trait split)
+- [x] 4. quick-xml (bd-8356) — branch `deps/quick-xml-039` \@ `3f6c765c` (BytesText::unescape removed; Event::GeneralRef coalescing)
 - [ ] 5. rand (bd-0a3b) — **deferred, blocked by bd-tv2s (automerge)**. `ThreadRng` in rand 0.10 doesn't satisfy the rand 0.9 `Rng` trait that `automerge::DocumentId::new` consumes; the upgrade only makes sense once automerge/samod move to rand 0.10.
-- [x] 6. scraper (bd-9h2g) — branch `deps/scraper-026` @ `d0d044ec` (one-line bump, no API change)
-- [x] 7. comrak (bd-anhg) — branch `deps/comrak-052` @ `c3a96f21` (no API change)
+- [x] 6. scraper (bd-9h2g) — branch `deps/scraper-026` \@ `d0d044ec` (one-line bump, no API change)
+- [x] 7. comrak (bd-anhg) — branch `deps/comrak-052` \@ `c3a96f21` (no API change)
 - [ ] 8. automerge (bd-tv2s) — **paused** (parallel work in flight; revisit in a later session)
-- [x] 9. reqwest (bd-v0zm) — branch `deps/reqwest-013` @ `ebd84b30` (rustls-tls feature renamed to rustls)
-- [x] 10. ureq (bd-r9hs) — branch `deps/ureq-3` @ `24007314` (Error::Status removed, status→StatusCode, into_body() body API)
-- [x] 11. runtimelib (bd-tanz) — branch `deps/runtimelib-2` @ `415999ab` (paired with jupyter-protocol 2; MediaType non_exhaustive)
+- [x] 9. reqwest (bd-v0zm) — branch `deps/reqwest-013` \@ `ebd84b30` (rustls-tls feature renamed to rustls)
+- [x] 10. ureq (bd-r9hs) — branch `deps/ureq-3` \@ `24007314` (Error::Status removed, status→StatusCode, into_body() body API)
+- [x] 11. runtimelib (bd-tanz) — branch `deps/runtimelib-2` \@ `415999ab` (paired with jupyter-protocol 2; MediaType non_exhaustive)
 - [ ] 12. Deno pair (bd-nl5q, bd-rhs6) — **paused** (largest semver jump; revisit when there's a dedicated session window)
 
 ## Session boundary protocol

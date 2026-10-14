@@ -1,9 +1,14 @@
-# Hub server-minted sliding sessions
+---
+title: 'Hub server-minted sliding sessions'
+date: 2026-07-06
+description: 'Replaces the hub''s Google-token cookie with a hub-signed session token whose expiry slides on activity under an absolute lifetime cap, plus a revocation store so sessions outlive the one-hour Google token without One-Tap.'
+status: done  # implementation complete (2026-07-24) — all phases C0–C7 done on `feature/hub-sliding-sessions` (unpushed); remaining: human browser-visual verification with a real Google client id (see C7 note), PR review, deploy.
+braid:
+  strand: bd-ey6jg70f
+  priority: P2
+  labels: [auth]
+---
 
-**Status:** implementation complete (2026-07-24) — all phases C0–C7 done on
-`feature/hub-sliding-sessions` (unpushed); remaining: human browser-visual
-verification with a real Google client id (see C7 note), PR review, deploy.
-**Strand:** `bd-ey6jg70f` (epic)
 **Phase strands:** C0 `bd-j1241nof` · C1 `bd-sekcpmv1` · C2 `bd-jyzz8o97` ·
 C3 `bd-nh5pt1pd` · C4 `bd-74iiwb3l` · C5 `bd-3dq0x6ut` · C5b `bd-6kll0jr6` ·
 C6 `bd-exk3hfxk` · C7 `bd-6s83nc38`
@@ -26,7 +31,7 @@ independent failure modes follow:
    WS upgrade 401s and the SPA presents as permanently offline — the root cause
    of `bd-3o8zmz46`, which shipped only a tactical client-side mitigation.
 2. **Large IdP tokens can be silently dropped.** A token >3800 bytes may exceed
-   the ~4096-byte cookie limit and be dropped by the browser
+   the \~4096-byte cookie limit and be dropped by the browser
    (`server.rs:292-298`) — presenting, again, as "not logged in."
 
 **Goal:** validate the Google token **once** at login, then mint a
@@ -54,7 +59,7 @@ revocation store**, both on the credential path: review accordingly.
 ### Credential validation is centralized (change is additive)
 - One extractor: `extract_credential(&HeaderMap)` → `Credential::{Cookie|Bearer}(String)` (`server.rs:212`); both present → **400 conflicting** (`:241-246`).
 - One core validator: `authenticate_claims_for_kind(token, kind)` (`context.rs:538`); wrappers `authenticate_claims` (`:526`), `authenticate` (`:511`) delegate here.
-- ~6 call sites: `Authenticated` extractor → `:440`; `ws_handler` → `:938`; `auth_me` → `:770` (cookie-only); `auth_actor` → `:801` (cookie-only); `auth_callback` → `:717` (validates *incoming* Google token before cookie-ing); `auth_refresh` → `:868` (validates *new* Google token before re-cookie-ing).
+- \~6 call sites: `Authenticated` extractor → `:440`; `ws_handler` → `:938`; `auth_me` → `:770` (cookie-only); `auth_actor` → `:801` (cookie-only); `auth_callback` → `:717` (validates *incoming* Google token before cookie-ing); `auth_refresh` → `:868` (validates *new* Google token before re-cookie-ing).
 - `CredentialKind` enum (`server.rs:149`) already threaded through audit + CSRF/Origin gating (cookie-only CSRF `:569`, logout CSRF `:820`, WS-Origin `:930`). Bearer is the documented non-browser MCP path, exempt from CSRF/Origin (`:144-147`).
 - `AUTH_COOKIE_MAX_AGE = 3600` (`server.rs:133`) hard-binds cookie lifetime to Google's 1 h — sliding sessions decouple this.
 - **`ws_handler` validates once at upgrade and never re-checks** (`server.rs:894-900`) — expiry/revocation only take effect on reconnect. Sliding sessions inherit this trade-off; live-socket revocation is out of scope (would need periodic re-check).
@@ -65,7 +70,7 @@ revocation store**, both on the credential path: review accordingly.
 ## Design
 
 1. **Token format — hub-signed compact token.** HS256 JWT (reuse
-   `jsonwebtoken`'s `EncodingKey::from_secret`), signed with a dedicated
+   `jsonwebtoken`\'s `EncodingKey::from_secret`), signed with a dedicated
    **session** secret (§4). Payload:
    - `sub`; `email`, `email_verified`, `name`, `picture` — stamped from the
      Google claims validated at mint; consumed by `/auth/me` and the
@@ -104,7 +109,7 @@ revocation store**, both on the credential path: review accordingly.
    - (b) the request passed **full validation including the allowlist
      re-check** (§5);
    - (c) the token is ≥ 1 h old (`now − iat ≥ 1 h`, bounding Set-Cookie
-     churn to ~1/h per session) **or was signed under a non-current `kid`**
+     churn to \~1/h per session) **or was signed under a non-current `kid`**
      (migrates sessions promptly during graceful rotation, §4);
    - (d) re-issue **never advances `auth_time`**.
 
@@ -370,7 +375,7 @@ revocation store**, both on the credential path: review accordingly.
   re-login stays valid; integration test extended with a same-second family
   member; e2e re-run fully green.*
 
-  ***Not verified** (needs a human + a real Google client id): the visual
+  **_Not verified_** (needs a human + a real Google client id): the visual
   browser flow — Google login UI, One-Tap-free renewal in a FedCM-blocked
   browser session, and the SPA's logged-out UX on device B. The HTTP surface
   those flows drive is exactly what the e2e exercised. Ops docs added at

@@ -1,7 +1,14 @@
-# Error-docs tooling: `cargo xtask error-docs`
+---
+title: 'Error-docs tooling: `cargo xtask error-docs`'
+date: 2026-05-22
+description: 'Specifies a `cargo xtask error-docs` subcommand that audits error documentation pages against the error catalog for missing, stale, mismatched, or misplaced pages, plus a health rollup and stub generation.'
+status: draft  # drafting — pending user review
+braid:
+  strand: bd-8otua  # child of bd-94x8a
+  priority: P2
+  labels: [documentation, error-reporting, tooling]
+---
 
-**Status:** drafting — pending user review
-**Beads:** [bd-8otua](../../.beads/issues.jsonl) (child of [bd-94x8a](2026-05-22-error-docs-website-epic.md))
 **Blocked by:** bd-nvlxn (foundation — schema + directory layout must exist)
 
 ## Goal
@@ -216,7 +223,7 @@ Rust tests live alongside the xtask. Per CLAUDE.md, write tests
    `cargo run -p xtask -- error-docs audit` against the real
    `error_catalog.json` and `docs/errors/` exits successfully
    when the seed page from bd-nvlxn is the only one present (it
-   should report ~132 missing, exit 0 because default fail-on is
+   should report \~132 missing, exit 0 because default fail-on is
    `none`).
 
 ## Out of scope

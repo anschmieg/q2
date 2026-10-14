@@ -1,4 +1,8 @@
-# Plan: YAML Tag-Based Markdown Parsing Behavior (2025-10-21)
+---
+title: 'Plan: YAML Tag-Based Markdown Parsing Behavior (2025-10-21)'
+date: 2025-10-21
+description: 'Changes how YAML tags control Markdown parsing of metadata strings: `!str` and `!path` bypass it, `!md` fails the parse on error, and untagged failures emit a visible warning instead of a silent span.'
+---
 
 ## Problem Statement
 
@@ -486,7 +490,7 @@ format:
 - **Phase 5**: 4 hours (comprehensive testing)
 - **Phase 6**: 1 hour (error code assignment)
 
-**Total**: ~16 hours (2 days)
+**Total**: \~16 hours (2 days)
 
 ## Related Beads Issues
 

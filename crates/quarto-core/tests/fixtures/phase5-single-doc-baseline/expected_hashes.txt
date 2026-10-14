@@ -431,5 +431,11 @@
 # only delta is those three rules (rendering the fixture with and without the
 # SCSS change and diffing the CSS split on `}`). doc.html hash unchanged:
 # CSS-only change, and the fixture has no editorial marks.
+#
+# Re-captured 2026-10-14 (bd-eip0naf4): doc_files/styles.css hash updated
+# because the website search stylesheet (`quarto-search.scss`) joined the
+# built-in Sass layers of every theme assembly, like `quarto-listing.scss`
+# before it. CSS-only change; doc.html hash unchanged (a single document
+# renders no search box).
 doc.html a0540297514ad41734a23e91c9511134b1fa469281ec470339571ffd5d404494
-doc_files/styles.css 9b3744e23ead74783590f056d2c44fab3e888619e4341153439b6008e0928338
+doc_files/styles.css 16110cc9a61121812fbba370a4a71e494fbef12e1386e40958554d3fe5334fa5

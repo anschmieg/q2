@@ -1,0 +1,11 @@
+---
+title: "Install Product B"
+---
+
+## Install
+
+Product B is a single binary. Download it and run `viz serve`.
+
+## Connecting to Product A
+
+Point `viz` at the collector's table directory.
