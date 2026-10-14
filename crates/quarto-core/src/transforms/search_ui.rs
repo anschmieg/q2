@@ -182,8 +182,7 @@ fn config_value_to_json(cv: &ConfigValue) -> serde_json::Value {
             Yaml::Integer(i) => serde_json::json!(i),
             Yaml::Real(r) => r
                 .parse::<f64>()
-                .map(|f| serde_json::json!(f))
-                .unwrap_or_else(|_| serde_json::json!(r)),
+                .map_or_else(|_| serde_json::json!(r), |f| serde_json::json!(f)),
             Yaml::Null => serde_json::Value::Null,
             other => serde_json::json!(other.as_str().map(str::to_owned).unwrap_or_default()),
         },
