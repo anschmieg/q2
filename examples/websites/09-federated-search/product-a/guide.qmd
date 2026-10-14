@@ -1,0 +1,12 @@
+---
+title: "Collector guide"
+---
+
+## Sources
+
+A source is anything that emits measurements on a schedule.
+
+## The lighthouse example
+
+The lighthouse example ships with Product A: a collector that reads a
+weather beacon every minute and stores the readings.

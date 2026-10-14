@@ -1,0 +1,32 @@
+project:
+  type: website
+  # All three sites render into one tree, ../www/, so a single static
+  # server at that directory serves them under one origin:
+  #   /            the umbrella site
+  #   /product-a/  product A's site
+  #   /product-b/  product B's site
+  output-dir: ../www
+
+website:
+  title: "Example Docs"
+  navbar:
+    left:
+      - index.qmd
+      - getting-started.qmd
+      - text: "Product A"
+        href: /product-a/
+      - text: "Product B"
+        href: /product-b/
+  search:
+    # The search box on this site also queries the two product sites.
+    # URLs are site roots; q2 finds each site's index and manifest at
+    # its fixed site_libs/quarto-search/ location. Relative URLs work
+    # here because the three sites share an origin; a site elsewhere
+    # needs an absolute URL and CORS headers on its bundle (see the
+    # README).
+    federate:
+      - url: /product-a/
+        title: "Product A"
+      - url: /product-b/
+        title: "Product B"
+        weight: 0.8

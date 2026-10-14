@@ -1,0 +1,20 @@
+---
+title: "Example Docs"
+---
+
+This is the umbrella documentation site for a fictional product family.
+Its search box finds pages here and in the two product sites.
+
+Try searching for these words. Apart from this list, each of the first
+three appears on exactly one site:
+
+- **umbrella** — this site only.
+- **lighthouse** — Product A's collector guide.
+- **tidepool** — Product B's chart reference.
+- **install** — every site has an installation page; results are
+  grouped by page and labelled with the site they come from.
+
+## How the family fits together
+
+Product A collects data; Product B visualizes it. Both are documented
+on their own sites, rendered separately, and published under this one.
