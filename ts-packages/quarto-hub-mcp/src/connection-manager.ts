@@ -39,6 +39,7 @@ import {
 } from '@quarto/quarto-sync-client';
 
 import type { CredentialStore } from './auth/credential-store.js';
+import type { DefaultProjectSetStore } from './default-project-set.js';
 import { ReauthRequired, type RefreshManager } from './auth/refresh-manager.js';
 import { redactTokens } from './auth/redact.js';
 import { PresenceTracker, type PresenceSnapshotEntry } from './presence-tracker.js';
@@ -49,8 +50,8 @@ import { serversMatch } from './share-url.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Observed hub auth-mode (process-local). Phase 7 consults this to
- * decide whether `authenticate` should short-circuit.
+ * Observed hub auth-mode (process-local). The auth tool's sign_in
+ * arm consults this to decide whether it should short-circuit.
  */
 export type ObservedAuthMode = 'no-auth' | 'requires-auth' | 'unknown';
 
@@ -58,7 +59,7 @@ export class AuthRequiredError extends Error {
   override readonly name = 'AuthRequiredError';
   constructor(
     message: string = 'This Quarto Hub requires authentication. ' +
-      'Ask me to call `authenticate` to sign in.',
+      'Ask me to call `auth` with `action: "sign_in"` to sign in.',
   ) {
     super(message);
   }
@@ -107,7 +108,7 @@ export class HubAccessDeniedError extends Error {
     message: string = 'Your account is not allowed on this Quarto Hub ' +
       '(it may be banned or not in the allowlist). Re-authenticating ' +
       'with the same account will not help — contact the hub operator, ' +
-      'or run authenticate_clear and sign in as a different account.',
+      'or run `auth` with `action: "clear"` and sign in as a different account.',
   ) {
     super(message);
   }
@@ -117,6 +118,12 @@ export interface ConnectionManagerDeps {
   readonly serverUrl: string;
   readonly credentialStore?: CredentialStore;
   readonly refreshManager?: RefreshManager;
+  /**
+   * The remembered-default store behind a bare `list_projects`
+   * (bd-3h5hbfdv). Optional so tests that never exercise the default can
+   * omit it; the handlers degrade to asking for an explicit `project_set`.
+   */
+  readonly defaultProjectSetStore?: DefaultProjectSetStore;
   /** Test seam. Defaults to `globalThis.fetch`. */
   readonly fetch?: typeof fetch;
   /** Test seam. Defaults to `process.env`. */
@@ -403,6 +410,8 @@ export class ConnectionManager {
   private readonly serverUrlParsed: URL;
   private readonly credentialStore: CredentialStore | undefined;
   private readonly refreshManager: RefreshManager | undefined;
+  /** Public: the tool handlers reach the remembered default through here. */
+  readonly defaultProjectSetStore: DefaultProjectSetStore | undefined;
   private readonly httpFetch: typeof fetch;
   private readonly env: NodeJS.ProcessEnv;
   private readonly syncClientFactory: (cbs: SyncClientCallbacks) => SyncClient;
@@ -436,6 +445,7 @@ export class ConnectionManager {
     this.serverUrlParsed = new URL(opts.serverUrl);
     this.credentialStore = opts.credentialStore;
     this.refreshManager = opts.refreshManager;
+    this.defaultProjectSetStore = opts.defaultProjectSetStore;
     this.httpFetch =
       opts.fetch ??
       ((input, init) => globalThis.fetch(input, init));
@@ -856,7 +866,8 @@ export class ConnectionManager {
   }
 
   /**
-   * Passive presence snapshot for `list_presence` (CAP-8): every peer
+   * Passive presence snapshot for get_project_info's presence arm
+   * (CAP-8; `list_presence` before Phase 7): every peer
    * heard from recently, freshest first. Connects first if needed;
    * observation starts at connect and never broadcasts anything (Q-3).
    */
@@ -910,7 +921,7 @@ export class ConnectionManager {
     this.emitProjectEvent({ kind: 'disconnected', serverUrl: server, indexDocId });
     const interruptErr = () =>
       new Error(
-        `project ${indexDocId} was disconnected (disconnect_project) while this ` +
+        `project ${indexDocId} was disconnected (the project tool's disconnect arm) while this ` +
           'poll was pending — re-call wait_for_change to keep watching (it reconnects).',
       );
     for (const w of [...state.waiters]) {
@@ -968,7 +979,7 @@ export class ConnectionManager {
     const state = this.get(indexDocId, options);
     if (!state) {
       throw new Error(
-        `Not connected to project ${indexDocId}. Call connect_project first.`,
+        `Not connected to project ${indexDocId}. Call \`project\` with \`action: "connect"\` first.`,
       );
     }
     return state;
@@ -1216,7 +1227,7 @@ export class ConnectionManager {
     this.authConfirmed = false;
     console.error(
       '[hub-mcp] Quarto Hub rejected our credentials mid-session; ' +
-        're-authentication is required. Ask me to run `authenticate`.',
+        're-authentication is required. Ask me to run `auth` with `action: "sign_in"`.',
     );
     await this.dropDeadProjects();
   }
@@ -1263,14 +1274,24 @@ export class ConnectionManager {
    * gate: any failure (network, non-OK status, malformed body) logs a
    * warning and yields `undefined`, so the connection proceeds
    * authorless (D8) instead of failing.
+   *
+   * The hub HMACs the `project` parameter verbatim, and its canonical
+   * spelling is the `automerge:`-prefixed URL form — the one the SPA
+   * stores and resolves authors over. hub-mcp's ids are bare
+   * ({@link parseProjectRef}), so without the prefix the same
+   * user+document mints a different author ID here than in the SPA and
+   * MCP edits surface as an unknown author (bd-9t8zsh98).
    */
   private async fetchAuthorId(
     projectId: string,
     getBearer: () => Promise<string>,
   ): Promise<string | undefined> {
+    const canonicalProjectId = projectId.startsWith('automerge:')
+      ? projectId
+      : `automerge:${projectId}`;
     const urlFor = (path: string) => {
       const url = new URL(path, toHttpUrl(this.serverUrlParsed));
-      url.searchParams.set('project', projectId);
+      url.searchParams.set('project', canonicalProjectId);
       return url.toString();
     };
     try {

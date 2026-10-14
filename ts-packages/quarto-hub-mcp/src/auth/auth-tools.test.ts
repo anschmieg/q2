@@ -11,6 +11,7 @@ import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type * as oauth from 'oauth4webapi';
+import { z } from 'zod';
 
 import {
   AUTH_TOOL_DEFINITIONS,
@@ -309,32 +310,37 @@ function textOf(res: CallToolResult): string {
 // ===========================================================================
 
 describe('AUTH_TOOL_DEFINITIONS', () => {
-  it('exposes exactly authenticate, authenticate_clear, and authenticate_status', () => {
+  // bd-lj6f7z9s: authenticate/authenticate_clear folded into one `auth`
+  // tool selected by `action` (sign_in short-circuits with "Already
+  // authenticated as <email>" when credentials are valid, and a failed
+  // connect names AuthRequiredError).
+  it('exposes exactly the merged auth tool', () => {
     const names = AUTH_TOOL_DEFINITIONS.map((t) => t.name).sort();
-    expect(names).toEqual(['authenticate', 'authenticate_clear', 'authenticate_status']);
+    expect(names).toEqual(['auth']);
   });
 
-  it('marks authenticate_status read-only and idempotent (it never runs a flow)', () => {
-    const status = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate_status')!;
-    expect(status.annotations?.readOnlyHint).toBe(true);
-    expect(status.annotations?.idempotentHint).toBe(true);
-    expect(status.outputSchema).toBeDefined();
-  });
-
-  it('marks authenticate non-idempotent / non-destructive and clear destructive / idempotent', () => {
-    const auth = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate')!;
-    const clear = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate_clear')!;
+  it('merges annotations honestly: clear is destructive, sign_in non-idempotent', () => {
+    const auth = AUTH_TOOL_DEFINITIONS[0]!;
+    expect(auth.annotations?.readOnlyHint).toBe(false);
+    expect(auth.annotations?.destructiveHint).toBe(true);
     expect(auth.annotations?.idempotentHint).toBe(false);
-    expect(auth.annotations?.destructiveHint).toBe(false);
-    expect(clear.annotations?.destructiveHint).toBe(true);
-    expect(clear.annotations?.idempotentHint).toBe(true);
   });
 
-  it('clear description names the best-effort revoke and drops the old disclaimer', () => {
-    const clear = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate_clear')!;
-    expect(clear.description).toMatch(/revoke/i);
-    expect(clear.description).toContain('myaccount.google.com');
-    expect(clear.description).not.toMatch(/Does not touch Google-side grants/i);
+  it('the description names both arms, the best-effort revoke, and drops the old disclaimer', () => {
+    const auth = AUTH_TOOL_DEFINITIONS[0]!;
+    expect(auth.description).toContain('sign_in');
+    expect(auth.description).toContain('clear');
+    expect(auth.description).toMatch(/revoke/i);
+    expect(auth.description).toContain('myaccount.google.com');
+    expect(auth.description).not.toMatch(/Does not touch Google-side grants/i);
+  });
+
+  it('the input schema accepts both arms and rejects an unknown action', () => {
+    const schema = AUTH_TOOL_DEFINITIONS[0]!.inputSchema as z.ZodType;
+    expect(schema.safeParse({ action: 'sign_in' }).success).toBe(true);
+    expect(schema.safeParse({ action: 'clear' }).success).toBe(true);
+    expect(schema.safeParse({ action: 'status' }).success).toBe(false);
+    expect(schema.safeParse({}).success).toBe(false);
   });
 });
 
@@ -651,7 +657,7 @@ describe('authenticate_clear', () => {
 
     const res = await auth.handleClear();
     expect(requests).toHaveLength(0);
-    expect(textOf(res)).toMatch(/cleared\. Call authenticate to sign in again/);
+    expect(textOf(res)).toMatch(/cleared\. Call `auth` with `action: "sign_in"` to sign in again/);
     expect(res.isError).toBeUndefined();
   });
 
@@ -809,7 +815,7 @@ describe('lazy discovery failure', () => {
 });
 
 // ===========================================================================
-// authenticate serialization (BP-12) + authenticate_status (BP-13)
+// authenticate serialization (BP-12)
 // ===========================================================================
 
 describe('authenticate concurrency guard (BP-12)', () => {
@@ -844,11 +850,11 @@ describe('authenticate concurrency guard (BP-12)', () => {
       openBrowser: fakeBrowser().open,
     });
 
-    const a = state.handle('authenticate');
+    const a = state.handle('sign_in');
     // A binds its listener and parks on the callback.
     await vi.waitFor(() => expect(listenerCalls).toBe(1));
 
-    const b = state.handle('authenticate');
+    const b = state.handle('sign_in');
     // B must not start its own flow while A is in flight.
     await new Promise((r) => setTimeout(r, 50));
     expect(listenerCalls).toBe(1);
@@ -859,38 +865,5 @@ describe('authenticate concurrency guard (BP-12)', () => {
     // B ran strictly after A's credential landed: it short-circuits.
     expect(textOf(resB)).toContain('Already authenticated');
     expect(listenerCalls).toBe(1);
-  });
-});
-
-describe('authenticate_status (BP-13)', () => {
-  it('reports unauthenticated with the hub URL and triggers no flow', async () => {
-    const { store } = emptyStore();
-    const listener = fakeListener({});
-    const browser = fakeBrowser();
-    const state = makeState({
-      store,
-      startListener: listener.start,
-      openBrowser: browser.open,
-    });
-    const res = await state.handle('authenticate_status');
-    expect(res.isError).not.toBe(true);
-    const payload = JSON.parse(textOf(res)) as Record<string, unknown>;
-    expect(payload.authenticated).toBe(false);
-    expect(payload.hub).toBe('wss://quarto-hub.com/ws');
-    // No flow: no listener, no browser.
-    expect(listener.recorded.calls).toBe(0);
-    expect(browser.calls).toEqual([]);
-  });
-
-  it('reports identity and expiry from the cached credential without a flow', async () => {
-    const { store } = await seededStore();
-    const listener = fakeListener({});
-    const state = makeState({ store, startListener: listener.start });
-    const res = await state.handle('authenticate_status');
-    const payload = JSON.parse(textOf(res)) as Record<string, unknown>;
-    expect(payload.authenticated).toBe(true);
-    expect(payload.identity).toBe(FAKE_EMAIL);
-    expect(payload.expiry).toBe(new Date(farFutureExp() * 1000).toISOString());
-    expect(listener.recorded.calls).toBe(0);
   });
 });
