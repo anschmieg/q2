@@ -233,7 +233,8 @@ export function useBlockEditHover(): {
                         ctx.requestClickSwitch?.(clickedEl);
                     }
                 }
-                // else: empty area click — no click-switch, plain close on blur.
+                // else: empty area click — no click-switch. The textarea closes on
+                // blur; the rich (tiptap) editor stays open (Esc / Mod-Enter close it).
             }
             return;
         }

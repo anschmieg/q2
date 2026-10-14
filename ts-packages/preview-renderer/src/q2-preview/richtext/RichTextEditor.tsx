@@ -252,31 +252,35 @@ export function RichTextEditor({
   }, [editor]);
 
   // Esc/Mod-Enter/plain-Enter are handled by the commit keymap (bd-hafs0qho);
-  // see `commitKeymap` above. This effect only wires the focusout commit: a
-  // focus move OUT of the edit box (not into the toolbar/link input) commits.
+  // see `commitKeymap` above. Focus leaving the edit box does NOT close the
+  // editor — it stays open until Esc / Mod-Enter (or editing is turned off).
+  // The one focusout case still handled here is the click-switch: a mouse
+  // click on a DIFFERENT block (recorded by useBlockEditHover's pointerdown
+  // via requestClickSwitch, which precedes this focusout) is about to open B
+  // and unmount this editor, so a dirty doc must be committed first — the
+  // same handleClickSwitchBlur path EditTextarea uses. Unchanged docs just
+  // let pointerup's activate(B) replace the target.
   useEffect(() => {
     if (!editor) return;
     const root = rootRef.current;
     const onFocusOut = (e: FocusEvent) => {
-      // A surface swap fires this as the editor unmounts — not a commit.
       if (ctx.editorModeSwitchRef?.current) return;
-      // Already committed (toolbar comment-on-selection, key commit): this
-      // is the unmount's focusout. Don't stash a focus restore — it would
-      // later steal focus from wherever the closing action sent it (the
-      // span's comment input). Key commits arm their own restore first.
       if (committedRef.current) return;
+      if (!isStillActive(ctx, resolved)) return;
       const next = e.relatedTarget as Node | null;
-      // Focus stayed within the edit box (toolbar button / link input) — not a commit.
       if (next && root && root.contains(next)) return;
-      // Focus moved into UI that owns its focus (e.g. the comment
-      // popup, marked [data-q2-owns-focus]) — commit, but don't arm a
-      // focus restore that would steal focus back from it.
-      if (next && (next as Element).closest?.('[data-q2-owns-focus]')) {
-        commit(editor);
-        return;
+      // Dirty-aware draft, matching `commit`: an unedited doc hands back the
+      // verbatim original so it is not misclassified as dirty by isDirty.
+      const base = initialDocRef.current;
+      const draft =
+        base && !editor.state.doc.eq(base)
+          ? docToMarkdown(editor.state.doc)
+          : originalMarkdownRef.current ?? docToMarkdown(editor.state.doc);
+      if (ctx.handleClickSwitchBlur?.(draft)) {
+        // A was committed and closed by the click-switch handler; latch so the
+        // unmount cannot commit again.
+        committedRef.current = true;
       }
-      ctx.requestFocusRestore?.(resolved.sourceEntry.r[0]);
-      commit(editor);
     };
     root?.addEventListener('focusout', onFocusOut);
     return () => {
