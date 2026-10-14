@@ -29,7 +29,7 @@ Defaults are resolved by `searchOptions()` (`website-search.ts:430-474`):
 | `collapse-after` | number (the code also accepts `false`) | **3** (`kDefaultCollapse`, 428). `false` disables collapsing (440-445). | The number of rows per document (counting the document card) before a "N more matches" toggle. The code comment says "show 2 sections" and the docs say "Defaults to 2"; in practice 3 means the doc card plus 2 sections. |
 | `copy-button` | boolean | `false` (449) | Adds a clipboard icon in the input suffix. |
 | `merge-navbar-crumbs` | boolean | `true` (schema 936-939) | Index time only. Read directly from `format.metadata.website.search["merge-navbar-crumbs"]` (`website-search.ts:258-259`). |
-| `keyboard-shortcut` | string or string[] | `["f", "/", "s"]` (488-502) | A single key is wrapped into an array. |
+| `keyboard-shortcut` | string or `string[]` | `["f", "/", "s"]` (488-502) | A single key is wrapped into an array. |
 | `show-item-context` | `tree` \| `parent` \| `root` \| boolean | `false` (504-516) | Shows breadcrumbs on document cards. `true` behaves like `tree`. |
 | `algolia` | object | none | See §4. |
 
@@ -212,7 +212,7 @@ SCSS bug: `media-breakpoint-up(med)` at line 603 refers to a nonexistent breakpo
 
 **Insights** (`configurePlugins`, 464-536): plugin wrapped in `deferredLoadPlugin` (543-593) so it works once consent loads the scripts. `aa("init", {appId, apiKey, useCookie: cookieConsentEnabled, userToken})`; `userToken` is a random 20-char session token when consent is off. `onItemsChange` chunks `viewedObjectIDs` events into 20-item batches.
 
-**Logo footer** (347-365): `offsetURL(`${libDir}/quarto-search/search-by-algolia.svg`)`.
+**Logo footer** (347-365): `offsetURL` of `${libDir}/quarto-search/search-by-algolia.svg`.
 
 The docs present `search.json` as directly uploadable to Algolia; `objectID` exists for that reason.
 
