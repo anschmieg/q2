@@ -593,14 +593,6 @@ jobs:
       # report the nightly version (the "one version string" invariant —
       # the verify step below then checks it). Exported only when
       # non-empty; see the header for why.
-      # `q2 call build-ts-extension` spawns an esbuild binary embedded in q2
-      # (crates/quarto-esbuild-embed). Stage this target's binary, checked
-      # against the integrity hash pinned in package-lock.json, before cargo
-      # build embeds it. esbuild is MIT: see resources/extension-build/ESBUILD-LICENSE.md.
-      - name: Stage esbuild for embedding
-        shell: bash
-        run: cargo xtask fetch-esbuild --target ${{ matrix.target }}
-
       - name: Build release binary
         shell: bash
         env:
@@ -691,14 +683,15 @@ jobs:
             *"(dirty)") echo "::warning::embedded docs were staged from a dirty tree at $EXPECTED_SHA" ;;
           esac
 
-          # Embedded esbuild: build a tiny extension with the release binary
-          # alone (no Node, no Deno). This is the only place the musl and
-          # Windows binaries' embedded esbuild is actually executed.
+          # Embedded bundler: build a tiny extension with the release binary.
+          # It runs the embedded rollup driver under the runner's Node 24 (the
+          # same Node TS engine extensions need), so this is where the musl and
+          # Windows binaries' build path is exercised.
           mkdir -p verify-ext/src
           printf 'title: T\nversion: 1.0.0\ncontributes:\n  engines:\n    - path: dist/e.js\n' > verify-ext/_extension.yml
           echo 'export default { name: "verify-ext" };' > verify-ext/src/e.ts
           if ! "$BIN" call build-ts-extension verify-ext || ! grep -q 'verify-ext' verify-ext/dist/e.js; then
-            echo "::error::release binary cannot build a TS extension (embedded esbuild missing or not runnable)"
+            echo "::error::release binary cannot build a TS extension (embedded rollup driver or Node failed)"
             FAIL=1
           fi
           exit $FAIL

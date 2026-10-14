@@ -214,6 +214,19 @@ jobs:
           npm run bundle -w @quarto/engine-host-node
           git diff --exit-code -- ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs
 
+      # ts-bundle: vitest suite (the rollup driver behind `q2 call build-ts-extension`)
+      - name: Run ts-bundle tests (vitest)
+        shell: bash
+        run: npm run test -w @quarto/ts-bundle
+
+      # Same freshness gate for the embedded ts-bundle driver: rollup and its
+      # plugins are pinned exactly, so the bytes depend only on the sources.
+      - name: Check ts-bundle driver freshness
+        shell: bash
+        run: |
+          npm run bundle -w @quarto/ts-bundle
+          git diff --exit-code -- ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs
+
       # preview-renderer's integration tier imports wasm-quarto-hub-client
       # (aliased in vitest.integration.config.ts:53-55 to the committed
       # hub-client/wasm-quarto-hub-client symlink -> crates/.../pkg). Without it

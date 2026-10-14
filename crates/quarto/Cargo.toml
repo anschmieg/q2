@@ -47,7 +47,6 @@ quarto-lsp = { workspace = true }
 quarto-hub.workspace = true
 quarto-hub-provider = { path = "../quarto-hub-provider" }
 quarto-mcp-launcher = { path = "../quarto-mcp-launcher" }
-quarto-esbuild-embed = { path = "../quarto-esbuild-embed" }
 quarto-preview = { path = "../quarto-preview" }
 # `q2 preview --join`: ticket parsing + the guest-side tunnel client
 # (live-share plan Phase 3, bd-6y0p1bne). All iroh usage stays behind

@@ -20,6 +20,7 @@
 //! - `build-hub-client-embed`: Build the hub-client editor bundle for `q2 preview --ui editor`
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
 //! - `build-engine-host-bundle`: Build the committed engine-host-node.mjs bundle
+//! - `build-ts-bundle`: Build the committed ts-bundle.mjs driver for `q2 call build-ts-extension`
 //! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
 //! - `pull-extension-subtree`: Sync vendored extension subtrees under `resources/extension-subtrees/`
@@ -32,12 +33,12 @@ mod build_hub_client_embed;
 mod build_hub_mcp_bundle;
 mod build_q2_preview_spa;
 mod build_trace_viewer;
+mod build_ts_bundle;
 mod capture_import_recordings;
 mod capture_pandoc_goldens;
 mod capture_pandoc_recordings;
 mod create_worktree;
 mod dev_setup;
-mod fetch_esbuild;
 mod gen_math_spec;
 mod lint;
 mod node_version;
@@ -423,18 +424,14 @@ enum Command {
     /// `@quarto/api`, or `@quarto/types` sources.
     BuildEngineHostBundle {},
 
-    /// Stage the esbuild binary `q2` embeds for `q2 call build-ts-extension`.
+    /// Build the committed ts-bundle driver (`q2 call build-ts-extension`).
     ///
-    /// Downloads `@esbuild/<platform>` for `--target` (default: the host),
-    /// verifies it against `package-lock.json`, and writes
-    /// `ts-packages/esbuild-embed/<triple>/esbuild`. Rebuild `q2` afterwards
-    /// to embed it; without it `q2` embeds a placeholder and falls back to
-    /// `ESBUILD_BINARY_PATH` / `node_modules/@esbuild`.
-    FetchEsbuild {
-        /// Rust target triple (default: host).
-        #[arg(long)]
-        target: Option<String>,
-    },
+    /// Produces `ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs` (rollup +
+    /// plugins + wasm in one ESM file) — the artifact `quarto-core` embeds via
+    /// `include_str!` in `extension/build.rs` and pipes to `node -`. A plain
+    /// `cargo build` does NOT refresh it; run this after changing
+    /// `quarto-ts-bundle`.
+    BuildTsBundle {},
 
     /// Fresh-clone build orchestration.
     ///
@@ -448,7 +445,7 @@ enum Command {
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
     /// 7. engine-host-node bundle (quarto-core embed artifact; Plan 1b)
-    /// 8. esbuild binary for q2's embed (fetch-esbuild)
+    /// 8. ts-bundle driver (quarto-core embed artifact for build-ts-extension)
     /// 9. cargo build --workspace
     BuildAll {
         /// Skip `npm install`.
@@ -479,9 +476,9 @@ enum Command {
         #[arg(long)]
         skip_engine_host_bundle: bool,
 
-        /// Skip staging the esbuild binary q2 embeds.
+        /// Skip the ts-bundle driver build.
         #[arg(long)]
-        skip_esbuild_embed: bool,
+        skip_ts_bundle: bool,
 
         /// Skip the Rust workspace build.
         #[arg(long)]
@@ -597,7 +594,7 @@ fn main() -> Result<()> {
         Command::BuildHubClientEmbed {} => build_hub_client_embed::run(),
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
         Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
-        Command::FetchEsbuild { target } => fetch_esbuild::run(fetch_esbuild::Args { target }),
+        Command::BuildTsBundle {} => build_ts_bundle::run(),
         Command::BuildAll {
             skip_npm_install,
             skip_ts_packages_build,
@@ -606,7 +603,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_bundle,
             skip_engine_host_bundle,
-            skip_esbuild_embed,
+            skip_ts_bundle,
             skip_rust_build,
             skip_agents_docs,
             release,
@@ -620,7 +617,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_bundle,
                 skip_engine_host_bundle,
-                skip_esbuild_embed,
+                skip_ts_bundle,
                 skip_rust_build,
                 release,
             };

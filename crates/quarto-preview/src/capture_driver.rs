@@ -522,8 +522,7 @@ mod tests {
         // The committed echo-engine bundle is deleted (plan1c3: hermetic fixtures
         // are regenerated at test time). These tests execute the engine, so
         // regenerate the real bundle in-place via the same public build lib the
-        // quarto-core suites use (it needs the `node_modules/@esbuild` binary from
-        // `npm ci`). Mirrors
+        // quarto-core suites use (the embedded rollup driver, run under Node). Mirrors
         // `engine_fixture_build::build_bundle` — the `../../resources/...` depth is
         // identical because quarto-preview and quarto-core are both one level under
         // `crates/`.
@@ -538,8 +537,6 @@ mod tests {
                         .canonicalize()
                         .expect("workspace root"),
                 ),
-                esbuild_binary: None,
-                embedded_esbuild: None,
             },
         )
         .expect("regenerate echo-engine bundle for preview capture test");

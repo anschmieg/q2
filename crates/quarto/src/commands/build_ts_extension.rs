@@ -22,8 +22,6 @@ pub fn execute(args: BuildTsExtensionArgs) -> Result<()> {
             config: args.config,
             workspace: args.workspace,
             workspace_root: None,
-            esbuild_binary: None,
-            embedded_esbuild: Some(quarto_esbuild_embed::extract),
         },
     )?;
     Ok(())

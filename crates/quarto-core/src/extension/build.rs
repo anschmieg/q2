@@ -2,18 +2,20 @@
  * extension/build.rs
  * Copyright (c) 2026 Posit, PBC
  *
- * Build a TypeScript engine extension bundle (esbuild).
+ * Build a TypeScript engine extension bundle (rollup, run under Node).
  */
 
 //! Build logic for `q2 call build-ts-extension` — build a TypeScript engine
-//! extension bundle with esbuild.
+//! extension bundle with rollup.
 //!
 //! Extension authors run this after editing TS source; `q2` never runs it
 //! during render. It resolves an alias config by the precedence rules in
-//! [`resolve_build_config`], locates an esbuild binary ([`resolve_esbuild_binary`]),
-//! and spawns it directly — no Node and no Deno at build time.
+//! [`resolve_build_config`] and runs the embedded bundler driver
+//! (`ts-packages/quarto-ts-bundle`) under Node — the same Node 24 that runs
+//! TS engine extensions, so building adds no requirement. No Deno, no npx and
+//! no network.
 //!
-//! Native-only (mirrors `engine::ts_process`): spawns esbuild via
+//! Native-only (mirrors `engine::ts_process`): spawns Node via
 //! `std::process`, unavailable on `wasm32-unknown-unknown`.
 //!
 //! The bundle is ESM for `node >= 24`, with `node:*` imports left external.
@@ -23,8 +25,9 @@
 //!
 //! # Config precedence
 //!
-//! The config is a JSON file `{"alias": {"<import>": "<path>"}}`; relative
-//! paths resolve against the config file's directory.
+//! The config is a JSON file `{"alias": {"<import>": "<path>"}}` (named
+//! `esbuild.json` for historical reasons; the format is bundler-neutral);
+//! relative paths resolve against the config file's directory.
 //!
 //! 1. `--config <path>` (explicit override) — always wins.
 //! 2. `esbuild.json` committed in the extension directory.
@@ -53,15 +56,10 @@ pub struct BuildOptions {
     pub config: Option<PathBuf>,
     /// Force use of the workspace tier (in-repo / pre-publish build).
     pub workspace: bool,
-    /// Use this q2 workspace root for the workspace tier and for finding
-    /// `node_modules/@esbuild`, instead of walking up from the extension
-    /// (for extensions built outside the workspace, e.g. in a temp dir).
+    /// Use this q2 workspace root for the workspace tier instead of walking
+    /// up from the extension (for extensions built outside the workspace,
+    /// e.g. in a temp dir).
     pub workspace_root: Option<PathBuf>,
-    /// Explicit esbuild binary; wins over every other way of finding one.
-    pub esbuild_binary: Option<PathBuf>,
-    /// Extracts an esbuild binary embedded in the `q2` executable and returns
-    /// its path (`Ok(None)` for a placeholder build that embeds nothing).
-    pub embedded_esbuild: Option<fn() -> Result<Option<PathBuf>>>,
 }
 
 // ============================================================================
@@ -183,88 +181,6 @@ pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
 }
 
 // ============================================================================
-// esbuild binary
-// ============================================================================
-
-/// The `@esbuild/<name>` platform package and the binary's path inside it
-/// for the current target, or `None` on a platform esbuild does not ship for.
-fn esbuild_platform_package() -> Option<(&'static str, &'static str)> {
-    let name = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x64",
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("windows", "x86_64") => "win32-x64",
-        ("windows", "aarch64") => "win32-arm64",
-        _ => return None,
-    };
-    // The Windows package keeps the binary at its root; the others use bin/.
-    let bin = if cfg!(windows) {
-        "esbuild.exe"
-    } else {
-        "bin/esbuild"
-    };
-    Some((name, bin))
-}
-
-/// Walk up from `start` for `node_modules/@esbuild/<platform>/<bin>`.
-fn find_node_modules_esbuild(start: &Path) -> Option<PathBuf> {
-    let (pkg, bin) = esbuild_platform_package()?;
-    let mut dir = start.to_path_buf();
-    loop {
-        let candidate = dir
-            .join("node_modules")
-            .join("@esbuild")
-            .join(pkg)
-            .join(bin);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-/// Locate the esbuild binary. In order: `BuildOptions.esbuild_binary`, the
-/// `ESBUILD_BINARY_PATH` environment variable, the binary embedded in this
-/// executable, then the workspace's `node_modules/@esbuild/<platform>`
-/// (what `npm ci` installs; the route tests take).
-pub fn resolve_esbuild_binary(
-    opts: &BuildOptions,
-    ext_dir: &Path,
-    workspace_root: Option<&Path>,
-) -> Result<PathBuf> {
-    // The binary runs with `current_dir = ext_dir`, where a relative program
-    // path would resolve against the wrong directory; always hand back an
-    // absolute path.
-    let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
-    if let Some(p) = &opts.esbuild_binary {
-        return Ok(absolute(p.clone()));
-    }
-    if let Some(p) = std::env::var_os("ESBUILD_BINARY_PATH").filter(|p| !p.is_empty()) {
-        return Ok(absolute(PathBuf::from(p)));
-    }
-    if let Some(extract) = opts.embedded_esbuild
-        && let Some(p) = extract()?
-    {
-        return Ok(p);
-    }
-    if let Some(p) = find_node_modules_esbuild(ext_dir)
-        .or_else(|| workspace_root.and_then(find_node_modules_esbuild))
-    {
-        return Ok(absolute(p));
-    }
-    bail!(
-        "No esbuild binary found. This q2 build does not embed one \
-         (run `cargo xtask fetch-esbuild` before building q2), and \
-         node_modules/@esbuild/<platform> is not reachable from {} \
-         (run `npm ci` in the q2 workspace). Set ESBUILD_BINARY_PATH to use another esbuild.",
-        ext_dir.display()
-    )
-}
-
-// ============================================================================
 // Command handler
 // ============================================================================
 
@@ -294,7 +210,7 @@ pub fn build_ts_extension(opts: BuildOptions) -> Result<PathBuf> {
     let ext_esbuild = Some(ext_dir.join("esbuild.json")).filter(|p| p.exists());
     if ext_esbuild.is_none() && opts.config.is_none() && ext_dir.join("deno.json").exists() {
         eprintln!(
-            "warning: {} is no longer read; q2 now bundles with esbuild. \
+            "warning: {} is no longer read; q2 now bundles with rollup. \
              Add an esbuild.json ({{\"alias\": {{...}}}}) if the extension needs import aliases.",
             ext_dir.join("deno.json").display()
         );
@@ -309,9 +225,8 @@ pub fn build_ts_extension(opts: BuildOptions) -> Result<PathBuf> {
 
     let entry_ts = find_entry_ts(&ext_dir)?;
     let output_js = find_output_path(&ext_dir)?;
-    let esbuild = resolve_esbuild_binary(&opts, &ext_dir, workspace_root.as_deref())?;
 
-    run_esbuild(&esbuild, &ext_dir, &aliases, &source, &entry_ts, &output_js)?;
+    run_bundler(&ext_dir, &aliases, &source, &entry_ts, &output_js)?;
     Ok(output_js)
 }
 
@@ -333,7 +248,7 @@ fn resolve_extension_dir(path: Option<&Path>) -> Result<PathBuf> {
         None => std::env::current_dir().context("Failed to get current working directory")?,
     };
 
-    // esbuild runs with `current_dir = dir`, so every path derived from it
+    // The bundler runs with `current_dir = dir`, so every path derived from it
     // (entry, output, aliases) must not depend on the caller's cwd.
     let dir = std::path::absolute(&dir)
         .with_context(|| format!("Failed to resolve {}", dir.display()))?;
@@ -414,12 +329,12 @@ fn find_output_path(ext_dir: &Path) -> Result<PathBuf> {
 }
 
 // ============================================================================
-// esbuild runner
+// Bundler runner
 // ============================================================================
 
 /// Strip the Windows verbatim prefix (`\\?\C:\...`) that
-/// `Path::canonicalize` adds. esbuild cannot resolve alias targets that carry
-/// it ("Could not resolve ... using the alias feature"). UNC verbatim paths
+/// `Path::canonicalize` adds. Bundlers cannot resolve alias targets that carry
+/// it (esbuild: "Could not resolve ... using the alias feature"). UNC verbatim paths
 /// (`\\?\UNC\...`) and every non-verbatim path are returned unchanged.
 pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
@@ -429,39 +344,40 @@ pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     }
 }
 
-/// The esbuild arguments for one build. Run with `cwd = ext_dir` and a
-/// relative `entry`, because esbuild embeds the entry path in a comment: a
-/// fixed relative path keeps the output byte-stable across machines.
-fn esbuild_args(
-    entry: &Path,
-    output: &Path,
-    aliases: &BTreeMap<String, PathBuf>,
-) -> Vec<std::ffi::OsString> {
-    let mut args: Vec<std::ffi::OsString> = [
-        "--bundle",
-        "--format=esm",
-        "--platform=node",
-        "--target=node24",
-        "--external:node:*",
-        "--conditions=source,import",
-        "--log-level=warning",
-    ]
-    .iter()
-    .map(Into::into)
-    .collect();
-    for (name, target) in aliases {
-        let mut arg = std::ffi::OsString::from(format!("--alias:{name}="));
-        arg.push(strip_verbatim_prefix(target));
-        args.push(arg);
-    }
-    let mut outfile = std::ffi::OsString::from("--outfile=");
-    outfile.push(output);
-    args.push(outfile);
-    args.push(entry.into());
-    args
+/// The bundler driver, built from `ts-packages/quarto-ts-bundle` by
+/// `cargo xtask build-ts-bundle` (committed; CI checks it is fresh). One
+/// self-contained ESM file, piped to `node -`: nothing to extract or cache.
+static BUNDLER_DRIVER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs"
+));
+
+/// What `BUNDLER_DRIVER` needs to know, passed as JSON in this variable
+/// (an environment variable has no quoting or length trouble that argv has
+/// for a driver read from stdin).
+const JOB_ENV: &str = "Q2_TS_BUNDLE_JOB";
+
+/// The `BundleJob` of `ts-packages/quarto-ts-bundle/src/bundle.ts`. The driver
+/// runs with `cwd = ext_dir` and a relative `entry`.
+fn bundle_job(entry: &Path, output: &Path, aliases: &BTreeMap<String, PathBuf>) -> Result<String> {
+    let text = |p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .with_context(|| format!("Path is not valid UTF-8: {}", p.display()))
+    };
+    let aliases = aliases
+        .iter()
+        .map(|(name, target)| Ok((name.clone(), text(&strip_verbatim_prefix(target))?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    Ok(serde_json::json!({
+        "entry": text(entry)?,
+        "output": text(output)?,
+        "aliases": aliases,
+    })
+    .to_string())
 }
 
-/// Turn esbuild's stderr into guidance when it names a known migration problem.
+/// Turn the bundler's stderr into guidance when it names a known migration problem.
 fn explain_failure(stderr: &str, source: &ConfigSource) -> Option<String> {
     if stderr.contains("\"jsr:") || stderr.contains("\"@std/") || stderr.contains("\"npm:") {
         return Some(
@@ -479,18 +395,25 @@ fn explain_failure(stderr: &str, source: &ConfigSource) -> Option<String> {
                 .to_string(),
         );
     }
+    if stderr.contains("is not exported by") {
+        return Some(
+            "Types are erased without type-checking, so an import that names only a type \
+             must say so: `import type { T } from \"...\"` or `import { type T } from \"...\"`."
+                .to_string(),
+        );
+    }
     None
 }
 
-fn run_esbuild(
-    esbuild: &Path,
+fn run_bundler(
     ext_dir: &Path,
     aliases: &BTreeMap<String, PathBuf>,
     source: &ConfigSource,
     entry: &Path,
     output: &Path,
 ) -> Result<()> {
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     // Ensure the output parent directory exists.
     if let Some(parent) = output.parent() {
@@ -498,14 +421,39 @@ fn run_esbuild(
             .with_context(|| format!("Failed to create output directory {}", parent.display()))?;
     }
 
+    let node = quarto_node_discovery::find_node(
+        &quarto_node_discovery::Discovery::from_env(),
+        "`q2 call build-ts-extension`",
+    )?;
     let relative_entry = entry.strip_prefix(ext_dir).unwrap_or(entry);
-    let result = Command::new(esbuild)
-        .current_dir(ext_dir)
-        .args(esbuild_args(relative_entry, output, aliases))
-        .output()
-        .with_context(|| format!("Failed to run esbuild at {}", esbuild.display()))?;
+    let job = bundle_job(relative_entry, output, aliases)?;
 
-    // esbuild reports problems on stderr; pass them through either way so
+    // `--disable-warning`: the driver strips types with Node's built-in
+    // `module.stripTypeScriptTypes`, which prints an ExperimentalWarning.
+    let mut child = Command::new(&node.path)
+        .args([
+            "--disable-warning=ExperimentalWarning",
+            "--input-type=module",
+            "-",
+        ])
+        .current_dir(ext_dir)
+        .env(JOB_ENV, job)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run Node at {}", node.path.display()))?;
+    // Node reads the whole script before running it, so it writes nothing until
+    // this is done. A write error means Node exited early; its status and
+    // stderr, collected below, say why.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let _ = stdin.write_all(BUNDLER_DRIVER.as_bytes());
+    drop(stdin);
+    let result = child
+        .wait_with_output()
+        .context("Failed to wait for the bundler")?;
+
+    // The driver reports problems on stderr; pass them through either way so
     // warnings are not lost.
     let stderr = String::from_utf8_lossy(&result.stderr);
     if !stderr.is_empty() {
@@ -516,7 +464,7 @@ fn run_esbuild(
             .map(|h| format!("\n{h}"))
             .unwrap_or_default();
         bail!(
-            "esbuild exited with status {}. Check the TypeScript source for errors.{hint}",
+            "The bundler exited with status {}. Check the TypeScript source for errors.{hint}",
             result.status
         );
     }
@@ -664,36 +612,27 @@ mod tests {
         assert!(load_aliases(&ConfigSource::File(dir.path().join("nope.json"))).is_err());
     }
 
-    // ---- esbuild args / failure hints ----------------------------------
+    // ---- bundler job / failure hints -----------------------------------
 
     #[test]
-    fn esbuild_args_are_fixed_and_carry_aliases() {
+    fn bundle_job_carries_entry_output_and_aliases() {
         let aliases = BTreeMap::from([("@quarto/api".to_string(), PathBuf::from("/ws/api"))]);
-        let args: Vec<String> = esbuild_args(Path::new("src/x.ts"), Path::new("/o/x.js"), &aliases)
-            .into_iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let job = bundle_job(Path::new("src/x.ts"), Path::new("/o/x.js"), &aliases).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&job).unwrap();
         assert_eq!(
-            args,
-            [
-                "--bundle",
-                "--format=esm",
-                "--platform=node",
-                "--target=node24",
-                "--external:node:*",
-                "--conditions=source,import",
-                "--log-level=warning",
-                "--alias:@quarto/api=/ws/api",
-                "--outfile=/o/x.js",
-                "src/x.ts",
-            ]
+            job,
+            serde_json::json!({
+                "entry": "src/x.ts",
+                "output": "/o/x.js",
+                "aliases": {"@quarto/api": "/ws/api"},
+            })
         );
     }
 
     #[test]
     fn deno_only_imports_get_a_node_hint() {
         let hint = explain_failure(
-            r#"✘ [ERROR] Could not resolve "jsr:@std/path""#,
+            r#"error: Could not resolve "jsr:@std/path" (imported by src/x.ts)"#,
             &ConfigSource::Shipped,
         )
         .unwrap();
@@ -702,76 +641,17 @@ mod tests {
 
     #[test]
     fn quarto_value_imports_in_the_shipped_tier_name_the_workspace() {
-        let stderr = r#"✘ [ERROR] Could not resolve "@quarto/api/claims""#;
+        let stderr = r#"error: Could not resolve "@quarto/api/claims" (imported by src/x.ts)"#;
         let hint = explain_failure(stderr, &ConfigSource::Shipped).unwrap();
         assert!(hint.contains("--workspace"), "got: {hint}");
         assert!(explain_failure(stderr, &ConfigSource::Workspace(PathBuf::from("/ws"))).is_none());
     }
 
-    // ---- esbuild binary resolution -------------------------------------
-
-    fn options() -> BuildOptions {
-        BuildOptions {
-            ext_dir: None,
-            config: None,
-            workspace: false,
-            workspace_root: None,
-            esbuild_binary: None,
-            embedded_esbuild: None,
-        }
-    }
-
     #[test]
-    fn explicit_esbuild_binary_wins() {
-        let mut opts = options();
-        opts.esbuild_binary = Some(PathBuf::from("/opt/esbuild"));
-        opts.embedded_esbuild = Some(|| panic!("embedded must not be consulted"));
-        assert_eq!(
-            resolve_esbuild_binary(&opts, Path::new("/nowhere"), None).unwrap(),
-            std::path::absolute("/opt/esbuild").unwrap()
-        );
-    }
-
-    #[test]
-    fn relative_binary_paths_are_made_absolute() {
-        let mut opts = options();
-        opts.esbuild_binary = Some(PathBuf::from("rel/esbuild"));
-        let resolved = resolve_esbuild_binary(&opts, Path::new("/nowhere"), None).unwrap();
-        assert!(resolved.is_absolute(), "got {}", resolved.display());
-    }
-
-    #[test]
-    fn placeholder_embed_falls_through_to_node_modules() {
-        let Some((pkg, bin)) = esbuild_platform_package() else {
-            return;
-        };
-        let dir = make_dir();
-        let binary = dir.path().join("node_modules/@esbuild").join(pkg).join(bin);
-        touch(&binary);
-        let ext = dir.path().join("a/b/ext");
-        fs::create_dir_all(&ext).unwrap();
-
-        let mut opts = options();
-        opts.embedded_esbuild = Some(|| Ok(None));
-        // ESBUILD_BINARY_PATH is process-global; this test only runs when the
-        // harness does not set it (nextest gives each test its own process).
-        if std::env::var_os("ESBUILD_BINARY_PATH").is_some() {
-            return;
-        }
-        assert_eq!(resolve_esbuild_binary(&opts, &ext, None).unwrap(), binary);
-    }
-
-    #[test]
-    fn missing_esbuild_binary_names_both_remedies() {
-        if std::env::var_os("ESBUILD_BINARY_PATH").is_some() {
-            return;
-        }
-        let dir = make_dir();
-        let err = resolve_esbuild_binary(&options(), dir.path(), None)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("fetch-esbuild"), "got: {err}");
-        assert!(err.contains("npm ci"), "got: {err}");
+    fn a_type_imported_as_a_value_gets_an_import_type_hint() {
+        let stderr = r#"error: "Shape" is not exported by "src/types.ts", imported by "src/x.ts"."#;
+        let hint = explain_failure(stderr, &ConfigSource::Shipped).unwrap();
+        assert!(hint.contains("import type"), "got: {hint}");
     }
 
     // ---- find_workspace_root tests ------------------------------------

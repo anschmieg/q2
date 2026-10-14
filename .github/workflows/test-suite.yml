@@ -157,9 +157,9 @@ jobs:
           sudo docker builder prune -a --force
 
       # Node 24 + `npm ci`: `q2 call build-ts-extension` (used by the engine
-      # tests to rebuild the hermetic fixture bundles) spawns the esbuild binary
-      # from node_modules/@esbuild/<platform>, and the TS packages the
-      # fixtures import need their npm deps. After "Free disk space" on purpose:
+      # tests to rebuild the hermetic fixture bundles) runs its embedded rollup
+      # driver under Node, the engine tests run the bundles under Node, and the
+      # TS packages the fixtures import need their npm deps. After "Free disk space" on purpose:
       # that step removes the tool cache setup-node populates.
       - name: Set up Node
         uses: actions/setup-node@v6

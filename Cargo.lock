@@ -6177,7 +6177,6 @@ dependencies = [
  "quarto-doctemplate",
  "quarto-error-catalog",
  "quarto-error-reporting",
- "quarto-esbuild-embed",
  "quarto-hub",
  "quarto-hub-provider",
  "quarto-lsp",
@@ -6423,16 +6422,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
-]
-
-[[package]]
-name = "quarto-esbuild-embed"
-version = "0.32.0"
-dependencies = [
- "anyhow",
- "dirs",
- "sha2 0.11.0",
- "tempfile",
 ]
 
 [[package]]

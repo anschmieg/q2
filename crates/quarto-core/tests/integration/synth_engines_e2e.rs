@@ -11,7 +11,7 @@
  * contending engines. THIS file is Task A1's smoke test: it proves each of
  * the well-formed synthetic fixtures under
  * `crates/quarto-core/tests/fixtures/extensions/` is a valid, loadable
- * TsEngine bundle (real esbuild bundle output, real `_extension.yml` parse) by
+ * TsEngine bundle (real bundler output, real `_extension.yml` parse) by
  * driving each ONE fixture at a time through the REAL render path —
  * `render_to_file` -> discovery -> `resolve_engines` -> LoadEngine /
  * LaunchEngine / execute -> a real Node engine-host subprocess.
@@ -34,7 +34,7 @@
  *   directions of the real `ClaimsFile` wire dispatch.
  * Both fixtures' `dist/<name>.js` bundles are regenerated at test time (not
  * committed) via `crate::engine_fixture_build`: they import only
- * `@quarto/api/claims` (pure, type-only transitive deps), so the esbuild bundler
+ * `@quarto/api/claims` (pure, type-only transitive deps), so the bundler
  * resolves hermetically from local `ts-packages/` with no network/lock —
  * real node bundle output, built fresh into each test's tempdir copy.
  */

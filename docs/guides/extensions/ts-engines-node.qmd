@@ -85,11 +85,13 @@ bundle:
 ## Building the bundle
 
 Build with `q2 call build-ts-extension` from the extension directory. It
-bundles with esbuild into ESM for Node 24 and needs neither Node nor Deno at
-build time. Imports that only exist under Deno (`jsr:`, `npm:` specifiers
+bundles with rollup (embedded in `q2`, run under the same Node 24 that runs
+the engine) into ESM for Node 24; it needs no Deno, no `npx` and no network.
+TypeScript types are erased (not type-checked), so an import of a type must be
+`import type`. Imports that only exist under Deno (`jsr:`, `npm:` specifiers
 and `@std/*`) are not resolved; the build fails and names the `node:`
 replacement.
 
-If you build with your own tooling, use esbuild (or any bundler) with
+If you build with your own tooling, use any bundler (esbuild, rollup, ...) with
 `platform: "node"`, `format: "esm"` and `external: ["node:*"]`, and pin the
 bundler version so the committed bytes are reproducible.

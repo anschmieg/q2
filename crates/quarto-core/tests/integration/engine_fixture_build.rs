@@ -8,7 +8,7 @@
  *
  * `build_bundle`/`ensure_bundle` call `quarto_core::extension::build::build_ts_extension`
  * in-process (no subprocess to `q2`, no `CARGO_BIN_EXE`) against the workspace
- * esbuild alias config, so the 10 `HERMETIC_FIXTURES` (pure/
+ * alias config, so the 10 `HERMETIC_FIXTURES` (pure/
  * type-only imports) can regenerate their `dist` bundle at test time
  * instead of being committed to git.
  *
@@ -38,7 +38,7 @@ pub const HERMETIC_FIXTURES: &[&str] = &[
 ];
 
 /// Build `<ext_dir>/dist/<name>.js` in place with the workspace aliases.
-/// Hermetic (no network): uses the `node_modules/@esbuild` binary from `npm ci`.
+/// Hermetic (no network): bundles with the embedded rollup driver under Node.
 pub fn build_bundle(ext_dir: &Path) {
     quarto_core::extension::build::build_ts_extension(
         quarto_core::extension::build::BuildOptions {
@@ -46,8 +46,6 @@ pub fn build_bundle(ext_dir: &Path) {
             config: None,
             workspace: false,
             workspace_root: Some(workspace_root()),
-            esbuild_binary: None,
-            embedded_esbuild: None,
         },
     )
     .expect("build fixture bundle");
@@ -97,6 +95,10 @@ fn copy_dir(src: &Path, dst: &Path) {
 /// `build_bundle` regenerates `dist/alpha.js` from source.
 #[test]
 fn build_helper_produces_bundle() {
+    if !quarto_core::engine::ts_process::node_available_for_tests() {
+        eprintln!("SKIP: no Node.js >= 24 (the bundler runs under it)");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let dst = tmp.path().join("alpha");
     let src = fixture_ext_dir("alpha");
