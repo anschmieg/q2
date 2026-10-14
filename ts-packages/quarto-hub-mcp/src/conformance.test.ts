@@ -806,16 +806,20 @@ describe('security invariants', () => {
       Object.defineProperty(refreshManager, 'getValidIdToken', {
         value: vi.fn().mockRejectedValue(new ReauthRequired()),
       });
+      // The flow blocks on the callback; reject promptly so the handler
+      // settles. The invariant under test is what reached the browser.
+      // A refused URL means the handler returns without ever awaiting
+      // this promise, so its later rejection has no listener; the no-op
+      // catch keeps that from surfacing as a vitest unhandled rejection
+      // (seen as a flake on a slow macOS runner).
+      const result = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('test: no callback coming')), 10),
+      );
+      result.catch(() => {});
       const listener: LoopbackListener = {
         port: 1,
         redirectUri: 'http://127.0.0.1:1/callback',
-        // The flow blocks on the callback; reject promptly so the handler
-        // settles. The invariant under test is what reached the browser.
-        // Deferred rejection: an eagerly-rejected promise would race the
-        // handler's await and surface as an unhandled rejection.
-        result: new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('test: no callback coming')), 10),
-        ),
+        result,
         close() {},
       };
       const state = new AuthToolsState({
