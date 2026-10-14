@@ -21,6 +21,7 @@
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
 //! - `build-engine-host-bundle`: Build the committed engine-host-node.mjs bundle
 //! - `build-ts-bundle`: Build the committed ts-bundle.mjs driver for `q2 call build-ts-extension`
+//! - `vendor-react`: Rebuild the vendored React ES modules under `resources/js/react/`
 //! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
 //! - `pull-extension-subtree`: Sync vendored extension subtrees under `resources/extension-subtrees/`
@@ -52,6 +53,7 @@ mod tree_sitter;
 mod treesitter_crlf;
 mod ts_packages;
 mod util;
+mod vendor_react;
 mod verify;
 
 use anyhow::Result;
@@ -415,6 +417,13 @@ enum Command {
     /// quarto-hub-mcp / quarto-sync-client / quarto-automerge-schema.
     BuildHubMcpBundle {},
 
+    /// Rebuild the vendored React ES modules under `resources/js/react/`
+    /// from the workspace `node_modules` (bd-react-components-a8flgldm).
+    /// Runs `build.mjs` then `check.mjs` (jsdom smoke). The files are
+    /// committed and version-pinned by the Rust test suite; run this
+    /// after bumping `react` / `react-dom`.
+    VendorReact {},
+
     /// Build the committed engine-host-node.mjs bundle (Plan 1b).
     ///
     /// Produces `ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs`
@@ -593,6 +602,7 @@ fn main() -> Result<()> {
         Command::BuildQ2PreviewSpa {} => build_q2_preview_spa::run(),
         Command::BuildHubClientEmbed {} => build_hub_client_embed::run(),
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
+        Command::VendorReact {} => vendor_react::run(),
         Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
         Command::BuildTsBundle {} => build_ts_bundle::run(),
         Command::BuildAll {

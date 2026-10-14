@@ -1,0 +1,45 @@
+---
+title: "Component module could not be prepared"
+description: "A component's TypeScript or JSX module, or one it imports, failed to transpile, could not be read, or has an import that names no file. The component was not shipped; its element keeps the static content."
+code: Q-25-9
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-9` — Component module could not be prepared
+
+> A component's TypeScript or JSX module, or one it imports, failed to transpile, could not be read, or has an import that names no file. The component was not shipped; its element keeps the static content.
+
+## What this means
+
+A `.tsx`, `.ts` or `.jsx` component is turned into browser JavaScript
+while the page renders: types are stripped, JSX is compiled, and every
+relative import inside the project is shipped beside it (TypeScript files
+transpiled, plain JavaScript copied). This warning means one step of that
+failed. The message names the file and, for a syntax error, the line and
+column inside it. When the entry module fails, the component is left out
+of the page; when an imported helper fails, the entry still ships and the
+browser reports the missing module.
+
+## Why this happens
+
+- A syntax or type-syntax error in the module. The position in the message
+  is in the module, not in the document that declares it.
+- An import such as `./util.ts` or `./util.js` that names no file (the
+  `.js`-for-`.ts` convention is accepted: `./util.js` finds `util.ts`).
+- The file is unreadable.
+
+## How to fix
+
+Fix the module at the position given, or the import that names no file,
+and render again. Bare imports (`react`, a package name) are not resolved
+here: `react` comes from the page's import map, and other packages are not
+supported yet (Q-25-3).
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

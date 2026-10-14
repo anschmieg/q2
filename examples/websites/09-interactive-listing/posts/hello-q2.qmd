@@ -1,0 +1,11 @@
+---
+title: "Hello, Quarto 2"
+date: 2025-11-03
+categories: [release, notes]
+description: "What the Rust rewrite changes for authors, and what it does not."
+---
+
+What the Rust rewrite changes for authors, and what it does not.
+
+This post is part of the interactive-listing example; its tags are
+`release`, `notes`.

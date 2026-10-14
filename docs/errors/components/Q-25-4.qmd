@@ -1,0 +1,42 @@
+---
+title: "Component binds to no element"
+description: "A component's `bind` selector (`#id` or `.class`) matches no Div or Span on the page, so the component was not shipped with it."
+code: Q-25-4
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-4` — Component binds to no element
+
+> A component's `bind` selector (`#id` or `.class`) matches no Div or Span on the page, so the component was not shipped with it.
+
+## What this means
+
+Each component binds to the elements its `bind` selects: `#id` for the
+one Div or Span with that id, `.class` for every Div or Span with that
+class. The default is `#<name>`. When nothing on the page matches, there
+is nothing to mount, so Quarto warns and leaves the component out of the
+page.
+
+## Why this happens
+
+- The element is missing, or its id or class is spelled differently.
+- `bind:` was omitted and no element has the component's name as its id.
+- The element is not a Div or Span (a heading or a code block cannot host
+  a component).
+- The id was rewritten: a heading inside a `:::` div gets its own section
+  id, for example, and ids on other block kinds do not count.
+
+## How to fix
+
+Give the element the id or class (`::: {#counter}` ... `:::` for a block,
+`[text]{.sparkline}` for an inline), or set `bind:` to the selector it
+already has.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

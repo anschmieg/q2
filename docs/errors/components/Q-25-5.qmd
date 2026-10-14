@@ -1,0 +1,37 @@
+---
+title: "Element bound by two components"
+description: "Two `components` entries select the same element. The first declaration keeps it; the second is ignored for that element."
+code: Q-25-5
+subsystem: components
+status: stub
+since: "99.9.9"
+categories:
+  - components
+---
+
+# `Q-25-5` — Element bound by two components
+
+> Two `components` entries select the same element. The first declaration keeps it; the second is ignored for that element.
+
+## What this means
+
+An element can host one component. When two declarations select the
+same Div or Span, for example a `.card` binding and a `#first-card`
+binding on the same div, Quarto warns and keeps the component declared
+first. The second component still binds to any other elements it selects.
+
+## Why this happens
+
+- A class binding and an id binding overlap.
+- Two class bindings name classes the same element carries.
+
+## How to fix
+
+Narrow one of the two `bind:` selectors so they select different
+elements, or remove the class from the element that should get the other
+component.
+
+## Related
+
+- The components guide (`docs/guides/authoring/components.qmd`) describes
+  the `components:` key, the element contract and the runtime.

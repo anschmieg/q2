@@ -76,6 +76,7 @@ website:
             - guides/authoring/engines.qmd
             - guides/authoring/navigation.qmd
             - guides/authoring/extensions.qmd
+            - guides/authoring/components.qmd
             - guides/authoring/templates.qmd
             - guides/publishing/index.qmd
     - id: tools
@@ -435,6 +436,17 @@ website:
             - errors/import/Q-24-12.qmd
             - errors/import/Q-24-13.qmd
             - errors/import/Q-24-14.qmd
+        - section: "components"
+          contents:
+            - errors/components/Q-25-1.qmd
+            - errors/components/Q-25-2.qmd
+            - errors/components/Q-25-3.qmd
+            - errors/components/Q-25-4.qmd
+            - errors/components/Q-25-5.qmd
+            - errors/components/Q-25-6.qmd
+            - errors/components/Q-25-7.qmd
+            - errors/components/Q-25-8.qmd
+            - errors/components/Q-25-9.qmd
 
 format:
   html:

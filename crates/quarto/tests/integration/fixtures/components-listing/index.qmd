@@ -1,0 +1,31 @@
+---
+title: "Posts"
+listing:
+  id: posts
+  type: metadata
+  contents: posts/*.qmd
+  sort: "date desc"
+components:
+  - name: filter-table
+    src: filter-table.js
+---
+
+The listing resolves the posts and publishes them at `meta.listings.posts`;
+the cell below hands them to a component as props, with a plain list as
+the no-script version.
+
+```{lmd}
+local items = meta.listings.posts.items
+local rows = items:map(function(it)
+  return {
+    title = pandoc.utils.stringify(it.title),
+    href = it["output-href"],
+    date = it.date,
+    categories = it.categories,
+  }
+end)
+local list = pandoc.BulletList(items:map(function(it)
+  return {=: `{lmd} pandoc.Link(it.title, it.path)` (`{lmd} it.date`) :=}
+end))
+return quarto.component("filter-table", { rows = rows }, { list })
+```

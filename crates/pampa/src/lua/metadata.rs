@@ -93,7 +93,7 @@ pub struct LuaMetaProxy {
 }
 
 impl LuaMetaProxy {
-    fn node(&self) -> Option<&ConfigValue> {
+    pub(crate) fn node(&self) -> Option<&ConfigValue> {
         lookup(&self.root, &self.path)
     }
 
@@ -250,6 +250,30 @@ mod tests {
 
     fn eval<T: mlua::FromLua>(lua: &Lua, src: &str) -> T {
         lua.load(format!("return {src}")).eval().unwrap()
+    }
+
+    /// `pandoc.json.encode` of a `meta` proxy is the plain JSON of the
+    /// metadata under it: prose as text, arrays as arrays, scalars as
+    /// themselves (bd-react-components-a8flgldm, so listing items can be
+    /// handed to a component as props).
+    #[test]
+    fn meta_proxy_encodes_as_plain_json() {
+        let lua = env();
+        let s: String = eval(&lua, "pandoc.json.encode(meta.author)");
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"name": "Ada", "affil": {"org": "Analytical"}})
+        );
+        let s: String = eval(
+            &lua,
+            "pandoc.json.encode({ t = meta.title, n = meta.n, list = meta.authors })",
+        );
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["t"], "A fancy title");
+        assert_eq!(v["n"], 3);
+        assert_eq!(v["list"][1]["name"], "Bob");
+        assert_eq!(v["list"][0]["tags"], serde_json::json!(["x", "y"]));
     }
 
     /// `pandoc.utils.stringify(<src>)`: strings in document metadata are
