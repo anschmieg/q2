@@ -260,9 +260,20 @@ pub fn synthesize_document(capture: &PageCapture) -> String {
         .map(|l| format!(" lang=\"{}\"", escape_attr(l)))
         .unwrap_or_default();
     let title = escape_text(&capture.title);
+    // Crumbs travel as a JSON array in a Pagefind metadata element.
+    // The element is ignored for indexing (metadata on ignored
+    // elements is still read) so the crumb words do not become hits.
+    let crumbs_meta = if capture.crumbs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<span data-pagefind-meta=\"crumbs\" data-pagefind-ignore>{}</span>\n",
+            escape_text(&serde_json::to_string(&capture.crumbs).expect("crumbs serialize"))
+        )
+    };
     format!(
         "<!DOCTYPE html>\n<html{lang_attr}><head><meta charset=\"utf-8\"><title>{title}</title></head>\n\
-         <body data-pagefind-body>\n<h1>{title}</h1>\n{}\n</body></html>\n",
+         <body data-pagefind-body>\n<h1>{title}</h1>\n{crumbs_meta}{}\n</body></html>\n",
         capture.body_html
     )
 }
@@ -332,6 +343,24 @@ mod tests {
         assert!(doc.contains("<h1>A &amp; B &lt;C&gt;</h1>"), "{doc}");
         assert!(doc.contains("<body data-pagefind-body>"), "{doc}");
         assert!(doc.contains("<p>Body</p>"), "{doc}");
+    }
+
+    #[test]
+    fn synthesized_document_carries_crumbs_as_ignored_meta() {
+        let capture = PageCapture {
+            href: "a.html".into(),
+            title: "T".into(),
+            lang: None,
+            crumbs: vec!["Home".into(), "A & B".into()],
+            body_html: String::new(),
+        };
+        let doc = synthesize_document(&capture);
+        assert!(
+            doc.contains(
+                "<span data-pagefind-meta=\"crumbs\" data-pagefind-ignore>[&quot;Home&quot;,&quot;A &amp; B&quot;]</span>"
+            ) || doc.contains("<span data-pagefind-meta=\"crumbs\" data-pagefind-ignore>[\"Home\",\"A &amp; B\"]</span>"),
+            "{doc}"
+        );
     }
 
     #[test]

@@ -426,6 +426,21 @@ pub fn load_listing_layer() -> Result<SassLayer, SassError> {
     parse_layer(content, Some("quarto-listing.scss"))
 }
 
+/// Load the website search layer (`quarto-search.scss`, bd-eip0naf4):
+/// the Autocomplete widget, results panel, cards, and the navbar /
+/// sidebar placement of the search box.
+pub fn load_search_layer() -> Result<SassLayer, SassError> {
+    use crate::resources::TEMPLATES_RESOURCES;
+
+    let content = TEMPLATES_RESOURCES
+        .read_str(Path::new("quarto-search.scss"))
+        .ok_or_else(|| SassError::CompilationFailed {
+            message: "quarto-search.scss not found in templates resources".to_string(),
+        })?;
+
+    parse_layer(content, Some("quarto-search.scss"))
+}
+
 /// Load the reveal.js framework layer.
 ///
 /// This is the reveal analogue of [`load_bootstrap_framework`]: it provides the

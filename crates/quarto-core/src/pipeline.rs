@@ -2467,6 +2467,11 @@ pub fn build_transform_pipeline(
     // entry.tsx module top (Phase F.1 pattern).
     #[cfg(not(target_arch = "wasm32"))]
     pipeline.push(Box::new(crate::transforms::QuartoNavJsTransform::new()));
+    // Website search UI (bd-eip0naf4): options JSON + offset meta in
+    // the head, and the search scripts as project artifacts. Reads the
+    // resolved language table and the search config only, so it has no
+    // ordering constraint beyond the Navigation phase.
+    pipeline.push(Box::new(crate::transforms::SearchUiTransform::new()));
     pipeline.push(Box::new(PageNavRenderTransform::new()));
     // Footer *generation* (above) is format-agnostic; footer *rendering* is
     // format-specific — html emits page-footer chrome, revealjs emits a

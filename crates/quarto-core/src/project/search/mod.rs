@@ -43,6 +43,7 @@ pub mod config;
 pub mod index_writer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod records;
+pub mod ui;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod writer;
 

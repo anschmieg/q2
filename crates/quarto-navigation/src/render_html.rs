@@ -93,6 +93,23 @@ pub fn navbar_to_html(
         html.push('\n');
     }
 
+    // Search box (Quarto 1 `nav-before-body.ejs:29-31,47-49,53-55`):
+    // with a collapsing navbar it sits *before* the toggler, outside
+    // the collapse, so it stays reachable on narrow viewports; without
+    // one it follows the menu. `quarto-search.js` mounts the widget
+    // into this element; `title` is the localized `search-label`.
+    let search_box = (navbar.search == Some(true)).then(|| {
+        format!(
+            "    <div id=\"quarto-search\" class=\"\" title=\"{}\"></div>\n",
+            escape_attr(navbar.search_label.as_deref().unwrap_or("Search"))
+        )
+    });
+    if navbar.collapse
+        && let Some(ref search_box) = search_box
+    {
+        html.push_str(search_box);
+    }
+
     // Collapse toggle, only if collapse is enabled.
     if navbar.collapse {
         let toggler_classes = match navbar.toggle_position {
@@ -112,7 +129,7 @@ pub fn navbar_to_html(
         ));
     }
 
-    // Collapsible content: left nav, search placeholder, right nav.
+    // Collapsible content: left nav, right nav.
     html.push_str("    <div class=\"collapse navbar-collapse\" id=\"navbarCollapse\">\n");
     if !navbar.left.is_empty() {
         html.push_str("      <ul class=\"navbar-nav me-auto\">\n");
@@ -123,10 +140,6 @@ pub fn navbar_to_html(
     } else {
         // Spacer to keep right-aligned items aligned when no left items exist.
         html.push_str("      <div class=\"me-auto\"></div>\n");
-    }
-
-    if navbar.search {
-        html.push_str("      <div class=\"quarto-search\"></div>\n");
     }
 
     if !navbar.right.is_empty() {
@@ -153,6 +166,11 @@ pub fn navbar_to_html(
         html.push_str("      </div>\n");
     }
     html.push_str("    </div>\n");
+    if !navbar.collapse
+        && let Some(ref search_box) = search_box
+    {
+        html.push_str(search_box);
+    }
 
     html.push_str("  </div>\n");
     html.push_str("</nav>\n");
@@ -312,7 +330,11 @@ pub enum SecondaryNavContent<'a> {
 /// pane beside it. Both halves must ship together — a toggle pointed at
 /// markup that doesn't exist is why this work was split out of
 /// bd-breadcrumbs-missing-1vpuqh34 in the first place.
-pub fn secondary_nav_to_html(content: SecondaryNavContent<'_>, toggle_label: &str) -> String {
+pub fn secondary_nav_to_html(
+    content: SecondaryNavContent<'_>,
+    toggle_label: &str,
+    search_label: Option<&str>,
+) -> String {
     let label = escape_attr(toggle_label);
     // Shared by the button and the click-anywhere link: both open the
     // same Bootstrap collapse target, and both freeze headroom while the
@@ -352,6 +374,17 @@ pub fn secondary_nav_to_html(content: SecondaryNavContent<'_>, toggle_label: &st
         }
     }
 
+    // Q1 `nav-before-body.ejs:83-87`: when the sidebar carries the
+    // search box, the collapsed bar gets a button that opens it
+    // (`window.quartoOpenSearch`, defined by `quarto-search.js`).
+    if let Some(search_label) = search_label {
+        html.push_str(&format!(
+            "    <button type=\"button\" class=\"btn quarto-search-button\" aria-label=\"{}\" \
+             onclick=\"window.quartoOpenSearch();\">\n      <i class=\"bi bi-search\"></i>\n    </button>\n",
+            escape_attr(search_label)
+        ));
+    }
+
     html.push_str("  </div>\n");
     html.push_str("</nav>\n");
     html
@@ -382,6 +415,7 @@ pub fn sidebar_to_html(sidebar: &Sidebar, home_url: &str) -> String {
             home_url,
             appended_html: None,
             has_navbar: false,
+            search: None,
         },
     )
 }
@@ -411,6 +445,20 @@ pub struct SidebarRenderOptions<'a> {
     /// gate for why, and for what changes if `Sidebar` ever gains a
     /// `logo` field.
     pub has_navbar: bool,
+    /// The search box to render in the sidebar, when search lives
+    /// there (bd-6cme). `None` emits nothing.
+    pub search: Option<SidebarSearch<'a>>,
+}
+
+/// How the sidebar's search box renders (Quarto 1 `sidebar.ejs:68-75`
+/// and `navtools.ejs:54-56`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarSearch<'a> {
+    /// `true`: the overlay icon button among the sidebar tools;
+    /// `false`: the inline textbox in a `.sidebar-search` wrapper.
+    pub overlay: bool,
+    /// Localized `search-label`, the box's `title`.
+    pub label: &'a str,
 }
 
 /// [`sidebar_to_html`] with page context passed via [`SidebarRenderOptions`].
@@ -488,6 +536,27 @@ pub fn sidebar_to_html_with_options(sidebar: &Sidebar, opts: &SidebarRenderOptio
             render_text(title_cv)
         ));
         html.push_str("  </div>\n");
+    }
+
+    // Search box (bd-6cme). Textbox: Q1 `sidebar.ejs:68-75`. Overlay:
+    // Q1 renders it among the sidebar tools (`navtools.ejs:54-56`);
+    // q2 has no sidebar `tools:` yet, so the tools container holds
+    // just the search tool.
+    if let Some(search) = opts.search {
+        let label = escape_attr(search.label);
+        if search.overlay {
+            html.push_str(&format!(
+                "  <div class=\"sidebar-tools-main\">\n    <div id=\"quarto-search\" \
+                 class=\"quarto-navigation-tool px-1\" title=\"{label}\"></div>\n  </div>\n"
+            ));
+        } else {
+            html.push_str(&format!(
+                "  <div class=\"mt-2 flex-shrink-0 align-items-center\">\n    \
+                 <div class=\"sidebar-search\">\n      \
+                 <div id=\"quarto-search\" class=\"\" title=\"{label}\"></div>\n    \
+                 </div>\n  </div>\n"
+            ));
+        }
     }
 
     if !sidebar.contents.is_empty() {
@@ -1830,13 +1899,54 @@ mod tests {
     }
 
     #[test]
-    fn navbar_search_emits_placeholder() {
+    fn navbar_search_emits_box_before_toggler_when_collapsing() {
         let navbar = Navbar {
-            search: true,
+            search: Some(true),
+            left: vec![NavigationItem {
+                href: Some("a.qmd".to_string()),
+                ..NavigationItem::default()
+            }],
             ..Navbar::with_defaults()
         };
         let html = navbar_to_html(&navbar, None, "./");
-        assert!(html.contains("<div class=\"quarto-search\"></div>"));
+        let box_pos = html
+            .find("<div id=\"quarto-search\" class=\"\" title=\"Search\"></div>")
+            .expect("search box present");
+        let toggler_pos = html.find("navbar-toggler").expect("toggler present");
+        assert!(
+            box_pos < toggler_pos,
+            "box precedes the toggler; got: {html}"
+        );
+        assert!(!html.contains("<div class=\"quarto-search\""));
+    }
+
+    #[test]
+    fn navbar_search_follows_menu_without_collapse_and_uses_label() {
+        let navbar = Navbar {
+            search: Some(true),
+            search_label: Some("Buscar".to_string()),
+            collapse: false,
+            ..Navbar::with_defaults()
+        };
+        let html = navbar_to_html(&navbar, None, "./");
+        let box_pos = html
+            .find("id=\"quarto-search\"")
+            .expect("search box present");
+        let collapse_pos = html.find("navbar-collapse").unwrap();
+        assert!(box_pos > collapse_pos, "box follows the menu; got: {html}");
+        assert!(html.contains("title=\"Buscar\""));
+    }
+
+    #[test]
+    fn navbar_search_unset_or_false_emits_nothing() {
+        for search in [None, Some(false)] {
+            let navbar = Navbar {
+                search,
+                ..Navbar::with_defaults()
+            };
+            let html = navbar_to_html(&navbar, None, "./");
+            assert!(!html.contains("quarto-search"), "{search:?}: {html}");
+        }
     }
 
     #[test]
@@ -2676,6 +2786,7 @@ mod tests {
                 home_url: "./",
                 appended_html: None,
                 has_navbar: true,
+                search: None,
             },
         );
         assert!(
@@ -2712,6 +2823,7 @@ mod tests {
                 home_url: "./",
                 appended_html: None,
                 has_navbar: false,
+                search: None,
             },
         );
         assert!(
@@ -3126,6 +3238,7 @@ mod secondary_nav_tests {
         let html = secondary_nav_to_html(
             SecondaryNavContent::Breadcrumbs("<nav class=\"quarto-page-breadcrumbs\"></nav>"),
             "Toggle sidebar navigation",
+            None,
         );
 
         assert!(
@@ -3160,6 +3273,7 @@ mod secondary_nav_tests {
         let html = secondary_nav_to_html(
             SecondaryNavContent::Breadcrumbs("<nav></nav>"),
             "Basculer \"la barre\"",
+            None,
         );
         assert!(
             html.contains("aria-label=\"Basculer &quot;la barre&quot;\""),
@@ -3187,6 +3301,7 @@ mod secondary_nav_tests {
         let html = secondary_nav_to_html(
             SecondaryNavContent::Breadcrumbs(&breadcrumbs),
             "Toggle sidebar navigation",
+            None,
         );
 
         assert!(
@@ -3215,6 +3330,7 @@ mod secondary_nav_tests {
         let html = secondary_nav_to_html(
             SecondaryNavContent::CollapsedTitle(&title),
             "Toggle sidebar navigation",
+            None,
         );
 
         assert!(
@@ -3245,6 +3361,7 @@ mod secondary_nav_tests {
         let html = secondary_nav_to_html(
             SecondaryNavContent::CollapsedTitle(&title),
             "Toggle sidebar navigation",
+            None,
         );
         assert!(
             html.contains("<h1 class=\"quarto-secondary-nav-title\"><strong>Bold</strong></h1>"),
@@ -3252,23 +3369,35 @@ mod secondary_nav_tests {
         );
     }
 
-    /// Decision 4: no search button until bd-6cme lands. Q1's markup
-    /// calls `window.quartoOpenSearch()` unguarded and q2 defines no
-    /// such function, so a button here would throw on click.
+    /// No sidebar search box, no button (bd-6cme).
     #[test]
-    fn secondary_nav_omits_search_button() {
+    fn secondary_nav_omits_search_button_without_sidebar_search() {
         let html = secondary_nav_to_html(
             SecondaryNavContent::Breadcrumbs("<nav></nav>"),
             "Toggle sidebar navigation",
+            None,
+        );
+        assert!(!html.contains("quarto-search-button"), "got: {html}");
+        assert!(!html.contains("quartoOpenSearch"), "got: {html}");
+    }
+
+    /// With the search box in the sidebar, the collapsed bar gets Q1's
+    /// search button calling `window.quartoOpenSearch()` (bd-6cme).
+    #[test]
+    fn secondary_nav_emits_search_button_for_sidebar_search() {
+        let html = secondary_nav_to_html(
+            SecondaryNavContent::Breadcrumbs("<nav></nav>"),
+            "Toggle sidebar navigation",
+            Some("Search"),
         );
         assert!(
-            !html.contains("quarto-search-button"),
-            "search button is out of scope (bd-6cme); got: {html}"
+            html.contains(
+                "<button type=\"button\" class=\"btn quarto-search-button\" aria-label=\"Search\" \
+                 onclick=\"window.quartoOpenSearch();\">"
+            ),
+            "got: {html}"
         );
-        assert!(
-            !html.contains("quartoOpenSearch"),
-            "must not reference an undefined function; got: {html}"
-        );
+        assert!(html.contains("<i class=\"bi bi-search\"></i>"));
     }
 
     /// bd-ersobfbt: the sidebar-toggle affordances freeze headroom while
@@ -3285,6 +3414,7 @@ mod secondary_nav_tests {
         let breadcrumbs = secondary_nav_to_html(
             SecondaryNavContent::Breadcrumbs("<nav></nav>"),
             "Toggle sidebar navigation",
+            None,
         );
         assert_eq!(
             breadcrumbs.matches(HEADROOM_ONCLICK).count(),
@@ -3296,6 +3426,7 @@ mod secondary_nav_tests {
         let collapsed = secondary_nav_to_html(
             SecondaryNavContent::CollapsedTitle(&title),
             "Toggle sidebar navigation",
+            None,
         );
         assert_eq!(
             collapsed.matches(HEADROOM_ONCLICK).count(),

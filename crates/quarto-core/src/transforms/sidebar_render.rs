@@ -57,7 +57,7 @@
 use quarto_error_reporting::DiagnosticMessage;
 use quarto_navigation::{
     Sidebar, SidebarEntry,
-    render_html::{SidebarRenderOptions, sidebar_to_html_with_options},
+    render_html::{SidebarRenderOptions, SidebarSearch, sidebar_to_html_with_options},
 };
 use quarto_pandoc_types::config_value::ConfigValue;
 use quarto_pandoc_types::pandoc::Pandoc;
@@ -192,12 +192,15 @@ impl AstTransform for SidebarRenderTransform {
         // `rendered.navigation.navbar`, which is why `sidebar-render`
         // must stay registered after `navbar-render`.
         let has_navbar = page_has_navbar(&ast.meta);
+        let search_label = crate::project::search::ui::search_label(&ast.meta);
+        let search = sidebar_search_option(&ast.meta, sidebar.search, &search_label);
         let html = sidebar_to_html_with_options(
             &sidebar,
             &SidebarRenderOptions {
                 home_url: &home_url,
                 appended_html: toc_block.as_deref(),
                 has_navbar,
+                search,
             },
         );
 
@@ -281,12 +284,15 @@ fn synthesize_toc_sidebar(ast: &mut Pandoc, ctx: &mut RenderContext, toc_block: 
         .resource_resolver
         .as_ref()
         .map_or_else(|| "./".to_string(), |r| r.page_url_for_site_root_dir());
+    let search_label = crate::project::search::ui::search_label(&ast.meta);
+    let search = sidebar_search_option(&ast.meta, sidebar.search, &search_label);
     let html = sidebar_to_html_with_options(
         &sidebar,
         &SidebarRenderOptions {
             home_url: &home_url,
             appended_html: Some(toc_block),
             has_navbar,
+            search,
         },
     );
     ast.meta.insert_path(
@@ -1107,4 +1113,18 @@ mod tests {
             .and_then(|v| v.as_plain_text());
         assert_eq!(body_classes.as_deref(), Some("user-override-class"));
     }
+}
+
+/// The sidebar's search box, if search renders there (bd-6cme): Q1's
+/// `sidebarEjsData` rule via `project::search::ui::sidebar_search_kind`.
+fn sidebar_search_option<'a>(
+    meta: &ConfigValue,
+    explicit: Option<bool>,
+    label: &'a str,
+) -> Option<SidebarSearch<'a>> {
+    use crate::project::search::config::SearchType;
+    crate::project::search::ui::sidebar_search_kind(meta, explicit).map(|kind| SidebarSearch {
+        overlay: kind == SearchType::Overlay,
+        label,
+    })
 }
