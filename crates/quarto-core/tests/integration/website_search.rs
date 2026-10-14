@@ -672,3 +672,45 @@ fn federate_config_reaches_options_json() {
         ])
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Books
+// ═══════════════════════════════════════════════════════════════════
+
+/// Books share the website machinery (`book.search` is copied into
+/// `website.search` by the book pre-render), so a book gets the
+/// bundle, the manifest, and chapter records too.
+#[test]
+fn book_project_gets_a_search_index() {
+    let project_dir = render_project(|dir| {
+        write(
+            &dir.join("_quarto.yml"),
+            "project:\n  type: book\n  output-dir: _site\n\
+             book:\n  title: \"Minibook\"\n  chapters:\n    - index.qmd\n    - ch1.qmd\n",
+        );
+        write(
+            &dir.join("index.qmd"),
+            "# Welcome {.unnumbered}\n\nWelcome to the book about marmots.\n",
+        );
+        write(
+            &dir.join("ch1.qmd"),
+            "# Chapter One\n\nMarmots whistle.\n\n## Habitat\n\nAlpine meadows.\n",
+        );
+    });
+    assert!(
+        project_dir
+            .join(BUNDLE_DIR)
+            .join("pagefind-entry.json")
+            .exists()
+    );
+    let manifest = read_json(&project_dir.join(MANIFEST));
+    assert_eq!(manifest["title"].as_str(), Some("Minibook"));
+    assert_eq!(manifest["pages"].as_u64(), Some(2));
+    let recs = records(&project_dir);
+    let hrefs: Vec<&str> = recs.iter().map(|r| r["href"].as_str().unwrap()).collect();
+    assert!(hrefs.contains(&"index.html"), "{hrefs:?}");
+    assert!(hrefs.contains(&"ch1.html"), "{hrefs:?}");
+    assert!(hrefs.contains(&"ch1.html#habitat"), "{hrefs:?}");
+    let html = read(&project_dir.join("_site/ch1.html"));
+    assert_contains(&html, "quarto-search-options", "book page wiring");
+}
