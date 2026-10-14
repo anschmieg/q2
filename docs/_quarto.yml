@@ -47,6 +47,7 @@ website:
             - guides/projects/environment.qmd
             - guides/projects/profiles.qmd
             - guides/hub/unix-socket.qmd
+            - guides/extensions/ts-engines-node.qmd
             - guides/publishing/index.qmd
             - guides/formats/epub/index.qmd
             - guides/formats/typst/index.qmd
@@ -78,6 +79,10 @@ website:
             - guides/authoring/components.qmd
             - guides/authoring/templates.qmd
             - guides/publishing/index.qmd
+    - id: tools
+      title: "Tools"
+      contents:
+        - tools/q2-mcp.qmd
     - id: guide
       collapse-level: 1
       contents:

@@ -125,6 +125,8 @@ clap = ["dep:clap"]
 
 # Native-only dependencies (for execution engines and resource extraction)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Node discovery for the TS engine host (QUARTO_NODE / PATH / fnm / nvm / volta).
+quarto-node-discovery = { path = "../quarto-node-discovery" }
 tempfile = "3"
 which = "8"
 # hephaestus plot documents (`.hep`) → SVG at render time

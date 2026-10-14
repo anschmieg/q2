@@ -26,8 +26,10 @@ const DIALOG = '.qh-dialog.new-file-dialog';
 async function openDialog(page: Page) {
   await page.locator(TRIGGER).click();
   await expect(page.locator(DIALOG)).toBeVisible();
-  // The dialog focuses the filename input on a 100ms timer; type through
-  // the locator (which waits) rather than racing the focus shift.
+  // The filename input is autoFocused on mount. It used to be focused on a
+  // 100ms timer that could fire after the Cancel/Create tests had moved
+  // focus to a button, yanking it back so Enter submitted from the input
+  // (flaky on Firefox CI).
   await page.locator('#filename').fill('notes.qmd');
 }
 

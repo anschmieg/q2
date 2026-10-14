@@ -5,6 +5,7 @@
  *     index.mjs                      — the bundled server (esbuild)
  *     build-info.json                — git commit + build time stamp
  *     node_modules/@napi-rs/...      — the keyring native addon
+ *     node_modules/wasm-qmd-parser/  — the qmd parser wasm (CAP-11)
  *
  * The output is consumed two ways:
  *   - embedded into the `q2` binary (`q2 mcp` extracts + runs it), and
@@ -21,10 +22,15 @@
  * - `@automerge/automerge`'s "node" export condition loads its wasm
  *   via __dirname-relative readFileSync, which cannot survive
  *   bundling. The "import" condition inlines the wasm as base64 and
- *   bundles cleanly, so a resolve plugin steers the bare
- *   `@automerge/automerge` import to the base64 entrypoint. `/slim`
- *   subpath imports are left alone (they share the wasm singleton
- *   the base64 entrypoint initializes).
+ *   bundles cleanly — but its entrypoint calls `initSync(wasmBlob)`,
+ *   the deprecated positional form, so every bundle startup prints
+ *   "using deprecated parameters for `initSync()`" on stderr
+ *   (bd-2qnnrwbd; every MCP host surfaces stderr as server errors).
+ *   A resolve plugin therefore steers the bare `@automerge/automerge`
+ *   import to a generated shim that decodes the same base64 blob but
+ *   initializes with the supported single-object form
+ *   (`initSync({ module })`). `/slim` subpath imports are left alone
+ *   (they share the wasm singleton the shim initializes).
  *
  * - The `source` condition makes esbuild compile our workspace deps
  *   (`@quarto/quarto-sync-client`, `@quarto/quarto-automerge-schema`)
@@ -41,37 +47,81 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { parsePlatformList, stageKeyring } from './stage-keyring.mjs';
 import { buildWasmHost } from './build-wasm-host.mjs';
+import { ensureQmdParserPkg } from './qmd-parser-pkg.mjs';
+import { stageQmdParser } from './stage-qmd-parser.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, '..');
-const outDir = join(pkgRoot, 'dist-bundle');
+// HUB_MCP_BUNDLE_OUT lets the packaging scripts (pack-npm.mjs,
+// pack-mcpb.mjs) build into a PRIVATE directory: the test suite runs
+// packaging tests (which rebuild) concurrently with bundle.test.ts
+// (which spawns dist-bundle/index.mjs), and sharing one output dir is a
+// wipe-while-spawning race (bd-8iv9jty5).
+const outDir = process.env['HUB_MCP_BUNDLE_OUT'] ?? join(pkgRoot, 'dist-bundle');
 
 const NODE_TARGET = 'node24';
 
-// --- locate the automerge base64 entrypoint ---------------------------
+// --- locate the automerge wasm glue -----------------------------------
 // `@automerge/automerge`'s exports map blocks subpath resolution, so we
-// resolve the package's node entrypoint and hop to its sibling file.
+// resolve the package's node entrypoint and hop to its sibling files.
 const require = createRequire(import.meta.url);
 const fullfatNode = fileURLToPath(
   import.meta.resolve('@automerge/automerge'),
 );
-const fullfatBase64 = join(dirname(fullfatNode), 'fullfat_base64.js');
-if (!existsSync(fullfatBase64)) {
-  throw new Error(
-    `automerge base64 entrypoint not found at ${fullfatBase64} — ` +
-      'the package layout changed; update scripts/bundle.mjs',
-  );
+// dist/mjs/ layout: entrypoints/, wasm_bindgen_output/web/, low_level.js,
+// index.js. All four shim inputs are asserted up front so a package
+// layout change fails here with a clear message, not a bundler error.
+const mjsDir = dirname(dirname(fullfatNode));
+const automergeParts = {
+  base64: join(mjsDir, 'wasm_bindgen_output', 'web', 'automerge_wasm_bg_base64.js'),
+  glue: join(mjsDir, 'wasm_bindgen_output', 'web', 'automerge_wasm.js'),
+  lowLevel: join(mjsDir, 'low_level.js'),
+  index: join(mjsDir, 'index.js'),
+};
+for (const [name, p] of Object.entries(automergeParts)) {
+  if (!existsSync(p)) {
+    throw new Error(
+      `automerge ${name} file not found at ${p} — ` +
+        'the package layout changed; update scripts/bundle.mjs',
+    );
+  }
 }
+
+/**
+ * Steer `@automerge/automerge` to a generated entrypoint that mirrors
+ * the stock base64 entrypoint but initializes the wasm with the
+ * supported single-object `initSync({ module })` form (bd-2qnnrwbd).
+ * Import specifiers are forward-slash absolute paths — the form esbuild
+ * resolves on every platform (it does not accept `file://` URLs).
+ */
+const esmPath = (p) => p.replaceAll('\\', '/');
+const automergeInitShim = [
+  `import { automergeWasmBase64 } from ${JSON.stringify(esmPath(automergeParts.base64))};`,
+  `import * as api from ${JSON.stringify(esmPath(automergeParts.glue))};`,
+  `import { initSync } from ${JSON.stringify(esmPath(automergeParts.glue))};`,
+  `import { UseApi } from ${JSON.stringify(esmPath(automergeParts.lowLevel))};`,
+  `const wasmBlob = Uint8Array.from(atob(automergeWasmBase64), (c) => c.charCodeAt(0));`,
+  `initSync({ module: wasmBlob });`,
+  `UseApi(api);`,
+  `export * from ${JSON.stringify(esmPath(automergeParts.index))};`,
+  '',
+].join('\n');
 
 const automergeBase64Plugin = {
   name: 'automerge-base64-entrypoint',
   setup(build) {
     build.onResolve({ filter: /^@automerge\/automerge$/ }, () => ({
-      path: fullfatBase64,
+      path: '@automerge/automerge',
+      namespace: 'automerge-fixed-init',
+    }));
+    build.onLoad({ filter: /.*/, namespace: 'automerge-fixed-init' }, () => ({
+      contents: automergeInitShim,
+      loader: 'js',
+      resolveDir: mjsDir,
     }));
   },
 };
@@ -79,6 +129,11 @@ const automergeBase64Plugin = {
 // --- bundle ------------------------------------------------------------
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
+
+// The qmd parser (CAP-11): build the nodejs pkg when missing or stale,
+// then stage it below with the keyring. External to esbuild — its glue
+// reads the .wasm __dirname-relative, which cannot survive bundling.
+const qmdParserPkg = ensureQmdParserPkg({});
 
 // Shared esbuild options for every entry we bundle (the MCP server and the
 // `q2 provide-hub` auth bridge). Both embed into the same dist-bundle/ that
@@ -89,7 +144,7 @@ const sharedOptions = {
   format: 'esm',
   target: NODE_TARGET,
   conditions: ['source'],
-  external: ['@napi-rs/keyring'],
+  external: ['@napi-rs/keyring', 'wasm-qmd-parser'],
   // Minify to shrink both the standalone tarball and the copy embedded
   // in the q2 binary (include_dir!). `keepNames` preserves class/function
   // .name through mangling — cheap insurance for libraries that key on
@@ -171,6 +226,9 @@ const copied = stageKeyring({
   platforms: parsePlatformList(process.env['KEYRING_PLATFORMS']),
 });
 
+// --- ship the qmd parser the same way (CAP-11) --------------------------
+const parserFiles = stageQmdParser({ pkgDir: qmdParserPkg, outDir });
+
 // --- build stamp --------------------------------------------------------
 // Diagnosability guard against the stale-embed trap: the launcher and
 // bug reports can always tell which source state a bundle came from.
@@ -199,6 +257,7 @@ writeFileSync(
       nodeTarget: NODE_TARGET,
       ...(wasmSha256 ? { wasmSha256 } : {}),
       keyringPackages: copied.sort(),
+      qmdParserFiles: parserFiles,
     },
     null,
     2,

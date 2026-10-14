@@ -1,6 +1,6 @@
 /**
  * Write tools auto-check the content they just wrote: after write_file /
- * patch_file / create_file touches a .qmd, the response carries a render
+ * patch_file touches a .qmd, the response carries a render
  * check of the NEW content so the agent sees immediately whether the
  * edit broke (or fixed) the document — no separate get_errors call
  * needed to close a batch of updates.
@@ -11,9 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import type { FilePayload } from '@quarto/quarto-sync-client';
 import type { LocalRenderResult } from './local-render.js';
 
@@ -68,24 +66,27 @@ function harness(files: Record<string, FilePayload>): {
     async connect(_project: string) {
       return state;
     },
+    // ERG-2 bounded delivery wait: report every write as acknowledged.
+    async awaitDelivery(_project: string, _paths: string[], _timeoutMs: number) {
+      return true;
+    },
   } as unknown as ConnectionManager;
 
-  let callToolHandler:
-    | ((req: { params: { name: string; arguments?: Record<string, unknown> } }, extra: unknown) => Promise<CallToolResult>)
-    | undefined;
+  const callbacks = new Map<string, (args: Record<string, unknown>) => Promise<CallToolResult>>();
   const server = {
-    setRequestHandler(schema: unknown, cb: unknown) {
-      if (schema === CallToolRequestSchema) {
-        callToolHandler = cb as typeof callToolHandler;
-      }
+    registerTool(name: string, _config: unknown, cb: unknown) {
+      callbacks.set(name, cb as (args: Record<string, unknown>) => Promise<CallToolResult>);
     },
-  } as unknown as Server;
+  } as unknown as McpServer;
 
   registerTools(server, manager, false);
-  if (!callToolHandler) throw new Error('CallTool handler was not registered');
 
   return {
-    call: (name, args) => callToolHandler!({ params: { name, arguments: args } }, {}),
+    call: (name, args) => {
+      const cb = callbacks.get(name);
+      if (!cb) throw new Error(`${name} callback was not registered`);
+      return cb(args);
+    },
     files: fileMap,
   };
 }
@@ -96,25 +97,31 @@ function textOf(result: CallToolResult): string {
   return block.text;
 }
 
+// Write-tool responses are structured (BP-1): the text block is the JSON
+// envelope; the render check rides as its `renderCheck` field.
+function parse(result: CallToolResult): Record<string, unknown> {
+  return JSON.parse(textOf(result)) as Record<string, unknown>;
+}
+
 beforeEach(() => {
   renderDiagnostics.mockReset();
   renderDiagnostics.mockResolvedValue(cleanResult());
 });
 
 describe('write tools render-check the new .qmd content', () => {
-  it('patch_file reports a clean render check for the patched content', async () => {
+  it('edit/patch reports a clean render check for the patched content', async () => {
     const h = harness({ 'a.qmd': { type: 'text', text: 'Hello **world**\n' } });
 
-    const res = await h.call('patch_file', {
+    const res = await h.call('edit', { action: 'patch',
       project: 'idx',
       path: 'a.qmd',
       old_string: 'world',
       new_string: 'there',
     });
 
-    const out = textOf(res);
-    expect(out).toContain('Patched a.qmd');
-    expect(out).toMatch(/render check: clean/i);
+    const out = parse(res);
+    expect(out.path).toBe('a.qmd');
+    expect(out.renderCheck).toMatch(/render check: clean/i);
     // The check ran against the NEW content, not the pre-edit content.
     expect(renderDiagnostics).toHaveBeenCalledTimes(1);
     const [checkedFiles, checkedPath] = renderDiagnostics.mock.calls[0] as [
@@ -126,65 +133,70 @@ describe('write tools render-check the new .qmd content', () => {
     expect(payload?.type === 'text' && payload.text).toBe('Hello **there**\n');
   });
 
-  it('patch_file reports the errors the new content renders with', async () => {
+  it('edit/patch reports the errors the new content renders with', async () => {
     renderDiagnostics.mockResolvedValue(cleanResult({ errors: [ERROR_ITEM] }));
     const h = harness({ 'a.qmd': { type: 'text', text: 'fine\n' } });
 
-    const res = await h.call('patch_file', {
+    const res = await h.call('edit', { action: 'patch',
       project: 'idx',
       path: 'a.qmd',
       old_string: 'fine',
       new_string: '**broken',
     });
 
-    const out = textOf(res);
-    expect(out).toContain('Patched a.qmd');
-    expect(out).toMatch(/render check: 1 error/i);
-    expect(out).toContain('Unclosed Strong Star Emphasis');
+    const out = parse(res);
+    expect(out.path).toBe('a.qmd');
+    expect(out.renderCheck).toMatch(/render check: 1 error/i);
+    expect(out.renderCheck).toContain('Unclosed Strong Star Emphasis');
     expect(res.isError).not.toBe(true); // the write itself succeeded
   });
 
-  it('write_file (update) render-checks the replacement content', async () => {
+  it('edit/write (update) render-checks the replacement content', async () => {
     const h = harness({ 'a.qmd': { type: 'text', text: 'old\n' } });
 
-    const res = await h.call('write_file', { project: 'idx', path: 'a.qmd', content: 'new\n' });
+    const res = await h.call('edit', { action: 'write', project: 'idx', path: 'a.qmd', content: 'new\n' });
 
-    expect(textOf(res)).toContain('Updated a.qmd');
-    expect(textOf(res)).toMatch(/render check: clean/i);
+    expect(parse(res).renderCheck).toMatch(/render check: clean/i);
     const [checkedFiles] = renderDiagnostics.mock.calls[0] as [Map<string, FilePayload>, string];
     const payload = checkedFiles.get('a.qmd');
     expect(payload?.type === 'text' && payload.text).toBe('new\n');
   });
 
-  it('write_file (create) and create_file render-check the initial content', async () => {
+  it('edit/write (plain and create_only creates) render-check the initial content', async () => {
     const h = harness({});
-    const created = await h.call('write_file', { project: 'idx', path: 'new.qmd', content: 'x\n' });
-    expect(textOf(created)).toContain('Created new.qmd');
-    expect(textOf(created)).toMatch(/render check: clean/i);
+    const created = await h.call('edit', { action: 'write', project: 'idx', path: 'new.qmd', content: 'x\n' });
+    expect(parse(created).created).toBe(true);
+    expect(parse(created).renderCheck).toMatch(/render check: clean/i);
 
     const h2 = harness({});
-    const created2 = await h2.call('create_file', { project: 'idx', path: 'n2.qmd', content: 'y\n' });
-    expect(textOf(created2)).toContain('Created n2.qmd');
-    expect(textOf(created2)).toMatch(/render check: clean/i);
+    const created2 = await h2.call('edit', { action: 'write',
+      project: 'idx',
+      path: 'n2.qmd',
+      content: 'y\n',
+      create_only: true,
+    });
+    expect(parse(created2).created).toBe(true);
+    expect(parse(created2).renderCheck).toMatch(/render check: clean/i);
   });
 
   it('mentions warning count on a clean check but does not dump warnings', async () => {
     renderDiagnostics.mockResolvedValue(cleanResult({ warnings: [WARNING_ITEM, WARNING_ITEM] }));
     const h = harness({ 'a.qmd': { type: 'text', text: 'x\n' } });
 
-    const res = await h.call('write_file', { project: 'idx', path: 'a.qmd', content: 'y\n' });
+    const res = await h.call('edit', { action: 'write', project: 'idx', path: 'a.qmd', content: 'y\n' });
 
-    const out = textOf(res);
-    expect(out).toMatch(/render check: clean \(2 warnings/i);
-    expect(out).not.toContain('raw HTML');
+    const out = parse(res);
+    expect(out.renderCheck).toMatch(/render check: clean \(2 warnings/i);
+    expect(out.renderCheck).not.toContain('raw HTML');
   });
 
   it('does not render-check non-qmd writes', async () => {
     const h = harness({ '_quarto.yml': { type: 'text', text: 'project:\n' } });
 
-    const res = await h.call('write_file', { project: 'idx', path: '_quarto.yml', content: 'x\n' });
+    const res = await h.call('edit', { action: 'write', project: 'idx', path: '_quarto.yml', content: 'x\n' });
 
-    expect(textOf(res)).toBe('Updated _quarto.yml');
+    expect(parse(res).path).toBe('_quarto.yml');
+    expect(parse(res).renderCheck).toBeUndefined();
     expect(renderDiagnostics).not.toHaveBeenCalled();
   });
 
@@ -192,13 +204,13 @@ describe('write tools render-check the new .qmd content', () => {
     renderDiagnostics.mockRejectedValue(new Error('wasm exploded'));
     const h = harness({ 'a.qmd': { type: 'text', text: 'x\n' } });
 
-    const res = await h.call('write_file', { project: 'idx', path: 'a.qmd', content: 'y\n' });
+    const res = await h.call('edit', { action: 'write', project: 'idx', path: 'a.qmd', content: 'y\n' });
 
     expect(res.isError).not.toBe(true);
-    const out = textOf(res);
-    expect(out).toContain('Updated a.qmd');
-    expect(out).toMatch(/render check unavailable/i);
-    expect(out).toContain('get_errors');
+    const out = parse(res);
+    expect(out.path).toBe('a.qmd');
+    expect(out.renderCheck).toMatch(/render check unavailable/i);
+    expect(out.renderCheck).toContain('get_errors');
   });
 
   it('a hung render check degrades after the timeout instead of hanging the write', async () => {
@@ -207,16 +219,16 @@ describe('write tools render-check the new .qmd content', () => {
       renderDiagnostics.mockReturnValue(new Promise(() => {}));
       const h = harness({ 'a.qmd': { type: 'text', text: 'x\n' } });
 
-      const p = h.call('write_file', { project: 'idx', path: 'a.qmd', content: 'y\n' });
+      const p = h.call('edit', { action: 'write', project: 'idx', path: 'a.qmd', content: 'y\n' });
       await vi.advanceTimersByTimeAsync(RENDER_CHECK_TIMEOUT_MS + 1000);
       const res = await p;
 
       // The write itself succeeded; the check degraded, it did not hang.
       expect(res.isError).not.toBe(true);
-      const out = textOf(res);
-      expect(out).toContain('Updated a.qmd');
-      expect(out).toMatch(/render check unavailable/i);
-      expect(out).toMatch(/timed out/i);
+      const out = parse(res);
+      expect(out.path).toBe('a.qmd');
+      expect(out.renderCheck).toMatch(/render check unavailable/i);
+      expect(out.renderCheck).toMatch(/timed out/i);
     } finally {
       vi.useRealTimers();
     }

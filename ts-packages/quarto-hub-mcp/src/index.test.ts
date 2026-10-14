@@ -9,11 +9,16 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   DEFAULT_SERVER_URL,
+  PACKAGE_VERSION_FLOOR,
   parseArgs,
   parseRedirectPort,
+  resolveServerVersion,
   resolveShutdownDrainMs,
 } from './index.js';
 
@@ -117,5 +122,36 @@ describe('resolveShutdownDrainMs', () => {
     expect(resolveShutdownDrainMs('abc')).toBe(3000);
     expect(resolveShutdownDrainMs('3000.5')).toBe(3000);
     expect(resolveShutdownDrainMs('-1')).toBe(3000);
+  });
+});
+
+// ============================================================================
+// resolveServerVersion (BP-10)
+// ============================================================================
+
+describe('resolveServerVersion (BP-10)', () => {
+  it('prefers the launcher-injected QUARTO_MCP_SERVER_VERSION', () => {
+    expect(
+      resolveServerVersion({ QUARTO_MCP_SERVER_VERSION: '0.32.0+5a41c8bea' }),
+    ).toBe('0.32.0+5a41c8bea');
+  });
+
+  it('falls back to the package floor when nothing injects a version', () => {
+    // vitest runs from src/: no build-info.json sibling, no env — the
+    // dev-build floor.
+    expect(resolveServerVersion({})).toBe(PACKAGE_VERSION_FLOOR);
+  });
+
+  it('treats a blank injection as absent', () => {
+    expect(resolveServerVersion({ QUARTO_MCP_SERVER_VERSION: '   ' })).toBe(
+      PACKAGE_VERSION_FLOOR,
+    );
+  });
+
+  it('keeps the floor equal to package.json version (CAP-15: no drift at publish)', () => {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+    ) as { version: string };
+    expect(PACKAGE_VERSION_FLOOR).toBe(pkg.version);
   });
 });

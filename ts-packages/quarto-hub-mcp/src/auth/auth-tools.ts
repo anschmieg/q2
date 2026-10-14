@@ -1,18 +1,16 @@
 /**
  * MCP auth-tool surface — Authorization Code + PKCE + loopback.
  *
- * Exposes two MCP tools:
+ * Exposes one MCP tool (bd-lj6f7z9s) selected by `action`:
  *
- *   - `authenticate` — runs the full loopback sign-in: binds a local
- *     `127.0.0.1` listener, opens the browser at Google's authorization
- *     endpoint, waits for the redirect, exchanges the code (with the
- *     PKCE verifier and the Desktop-app `client_secret`), and stores the
- *     resulting tokens in the OS keyring. Single blocking call —
- *     replaces the device-flow `authenticate_start` / `authenticate_finish`
- *     pair.
- *   - `authenticate_clear` — best-effort revoke at Google, then delete
- *     the local keyring entry. Read → revoke → delete order so a crash
- *     between revoke and delete leaves a retryable state.
+ *   - `auth` with `action: "sign_in"` — runs the full loopback sign-in:
+ *     binds a local `127.0.0.1` listener, opens the browser at Google's
+ *     authorization endpoint, waits for the redirect, exchanges the code
+ *     (with the PKCE verifier and the Desktop-app `client_secret`), and
+ *     stores the resulting tokens in the OS keyring. Single blocking call.
+ *   - `auth` with `action: "clear"` — best-effort revoke at Google, then
+ *     delete the local keyring entry. Read → revoke → delete order so a
+ *     crash between revoke and delete leaves a retryable state.
  *
  * stdio-transport MCP clients capture stderr to log files; the tool
  * response is the only agent-visible channel. All log call sites funnel
@@ -21,18 +19,16 @@
  * headless machines.
  */
 
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type {
   CallToolResult,
-  ServerNotification,
-  Tool,
-} from '@modelcontextprotocol/sdk/types.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+  Notification,
+  ServerContext,
+  StandardSchemaWithJSON,
+  ToolAnnotations,
+} from '@modelcontextprotocol/server';
 import { decodeJwt } from 'jose';
 import * as oauth from 'oauth4webapi';
+import { z } from 'zod';
 
 import { openBrowser as defaultOpenBrowser } from './browser.js';
 import type { CredentialBundle, CredentialStore } from './credential-store.js';
@@ -48,7 +44,10 @@ import {
 } from './loopback.js';
 import type { AuthServerProvider } from './oauth-config.js';
 import { generatePkceParams } from './pkce.js';
-import { issuerAllowsInsecureRequests } from './oauth-config.js';
+import {
+  assertSafeAuthorizationEndpoint,
+  issuerAllowsInsecureRequests,
+} from './oauth-config.js';
 import { redactTokens } from './redact.js';
 import {
   type RefreshManager,
@@ -68,6 +67,11 @@ const GOOGLE_AUTHORIZATION_ENDPOINT =
 
 export interface LastObservedAuthModeSource {
   lastObservedAuthMode(): 'no-auth' | 'requires-auth' | 'unknown';
+  /**
+   * The hub URL the connection manager is configured for. Optional:
+   * minimal stubs may not know it.
+   */
+  readonly configuredServerUrl?: string;
 }
 
 export interface AuthFlowConfig {
@@ -127,46 +131,77 @@ export interface AuthToolsDeps {
   readonly openBrowser?: typeof defaultOpenBrowser;
 }
 
-export const AUTH_TOOL_DEFINITIONS: readonly Tool[] = [
+// Phase 7 (bd-1ilystml): `authenticate_status` was removed — a status
+// probe spent an ERG-5 listing slot on what `authenticate`'s
+// already-valid short-circuit and the connect arm's AuthRequiredError
+// already tell an agent.
+// bd-lj6f7z9s: `authenticate` / `authenticate_clear` folded into one
+// `auth` tool selected by `action`.
+export type AuthToolName = 'auth';
+
+/** The `auth` tool's arm selector. */
+export type AuthAction = 'sign_in' | 'clear';
+
+/**
+ * An auth tool's advertised metadata. The single `auth` tool carries its
+ * input schema (a discriminated union on `action`) in the definition —
+ * the registration layer (tools.ts) uses it verbatim.
+ */
+export interface AuthToolDefinition {
+  readonly name: AuthToolName;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: StandardSchemaWithJSON;
+  readonly annotations: ToolAnnotations;
+  /** The tool's `structuredContent` schema (BP-1); prose-text tools omit it. */
+  readonly outputSchema?: StandardSchemaWithJSON;
+}
+
+/** The `auth` tool's input schema: a discriminated union on `action`. */
+const authInputSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z
+      .literal('sign_in')
+      .describe(
+        'Sign in: browser loopback OAuth, credentials stored in the OS keyring.',
+      ),
+  }),
+  z.object({
+    action: z
+      .literal('clear')
+      .describe('Clear locally-cached credentials (best-effort revoke at Google first).'),
+  }),
+]);
+
+export const AUTH_TOOL_DEFINITIONS: readonly AuthToolDefinition[] = [
   {
-    name: 'authenticate',
+    name: 'auth',
+    title: 'Sign in or clear Quarto Hub credentials',
     description:
-      'Authenticate Quarto Hub MCP against the configured hub. Opens the ' +
-      "user's browser to a Google sign-in page and waits for them to " +
-      'complete it, then stores the credentials in the OS keyring. ' +
-      'Returns "Authenticated as <email>" on success. If credentials are ' +
-      'already valid, returns "Already authenticated as <email>" without ' +
-      'opening a browser. The authorization URL is also printed so a user ' +
-      'on a headless or SSH session can open it manually.',
-    inputSchema: { type: 'object', properties: {} },
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-    },
-  },
-  {
-    name: 'authenticate_clear',
-    description:
-      'Remove any locally-cached Quarto Hub credentials from the OS ' +
-      'keyring and discard any in-progress sign-in. Best-effort revokes ' +
-      'the stored refresh token at Google before the local delete, so the ' +
-      'credential is rendered unusable both locally and server-side; if ' +
-      'the revoke fails (offline, token already invalid) the local delete ' +
-      'still proceeds and you can revoke the grant manually at ' +
-      'myaccount.google.com. Use this as an escape hatch when the hub ' +
-      'rejects the cached credentials. Idempotent: safe to call when no ' +
-      'credentials are present.',
-    inputSchema: { type: 'object', properties: {} },
+      'Manage Quarto Hub MCP authentication against the configured hub.\n\n' +
+      '`action: "sign_in"` — authenticate: opens the user\'s browser to a ' +
+      'Google sign-in page and waits for them to complete it, then stores ' +
+      'the credentials in the OS keyring. Returns "Authenticated as <email>" ' +
+      'on success. If credentials are already valid, returns "Already ' +
+      'authenticated as <email>" without opening a browser. The authorization ' +
+      'URL is also printed so a user on a headless or SSH session can open ' +
+      'it manually.\n\n' +
+      '`action: "clear"` — remove any locally-cached credentials from the OS ' +
+      'keyring and discard any in-progress sign-in. Best-effort revokes the ' +
+      'stored refresh token at Google before the local delete, so the ' +
+      'credential is rendered unusable both locally and server-side; if the ' +
+      'revoke fails (offline, token already invalid) the local delete still ' +
+      'proceeds and you can revoke the grant manually at myaccount.google.com. ' +
+      'Use this as an escape hatch when the hub rejects the cached ' +
+      'credentials. Idempotent: safe to call when no credentials are present.',
+    inputSchema: authInputSchema,
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: true,
+      idempotentHint: false,
     },
   },
 ];
-
-export type AuthToolName = 'authenticate' | 'authenticate_clear';
 
 // ---------------------------------------------------------------------------
 // Result helpers
@@ -195,22 +230,36 @@ export class AuthToolsState {
     this.deps = deps;
   }
 
-  async handle(name: AuthToolName, ctx: AuthToolContext = {}): Promise<CallToolResult> {
-    if (name === 'authenticate') return this.handleAuthenticate(ctx);
-    if (name === 'authenticate_clear') return this.handleClear();
-    return errorResult(`Unknown auth tool: ${String(name)}`);
+  async handle(action: AuthAction, ctx: AuthToolContext = {}): Promise<CallToolResult> {
+    if (action === 'sign_in') return this.handleAuthenticate(ctx);
+    if (action === 'clear') return this.handleClear();
+    return errorResult(`Unknown auth action: ${String(action)}`);
+  }
+
+  /**
+   * Serialize `authenticate` calls (BP-12). MCP stdio hosts serialise
+   * `tools/call`, but nothing in the protocol forbids a parallel host;
+   * an unguarded pair races to two browser tabs and two loopback
+   * listeners. With this mutex the behaviour is *defined*: the second
+   * call waits for the first to settle and — on the happy path —
+   * short-circuits on the credential the first just stored.
+   */
+  private authMutex: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Run the loopback sign-in, serialized through {@link authMutex}.
+   */
+  async handleAuthenticate(ctx: AuthToolContext = {}): Promise<CallToolResult> {
+    const run = this.authMutex.then(() => this.handleAuthenticateFlow(ctx));
+    // The chain must survive a rejected flow without itself rejecting.
+    this.authMutex = run.catch(() => undefined);
+    return run;
   }
 
   /**
    * Run the loopback sign-in.
-   *
-   * MCP stdio hosts serialise `tools/call`; this handler intentionally
-   * has no concurrency guard. Two simultaneous calls is
-   * undefined-but-non-corrupting behaviour — PKCE and `state` bind each
-   * flow's tokens to its own callback, so the worst case is two browser
-   * tabs, not token cross-contamination.
    */
-  async handleAuthenticate(ctx: AuthToolContext = {}): Promise<CallToolResult> {
+  private async handleAuthenticateFlow(ctx: AuthToolContext = {}): Promise<CallToolResult> {
     // 1. Already authenticated → short-circuit without touching Google.
     try {
       const idToken = await this.deps.refreshManager.getValidIdToken();
@@ -272,6 +321,17 @@ export class AuthToolsState {
     }
 
     try {
+      // BP-18: the authorization endpoint is *fetched* metadata — SSRF
+      // input. Validate it before the URL is surfaced anywhere (browser,
+      // progress notification, stderr log).
+      try {
+        assertSafeAuthorizationEndpoint(
+          as.authorization_endpoint ?? GOOGLE_AUTHORIZATION_ENDPOINT,
+        );
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+
       const authUrl = this.buildAuthorizationUrl(as, {
         redirectUri: listener.redirectUri,
         codeChallenge: pkce.codeChallenge,
@@ -339,6 +399,10 @@ export class AuthToolsState {
     } finally {
       // Idempotent — settles a no-op if the flow already completed.
       listener.close();
+      // An early return (endpoint validation, exchange failure) leaves
+      // the listener's result promise un-awaited; sink it so an
+      // abandoned rejection never surfaces as unhandled.
+      void listener.result.catch(() => {});
     }
   }
 
@@ -372,13 +436,13 @@ export class AuthToolsState {
 
     if (revoke === 'skipped') {
       return textResult(
-        'Quarto Hub credentials cleared. Call authenticate to sign in again.',
+        'Quarto Hub credentials cleared. Call `auth` with `action: "sign_in"` to sign in again.',
       );
     }
     if (revoke === 'ok') {
       return textResult(
         'Quarto Hub credentials cleared and revoked at Google. ' +
-          'Call authenticate to sign in again.',
+          'Call `auth` with `action: "sign_in"` to sign in again.',
       );
     }
     return textResult(
@@ -598,44 +662,14 @@ function extractEmail(idToken: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Adapt the MCP SDK's per-request `extra` onto {@link AuthToolContext}.
- * The cast on `sendNotification` bridges our minimal
- * {@link ProgressNotification} shape to the SDK's `ServerNotification`.
+ * Adapt the MCP SDK v2 per-request context onto {@link AuthToolContext}.
+ * The cast on the notification bridges our minimal
+ * {@link ProgressNotification} shape to the SDK's `Notification` union.
  */
-export function extractAuthContext(extra: {
-  signal?: AbortSignal;
-  _meta?: { progressToken?: string | number };
-  sendNotification?: (n: ServerNotification) => Promise<void>;
-}): AuthToolContext {
+export function extractAuthContext(ctx: ServerContext): AuthToolContext {
   return {
-    signal: extra.signal,
-    progressToken: extra._meta?.progressToken,
-    sendNotification: extra.sendNotification
-      ? (n) => extra.sendNotification!(n as unknown as ServerNotification)
-      : undefined,
+    signal: ctx.mcpReq.signal,
+    progressToken: ctx.mcpReq._meta?.progressToken,
+    sendNotification: (n) => ctx.mcpReq.notify(n as unknown as Notification),
   };
-}
-
-/**
- * Registers `authenticate` / `authenticate_clear` on the MCP server.
- * Must be called **before** {@link registerTools} so the read/write
- * tools' "no credentials" errors can name the auth tools.
- *
- * Returns the {@link AuthToolsState} so the caller can pass it back into
- * `registerTools(...)`, which dispatches both tool families through a
- * single `CallToolRequestSchema` handler.
- */
-export function registerAuthTools(server: Server, deps: AuthToolsDeps): AuthToolsState {
-  const state = new AuthToolsState(deps);
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...AUTH_TOOL_DEFINITIONS],
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name } = request.params;
-    if (name === 'authenticate' || name === 'authenticate_clear') {
-      return state.handle(name, extractAuthContext(extra));
-    }
-    return errorResult(`Unknown tool: ${name}`);
-  });
-  return state;
 }

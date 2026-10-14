@@ -1,12 +1,13 @@
 {
   "name": "@quarto/hub-mcp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "MCP server for AI agent access to Quarto Hub projects via automerge",
   "license": "MIT",
   "author": {
     "name": "Posit PBC"
   },
+  "mcpName": "io.github.quarto-dev/hub-mcp",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",
@@ -24,26 +25,36 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && node scripts/build-wasm-host.mjs --allow-stub && node -e \"import('node:fs').then(fs => fs.chmodSync('dist/index.js', 0o755))\"",
+    "build": "rm -rf dist && tsc && node scripts/build-wasm-host.mjs --allow-stub && node -e \"import('node:fs').then(fs => fs.chmodSync('dist/index.js', 0o755))\"",
     "bundle": "node scripts/bundle.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist dist-bundle",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "npm run build && node eval/run.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@automerge/automerge": "^3.5.0",
+    "@modelcontextprotocol/server": "~2.3.1",
     "@napi-rs/keyring": "^1.3.0",
     "@quarto/quarto-automerge-schema": "*",
     "@quarto/quarto-sync-client": "*",
     "jose": "^6.0.11",
-    "oauth4webapi": "^3.5.5"
+    "oauth4webapi": "^3.5.5",
+    "zod": "^4.2.0"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@automerge/automerge-repo": "2.6.0-alpha.5",
     "@automerge/automerge-repo-network-websocket": "2.6.0-alpha.5",
+    "@modelcontextprotocol/client": "~2.3.1",
+    "@modelcontextprotocol/conformance": "^0.2.0-alpha.12",
+    "@modelcontextprotocol/core": "~2.3.1",
+    "@modelcontextprotocol/inspector": "^2.9.0",
+    "@modelcontextprotocol/node": "^2.1.1",
     "@types/node": "^22.15.0",
     "@types/ws": "^8.18.1",
+    "ajv": "^8.17.1",
     "esbuild": "^0.28.0",
     "typescript": "~5.9.3",
     "undici": "^7.16.0",

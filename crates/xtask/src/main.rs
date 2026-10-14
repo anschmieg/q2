@@ -19,7 +19,8 @@
 //! - `build-trace-viewer`: Build just the trace-viewer SPA
 //! - `build-hub-client-embed`: Build the hub-client editor bundle for `q2 preview --ui editor`
 //! - `build-hub-mcp-bundle`: Build the self-contained hub MCP server bundle
-//! - `build-engine-host-bundle`: Build the committed engine-host-deno.js bundle
+//! - `build-engine-host-bundle`: Build the committed engine-host-node.mjs bundle
+//! - `build-ts-bundle`: Build the committed ts-bundle.mjs driver for `q2 call build-ts-extension`
 //! - `vendor-react`: Rebuild the vendored React ES modules under `resources/js/react/`
 //! - `build-agents-docs`: Stage the docs-site llms.txt artifacts for `q2 docs llms`
 //! - `stage-doc-examples`: Render `examples/manifest.yml` projects into `docs/examples/`
@@ -33,6 +34,7 @@ mod build_hub_client_embed;
 mod build_hub_mcp_bundle;
 mod build_q2_preview_spa;
 mod build_trace_viewer;
+mod build_ts_bundle;
 mod capture_import_recordings;
 mod capture_pandoc_goldens;
 mod capture_pandoc_recordings;
@@ -422,14 +424,23 @@ enum Command {
     /// after bumping `react` / `react-dom`.
     VendorReact {},
 
-    /// Build the committed engine-host-deno.js bundle (Plan 1b).
+    /// Build the committed engine-host-node.mjs bundle (Plan 1b).
     ///
-    /// Produces `ts-packages/quarto-engine-host-deno/dist/engine-host-deno.js`
-    /// (esbuild, ESM, Deno-ready) — the artifact `quarto-core` embeds via
+    /// Produces `ts-packages/quarto-engine-host-node/dist/engine-host-node.mjs`
+    /// (esbuild, ESM, node24) — the artifact `quarto-core` embeds via
     /// `include_str!` in `engine/ts_process.rs`. A plain `cargo build`
-    /// does NOT refresh it; run this after changing `quarto-engine-host-deno`,
+    /// does NOT refresh it; run this after changing `quarto-engine-host-node`,
     /// `@quarto/api`, or `@quarto/types` sources.
     BuildEngineHostBundle {},
+
+    /// Build the committed ts-bundle driver (`q2 call build-ts-extension`).
+    ///
+    /// Produces `ts-packages/quarto-ts-bundle/dist/ts-bundle.mjs` (rollup +
+    /// plugins + wasm in one ESM file) — the artifact `quarto-core` embeds via
+    /// `include_str!` in `extension/build.rs` and pipes to `node -`. A plain
+    /// `cargo build` does NOT refresh it; run this after changing
+    /// `quarto-ts-bundle`.
+    BuildTsBundle {},
 
     /// Fresh-clone build orchestration.
     ///
@@ -442,8 +453,9 @@ enum Command {
     /// 4. trace-viewer build (if present; Phase 4.3+)
     /// 5. q2-preview-spa build (if present; q2-preview Phase A.4)
     /// 6. hub MCP bundle (q2-mcp embed artifact; bd-81cfshmw)
-    /// 7. engine-host-deno bundle (quarto-core embed artifact; Plan 1b)
-    /// 8. cargo build --workspace
+    /// 7. engine-host-node bundle (quarto-core embed artifact; Plan 1b)
+    /// 8. ts-bundle driver (quarto-core embed artifact for build-ts-extension)
+    /// 9. cargo build --workspace
     BuildAll {
         /// Skip `npm install`.
         #[arg(long)]
@@ -469,9 +481,13 @@ enum Command {
         #[arg(long)]
         skip_hub_mcp_bundle: bool,
 
-        /// Skip the engine-host-deno bundle build.
+        /// Skip the engine-host-node bundle build.
         #[arg(long)]
         skip_engine_host_bundle: bool,
+
+        /// Skip the ts-bundle driver build.
+        #[arg(long)]
+        skip_ts_bundle: bool,
 
         /// Skip the Rust workspace build.
         #[arg(long)]
@@ -588,6 +604,7 @@ fn main() -> Result<()> {
         Command::BuildHubMcpBundle {} => build_hub_mcp_bundle::run(),
         Command::VendorReact {} => vendor_react::run(),
         Command::BuildEngineHostBundle {} => build_engine_host_bundle::run(),
+        Command::BuildTsBundle {} => build_ts_bundle::run(),
         Command::BuildAll {
             skip_npm_install,
             skip_ts_packages_build,
@@ -596,6 +613,7 @@ fn main() -> Result<()> {
             skip_q2_preview_spa_build,
             skip_hub_mcp_bundle,
             skip_engine_host_bundle,
+            skip_ts_bundle,
             skip_rust_build,
             skip_agents_docs,
             release,
@@ -609,6 +627,7 @@ fn main() -> Result<()> {
                 skip_q2_preview_spa_build,
                 skip_hub_mcp_bundle,
                 skip_engine_host_bundle,
+                skip_ts_bundle,
                 skip_rust_build,
                 release,
             };

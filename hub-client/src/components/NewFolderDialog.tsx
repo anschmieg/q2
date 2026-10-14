@@ -6,7 +6,7 @@
  * once; leading/trailing slashes are stripped.
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import ModalDialog from './ModalDialog';
 import FolderPicker from './FolderPicker';
 import { normalizeProjectPath } from '@quarto/preview-renderer/types/project';
@@ -41,12 +41,6 @@ function NewFolderForm({
   const [name, setName] = useState('');
   const [parentFolder, setParentFolder] = useState(parent);
   const [error, setError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const t = setTimeout(() => inputRef.current?.focus(), 100);
-    return () => clearTimeout(t);
-  }, []);
 
   const close = onClose;
 
@@ -117,7 +111,8 @@ function NewFolderForm({
           <div className="filename-input">
             <label htmlFor="folder-name">{dialogs.newFolder.nameLabel}</label>
             <input
-              ref={inputRef}
+              // autoFocus rather than a deferred focus(); see NewFileDialog.
+              autoFocus
               id="folder-name"
               type="text"
               className="qh-input focus-accent"

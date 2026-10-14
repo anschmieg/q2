@@ -9,8 +9,9 @@
 
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi } from 'vitest';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type * as oauth from 'oauth4webapi';
+import { z } from 'zod';
 
 import {
   AUTH_TOOL_DEFINITIONS,
@@ -242,7 +243,10 @@ function fakeBrowser(opts: { fail?: boolean } = {}): FakeBrowserControl {
 // ---------------------------------------------------------------------------
 
 function authMode(mode: 'no-auth' | 'requires-auth' | 'unknown'): LastObservedAuthModeSource {
-  return { lastObservedAuthMode: () => mode };
+  return {
+    lastObservedAuthMode: () => mode,
+    configuredServerUrl: 'wss://quarto-hub.com/ws',
+  };
 }
 
 interface MakeStateArgs {
@@ -306,25 +310,37 @@ function textOf(res: CallToolResult): string {
 // ===========================================================================
 
 describe('AUTH_TOOL_DEFINITIONS', () => {
-  it('exposes exactly authenticate and authenticate_clear', () => {
+  // bd-lj6f7z9s: authenticate/authenticate_clear folded into one `auth`
+  // tool selected by `action` (sign_in short-circuits with "Already
+  // authenticated as <email>" when credentials are valid, and a failed
+  // connect names AuthRequiredError).
+  it('exposes exactly the merged auth tool', () => {
     const names = AUTH_TOOL_DEFINITIONS.map((t) => t.name).sort();
-    expect(names).toEqual(['authenticate', 'authenticate_clear']);
+    expect(names).toEqual(['auth']);
   });
 
-  it('marks authenticate non-idempotent / non-destructive and clear destructive / idempotent', () => {
-    const auth = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate')!;
-    const clear = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate_clear')!;
+  it('merges annotations honestly: clear is destructive, sign_in non-idempotent', () => {
+    const auth = AUTH_TOOL_DEFINITIONS[0]!;
+    expect(auth.annotations?.readOnlyHint).toBe(false);
+    expect(auth.annotations?.destructiveHint).toBe(true);
     expect(auth.annotations?.idempotentHint).toBe(false);
-    expect(auth.annotations?.destructiveHint).toBe(false);
-    expect(clear.annotations?.destructiveHint).toBe(true);
-    expect(clear.annotations?.idempotentHint).toBe(true);
   });
 
-  it('clear description names the best-effort revoke and drops the old disclaimer', () => {
-    const clear = AUTH_TOOL_DEFINITIONS.find((t) => t.name === 'authenticate_clear')!;
-    expect(clear.description).toMatch(/revoke/i);
-    expect(clear.description).toContain('myaccount.google.com');
-    expect(clear.description).not.toMatch(/Does not touch Google-side grants/i);
+  it('the description names both arms, the best-effort revoke, and drops the old disclaimer', () => {
+    const auth = AUTH_TOOL_DEFINITIONS[0]!;
+    expect(auth.description).toContain('sign_in');
+    expect(auth.description).toContain('clear');
+    expect(auth.description).toMatch(/revoke/i);
+    expect(auth.description).toContain('myaccount.google.com');
+    expect(auth.description).not.toMatch(/Does not touch Google-side grants/i);
+  });
+
+  it('the input schema accepts both arms and rejects an unknown action', () => {
+    const schema = AUTH_TOOL_DEFINITIONS[0]!.inputSchema as z.ZodType;
+    expect(schema.safeParse({ action: 'sign_in' }).success).toBe(true);
+    expect(schema.safeParse({ action: 'clear' }).success).toBe(true);
+    expect(schema.safeParse({ action: 'status' }).success).toBe(false);
+    expect(schema.safeParse({}).success).toBe(false);
   });
 });
 
@@ -641,7 +657,7 @@ describe('authenticate_clear', () => {
 
     const res = await auth.handleClear();
     expect(requests).toHaveLength(0);
-    expect(textOf(res)).toMatch(/cleared\. Call authenticate to sign in again/);
+    expect(textOf(res)).toMatch(/cleared\. Call `auth` with `action: "sign_in"` to sign in again/);
     expect(res.isError).toBeUndefined();
   });
 
@@ -795,5 +811,59 @@ describe('lazy discovery failure', () => {
     expect(textOf(res)).toMatch(/myaccount\.google\.com/);
     expect(await store.read()).toBeNull();
     expect(state.value).toBeNull();
+  });
+});
+
+// ===========================================================================
+// authenticate serialization (BP-12)
+// ===========================================================================
+
+describe('authenticate concurrency guard (BP-12)', () => {
+  it('serializes concurrent authenticate calls — the second sees the first\u2019s result', async () => {
+    let releaseFirst: (() => void) | undefined;
+    let listenerCalls = 0;
+    const start: typeof startLoopbackListener = async (o: StartLoopbackOptions) => {
+      listenerCalls += 1;
+      const result = new Promise<{ code: string; state: string; params: URLSearchParams }>(
+        (resolve) => {
+          releaseFirst = () =>
+            resolve({
+              code: 'auth-code-xyz',
+              state: o.expectedState,
+              params: new URLSearchParams({ code: 'auth-code-xyz', state: o.expectedState }),
+            });
+        },
+      );
+      return {
+        port: 51234,
+        redirectUri: 'http://127.0.0.1:51234/callback',
+        result,
+        close: () => undefined,
+      };
+    };
+    const { fetch } = makeFetch(() => jsonResponse(200, tokenResponseBody()));
+    const { store } = emptyStore();
+    const state = makeState({
+      store,
+      startListener: start,
+      fetch,
+      openBrowser: fakeBrowser().open,
+    });
+
+    const a = state.handle('sign_in');
+    // A binds its listener and parks on the callback.
+    await vi.waitFor(() => expect(listenerCalls).toBe(1));
+
+    const b = state.handle('sign_in');
+    // B must not start its own flow while A is in flight.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(listenerCalls).toBe(1);
+
+    releaseFirst!();
+    const [resA, resB] = await Promise.all([a, b]);
+    expect(textOf(resA)).toContain('Authenticated as');
+    // B ran strictly after A's credential landed: it short-circuits.
+    expect(textOf(resB)).toContain('Already authenticated');
+    expect(listenerCalls).toBe(1);
   });
 });

@@ -34,6 +34,7 @@ import type {
   FileEntry,
   ActorIdentity,
   CaptureRef,
+  ProjectSetDocument,
 } from '@quarto/quarto-automerge-schema';
 import {
   CURRENT_SCHEMA_VERSION,
@@ -203,6 +204,25 @@ function wrapAdapter(adapter: NetworkAdapter): NetworkAdapter {
 
 // FileDocument can be text or binary - use runtime detection
 type FileDocument = TextDocumentContent | BinaryDocumentContent;
+
+/**
+ * The identities map of an index document snapshot ({} when absent —
+ * V1 documents predate it). Returns a shallow copy so callers can't
+ * mutate the live doc. Module-level and exported (quarto-hub-mcp
+ * CAP-2): the MCP server reads these out of `getIndexHandle().doc()`.
+ */
+export function getIdentitiesFromIndex(doc: IndexDocument): Record<string, ActorIdentity> {
+  return doc.identities ? { ...doc.identities } : {};
+}
+
+/**
+ * The engine-capture sidecar of an index document snapshot ({} when
+ * absent — V1 documents predate it). Shallow copy, same rationale as
+ * {@link getIdentitiesFromIndex}.
+ */
+export function getCapturesFromIndex(doc: IndexDocument): Record<string, CaptureRef> {
+  return doc.captures ? { ...doc.captures } : {};
+}
 
 /**
  * Order-insensitive equality of two automerge head sets (URL-encoded
@@ -475,15 +495,8 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     }));
   }
 
-  // Helper: get identities from index document
-  function getIdentitiesFromIndex(doc: IndexDocument): Record<string, ActorIdentity> {
-    return doc.identities ? { ...doc.identities } : {};
-  }
-
-  // Helper: get captures sidecar from index document (V2+; absent on V1)
-  function getCapturesFromIndex(doc: IndexDocument): Record<string, CaptureRef> {
-    return doc.captures ? { ...doc.captures } : {};
-  }
+  // Identity/capture getters are the module-level exports above
+  // (quarto-hub-mcp CAP-2 shares them); the closures only diff + fire.
 
   // Track last-seen identities for diffing
   let lastIdentities: Record<string, ActorIdentity> = {};
@@ -1441,6 +1454,53 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   }
 
   /**
+   * Bounded per-write delivery confirmation (ERG-2 — quarto-hub-mcp's
+   * write tools): wait until the named file documents AND the index
+   * document have been delivered to a storage-backed peer (the hub),
+   * returning early on confirmation. Resolves `true` when everything
+   * outstanding is delivered, `false` when the budget expires — the
+   * write is never rolled back either way, so `false` means "not yet
+   * confirmed", not "lost".
+   *
+   * The index handle always participates: delete/rename touch only the
+   * index, and create touches both. Event-driven on `remote-heads` /
+   * `peer`, sharing the exit drain's delivery signal (bd-10deu8h4).
+   */
+  async function awaitDelivery(paths: string[], timeoutMs: number): Promise<boolean> {
+    const handles: Array<DocHandle<unknown>> = [];
+    if (state.indexHandle) {
+      handles.push(state.indexHandle as unknown as DocHandle<unknown>);
+    }
+    for (const path of paths) {
+      const handle = state.fileHandles.get(path);
+      if (!handle) return false; // unknown document — nothing to wait on
+      handles.push(handle as unknown as DocHandle<unknown>);
+    }
+    if (handles.length === 0) return false;
+    if (handles.every(isDelivered)) return true;
+    return await new Promise<boolean>((resolve) => {
+      let done = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        for (const handle of handles) handle.off('remote-heads', recheck);
+        state.repo?.networkSubsystem.off('peer', recheck);
+      };
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      const recheck = () => {
+        if (handles.every(isDelivered)) finish(true);
+      };
+      for (const handle of handles) handle.on('remote-heads', recheck);
+      state.repo?.networkSubsystem.on('peer', recheck);
+    });
+  }
+
+  /**
    * Disconnect from the sync server.
    *
    * With `drainMs > 0`, first gives outbound document sync a bounded
@@ -1729,6 +1789,39 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     callbacks.onFileAdded(path, { type: 'binary', data: content, mimeType });
 
     return { docId, path, deduplicated: false };
+  }
+
+  /**
+   * Replace a binary file's bytes in place (quarto-hub-mcp CAP-5:
+   * `write_file` with `encoding: "base64"` on an existing binary).
+   * Mirrors {@link updateFileContent} for text: the path keeps its
+   * document, so index entries and collaborators' handles are
+   * untouched, and the BinaryDocumentContent invariant (`hash` tracks
+   * `content`) is maintained here rather than by callers reaching into
+   * the doc. Throws when the path is unknown or names a text file —
+   * replacing across the text/binary boundary is a delete+create, which
+   * is the caller's explicit choice to make.
+   */
+  async function updateBinaryFileContent(
+    rawPath: string,
+    content: Uint8Array,
+    mimeType: string,
+  ): Promise<void> {
+    const path = normalizeProjectPath(rawPath);
+    const handle = state.fileHandles.get(path);
+    if (!handle) {
+      throw new Error(`No handle found for file: ${path}`);
+    }
+    if (!state.binaryFiles.has(path)) {
+      throw new Error(`File is not binary: ${path}`);
+    }
+    const hash = await computeSHA256(content);
+    handle.change((doc) => {
+      if (!isBinaryDocument(doc)) return;
+      doc.content = content;
+      doc.mimeType = mimeType;
+      doc.hash = hash;
+    });
   }
 
   /**
@@ -2300,6 +2393,7 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
   return {
     connect,
     disconnect,
+    awaitDelivery,
     isFileBinary,
     getFileContent,
     getBinaryFileContent,
@@ -2311,6 +2405,7 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
     createFile,
     createFileIfAbsent,
     createBinaryFile,
+    updateBinaryFileContent,
     deleteFile,
     renameFile,
     createFolder,
@@ -2335,3 +2430,70 @@ export function createSyncClient(callbacks: SyncClientCallbacks, astOptions?: AS
  * Type for the sync client instance.
  */
 export type SyncClient = ReturnType<typeof createSyncClient>;
+
+// ---------------------------------------------------------------------------
+// Project-set reads (quarto-hub-mcp CAP-3)
+// ---------------------------------------------------------------------------
+
+export interface ReadProjectSetOptions {
+  /** WebSocket URL of the sync server hosting the project-set document. */
+  serverUrl: string;
+  /** The project-set document id (bare or `automerge:`-prefixed). */
+  docId: string;
+  /** Bearer plumbing for hubs that require auth; omitted for open hubs. */
+  auth?: SyncClientAuthOptions;
+  /** Peer-wait budget in ms (default 15000, matching hub-mcp connects). */
+  peerTimeoutMs?: number;
+}
+
+/**
+ * One-shot read of a ProjectSetDocument by doc id. A project-set
+ * document is not a project index, so a full SyncClient cannot open it —
+ * this stands up a temporary repo + adapter, fetches the document, and
+ * tears down. Throws when the peer never connects, the document is
+ * unavailable, or the document is not a project set (the id usually
+ * names a project index instead — pass project ids to `connect`).
+ */
+export async function readProjectSetDoc(
+  options: ReadProjectSetOptions,
+): Promise<ProjectSetDocument> {
+  const adapter = wrapAdapter(await buildWsAdapter(options.serverUrl, options.auth, undefined));
+  const repo = new Repo({ network: [adapter] });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        repo.networkSubsystem.off('peer', onPeer);
+      };
+      const onPeer = () => {
+        cleanup();
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout waiting for peer connection to ${options.serverUrl}`));
+      }, options.peerTimeoutMs ?? 15000);
+      repo.networkSubsystem.on('peer', onPeer);
+    });
+    const handle = await repo.find<ProjectSetDocument>(
+      normalizeDocId(options.docId) as DocumentId,
+      { signal: AbortSignal.timeout(FIND_DOC_ATTEMPT_TIMEOUT_MS) },
+    );
+    await handle.whenReady();
+    const doc = handle.doc();
+    if (
+      !doc ||
+      typeof doc !== 'object' ||
+      typeof (doc as { version?: unknown }).version !== 'number' ||
+      typeof (doc as { projects?: unknown }).projects !== 'object' ||
+      (doc as { projects?: unknown }).projects === null
+    ) {
+      throw new Error(
+        `document ${options.docId} is not a project-set document (no version/projects map)`,
+      );
+    }
+    return doc;
+  } finally {
+    (adapter as unknown as { disconnect?: () => void }).disconnect?.();
+  }
+}
