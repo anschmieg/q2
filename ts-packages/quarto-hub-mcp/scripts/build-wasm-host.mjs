@@ -22,7 +22,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const pkgDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(pkgDir, '../..');
-const defaultWasmPkg = path.join(repoRoot, 'hub-client/wasm-quarto-hub-client');
+// The wasm-pack output directory itself. hub-client reaches it through
+// the committed hub-client/wasm-quarto-hub-client symlink, but that
+// symlink is a plain text file on a Windows checkout (no core.symlinks)
+// and dangles anywhere WASM has not been built, so resolve the real
+// path: it is what the release pipeline's web-payloads artifact
+// extracts into on every build leg.
+const defaultWasmPkg = path.join(repoRoot, 'crates/wasm-quarto-hub-client/pkg');
 const bridgeDir = path.join(repoRoot, 'ts-packages/wasm-js-bridge/src');
 
 /** Locate node_modules/sass/sass.default.js (workspace-hoisted or local). */
@@ -53,7 +59,7 @@ export async function ensureInit() {
  * opts.allowStub — write a stub host when the Rust WASM artifacts are
  *   missing, instead of throwing (dev builds / no-WASM CI legs).
  * opts.wasmPkgDir — wasm-pack output directory; defaults to
- *   hub-client/wasm-quarto-hub-client (overridable for tests).
+ *   crates/wasm-quarto-hub-client/pkg (overridable for tests).
  */
 export async function buildWasmHost({ outDir, allowStub = false, wasmPkgDir = defaultWasmPkg }) {
   await mkdir(outDir, { recursive: true });

@@ -299,7 +299,17 @@ jobs:
             # `npm run bundle`, whose buildWasmHost refuses to bundle
             # without them — and rebuilding them here would mean the
             # whole wasm32/wasm-bindgen/binaryen toolchain on every leg.
-            hub-client/wasm-quarto-hub-client
+            #
+            # Stage the real output directory, never the committed
+            # hub-client/wasm-quarto-hub-client symlink that points at
+            # it: on a checkout that has not built WASM the symlink
+            # dangles (Linux/macOS) or is a plain text file (Windows,
+            # no core.symlinks), and download-artifact cannot create a
+            # directory under either — every downstream job then fails
+            # with "Artifact download failed after 5 retries" (nightly
+            # 2026-10-14). Glob-ing the symlink here uploads the files
+            # under the symlink path, which is exactly what breaks.
+            crates/wasm-quarto-hub-client/pkg
             # The qmd parser wasm (CAP-11), built once here — the
             # hub-mcp-bundle job stages it without rebuilding.
             crates/wasm-qmd-parser/pkg-nodejs
@@ -328,7 +338,7 @@ jobs:
   hub-mcp-bundle:
     name: Build standalone hub MCP bundle
     # web-payloads: the bundle build needs the wasm-pack artifacts
-    # (hub-client/wasm-quarto-hub-client/) for the WASM render host, and
+    # (crates/wasm-quarto-hub-client/pkg/) for the WASM render host, and
     # the qmd parser pkg (crates/wasm-qmd-parser/pkg-nodejs, CAP-11).
     needs: [check-inputs, web-payloads]
     runs-on: ubuntu-latest
@@ -354,7 +364,7 @@ jobs:
 
       # Target-independent payloads from the web-payloads job, placed
       # where the bundle build looks for them — the wasm-pack artifacts
-      # (hub-client/wasm-quarto-hub-client/) are required: buildWasmHost
+      # (crates/wasm-quarto-hub-client/pkg/) are required: buildWasmHost
       # refuses to ship a stub host. The qmd parser wasm (CAP-11) also
       # comes from web-payloads — this job has no Rust toolchain, and
       # with the pkg present and fresh (same checkout) `npm run bundle`
