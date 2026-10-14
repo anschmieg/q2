@@ -146,7 +146,7 @@ page assets: js:search:* (pagefind.js, quarto-search.js[, autocomplete]),
 
 ## Phases and todo (living checklist)
 
-Work proceeds phase by phase on `braid/bd-eip0naf4-website-search`; each item is checked off in the commit that lands it. `[~]` marks an item in progress.
+Work proceeds phase by phase on `braid/bd-eip0naf4-website-search`; each item is checked off in the commit that lands it. An unchecked item with a status note is partially done.
 
 ### Phase 0 — in-tree spike + test plan
 
@@ -179,7 +179,7 @@ Work proceeds phase by phase on `braid/bd-eip0naf4-website-search`; each item is
 - [x] `website.search.federate`: `quarto-search.js` reads each child `manifest.json`, skips (console warning) children whose pagefind version differs, calls `mergeIndex` with `baseUrl`, `indexWeight`, and a `mergeFilter` site tag, and shows the site title on child result cards. Verified in a headless browser with a parent and child site served under one origin.
 - [x] `q2 preview --static`: `Access-Control-Allow-Origin: *` on files under `site_libs/quarto-search/` only (integration test). Reload: the index is rewritten by the render the preview triggers; the no-store policy means the browser refetches it.
 - [x] Incremental / Subset renders end to end: cache, manifest, pruning, no stale anchors (two integration tests). Pages neither rendered nor cached produce one *info* note with a count, not a warning per page: a warning would fail `--strict` once per page on every `q2 render page.qmd` in a never-fully-rendered site (observed on the docs site: 347 pages).
-- [~] Hub-client preview: the WASM crate builds with the new transforms (`SearchUiTransform` runs there but its output is unused; the JS artifacts are cfg-gated out). The navbar carries an empty `#quarto-search` div in the preview, which renders as nothing without the scripts. Not yet exercised in a running hub-client.
+- [ ] Hub-client preview: the WASM crate builds with the new transforms (`SearchUiTransform` runs there but its output is unused; the JS artifacts are cfg-gated out). The navbar carries an empty `#quarto-search` div in the preview, which renders as nothing without the scripts. Not yet exercised in a running hub-client.
 
 ### Phase 4 — Algolia opt-in
 
