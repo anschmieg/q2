@@ -1721,6 +1721,20 @@
     "docs_url": "https://quarto.org/docs/errors/project/Q-5-37",
     "since_version": "99.9.9"
   },
+  "Q-5-38": {
+    "subsystem": "project",
+    "title": "Unknown website.search Option",
+    "message_template": "`website.search` has an option Quarto does not recognize. The option is ignored.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-38",
+    "since_version": "99.9.9"
+  },
+  "Q-5-39": {
+    "subsystem": "project",
+    "title": "Invalid website.search Value",
+    "message_template": "A `website.search` option has a value of the wrong type or outside its allowed values. The default is used instead.",
+    "docs_url": "https://quarto.org/docs/errors/project/Q-5-39",
+    "since_version": "99.9.9"
+  },
   "Q-13-8": {
     "subsystem": "navigation",
     "title": "Unsupported toc-location value",
@@ -1787,7 +1801,7 @@
   "Q-18-2": {
     "subsystem": "engine",
     "title": "Engine Include File Could Not Be Read",
-    "message_template": "An execution engine asked Quarto to include the contents of a file in the output (header, before body, or after body), but the file could not be read. The render continues without it, so content the engine expected on the page — typically an HTML dependency's scripts and stylesheets — is missing.",
+    "message_template": "An execution engine asked Quarto to include the contents of a file in the output (header, before body, or after body), but the file could not be read. The render continues without it, so content the engine expected on the page \u2014 typically an HTML dependency's scripts and stylesheets \u2014 is missing.",
     "docs_url": "https://quarto.org/docs/errors/engine/Q-18-2",
     "since_version": "99.9.9"
   },
@@ -1871,7 +1885,7 @@
   "Q-22-3": {
     "subsystem": "math",
     "title": "Mismatched Math Environment",
-    "message_template": "A math environment is closed by the wrong `\\end{…}`, is never closed, or an `\\end{…}` appears without its `\\begin{…}`.",
+    "message_template": "A math environment is closed by the wrong `\\end{\u2026}`, is never closed, or an `\\end{\u2026}` appears without its `\\begin{\u2026}`.",
     "docs_url": "https://quarto.org/docs/errors/math/Q-22-3",
     "since_version": "99.9.9"
   },
@@ -1920,7 +1934,7 @@
   "Q-22-10": {
     "subsystem": "math",
     "title": "Ragged Rows In Math Environment",
-    "message_template": "The rows of a math environment (`pmatrix`, `aligned`, `cases`, …) do not all have the same number of `&`-separated cells.",
+    "message_template": "The rows of a math environment (`pmatrix`, `aligned`, `cases`, \u2026) do not all have the same number of `&`-separated cells.",
     "docs_url": "https://quarto.org/docs/errors/math/Q-22-10",
     "since_version": "99.9.9"
   },

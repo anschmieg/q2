@@ -181,5 +181,6 @@ pub mod video_shortcode_preview;
 pub mod website_aliases;
 pub mod website_post_render;
 pub mod website_post_render_format_gate;
+pub mod website_search;
 
 fn main() {}

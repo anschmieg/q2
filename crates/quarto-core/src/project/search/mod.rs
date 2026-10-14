@@ -36,8 +36,14 @@
 //!
 //! [Pagefind]: https://pagefind.app
 
+pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod index_writer;
+
+pub use config::{
+    FederatedSite, ItemContext, SearchLocation, SearchOptions, SearchType, has_navbar,
+    page_search_enabled, resolve_website_search,
+};
 
 /// Directory under the project lib dir (`site_libs/`) that holds the
 /// search assets: `pagefind/` (the index bundle and its runtime) and

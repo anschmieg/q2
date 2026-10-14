@@ -6667,6 +6667,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "jupyter-protocol",
+ "lol_html",
  "pagefind",
  "pampa",
  "pathdiff",
