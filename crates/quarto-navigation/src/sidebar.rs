@@ -409,6 +409,12 @@ pub struct Sidebar {
     pub border: Option<bool>,
     pub contents: Vec<SidebarEntry>,
     pub pinned: bool,
+    /// `sidebar.search:` as authored (`None` when unset). The render
+    /// transform combines it with `website.search` to decide whether
+    /// and how the box renders (bd-6cme): explicit `false` suppresses
+    /// it, explicit `true` forces a textbox, unset follows search's
+    /// `location`.
+    pub search: Option<bool>,
 }
 
 impl Default for Sidebar {
@@ -429,6 +435,7 @@ impl Sidebar {
             border: None,
             contents: Vec::new(),
             pinned: false,
+            search: None,
         }
     }
 
@@ -451,6 +458,7 @@ impl Sidebar {
         sb.background = cv.get("background").and_then(|v| v.as_plain_text());
         sb.border = cv.get("border").and_then(|v| v.as_bool());
         sb.pinned = cv.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+        sb.search = cv.get("search").and_then(|v| v.as_bool());
         if let Some(style) = cv
             .get("style")
             .and_then(|v| v.as_plain_text())
@@ -521,6 +529,9 @@ impl Sidebar {
         }
         if self.pinned {
             entries.push(bool_entry("pinned", true, &info));
+        }
+        if let Some(search) = self.search {
+            entries.push(bool_entry("search", search, &info));
         }
         if !self.contents.is_empty() {
             let values: Vec<ConfigValue> = self
@@ -1184,6 +1195,7 @@ mod tests {
             title: SidebarTitle::Text(s("Docs")),
             style: SidebarStyle::Docked,
             collapse_level: 3,
+            search: Some(true),
             background: Some("light".to_string()),
             border: Some(true),
             pinned: true,
@@ -1225,6 +1237,7 @@ mod tests {
         assert_eq!(reparsed.collapse_level, original.collapse_level);
         assert_eq!(reparsed.background, original.background);
         assert_eq!(reparsed.pinned, original.pinned);
+        assert_eq!(reparsed.search, original.search);
 
         // Contents — check shape preservation rather than full PartialEq
         // because inline markup may serialize differently.

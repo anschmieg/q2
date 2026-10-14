@@ -51,6 +51,14 @@ fn full_site(temp: &tempfile::TempDir) -> PathBuf {
     write(&root.join("img.png"), b"\x89PNG\r\n\x1a\nnot really");
     write(&root.join("style.css"), CSS.as_bytes());
     write(&root.join("404.html"), NOT_FOUND_PAGE.as_bytes());
+    write(
+        &root.join("site_libs/quarto-search/manifest.json"),
+        b"{\"version\":1}",
+    );
+    write(
+        &root.join("site_libs/quarto-search/pagefind/pagefind-entry.json"),
+        b"{\"version\":\"1.5.2\"}",
+    );
     root
 }
 
@@ -515,4 +523,33 @@ async fn non_page_views_are_not_reported() {
         rx.try_recv().is_err(),
         "a stylesheet, a 404, a HEAD, and a fetch() are not page views"
     );
+}
+
+/// The website search bundle is readable cross-origin, so a federated
+/// parent site previewed on another port can merge this site's index;
+/// nothing else is (bd-eip0naf4).
+#[tokio::test]
+async fn search_bundle_is_served_with_open_cors_and_nothing_else_is() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let (app, _hub) = router(full_site(&temp), None);
+    for path in [
+        "/site_libs/quarto-search/manifest.json",
+        "/site_libs/quarto-search/pagefind/pagefind-entry.json",
+    ] {
+        let (status, headers, _body) = get(&app, path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(
+            header_str(&headers, "access-control-allow-origin"),
+            "*",
+            "{path}"
+        );
+        assert_eq!(header_str(&headers, "cache-control"), "no-store, max-age=0");
+    }
+    for path in ["/about.html", "/style.css", "/img.png"] {
+        let (_status, headers, _body) = get(&app, path).await;
+        assert!(
+            headers.get("access-control-allow-origin").is_none(),
+            "{path} must not be CORS-open"
+        );
+    }
 }

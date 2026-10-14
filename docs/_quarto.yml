@@ -42,6 +42,7 @@ website:
             - guides/projects/render-list.qmd
             - guides/projects/aliases.qmd
             - guides/projects/llms-txt.qmd
+            - guides/projects/website-search.qmd
             - guides/embedded-docs.qmd
             - guides/projects/scripts.qmd
             - guides/projects/environment.qmd
@@ -325,6 +326,9 @@ website:
             - errors/project/Q-5-35.qmd
             - errors/project/Q-5-36.qmd
             - errors/project/Q-5-37.qmd
+            - errors/project/Q-5-38.qmd
+            - errors/project/Q-5-39.qmd
+            - errors/project/Q-5-40.qmd
         - section: "include"
           contents:
             - errors/include/Q-17-1.qmd

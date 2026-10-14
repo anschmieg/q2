@@ -158,7 +158,15 @@ pub struct Navbar {
     pub logo_href_source: SourceInfo,
     pub background: Option<String>,
     pub foreground: Option<String>,
-    pub search: bool,
+    /// `navbar.search:` as authored: `Some(true)` / `Some(false)` when
+    /// the user set it, `None` when unset. `NavbarGenerateTransform`
+    /// resolves `None` from `website.search` (a navbar gets the box
+    /// when search's `location` is the navbar — Quarto 1's
+    /// `navbarEjsData` rule), so by render time this is always `Some`.
+    pub search: Option<bool>,
+    /// Localized `search-label` term, the box's `title`. Set by the
+    /// generate transform; defaults to `Search`.
+    pub search_label: Option<String>,
     pub pinned: bool,
     /// Defaults to `true` per Quarto 1 semantics.
     pub collapse: bool,
@@ -185,7 +193,8 @@ impl Navbar {
             logo_href_source: SourceInfo::generated(By::programmatic_config()),
             background: None,
             foreground: None,
-            search: false,
+            search: None,
+            search_label: None,
             pinned: false,
             collapse: true,
             collapse_below: CollapseBelow::Lg,
@@ -230,9 +239,8 @@ impl Navbar {
         nav.background = cv.get("background").and_then(|v| v.as_plain_text());
         nav.foreground = cv.get("foreground").and_then(|v| v.as_plain_text());
 
-        if let Some(v) = cv.get("search").and_then(|v| v.as_bool()) {
-            nav.search = v;
-        }
+        nav.search = cv.get("search").and_then(|v| v.as_bool());
+        nav.search_label = cv.get("search-label").and_then(|v| v.as_plain_text());
         if let Some(v) = cv.get("pinned").and_then(|v| v.as_bool()) {
             nav.pinned = v;
         }
@@ -334,9 +342,10 @@ impl Navbar {
         push_optional_string(&mut entries, "foreground", &self.foreground, &info);
 
         // Booleans: emit only when non-default, to keep stored metadata tidy.
-        if self.search {
-            entries.push(bool_entry("search", true, &info));
+        if let Some(search) = self.search {
+            entries.push(bool_entry("search", search, &info));
         }
+        push_optional_string(&mut entries, "search-label", &self.search_label, &info);
         if self.pinned {
             entries.push(bool_entry("pinned", true, &info));
         }
@@ -627,7 +636,7 @@ mod tests {
             other => panic!("expected Text title, got {:?}", other),
         }
         assert_eq!(nav.background.as_deref(), Some("primary"));
-        assert!(nav.search);
+        assert_eq!(nav.search, Some(true));
         assert!(nav.pinned);
         assert_eq!(nav.collapse_below, CollapseBelow::Xl);
         assert_eq!(nav.toggle_position, TogglePosition::Right);
@@ -660,7 +669,10 @@ mod tests {
         assert!(nav.collapse);
         assert_eq!(nav.collapse_below, CollapseBelow::Lg);
         assert_eq!(nav.toggle_position, TogglePosition::Left);
-        assert!(!nav.search);
+        assert_eq!(
+            nav.search, None,
+            "unset until the generate transform resolves it"
+        );
         assert!(!nav.pinned);
     }
 
@@ -775,7 +787,7 @@ mod tests {
         let original = Navbar {
             title: NavbarTitle::Text(s("Home")),
             background: Some("primary".to_string()),
-            search: true,
+            search: Some(true),
             collapse_below: CollapseBelow::Xl,
             left: vec![NavigationItem {
                 href: Some("index.qmd".to_string()),

@@ -1,0 +1,11 @@
+project:
+  type: website
+  output-dir: ../www/product-b
+
+website:
+  title: "Product B"
+  navbar:
+    left:
+      - index.qmd
+      - install.qmd
+      - reference.qmd

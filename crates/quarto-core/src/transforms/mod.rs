@@ -116,6 +116,7 @@ mod secondary_nav_render;
 // same vendored files itself in entry.tsx — see the module docs.
 #[cfg(not(target_arch = "wasm32"))]
 mod quarto_nav_js;
+mod search_ui;
 mod sectionize;
 mod shortcode_resolve;
 mod shortcode_text;
@@ -195,6 +196,7 @@ pub use reference_link_diagnostics::ReferenceLinkDiagnosticsTransform;
 pub use repo_actions_render::RepoActionsRenderTransform;
 pub use resource_collector::{ResourceCollectorTransform, collect_referenced_asset_urls};
 pub use responsive_image::ResponsiveImageTransform;
+pub use search_ui::SearchUiTransform;
 pub use secondary_nav_render::SecondaryNavRenderTransform;
 pub use sectionize::SectionizeTransform;
 pub(crate) use shortcode_resolve::code_shortcode_opt_out;

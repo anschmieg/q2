@@ -1,0 +1,11 @@
+---
+title: "Install Product A"
+---
+
+## Requirements
+
+Product A runs anywhere the collector agent runs.
+
+## Install
+
+Download the collector, unpack it, and run `collector init`.

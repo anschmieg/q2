@@ -165,6 +165,26 @@ imagesize = "0.13"
 # `crates/quarto-core/src/project/orchestrator.rs`.
 rayon = "1"
 
+# Website search index builder (bd-eip0naf4). Pagefind consumed as a
+# library: `project/search/index_writer.rs` feeds every rendered page
+# to `pagefind::api::PagefindIndex` in `post_resources` and writes the
+# chunked index into `site_libs/quarto-search/pagefind/`. Native-only
+# by construction: the index is a whole-site, post-render artifact and
+# the crate does not build for wasm32 (tokio fs/rt-multi-thread, rayon)
+# — see claude-notes/plans/2026-10-14-website-search.md (decision 6 and
+# the wasm32 feasibility section for the measured fork cost).
+# `default-features = false` drops the actix `serve` feature; the
+# crate then needs tokio's `io-util`, which the tokio line below
+# already enables (known 1.5.2 packaging gap, noted upstream).
+pagefind = { version = "1.5.2", default-features = false }
+# Streaming HTML rewriter for the search capture stage (restores
+# section ids onto their headings so Pagefind forms per-heading
+# sub-results). Same crate pagefind uses internally, so no new tree.
+lol_html = "2"
+# Tree walker behind `scraper` (already in the native tree through it);
+# the search.json record extractor walks captured HTML node by node.
+ego-tree = "0.11"
+
 # Jupyter engine dependencies (native only)
 runtimelib = { version = "2.0", features = ["tokio-runtime"] }
 jupyter-protocol = "2.0"

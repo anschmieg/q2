@@ -1,0 +1,6 @@
+---
+title: "Product B"
+---
+
+Product B turns tables from Product A into charts and dashboards. This
+site is rendered on its own and also searched from the family site.

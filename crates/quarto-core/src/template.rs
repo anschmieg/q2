@@ -275,6 +275,9 @@ $endfor$
 $if(math)$
 $math$
 $endif$
+$if(rendered.search.head)$
+$rendered.search.head$
+$endif$
 $for(scripts)$
 $if(scripts.src)$<script src="$scripts.src$"$scripts.attribs$></script>$else$<script src="$scripts$"></script>$endif$
 $endfor$
@@ -288,6 +291,9 @@ $color-mode-script$
 $endif$
 $if(rendered.draft-alert-text)$
 <div id="quarto-draft-alert" class="alert alert-warning"><i class="bi bi-pencil-square"></i>$rendered.draft-alert-text$</div>
+$endif$
+$if(rendered.search.head)$
+<div id="quarto-search-results"></div>
 $endif$
 $if(rendered.navigation.navbar)$
 $quarto-header()$

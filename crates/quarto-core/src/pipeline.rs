@@ -445,6 +445,12 @@ pub fn build_html_pipeline_stages_with_options(
     // WASM pipelines — see math_js.rs module docs for the rationale.
     stages.push(Box::new(MathJsStage::new()));
     stages.push(Box::new(RenderHtmlBodyStage::new()));
+    // Website search capture (bd-eip0naf4): records the rendered body
+    // before the template wraps it. Native-only, like the JS stages:
+    // the index is written by the native post-render hooks, and the
+    // q2-preview pipeline drops render-html-body anyway.
+    #[cfg(not(target_arch = "wasm32"))]
+    stages.push(Box::new(crate::stage::stages::SearchCaptureStage::new()));
     let apply_stage = match apply_config {
         Some(cfg) => ApplyTemplateStage::with_config(cfg),
         None => ApplyTemplateStage::new(),
@@ -513,8 +519,13 @@ pub async fn render_qmd_to_pandoc(
 /// (`q2_preview_stage_excluded_names_exist_in_html_pipeline`)
 /// fails the test suite if any name here is not an actual stage in
 /// the full HTML pipeline (typo / rename guard).
-const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] =
-    &["math-ml", "math-js", "render-html-body", "apply-template"];
+const Q2_PREVIEW_STAGE_EXCLUDED: &[&str] = &[
+    "math-ml",
+    "math-js",
+    "render-html-body",
+    "search-capture",
+    "apply-template",
+];
 
 /// Build the q2-preview pipeline stages (Plan 1).
 ///
@@ -575,6 +586,9 @@ pub fn build_q2_preview_pipeline_stages(
 /// validator.
 const PANDOC_STAGE_EXCLUDED: &[&str] = &[
     "compile-theme-css",
+    // Website search captures rendered HTML bodies; a Pandoc-writer
+    // format has none (bd-eip0naf4).
+    "search-capture",
     "bootstrap-js",
     "clipboard-js",
     "tabsets-js",
@@ -2464,6 +2478,11 @@ pub fn build_transform_pipeline(
     // entry.tsx module top (Phase F.1 pattern).
     #[cfg(not(target_arch = "wasm32"))]
     pipeline.push(Box::new(crate::transforms::QuartoNavJsTransform::new()));
+    // Website search UI (bd-eip0naf4): options JSON + offset meta in
+    // the head, and the search scripts as project artifacts. Reads the
+    // resolved language table and the search config only, so it has no
+    // ordering constraint beyond the Navigation phase.
+    pipeline.push(Box::new(crate::transforms::SearchUiTransform::new()));
     pipeline.push(Box::new(PageNavRenderTransform::new()));
     // Footer *generation* (above) is format-agnostic; footer *rendering* is
     // format-specific — html emits page-footer chrome, revealjs emits a
@@ -2783,6 +2802,7 @@ const PANDOC_TRANSFORM_EXCLUDED: &[&str] = &[
     "secondary-nav-render",
     "breadcrumbs-render",
     "quarto-nav-js",
+    "search-ui",
     "page-nav-generate",
     "page-nav-render",
     "toc-generate",
@@ -2994,6 +3014,9 @@ pub const BUCKETS: &[(&str, Bucket)] = &[
     ("breadcrumbs-render", Bucket::B4),
     ("secondary-nav-render", Bucket::B4),
     ("quarto-nav-js", Bucket::B4),
+    // Website search UI: options JSON + offset meta + search scripts
+    // (bd-eip0naf4). Website chrome, like quarto-nav-js.
+    ("search-ui", Bucket::B4),
     ("page-nav-render", Bucket::B4),
     ("footer-render", Bucket::B4),
     // The HTML writer's copy of the renderer trinity. `crossref-render` is
@@ -3568,8 +3591,8 @@ mod tests {
         // MathMlStage after the post filters (bd-vlhi2zkj, bd-3evfzwal),
         // plus LmdDesugarStage before the engine and LmdExecuteStage before
         // the user pre-filters (bd-lmd-exploration-jqv2nbl4), plus
-        // ListingResolveStage before lmd-execute (bd-2oqen84t): 30.
-        assert_eq!(stages.len(), 30);
+        // ListingResolveStage before lmd-execute (bd-2oqen84t), plus SearchCaptureStage (bd-eip0naf4): 31.
+        assert_eq!(stages.len(), 31);
         // Pre-parse file-claim/convert (Task 10).
         assert_eq!(stages[0].name(), "source-conversion");
         assert_eq!(stages[1].name(), "parse-document");
@@ -3642,7 +3665,10 @@ mod tests {
         // filters, the `\tag{N}` equation-number encoding) is visible.
         assert_eq!(stages[27].name(), "math-js");
         assert_eq!(stages[28].name(), "render-html-body");
-        assert_eq!(stages[29].name(), "apply-template");
+        // Website search capture (bd-eip0naf4): records the rendered
+        // body before the template wraps it.
+        assert_eq!(stages[29].name(), "search-capture");
+        assert_eq!(stages[30].name(), "apply-template");
     }
 
     #[test]
@@ -3651,9 +3677,9 @@ mod tests {
         // Merged pipeline carries both SourceConversionStage (Task 10, branch)
         // LanguageResolveStage and TabsetsJsStage (main), plus
         // EquationNumberStage and MathMlStage, plus LmdDesugarStage and
-        // LmdExecuteStage, plus ListingResolveStage (bd-2oqen84t) → 30
-        // stages.
-        assert_eq!(pipeline.len(), 30);
+        // LmdExecuteStage, plus ListingResolveStage (bd-2oqen84t), plus
+        // SearchCaptureStage (bd-eip0naf4) → 31 stages.
+        assert_eq!(pipeline.len(), 31);
     }
 
     #[test]
@@ -5568,6 +5594,7 @@ mod tests {
             "compile-theme-css",
             "code-highlight",
             "render-html-body",
+            "search-capture",
             "apply-template",
         ] {
             assert!(
@@ -5625,6 +5652,7 @@ mod tests {
                 "code-highlight",
                 "math-js",
                 "render-html-body",
+                "search-capture",
                 "apply-template",
             ]
         );
@@ -6447,6 +6475,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",
@@ -6539,6 +6568,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "reveal-footer-logo",
                 "link-rewrite",
@@ -6635,8 +6665,8 @@ mod tests {
 
         assert_eq!(
             nav_names.len(),
-            20,
-            "expected exactly 20 Navigation-phase transforms in the HTML pipeline; got: \
+            21,
+            "expected exactly 21 Navigation-phase transforms in the HTML pipeline; got: \
              {nav_names:?}",
         );
         assert!(
@@ -6914,6 +6944,7 @@ mod tests {
                 "breadcrumbs-render",
                 "secondary-nav-render",
                 "quarto-nav-js",
+                "search-ui",
                 "page-nav-render",
                 "footer-render",
                 "link-rewrite",

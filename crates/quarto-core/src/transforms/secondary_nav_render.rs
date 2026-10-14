@@ -118,6 +118,12 @@ impl AstTransform for SecondaryNavRenderTransform {
 
         let show_breadcrumbs = resolve_website_bool(&ast.meta, "bread-crumbs", true);
 
+        // Search button when the sidebar carries the search box
+        // (bd-6cme); `quarto-search.js` defines `window.quartoOpenSearch`.
+        let search_label =
+            crate::project::search::ui::sidebar_search_kind(&ast.meta, sidebar.search)
+                .map(|_| crate::project::search::ui::search_label(&ast.meta));
+
         let html = if show_breadcrumbs {
             let page_source = page_relative_source(ctx);
             let mut crumbs = breadcrumb_trail(&sidebar, &page_source);
@@ -146,6 +152,7 @@ impl AstTransform for SecondaryNavRenderTransform {
             secondary_nav_to_html(
                 SecondaryNavContent::Breadcrumbs(&breadcrumbs),
                 &toggle_label,
+                search_label.as_deref(),
             )
         } else {
             // Q1 collapses the page title into the bar instead, and
@@ -154,8 +161,11 @@ impl AstTransform for SecondaryNavRenderTransform {
             let Some(title) = ast.meta.get("title") else {
                 return Ok(());
             };
-            let html =
-                secondary_nav_to_html(SecondaryNavContent::CollapsedTitle(title), &toggle_label);
+            let html = secondary_nav_to_html(
+                SecondaryNavContent::CollapsedTitle(title),
+                &toggle_label,
+                search_label.as_deref(),
+            );
             ast.meta.insert_path(
                 &["rendered", "navigation", "secondary-nav-collapsed-title"],
                 ConfigValue::new_bool(true, SourceInfo::generated(By::programmatic_config())),
