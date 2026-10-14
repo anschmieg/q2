@@ -7,7 +7,7 @@
  * Binary asset uploads go through `NewAssetDialog` (a sibling component).
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { normalizeProjectPath } from '@quarto/preview-renderer/types/project';
 import { discoverTemplates, type ProjectTemplate } from '../services/templateService';
 import ModalDialog from './ModalDialog';
@@ -71,7 +71,6 @@ export default function NewFileDialog({
   const [selectedTemplate, setSelectedTemplate] = useState<ProjectTemplate | null>(null);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
 
-  const filenameInputRef = useRef<HTMLInputElement>(null);
 
   // Seed the folder picker and filename input on open.
   useEffect(() => {
@@ -102,13 +101,6 @@ export default function NewFileDialog({
         .finally(() => {
           setLoadingTemplates(false);
         });
-    }
-  }, [isOpen]);
-
-  // Focus the filename input when the dialog opens.
-  useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => filenameInputRef.current?.focus(), 100);
     }
   }, [isOpen]);
 
@@ -250,7 +242,12 @@ export default function NewFileDialog({
             <div className="filename-input">
               <label htmlFor="filename">{dialogs.newFile.filenameLabel}</label>
               <input
-                ref={filenameInputRef}
+                // autoFocus, not a deferred focus(): a timer fires after the
+                // user may already have moved focus (e.g. to Cancel) and
+                // yanks it back, so Enter submits instead of cancelling.
+                // ModalDialog captures its restore target during render,
+                // before autoFocus runs.
+                autoFocus
                 id="filename"
                 type="text"
                 className="qh-input focus-accent"

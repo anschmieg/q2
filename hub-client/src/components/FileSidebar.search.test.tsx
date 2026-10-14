@@ -52,6 +52,30 @@ describe('FileSidebar search button', () => {
 describe('SearchFilesDialog', () => {
   const base = { isOpen: true, onClose: () => {} };
 
+  // The input used to be focused on a 50ms timer, which could steal focus
+  // back from wherever the user had already moved it.
+  it('focuses the search input on open and does not pull focus back later', () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <SearchFilesDialog
+          {...base}
+          files={[entry('a.qmd')]}
+          searchFiles={async () => []}
+          onSelectFile={() => {}}
+        />
+      );
+      expect(document.activeElement).toBe(screen.getByRole('searchbox', { name: 'Search files' }));
+
+      const closeButton = screen.getByRole('button', { name: 'Close' });
+      closeButton.focus();
+      vi.advanceTimersByTime(500);
+      expect(document.activeElement).toBe(closeButton);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('runs a query and renders ranked results with snippets', async () => {
     const searchFiles = vi.fn(
       async (): Promise<SearchResult[]> => [{ path: 'intro.qmd', score: 2, terms: ['search'] }]

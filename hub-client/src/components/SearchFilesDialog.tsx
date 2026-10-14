@@ -46,16 +46,10 @@ function SearchFilesForm({
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const filesByPath = useMemo(() => new Map(files.map((f) => [f.path, f])), [files]);
   const isSearching = query.trim() !== '';
-
-  useEffect(() => {
-    const t = setTimeout(() => inputRef.current?.focus(), 50);
-    return () => clearTimeout(t);
-  }, []);
 
   // Debounced search; ignore stale resolutions. State updates happen in
   // the timer callback, never synchronously in the effect body.
@@ -124,7 +118,8 @@ function SearchFilesForm({
     >
       <div className="dialog-content">
         <input
-          ref={inputRef}
+          // autoFocus rather than a deferred focus(); see NewFileDialog.
+          autoFocus
           type="search"
           className="qh-input focus-accent search-files-input"
           placeholder={fileSidebar.searchPlaceholder}
