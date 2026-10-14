@@ -5,16 +5,74 @@
  * communicate with it via JSON-RPC over stdio, just like a real
  * MCP client (Claude Code, Cursor, etc.) would.
  *
- * Tests marked with "live" require connectivity to the automerge
- * sync server at wss://sync.automerge.org.
+ * The sync-backed tests run against the in-process test hub
+ * (`startTestHub`), seeded with a small fixture project, so they are
+ * deterministic and need no network. A single smoke test against the
+ * public wss://sync.automerge.org runs only when HUB_MCP_LIVE=1
+ * (bd-hub-mcp-live-tests-local-1nmlez1i: CI used to depend on that
+ * server and a world-editable doc there, and flaked when it was slow).
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import type { DocumentId } from '@automerge/automerge-repo';
 import { McpTestClient } from './mcp-test-client.js';
+import { startTestHub, type TestHub } from './test-hub.js';
 
-// The hello world project on sync.automerge.org
-const SYNC_SERVER = 'wss://sync.automerge.org';
+// The hello world project on sync.automerge.org (opt-in smoke test only)
+const PUBLIC_SYNC_SERVER = 'wss://sync.automerge.org';
 const HELLO_WORLD_DOC = 'automerge:2knrbhSpo36X5Kk6ADkAX6qZLnfM';
+
+// The 8-byte PNG signature plus a few bytes: enough to round-trip as an
+// image/png binary document.
+const FIXTURE_PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
+
+/**
+ * Create a fixture project (index.qmd, _quarto.yml, code.png) on `hub`
+ * through a throwaway server instance, and wait until the hub holds
+ * every document so a fresh instance can do a cold connect.
+ */
+async function seedFixtureProject(hub: TestHub): Promise<string> {
+  const creator = new McpTestClient();
+  await creator.start(['--server', hub.url]);
+  try {
+    const created = await creator.callTool('create_project', {
+      files: [
+        { path: 'index.qmd', content: '---\ntitle: "Hello"\n---\n\nHello, world!\n' },
+        { path: '_quarto.yml', content: 'project:\n  type: website\n' },
+      ],
+    });
+    expect(created.isError).not.toBe(true);
+    const projectId = (JSON.parse(created.content[0]!.text) as { indexDocId: string })
+      .indexDocId;
+
+    const png = await creator.callTool('edit', { action: 'write',
+      project: projectId,
+      path: 'code.png',
+      content: FIXTURE_PNG.toString('base64'),
+      encoding: 'base64',
+    });
+    expect(png.isError).not.toBe(true);
+
+    // Creation syncs in the background: wait for the index to list all
+    // three files on the hub, then for each file document.
+    expect(await hub.hubHasDoc(projectId, 8000)).toBe(true);
+    const index = await hub.repo.find<{ files: Record<string, string> }>(
+      projectId as DocumentId,
+    );
+    const deadline = Date.now() + 8000;
+    while (Object.keys(index.doc()?.files ?? {}).length < 3 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const files = index.doc()!.files;
+    expect(Object.keys(files).sort()).toEqual(['_quarto.yml', 'code.png', 'index.qmd']);
+    for (const docId of Object.values(files)) {
+      expect(await hub.hubHasDoc(docId, 8000)).toBe(true);
+    }
+    return projectId;
+  } finally {
+    await creator.stop();
+  }
+}
 
 // ============================================================================
 // Protocol tests (no sync server needed)
@@ -217,28 +275,44 @@ describe('MCP protocol (read-only mode)', () => {
 });
 
 // ============================================================================
-// Live integration tests (require sync.automerge.org)
+// Sync integration tests (in-process test hub)
 // ============================================================================
 
-describe('live: connect and read', () => {
+describe('hub: connect and read', () => {
+  let hub: TestHub;
   let client: McpTestClient;
+  let projectId: string;
+  let shareUrl: string;
 
   beforeAll(async () => {
+    hub = await startTestHub();
+    projectId = await seedFixtureProject(hub);
+    // End-to-end share-URL handling: the `project` argument is a full
+    // quarto-hub.com share link rather than a bare id. The server must
+    // extract the id from the `#/share/<id>` fragment, and `file=` must
+    // supply a default `path` so read_file works with no explicit path.
+    // (bd-m4slev7a)
+    shareUrl =
+      `https://quarto-hub.com/#/share/${projectId}` +
+      `?server=${encodeURIComponent(hub.url)}&file=index.qmd&name=Hello+World`;
+
+    // A fresh server instance does the cold connect.
     client = new McpTestClient();
-    await client.start(['--server', SYNC_SERVER]);
-  }, 15000);
+    await client.start(['--server', hub.url]);
+  }, 60000);
 
   afterAll(async () => {
-    await client.stop();
+    await client?.stop();
+    await hub?.stop();
   });
 
-  it('should connect to the hello world project', async () => {
+  it('should connect to the fixture project', async () => {
     const result = await client.callTool('project', { action: 'connect',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
     });
     expect(result.isError).toBeUndefined();
     const data = JSON.parse(result.content[0]!.text);
-    expect(data.project).toBe(HELLO_WORLD_DOC);
+    expect(data.project).toBe(projectId);
     expect(data.files).toBeInstanceOf(Array);
     expect(data.files.length).toBeGreaterThan(0);
 
@@ -248,9 +322,9 @@ describe('live: connect and read', () => {
     expect(paths).toContain('_quarto.yml');
   }, 15000);
 
-  it('should list files in the hello world project', async () => {
+  it('should list files in the fixture project', async () => {
     const result = await client.callTool('read', { action: 'list',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
     });
     expect(result.isError).toBeUndefined();
     const files = JSON.parse(result.content[0]!.text);
@@ -266,19 +340,19 @@ describe('live: connect and read', () => {
 
   it('should read a text file', async () => {
     const result = await client.callTool('read', { action: 'read',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
       path: 'index.qmd',
     });
     expect(result.isError).toBeUndefined();
     const content = result.content[0]!.text;
-    // The hello world index.qmd has YAML frontmatter
+    // The fixture index.qmd has YAML frontmatter
     expect(content).toContain('---');
     expect(content).toContain('title:');
   }, 15000);
 
   it('should read _quarto.yml', async () => {
     const result = await client.callTool('read', { action: 'read',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
       path: '_quarto.yml',
     });
     expect(result.isError).toBeUndefined();
@@ -288,7 +362,7 @@ describe('live: connect and read', () => {
 
   it('should read a binary file (CAP-4)', async () => {
     const result = await client.callTool('read', { action: 'read',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
       path: 'code.png',
     });
     expect(result.isError).toBeUndefined();
@@ -305,32 +379,24 @@ describe('live: connect and read', () => {
 
   it('should error on reading a non-existent file', async () => {
     const result = await client.callTool('read', { action: 'read',
-      project: HELLO_WORLD_DOC,
+      project: projectId,
       path: 'does-not-exist.qmd',
     });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('File not found');
   }, 15000);
 
-  // End-to-end share-URL handling: the `project` argument is a full
-  // quarto-hub.com share link rather than a bare id. The server must extract
-  // the id from the `#/share/<id>` fragment, and `file=` must supply a default
-  // `path` so read_file works with no explicit path. (bd-m4slev7a)
-  const SHARE_URL =
-    `https://quarto-hub.com/#/share/${HELLO_WORLD_DOC}` +
-    `?server=wss%3A%2F%2Fsync.automerge.org&file=index.qmd&name=Hello+World`;
-
   it('should connect using a share URL in place of an id', async () => {
-    const result = await client.callTool('project', { action: 'connect', project: SHARE_URL });
+    const result = await client.callTool('project', { action: 'connect', project: shareUrl });
     expect(result.isError).toBeUndefined();
     const data = JSON.parse(result.content[0]!.text);
-    expect(data.project).toBe(HELLO_WORLD_DOC);
+    expect(data.project).toBe(projectId);
     const paths = data.files.map((f: { path: string }) => f.path);
     expect(paths).toContain('index.qmd');
   }, 15000);
 
   it('should read the share URL file= with no explicit path', async () => {
-    const result = await client.callTool('read', { action: 'read', project: SHARE_URL });
+    const result = await client.callTool('read', { action: 'read', project: shareUrl });
     expect(result.isError).toBeUndefined();
     const content = result.content[0]!.text;
     // index.qmd (named by file= in the share URL) has YAML frontmatter.
@@ -340,7 +406,7 @@ describe('live: connect and read', () => {
 
   it('should let an explicit path override the share URL file=', async () => {
     const result = await client.callTool('read', { action: 'read',
-      project: SHARE_URL,
+      project: shareUrl,
       path: '_quarto.yml',
     });
     expect(result.isError).toBeUndefined();
@@ -348,17 +414,20 @@ describe('live: connect and read', () => {
   }, 15000);
 });
 
-describe('live: create project and mutate files', () => {
+describe('hub: create project and mutate files', () => {
+  let hub: TestHub;
   let client: McpTestClient;
   let projectId: string;
 
   beforeAll(async () => {
+    hub = await startTestHub();
     client = new McpTestClient();
-    await client.start(['--server', SYNC_SERVER]);
+    await client.start(['--server', hub.url]);
   }, 15000);
 
   afterAll(async () => {
-    await client.stop();
+    await client?.stop();
+    await hub?.stop();
   });
 
   it('should create a new project', async () => {
@@ -541,4 +610,46 @@ describe('live: create project and mutate files', () => {
     });
     expect(JSON.parse(readResult.content[0]!.text).content).toBe('Created via write_file');
   }, 15000);
+});
+
+// ============================================================================
+// Opt-in smoke test against the public sync server
+// ============================================================================
+
+// Run with HUB_MCP_LIVE=1. Skipped by default so CI does not depend on a
+// public server; when enabled, an unreachable or slow server skips with a
+// warning rather than failing, since that says nothing about this code.
+describe.skipIf(!process.env['HUB_MCP_LIVE'])('live (HUB_MCP_LIVE=1): sync.automerge.org smoke', () => {
+  let client: McpTestClient;
+
+  beforeAll(async () => {
+    client = new McpTestClient();
+    await client.start(['--server', PUBLIC_SYNC_SERVER]);
+  }, 15000);
+
+  afterAll(async () => {
+    await client?.stop();
+  });
+
+  it('connects to the hello world project and reads _quarto.yml', async (ctx) => {
+    const connected = await client.callTool('project', { action: 'connect',
+      project: HELLO_WORLD_DOC,
+    });
+    if (connected.isError) {
+      const why = `${PUBLIC_SYNC_SERVER} unavailable: ${connected.content[0]?.text ?? ''}`;
+      console.warn(`[hub-mcp live smoke] skipping — ${why}`);
+      ctx.skip(why);
+    }
+    const data = JSON.parse(connected.content[0]!.text);
+    expect(data.project).toBe(HELLO_WORLD_DOC);
+    const paths = data.files.map((f: { path: string }) => f.path);
+    expect(paths).toContain('_quarto.yml');
+
+    const read = await client.callTool('read', { action: 'read',
+      project: HELLO_WORLD_DOC,
+      path: '_quarto.yml',
+    });
+    expect(read.isError).toBeUndefined();
+    expect(read.content[0]!.text.length).toBeGreaterThan(0);
+  }, 60000);
 });

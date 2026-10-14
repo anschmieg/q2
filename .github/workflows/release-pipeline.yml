@@ -315,6 +315,13 @@ jobs:
             crates/wasm-qmd-parser/pkg-nodejs
           retention-days: 7
           if-no-files-found: error
+          # pkg-nodejs/.build-stamp is a dotfile, and upload-artifact
+          # drops hidden files by default. Without the stamp, every
+          # downstream `npm run bundle` sees the pkg as stale and tries
+          # to rebuild it with wasm-pack, which only this job installs
+          # (dry-run nightly 38625518489). None of the other staged
+          # dirs contain hidden files.
+          include-hidden-files: true
 
   # Standalone hub MCP server bundle (bd-sca6g1tu): the same
   # ts-packages/quarto-hub-mcp dist-bundle that gets embedded into q2,
@@ -403,7 +410,7 @@ jobs:
               || { echo "::error::qmd parser $f not staged"; exit 1; }
           done
           node --input-type=module -e \
-            "const m = await import('$DIR/node_modules/wasm-qmd-parser/wasm_qmd_parser.js'); \
+            "const m = await import('./$DIR/node_modules/wasm-qmd-parser/wasm_qmd_parser.js'); \
              const r = JSON.parse(m.parse_qmd('# ok\n', 'true')); \
              if (r.success !== true) { console.error('qmd parser smoke failed'); process.exit(1); }"
           node "$DIR/index.mjs" --help >/dev/null
@@ -636,6 +643,14 @@ jobs:
           QUARTO_HUB_BUNDLED_CLIENT_SECRET: ${{ secrets.QUARTO_HUB_MCP_CLIENT_SECRET }}
           QUARTO_HUB_BUNDLED_SERVER: ${{ vars.QUARTO_HUB_SERVER }}
           NIGHTLY_VERSION: ${{ inputs.channel == 'nightly' && inputs.version || '' }}
+          # aarch64 only: Ubuntu's gcc defaults to -moutline-atomics,
+          # whose __aarch64_* helpers musl-gcc does not link, so every
+          # atomics probe in jemalloc's configure fails to link and the
+          # build dies with "Don't have atomics implemented on this
+          # platform". jemalloc comes in via pagefind, which pulls in
+          # tikv-jemallocator on every 64-bit musl target (dry-run
+          # nightly 38634938445). Inline atomics are fine on armv8.0.
+          CFLAGS_aarch64_unknown_linux_musl: ${{ matrix.target == 'aarch64-unknown-linux-musl' && '-mno-outline-atomics' || '' }}
         run: |
           for VAR in QUARTO_HUB_BUNDLED_CLIENT_ID QUARTO_HUB_BUNDLED_CLIENT_SECRET QUARTO_HUB_BUNDLED_SERVER; do
             if [ -z "${!VAR}" ]; then
