@@ -1,0 +1,62 @@
+name: Q2 M1 preview dependency verification
+on:
+  push:
+    branches: [research/q2-m1-preview-deps-direct]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: q2-m1-preview-deps-direct-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify checkout
+        run: |
+          git rev-parse HEAD
+          cat rust-toolchain.toml
+      - uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: q2-m1-preview-deps-direct
+          cache-on-failure: true
+      - name: Check transitive deps and fail-open regressions
+        run: cargo test -p quarto-preview --lib project_mode -- --nocapture
+
+  spa-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked workspace dependencies
+        run: npm ci
+      - name: Test preview filter and dependency response
+        run: npm run test --workspace=q2-preview-spa -- src/shouldRerenderForTextChange.test.ts
+      - name: Typecheck preview SPA
+        run: npm run typecheck --workspace=q2-preview-spa
