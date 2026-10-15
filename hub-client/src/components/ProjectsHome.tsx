@@ -1,9 +1,9 @@
 /**
- * ProjectsHome — full-page projects view (explore/projects-collections-ui).
+ * ProjectsHome — full-page projects view.
  *
  * Implements the "Short term" design from QH-ProjectManagement-July26.fig:
  * collections + streamlined entry, buildable on today's metadata. Replaces the
- * ProjectSelector modal on this exploration branch:
+ * ProjectSelector modal:
  *   - header bar: logo, search (⌘K), Connect/Import ▾, ＋ New ▾, avatar menu
  *   - personal collections with project cards (paged at 6+)
  *   - "Everything else" list with per-project ⋯ menu, Rename and Peek for
@@ -2386,6 +2386,7 @@ export default function ProjectsHome({
         isOpen={showLinkDialog}
         shareableUrl={projectSetLinkUrl}
         onClose={() => setShowLinkDialog(false)}
+        variant="projectSet"
       />
 
       <footer className="qh-footer">
@@ -2394,7 +2395,6 @@ export default function ProjectsHome({
             {__GIT_COMMIT_HASH__}
           </span>
         </Tooltip>
-        <span className="qh-footer-note">collections UI exploration</span>
       </footer>
     </div>
   );

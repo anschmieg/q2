@@ -408,6 +408,14 @@ export const dialogs = {
     copyLink: 'Copy link',
     copied: 'Copied!',
   },
+  // Text overrides for the project-set variant of the share dialog (the
+  // "link another browser" flow): the link carries the project set document,
+  // which holds every project's document ID, so the warning is broader.
+  linkBrowser: {
+    title: 'Link another browser',
+    warning: 'Anyone with this link can access and edit every project in your project list permanently.',
+    warningDetail: 'Meant for linking your own browsers and devices — only share it with people you trust. The link cannot be revoked.',
+  },
   newAsset: {
     title: 'Add asset to project',
     destinationLabel: 'Folder:',

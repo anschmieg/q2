@@ -1035,6 +1035,16 @@ const DEV_PAGES: Record<string, () => React.ReactNode> = {
       />
     </EditorChrome>
   ),
+  'dialog-share-project-set': () => (
+    <EditorChrome>
+      <ShareDialog
+        isOpen={true}
+        shareableUrl="https://hub.example.com/#/link-project-set/abc123?server=wss%3A%2F%2Fsync.example.com"
+        onClose={() => {}}
+        variant="projectSet"
+      />
+    </EditorChrome>
+  ),
   'dialog-new-asset': () => (
     <EditorChrome>
       <NewAssetDialog
