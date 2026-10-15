@@ -127,6 +127,16 @@ jobs:
       - name: Run real Chromium nested-include preview tests
         working-directory: q2-preview-spa
         run: npx playwright test e2e/project-transitive-deps.spec.ts --project=chromium --retries=0
+      - name: Native full vs targeted HTML parity and timings
+        run: bash scripts/ci/q2-m1-native-parity.sh
+      - name: Archive native parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q2-m1-native-parity
+          path: m1-verification/
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Archive Chromium test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -137,3 +147,83 @@ jobs:
             q2-preview-spa/playwright-report/
           if-no-files-found: ignore
           retention-days: 14
+
+  native-full-suite:
+    name: Complete native Rust regression suite on patched Q2
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    env:
+      QUARTO_CI: "1"
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Free runner disk
+        uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - name: Prune ephemeral Docker images
+        run: |
+          sudo docker image prune --all --force
+          sudo docker builder prune --all --force
+          df -h .
+      - name: Install pinned native test dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libc6-dev gcc-multilib minisign
+          curl --fail --location --retry 3 -o pandoc.deb https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-1-amd64.deb
+          sudo dpkg -i pandoc.deb
+          curl --fail --location --retry 3 -o typst.tar.xz https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz
+          tar -xf typst.tar.xz
+          sudo install -m 0755 typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst
+          curl --fail --location --retry 3 -o tree-sitter.gz https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.8/tree-sitter-linux-x86.gz
+          gunzip tree-sitter.gz
+          sudo install -m 0755 tree-sitter /usr/local/bin/tree-sitter
+          pandoc --version | head -2
+          typst --version
+          tree-sitter --version
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+          components: rust-src,rustfmt,clippy
+          targets: wasm32-unknown-unknown
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: "2.9.0"
+      - name: Verify pinned Deno
+        run: |
+          deno --version
+          test "$(deno --version | head -1 | awk '{print $2}')" = "2.9.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install JS dependencies
+        run: npm ci
+      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-insta
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: q2-m1-native-complete
+          cache-on-failure: true
+          cache-bin: false
+      - name: Run full patched native suite without fail-fast
+        shell: bash
+        run: |
+          mkdir -p m1-verification
+          cargo nextest run --tests --cargo-profile ci --no-fail-fast 2>&1 | tee m1-verification/native-full.log
+      - name: Archive native full suite logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q2-m1-full-native-results
+          path: m1-verification/
+          retention-days: 14
+          if-no-files-found: ignore
