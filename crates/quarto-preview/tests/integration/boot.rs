@@ -142,14 +142,14 @@ async fn boots_serves_spa_plus_hub_health() {
 async fn project_deps_http_endpoint_includes_nested_children() {
     let project = tempfile::TempDir::with_prefix("q2-preview-deps-").unwrap();
     let data = tempfile::TempDir::with_prefix("q2-preview-deps-data-").unwrap();
-    std::fs::write(project.path().join("_quarto.yml"), "project:\\n  type: website\\n").unwrap();
+    std::fs::write(project.path().join("_quarto.yml"), "project:\n  type: website\n").unwrap();
     std::fs::write(
         project.path().join("index.qmd"),
-        "# Active\\n\\n{{< include outer.qmd >}}\\n",
+        "# Active\n\n{{< include outer.qmd >}}\n",
     ).unwrap();
-    std::fs::write(project.path().join("outer.qmd"), "{{< include leaf.qmd >}}\\n").unwrap();
-    std::fs::write(project.path().join("leaf.qmd"), "Updated content\\n").unwrap();
-    std::fs::write(project.path().join("unrelated.qmd"), "# Unrelated\\n").unwrap();
+    std::fs::write(project.path().join("outer.qmd"), "{{< include leaf.qmd >}}\n").unwrap();
+    std::fs::write(project.path().join("leaf.qmd"), "Updated content\n").unwrap();
+    std::fs::write(project.path().join("unrelated.qmd"), "# Unrelated\n").unwrap();
 
     let port = pick_free_port();
     let config = PreviewConfig {
