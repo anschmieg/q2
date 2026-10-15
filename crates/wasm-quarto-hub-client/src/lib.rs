@@ -2293,6 +2293,17 @@ async fn render_single_doc_to_response(
     // bd-0rsk07il: the profile was bridged onto the RenderContext by
     // `run_pipeline` (via the `UnwrapProfileStage` stash).
     let comments = comments_to_json(ctx.document_profile.as_ref(), &source_context);
+    // Single-file preview uses the same core graph interface, but only
+    // the active document has a profile. An unavailable profile is unknown.
+    let render_inputs = ctx.document_profile.as_ref().and_then(|profile| {
+        let index = quarto_core::project::index::ProjectIndex::new(vec![profile.clone()]);
+        live_dependencies::render_input_paths(
+            &index,
+            &project.config.metadata.clone().unwrap_or_default(),
+            &project.dir,
+            path,
+        )
+    });
     serde_json::to_string(&RenderResponse {
         success: true,
         error: None,
@@ -2310,6 +2321,7 @@ async fn render_single_doc_to_response(
         pass1_failures: None,
         theme_fingerprint,
         comments,
+        render_inputs,
     })
     .unwrap()
 }
@@ -2674,6 +2686,7 @@ fn error_response(msg: impl Into<String>) -> String {
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }
@@ -2701,6 +2714,7 @@ fn render_error_response(e: QuartoError) -> String {
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }
@@ -2741,6 +2755,7 @@ fn pass_failure_response(
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }
