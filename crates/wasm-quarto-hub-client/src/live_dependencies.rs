@@ -7,7 +7,7 @@
 //! attach smaller render-unit keys without changing the source identity
 //! contract or teaching the browser about QMD shortcodes.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use quarto_core::project::dependency_graph::ProjectDependencyGraph;
 use quarto_core::project::index::ProjectIndex;
@@ -75,6 +75,8 @@ fn path_for_sync(input: &Path, root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use quarto_core::document_profile::{DocumentProfile, IncludeEntry};
 
     fn profile(name: &str, files: &[&str]) -> DocumentProfile {
@@ -82,7 +84,10 @@ mod tests {
             source_path: PathBuf::from(name),
             output_href: name.replace(".qmd", ".html"),
             format_id: "html".to_string(),
-            includes: files.iter().map(|file| IncludeEntry::new(PathBuf::from(file), b"x")).collect(),
+            includes: files
+                .iter()
+                .map(|file| IncludeEntry::new(PathBuf::from(file), b"x"))
+                .collect(),
             ..Default::default()
         }
     }
@@ -110,17 +115,31 @@ mod tests {
 
     #[test]
     fn unknown_or_unrepresentable_dependency_must_fail_open() {
-        let index = ProjectIndex::new(vec![
-            profile("index.qmd", &["/elsewhere/secret.qmd"]),
-        ]);
+        let index = ProjectIndex::new(vec![profile("index.qmd", &["/elsewhere/secret.qmd"])]);
         assert_eq!(
-            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/index.qmd")),
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+            ),
             None,
         );
-        assert_eq!(path_for_sync(Path::new("a/../b.qmd"), Path::new("/project")), None);
-        assert_eq!(path_for_sync(Path::new("/other/b.qmd"), Path::new("/project")), None);
         assert_eq!(
-            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/not-indexed.qmd")),
+            path_for_sync(Path::new("a/../b.qmd"), Path::new("/project")),
+            None
+        );
+        assert_eq!(
+            path_for_sync(Path::new("/other/b.qmd"), Path::new("/project")),
+            None
+        );
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/not-indexed.qmd"),
+            ),
             None,
         );
     }
@@ -135,7 +154,12 @@ mod tests {
             profile("unrelated.qmd", &[]),
         ]);
         assert_eq!(
-            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/index.qmd")),
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+            ),
             Some(vec!["about.qmd".to_string(), "index.qmd".to_string(), "sub/leaf.qmd".to_string()]),
         );
     }
