@@ -37,6 +37,8 @@ use quarto_system_runtime::{SystemRuntime, WasmRuntime};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+mod live_dependencies;
+
 // Global runtime instance for VFS operations.
 // Stored as Arc so it can be shared with the rendering pipeline.
 static RUNTIME: OnceLock<Arc<WasmRuntime>> = OnceLock::new();
@@ -696,6 +698,14 @@ struct RenderResponse {
     /// responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     comments: Option<Vec<quarto_core::document_profile::JsonComment>>,
+    /// Complete input-file paths affecting the active *document* render,
+    /// derived from the authoritative core ProjectDependencyGraph snapshot.
+    /// Paths are project-relative and match sync-client file events.
+    /// Absent on failures/incomplete profiles; absence means unknown and
+    /// must disable selective filtering. Future finer-grained render units
+    /// can use the same file identity contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_inputs: Option<Vec<String>>,
 }
 
 /// Build the `RenderResponse.comments` summary from a document
