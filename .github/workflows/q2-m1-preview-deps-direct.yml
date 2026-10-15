@@ -42,6 +42,8 @@ jobs:
           cache-on-failure: true
       - name: Check transitive deps and fail-open regressions
         run: cargo test -p quarto-preview --lib project_mode -- --nocapture
+      - name: Exercise project dependency endpoint over HTTP
+        run: cargo test -p quarto-preview --test integration boot::project_deps_http_endpoint_includes_nested_children -- --nocapture
 
   spa-deps:
     runs-on: ubuntu-latest
@@ -56,7 +58,7 @@ jobs:
           cache: npm
       - name: Install locked workspace dependencies
         run: npm ci
-      - name: Test preview filter and dependency response
-        run: npm run test --workspace=q2-preview-spa -- src/shouldRerenderForTextChange.test.ts
+      - name: Test SPA dependency filters, request races, and file membership
+        run: npm run test --workspace=q2-preview-spa -- src/shouldRerenderForTextChange.test.ts src/PreviewApp.integration.test.tsx
       - name: Typecheck preview SPA
         run: npm run typecheck --workspace=q2-preview-spa

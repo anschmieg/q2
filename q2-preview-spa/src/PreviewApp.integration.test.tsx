@@ -1493,3 +1493,56 @@ describe('PreviewApp: formats with no live preview (bd-kltzdhle, D5)', () => {
     consoleError.mockRestore();
   });
 });
+
+describe('project dependency sync and request ordering', () => {
+  it('discards an older deps response after the active page has changed revision', async () => {
+    const baseFetch = globalThis.fetch;
+    const pending: Array<(response: Response) => void> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).startsWith('/api/preview/deps?page=')) {
+        return new Promise<Response>((resolve) => pending.push(resolve));
+      }
+      return baseFetch(input);
+    }));
+    const runtime = await import('@quarto/preview-runtime');
+    const renderMock = runtime.renderPageForPreview as ReturnType<typeof vi.fn>;
+    render(<PreviewApp />);
+    await waitFor(() => expect(screen.queryByTestId('q2-preview-iframe-mock')).not.toBeNull());
+    await waitFor(() => expect(pending).toHaveLength(1));
+    const handlers = (runtime.setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as
+      { onFileContent?: (path: string) => void };
+    expect(handlers.onFileContent).toBeTypeOf('function');
+    act(() => handlers.onFileContent!('index.qmd'));
+    await waitFor(() => expect(pending).toHaveLength(2));
+    // Newer request includes leaf.qmd; the old answer did not.
+    await act(async () => {
+      pending[1](new Response(JSON.stringify({ deps: ['leaf.qmd'] }), { status: 200 }));
+    });
+    await act(async () => {
+      pending[0](new Response(JSON.stringify({ deps: [] }), { status: 200 }));
+    });
+    const before = renderMock.mock.calls.length;
+    act(() => handlers.onFileContent!('leaf.qmd'));
+    await waitFor(() => expect(renderMock.mock.calls.length).toBeGreaterThan(before));
+  });
+  it('renders when newly created file appears without content event and deps unknown', async () => {
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).startsWith('/api/preview/deps?page=')) return new Promise<Response>(() => {});
+      return baseFetch(input);
+    }));
+    const runtime = await import('@quarto/preview-runtime');
+    const renderMock = runtime.renderPageForPreview as ReturnType<typeof vi.fn>;
+    render(<PreviewApp />);
+    await waitFor(() => expect(screen.queryByTestId('q2-preview-iframe-mock')).not.toBeNull());
+    const handlers = (runtime.setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as
+      { onFilesChange?: (files: FileEntry[]) => void };
+    expect(handlers.onFilesChange).toBeTypeOf('function');
+    const before = renderMock.mock.calls.length;
+    act(() => handlers.onFilesChange!([
+      { path: 'index.qmd', docId: 'automerge:doc-index' },
+      { path: 'new-leaf.qmd', docId: 'automerge:new-leaf' },
+    ]));
+    await waitFor(() => expect(renderMock.mock.calls.length).toBeGreaterThan(before));
+  });
+});

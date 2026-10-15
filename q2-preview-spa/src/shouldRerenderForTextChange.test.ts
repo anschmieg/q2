@@ -11,7 +11,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { decodePreviewDepsResponse, shouldRerenderForTextChange } from './PreviewApp';
+import {
+  decodePreviewDepsResponse,
+  isCurrentPreviewDepsRequest,
+  shouldRefreshForFileMembershipChange,
+  shouldRerenderForTextChange,
+} from './PreviewApp';
 
 describe('shouldRerenderForTextChange', () => {
   const deps = new Set(['included.qmd', 'snippets/part.md']);
@@ -81,5 +86,25 @@ describe('preview transitive dependency response', () => {
   it('distinguishes an explicitly empty known set from an unknown closure', () => {
     expect(decodePreviewDepsResponse('index.qmd', { deps: [] })).toEqual(new Set(['index.qmd']));
     expect(decodePreviewDepsResponse('index.qmd', { deps: null })).toBeNull();
+  });
+});
+
+describe('project dependency membership and async revisions', () => {
+  it('refreshes for new and removed file membership while closure is unknown', () => {
+    expect(shouldRefreshForFileMembershipChange(['index.qmd'], ['index.qmd', 'new.qmd'], null)).toBe(true);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd', 'new.qmd'], ['index.qmd'], null)).toBe(true);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd'], ['index.qmd'], null)).toBe(false);
+  });
+  it('keeps complete closures selective for unrelated siblings', () => {
+    const deps = new Set(['index.qmd', 'included.qmd']);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd'], ['index.qmd', 'sibling.qmd'], deps)).toBe(false);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd', 'sibling.qmd'], ['index.qmd'], deps)).toBe(false);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd', 'included.qmd'], ['index.qmd'], deps)).toBe(true);
+    expect(shouldRefreshForFileMembershipChange(['index.qmd'], ['index.qmd', 'included.qmd'], deps)).toBe(true);
+  });
+  it('rejects old responses even when their active page still matches', () => {
+    expect(isCurrentPreviewDepsRequest('index.qmd', 2, 'index.qmd', 1)).toBe(false);
+    expect(isCurrentPreviewDepsRequest('other.qmd', 2, 'index.qmd', 2)).toBe(false);
+    expect(isCurrentPreviewDepsRequest('index.qmd', 2, 'index.qmd', 2)).toBe(true);
   });
 });

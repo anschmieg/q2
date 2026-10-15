@@ -467,6 +467,34 @@ export function decodePreviewDepsResponse(
   return new Set([activePath, ...deps]);
 }
 
+/** File-list changes can occur without a content callback (e.g. new files).
+ * Unknown closure = refresh on any added or removed file. Complete
+ * closure = only tracked membership changes need a new render.
+ */
+export function shouldRefreshForFileMembershipChange(
+  previousPaths: readonly string[],
+  nextPaths: readonly string[],
+  deps: ReadonlySet<string> | null,
+): boolean {
+  const before = new Set(previousPaths);
+  const after = new Set(nextPaths);
+  const relevant = (path: string) => deps === null || deps.has(path);
+  return previousPaths.some((path) => relevant(path) && !after.has(path))
+    || nextPaths.some((path) => relevant(path) && !before.has(path));
+}
+
+/** Reject dependency fetches for an older active page or content revision.
+ * A response can resolve before its effect cleanup runs.
+ */
+export function isCurrentPreviewDepsRequest(
+  activeFile: string | null,
+  contentTick: number,
+  requestedFile: string,
+  requestedTick: number,
+): boolean {
+  return activeFile === requestedFile && contentTick === requestedTick;
+}
+
 export function shouldRerenderForTextChange(
   changedPath: string,
   activeFile: string | null,
@@ -799,18 +827,18 @@ export default function PreviewApp() {
           onFilesChange: (files) => {
             if (cancelled) return;
             setState((s) => {
-              // Deleting a previously tracked file may not produce an
-              // onFileContent event. Invalidate the filter so a missing
-              // include is rendered and diagnosed rather than left stale.
-              const nextPaths = new Set(files.map((file) => file.path));
-              const removedTrackedDep = s.deps !== null && s.files.some(
-                (file) => s.deps!.has(file.path) && !nextPaths.has(file.path),
+              // Missing includes can be repaired by new file membership
+              // without an onFileContent callback; fail open while unknown.
+              const refresh = s.activeFile !== null && shouldRefreshForFileMembershipChange(
+                s.files.map((file) => file.path),
+                files.map((file) => file.path),
+                s.deps,
               );
               return {
                 ...s,
                 files,
-                deps: removedTrackedDep ? null : s.deps,
-                contentTick: removedTrackedDep ? s.contentTick + 1 : s.contentTick,
+                deps: refresh ? null : s.deps,
+                contentTick: refresh ? s.contentTick + 1 : s.contentTick,
               };
             });
           },
@@ -1042,6 +1070,11 @@ export default function PreviewApp() {
     if (!state.activeFile) return;
     let cancelled = false;
     const activePath = state.activeFile;
+    const requestedTick = state.contentTick;
+    // The state-revision guard also protects the gap before effect cleanup.
+    const isCurrent = (s: PreviewAppState) => isCurrentPreviewDepsRequest(
+      s.activeFile, s.contentTick, activePath, requestedTick,
+    );
     void (async () => {
       try {
         const resp = await fetch(
@@ -1057,14 +1090,14 @@ export default function PreviewApp() {
           console.warn(
             `deps fetch returned ${resp.status} for ${activePath}; filter falls open`,
           );
-          setState((s) => s.activeFile === activePath ? { ...s, deps: null } : s);
+          setState((s) => isCurrent(s) ? { ...s, deps: null } : s);
           return;
         }
         const body: unknown = await resp.json();
         if (cancelled) return;
         const set = decodePreviewDepsResponse(activePath, body);
         setState((s) =>
-          s.activeFile === activePath ? { ...s, deps: set } : s,
+          isCurrent(s) ? { ...s, deps: set } : s,
         );
       } catch (e) {
         // Network errors etc. — fail-open, just log.
@@ -1072,7 +1105,7 @@ export default function PreviewApp() {
           `deps fetch threw for ${activePath}: ${e instanceof Error ? e.message : String(e)}`,
         );
         if (!cancelled) {
-          setState((s) => s.activeFile === activePath ? { ...s, deps: null } : s);
+          setState((s) => isCurrent(s) ? { ...s, deps: null } : s);
         }
       }
     })();
