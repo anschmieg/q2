@@ -1421,7 +1421,10 @@ mod tests {
     #[test]
     fn render_inputs_include_active_sibling_profiles_and_their_nested_files() {
         let mut profiles = vec![
-            with_includes("index.qmd", &["/project/includes/outer.qmd", "/project/includes/leaf.qmd"]),
+            with_includes(
+                "index.qmd",
+                &["/project/includes/outer.qmd", "/project/includes/leaf.qmd"],
+            ),
             with_includes("about.qmd", &["/project/includes/about-note.qmd"]),
             with_includes("unrelated.qmd", &["/project/includes/irrelevant.qmd"]),
         ];
@@ -1441,7 +1444,11 @@ mod tests {
                 PathBuf::from("/project/includes/about-note.qmd"),
             ]),
         );
-        assert!(!graph.render_inputs_for(Path::new("index.qmd")).contains(Path::new("unrelated.qmd")));
+        assert!(
+            !graph
+                .render_inputs_for(Path::new("index.qmd"))
+                .contains(Path::new("unrelated.qmd"))
+        );
     }
 
     #[test]
@@ -1450,14 +1457,25 @@ mod tests {
             with_includes("index.qmd", &["/project/old.qmd"]),
             with_includes("other.qmd", &[]),
         ]);
-        let mut graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
         graph.replace_include_dependencies(Path::new("index.qmd"), [Path::new("/project/new.qmd")]);
         assert_eq!(
             graph.render_inputs_for(Path::new("index.qmd")),
-            BTreeSet::from([PathBuf::from("index.qmd"), PathBuf::from("/project/new.qmd")]),
+            BTreeSet::from([
+                PathBuf::from("index.qmd"),
+                PathBuf::from("/project/new.qmd")
+            ]),
         );
-        assert!(!graph.render_inputs_for(Path::new("index.qmd")).contains(Path::new("/project/old.qmd")));
-        assert_eq!(graph.render_inputs_for(Path::new("other.qmd")), BTreeSet::from([PathBuf::from("other.qmd")]));
+        assert!(
+            !graph
+                .render_inputs_for(Path::new("index.qmd"))
+                .contains(Path::new("/project/old.qmd"))
+        );
+        assert_eq!(
+            graph.render_inputs_for(Path::new("other.qmd")),
+            BTreeSet::from([PathBuf::from("other.qmd")])
+        );
     }
 
     #[test]
