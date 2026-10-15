@@ -146,14 +146,10 @@ interface PreviewAppState {
    */
   themeFingerprint: string | null | undefined;
   /**
-   * Phase D.6 (bd-kw93.12): dep set for the *current* `activeFile`,
-   * fetched from `/api/preview/deps`. `null` means "unknown yet";
-   * the filter in `onFileContent` falls back to pre-D.6 behaviour
-   * (every change bumps `contentTick`) when null — fail-open is
-   * correct because a missed re-render is the worse failure mode
-   * here. Paths in the set are project-relative forward-slash
-   * strings; `activeFile` itself is included in the set for a
-   * single comparison call.
+   * Render-input snapshot from the last completed WASM render's
+   * core ProjectDependencyGraph. null = not yet known / invalidated /
+   * incomplete: accept every file change until a new render completes.
+   * Paths match project-relative sync event names, including activeFile.
    */
   deps: Set<string> | null;
   /**
@@ -443,10 +439,9 @@ function buildInitialState(): PreviewAppState {
  * project-wide signals that affect rendering regardless of the active
  * page's include-shortcode set, so they always pass.
  *
- * Returns true (fail-open) when `deps` is null — the server response
- * hasn't landed yet, and we'd rather over-render than miss a change.
- * (The deps fetch seeds the set with the active page itself, so "edit
- * my own page" needs no special case here.)
+ * Returns true (fail-open) when `deps` is null — the next complete
+ * WASM render has not yet supplied a core dependency snapshot, and
+ * missing an edit would leave stale output.
  *
  * Exported for unit testing.
  */
@@ -458,11 +453,28 @@ export function shouldRerenderForTextChange(
   if (!activeFile) return true;
   // Non-source edits always pass: they're either config (_quarto.yml,
   // _metadata.yml) or project-wide assets (CSS, custom components)
-  // that the include-shortcode dep extractor doesn't track.
+  // that aren't represented in the graph's file-include channel.
   const lower = changedPath.toLowerCase();
   if (!lower.endsWith('.qmd') && !lower.endsWith('.md')) return true;
   if (deps === null) return true;
   return deps.has(changedPath);
+}
+
+/** Validate the WASM snapshot as a whole before allowing negative filtering.
+ * The core always includes the active file; a malformed/missing snapshot
+ * is unknown, never an authoritative empty set.
+ */
+export function decodeRenderInputs(input: unknown, activeFile: string): Set<string> | null {
+  if (!Array.isArray(input)) return null;
+  if (!input.every((value) =>
+    typeof value === 'string' &&
+    value.length > 0 &&
+    !value.startsWith('/') &&
+    !value.includes('\\') &&
+    !value.split('/').includes('..')
+  )) return null;
+  const deps = new Set<string>(input);
+  return deps.has(activeFile) ? deps : null;
 }
 
 /**
@@ -691,6 +703,7 @@ export default function PreviewApp() {
       return {
         ...s,
         activeFile: path,
+        deps: null,
         pendingAnchor: anchor,
         pendingAnchorEpoch: anchor ? s.pendingAnchorEpoch + 1 : s.pendingAnchorEpoch,
       };
@@ -726,6 +739,7 @@ export default function PreviewApp() {
         return {
           ...s,
           activeFile: restored,
+          deps: null,
           pendingAnchor: restoredAnchor,
           // Bump on any popstate that carries an anchor so the
           // iframe re-scrolls. Same logic as `handleNavigate`.
@@ -779,7 +793,17 @@ export default function PreviewApp() {
         setSyncHandlers({
           onFilesChange: (files) => {
             if (cancelled) return;
-            setState((s) => ({ ...s, files }));
+            setState((s) => {
+              const previous = new Set(s.files.map((file) => file.path));
+              const current = new Set(files.map((file) => file.path));
+              const membershipChanged = previous.size !== current.size ||
+                [...current].some((path) => !previous.has(path));
+              // Creating/deleting a project input can alter nav/listing
+              // edges without a content notification for the active page.
+              return membershipChanged
+                ? { ...s, files, deps: null, contentTick: s.contentTick + 1 }
+                : { ...s, files };
+            });
           },
           onFileContent: (path: string) => {
             if (cancelled) return;
@@ -798,6 +822,7 @@ export default function PreviewApp() {
               return {
                 ...s,
                 contentTick: s.contentTick + 1,
+                deps: null,
                 tsxTick: isTsx ? s.tsxTick + 1 : s.tsxTick,
               };
             });
@@ -811,7 +836,7 @@ export default function PreviewApp() {
           // pick the change up uniformly.
           onBinaryContent: () => {
             if (cancelled) return;
-            setState((s) => ({ ...s, contentTick: s.contentTick + 1 }));
+            setState((s) => ({ ...s, deps: null, contentTick: s.contentTick + 1 }));
           },
           // Phase C.4: keep the capture sidecar in state so the render
           // effect can pick up server-recorded captures (writes by
@@ -921,6 +946,7 @@ export default function PreviewApp() {
           ...s,
           files: initialFiles,
           activeFile,
+          deps: null,
           pendingAnchor: initialHash || null,
           // Boot epoch is 1 only when there's actually an anchor to
           // scroll to; staying at 0 means "no scroll has been
@@ -996,58 +1022,14 @@ export default function PreviewApp() {
     };
   }, []);
 
-  // Phase D.6 (bd-kw93.12): fetch the dep set for the active page
-  // from `/api/preview/deps`. Re-fetch whenever the active file
-  // itself changes (different page), or whenever its content was
-  // just edited (a new include shortcode might have been added or
-  // removed). The dep set is consumed by `onFileContent`'s filter
-  // above; null = unknown ⇒ fail-open.
-  useEffect(() => {
-    if (!state.activeFile) return;
-    let cancelled = false;
-    const activePath = state.activeFile;
-    void (async () => {
-      try {
-        const resp = await fetch(
-          `/api/preview/deps?page=${encodeURIComponent(activePath)}`,
-        );
-        if (cancelled) return;
-        if (!resp.ok) {
-          // Fail-open: leave `deps` as null so the filter accepts
-          // everything (pre-D.6 behaviour). A 400 here means the
-          // server hasn't indexed the page yet; the next refetch
-          // (driven by the activeFile/contentTick deps below) will
-          // try again.
-          console.warn(
-            `deps fetch returned ${resp.status} for ${activePath}; filter falls open`,
-          );
-          return;
-        }
-        const body = (await resp.json()) as { deps?: string[] };
-        if (cancelled) return;
-        const list = body.deps ?? [];
-        // Include the active page itself in the set so the filter
-        // doesn't need a special-case for "edit my own page."
-        const set = new Set<string>([activePath, ...list]);
-        setState((s) =>
-          s.activeFile === activePath ? { ...s, deps: set } : s,
-        );
-      } catch (e) {
-        // Network errors etc. — fail-open, just log.
-        console.warn(
-          `deps fetch threw for ${activePath}: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [state.activeFile, state.contentTick]);
+  // The authoritative input set is attached to the completed WASM
+  // render (below). Do not independently fetch a disk-based closure:
+  // it can disagree with the synced VFS, particularly during edits.
 
   // bd-b9kzg: fetch the server-side diagnostic list for the
   // active page. Same trigger as the dep fetch above (activeFile
   // change + every contentTick bump) so a fresh diagnostic from
-  // the capture driver / re_execute / deps path becomes visible
+  // the capture driver / re_execute path becomes visible
   // shortly after the file change that produced it. Fail-open:
   // a fetch failure leaves `serverDiagnostics` at its prior
   // value with a console warning — losing visibility on a
@@ -1201,6 +1183,7 @@ export default function PreviewApp() {
           setState((s) => ({
             ...s,
             astJson: result.ast_json ?? null,
+            deps: decodeRenderInputs(result.render_inputs, state.activeFile!),
             untransformedAstJson: result.untransformed_ast_json ?? null,
             renderedContent: capturedContent,
             themeFingerprint: result.theme_fingerprint ?? null,
@@ -1222,6 +1205,7 @@ export default function PreviewApp() {
           // the whole view; otherwise it sits on top of the last render.
           setState((s) => ({
             ...s,
+            deps: null,
             render: {
               failure: { message: noLivePreviewMessage(result.format) },
               diagnostics: result.diagnostics ?? [],
@@ -1246,6 +1230,7 @@ export default function PreviewApp() {
           // to fall back to).
           setState((s) => ({
             ...s,
+            deps: null,
             render: {
               failure: {
                 message:
@@ -1276,6 +1261,7 @@ export default function PreviewApp() {
         const message = err instanceof Error ? err.message : String(err);
         setState((s) => ({
           ...s,
+          deps: null,
           render: {
             failure: { message },
             diagnostics: [],
