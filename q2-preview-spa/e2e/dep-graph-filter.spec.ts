@@ -64,7 +64,13 @@ async function getRenderTicks(page: Page): Promise<number> {
 
 let server: PreviewServerHandle;
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __q2M1Probe?: boolean }).__q2M1Probe = true;
+  });
+  page.on('console', (m) => {
+    if (m.text().startsWith('[q2-m1-probe]')) console.log(m.text());
+  });
   server = await startPreviewServer({
     fixtureFiles: [
       { path: 'index.qmd', content: INDEX_INITIAL },

@@ -426,6 +426,13 @@ function buildInitialState(): PreviewAppState {
   };
 }
 
+function m1Probe(label: string, detail: unknown): void {
+  if (typeof window !== 'undefined' &&
+      (window as unknown as { __q2M1Probe?: boolean }).__q2M1Probe) {
+    console.log('[q2-m1-probe]', label, JSON.stringify(detail));
+  }
+}
+
 /**
  * Phase D.6 (bd-kw93.12): decide whether a text-file change at
  * `changedPath` should trigger a re-render of the page named by
@@ -800,6 +807,7 @@ export default function PreviewApp() {
                 [...current].some((path) => !previous.has(path));
               // Creating/deleting a project input can alter nav/listing
               // edges without a content notification for the active page.
+              if (membershipChanged) m1Probe('membership', { previous: [...previous], current: [...current] });
               return membershipChanged
                 ? { ...s, files, deps: null, contentTick: s.contentTick + 1 }
                 : { ...s, files };
@@ -812,7 +820,9 @@ export default function PreviewApp() {
             // values (the closure was set up at boot time and would
             // otherwise capture stale state).
             setState((s) => {
-              if (!shouldRerenderForTextChange(path, s.activeFile, s.deps)) {
+              const trigger = shouldRerenderForTextChange(path, s.activeFile, s.deps);
+              m1Probe('text-event', { path, active: s.activeFile, deps: s.deps && [...s.deps], trigger });
+              if (!trigger) {
                 return s;
               }
               // GH #402: `.tsx` touches additionally bump tsxTick so the
@@ -1193,7 +1203,11 @@ export default function PreviewApp() {
             return {
               ...s,
               astJson: result.ast_json ?? null,
-              deps: decodeRenderInputs(result.render_inputs, state.activeFile!),
+              deps: (() => {
+                const decoded = decodeRenderInputs(result.render_inputs, state.activeFile!);
+                m1Probe('render-result', { active: state.activeFile, raw: result.render_inputs, decoded: decoded && [...decoded] });
+                return decoded;
+              })(),
               untransformedAstJson: result.untransformed_ast_json ?? null,
               renderedContent: capturedContent,
               themeFingerprint: result.theme_fingerprint ?? null,
