@@ -2418,7 +2418,7 @@ async fn render_project_active_page_to_response(
     // Likewise captured before the move: reported on the response so hosts
     // can tell which format the render actually ran with (bd-kltzdhle).
     let resolved_format = format.target_format.clone();
-    let summary = match kind {
+    let (summary, pass1_index) = match kind {
         Some("preview") => {
             let mut renderer = RenderToPreviewAstRenderer::new("/.quarto/project-artifacts");
             // bd-lucp / bd-5yff4: when captures are present, attach the
@@ -2440,8 +2440,9 @@ async fn render_project_active_page_to_response(
                 renderer,
             )
             .with_mode(RenderMode::ActivePage(active_canonical.clone()));
-            match pipeline.run().await {
-                Ok(s) => s,
+            let finished = pipeline.run().await;
+            match finished {
+                Ok(summary) => (summary, pipeline.last_project_index()),
                 Err(e) => return render_error_response(e),
             }
         }
@@ -2462,11 +2463,29 @@ async fn render_project_active_page_to_response(
                 renderer,
             )
             .with_mode(RenderMode::ActivePage(active_canonical.clone()));
-            match pipeline.run().await {
-                Ok(s) => s,
+            let finished = pipeline.run().await;
+            match finished {
+                Ok(summary) => (summary, pipeline.last_project_index()),
                 Err(e) => return render_error_response(e),
             }
         }
+    };
+
+    // Use the SAME Pass-1 snapshot consumed by the render pipeline.
+    // No extra filesystem walk, shortcode parse, or separate preview-only
+    // dependency collector is necessary. If another project page could not
+    // be profiled, we cannot safely suppress any change: fail open.
+    let render_inputs = if summary.pass1_failures.is_empty() {
+        pass1_index.as_ref().and_then(|index| {
+            live_dependencies::render_input_paths(
+                index,
+                &project.config.metadata.clone().unwrap_or_default(),
+                &project.dir,
+                &active_canonical,
+            )
+        })
+    } else {
+        None
     };
 
     // Locate the active page's output. With `RenderMode::ActivePage`
@@ -2610,6 +2629,7 @@ async fn render_project_active_page_to_response(
         },
         theme_fingerprint: theme_fingerprint_from_output,
         comments,
+        render_inputs,
     })
     .unwrap()
 }
