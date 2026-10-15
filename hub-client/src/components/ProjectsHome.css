@@ -1,4 +1,4 @@
-/* ProjectsHome — collections-based projects view (explore/projects-collections-ui).
+/* ProjectsHome — collections-based projects view.
    Visual language from QH-ProjectManagement-July26.fig "Short term" section:
    full-page surface, hairline borders, teal primary actions, navy text.
    Colors route through theme.css tokens so dark mode keeps working. */
@@ -291,7 +291,7 @@
 
 .qh-new-collection-row { margin: 2px 0 24px; }
 
-/* ---- facepiles (mock collaborators for the exploration) ---- */
+/* ---- facepiles (mock collaborators) ---- */
 
 .qh-facepile {
   display: inline-flex;
@@ -753,10 +753,6 @@
   font-size: 10px;
   color: var(--text-muted);
 }
-
-/* .qh-footer-note keeps full-opacity --text-muted: at opacity 0.8 the
-   composite drops to 3.49:1 (light) / 3.92:1 (dark) — under the WCAG
-   1.4.3 4.5:1 minimum. */
 
 /* Focusable for its tooltip — needs a visible indicator (WCAG 2.4.7). */
 .qh-footer .mono:focus-visible {

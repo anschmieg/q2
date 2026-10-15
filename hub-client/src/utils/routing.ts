@@ -145,7 +145,7 @@ export interface LinkProjectSetRoute {
 }
 
 /**
- * Route from a collection invite link (explore/projects-collections-ui exploration).
+ * Route from a collection invite link.
  *
  * The invite carries the collection identity plus the collection's project entries
  * inline, so joining delivers real, syncable projects; only collection
