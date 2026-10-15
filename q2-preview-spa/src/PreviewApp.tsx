@@ -1185,21 +1185,24 @@ export default function PreviewApp() {
           setState((s) => {
             // An edit can arrive after WASM resolved but before React applies
             // this updater. Never resurrect a stale dependency snapshot.
-            if (cancelled || s.activeFile !== state.activeFile ||
-                s.contentTick !== state.contentTick) return s;
+            if (
+              cancelled ||
+              s.activeFile !== state.activeFile ||
+              s.contentTick !== state.contentTick
+            ) return s;
             return {
-            ...s,
-            astJson: result.ast_json ?? null,
-            deps: decodeRenderInputs(result.render_inputs, state.activeFile!),
-            untransformedAstJson: result.untransformed_ast_json ?? null,
-            renderedContent: capturedContent,
-            themeFingerprint: result.theme_fingerprint ?? null,
-            render: {
-              failure: null,
-              diagnostics: [],
-              warnings: result.warnings ?? [],
-              pass1Failures: result.pass1_failures ?? [],
-            },
+              ...s,
+              astJson: result.ast_json ?? null,
+              deps: decodeRenderInputs(result.render_inputs, state.activeFile!),
+              untransformedAstJson: result.untransformed_ast_json ?? null,
+              renderedContent: capturedContent,
+              themeFingerprint: result.theme_fingerprint ?? null,
+              render: {
+                failure: null,
+                diagnostics: [],
+                warnings: result.warnings ?? [],
+                pass1Failures: result.pass1_failures ?? [],
+              },
             };
           });
         } else if (result.success && result.html !== undefined) {
