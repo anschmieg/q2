@@ -1521,7 +1521,7 @@ describe('core WASM render-input snapshots', () => {
     expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBe(calls);
     expect(
       (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some(
-        ([url]: [string]) => String(url).includes('/api/preview/deps'),
+        (args) => String(args[0]).includes('/api/preview/deps'),
       ),
     ).toBe(false);
     await act(async () => {
