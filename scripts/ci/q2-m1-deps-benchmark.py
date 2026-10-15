@@ -51,7 +51,7 @@ def start(binary,root,logfile):
 def measure(port,depth,variant,count):
     measurements=[]
     url=f"http://127.0.0.1:{port}/api/preview/deps?page=index.qmd"
-    expected=([f"parts/p{i:03d}.qmd" for i in range(depth)] if variant=="patched"
+    expected=([f"parts/p{i:03d}.qmd" for i in range(depth)] if variant in ("original","patched")
         else (["parts/p000.qmd"] if depth else []))
     for i in range(count+3):
         t=time.perf_counter_ns()
@@ -69,7 +69,7 @@ def measure(port,depth,variant,count):
 
 def main():
     ap=argparse.ArgumentParser()
-    for param in ["baseline","patched","output"]:
+    for param in ["baseline","original","patched","output"]:
         ap.add_argument("--"+param,type=Path,required=True)
     opts=ap.parse_args()
     opts.output.mkdir(parents=True,exist_ok=True)
@@ -79,7 +79,7 @@ def main():
             project=Path(d)/label
             fixture(project,depth,siblings)
             row={"case":label,"include_depth":depth,"sibling_count":siblings,"n":n}
-            for variant,binary in [("baseline",opts.baseline),("patched",opts.patched)]:
+            for variant,binary in [("baseline",opts.baseline),("original",opts.original),("patched",opts.patched)]:
                 proc=h=None
                 try:
                     proc,h,port=start(binary,project,opts.output/f"{label}-{variant}.log")
@@ -91,23 +91,25 @@ def main():
                         except subprocess.TimeoutExpired:proc.kill()
                     if h:h.close()
             b=row["baseline"]["median_ms"]
+            old=row["original"]["median_ms"]
             p=row["patched"]["median_ms"]
-            row["overhead_ms"]=round(p-b,4)
-            row["ratio"]=round(p/b,3)
+            row["original_delta_ms"]=round(old-b,4)
+            row["optimized_delta_ms"]=round(p-b,4)
+            row["optimization_ratio"]=round(p/old,3)
             results.append(row)
-            print(f"{label}: base {b:.3f}ms, M1 {p:.3f}ms, delta {p-b:+.3f}ms, ratio {p/b:.2f}x",flush=True)
+            print(f"{label}: base {b:.3f}ms, old M1 {old:.3f}ms, optimized {p:.3f}ms, old->new {old/p:.2f}x",flush=True)
     (opts.output/"results.json").write_text(json.dumps(results,indent=2)+"\n")
     report=[
         "# Q2 M1 native preview dependency endpoint overhead",
         "", "Paired baseline and patch binaries built on the same CI runner,",
         "native warm HTTP endpoint latency (not startup or browser rendering).",
         "Each case includes 3 warmups, then 8–32 measured requests.",
-        "", "| Case | Include depth | Unrelated pages | Base median ms | Patch median ms | Delta ms | Ratio | Base p95 ms | Patch p95 ms |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "", "| Case | Depth | Siblings | Baseline p50 | Original M1 p50 | Optimized M1 p50 | Original p95 | Optimized p95 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|"
     ]
     for row in results:
-        a=row["baseline"];b=row["patched"]
-        report.append(f'| {row["case"]} | {row["include_depth"]} | {row["sibling_count"]} | {a["median_ms"]:.3f} | {b["median_ms"]:.3f} | {row["overhead_ms"]:+.3f} | {row["ratio"]:.2f}x | {a["p95_ms"]:.3f} | {b["p95_ms"]:.3f} |')
+        a=row["baseline"];o=row["original"];b=row["patched"]
+        report.append(f'| {row["case"]} | {row["include_depth"]} | {row["sibling_count"]} | {a["median_ms"]:.3f} | {o["median_ms"]:.3f} | {b["median_ms"]:.3f} | {o["p95_ms"]:.3f} | {b["p95_ms"]:.3f} |')
     report+=["","Single CI runner and fixed order: interpret as diagnostic, not statistically proven speedup/slowdown."]
     (opts.output/"results.md").write_text("\n".join(report)+"\n")
 
