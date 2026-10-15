@@ -2491,17 +2491,6 @@ async fn render_project_active_page_to_response(
     // No extra filesystem walk, shortcode parse, or separate preview-only
     // dependency collector is necessary. If another project page could not
     // be profiled, we cannot safely suppress any change: fail open.
-    // TEMPORARY Q2-M1 probe: identify incompleteness in the real browser.
-    #[cfg(target_arch = "wasm32")]
-    if !summary.pass1_failures.is_empty() {
-        web_sys::console::log_1(
-            &format!(
-                "[q2-m1-probe] rust-pass1-failures {:?}",
-                summary.pass1_failures.iter().map(|f| &f.input).collect::<Vec<_>>()
-            ).into(),
-        );
-    }
-
     let render_inputs = if summary.pass1_failures.is_empty() {
         pass1_index.as_ref().and_then(|index| {
             live_dependencies::render_input_paths(

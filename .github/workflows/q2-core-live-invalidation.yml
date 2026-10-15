@@ -45,9 +45,9 @@ jobs:
       - name: Test core document and included-file dependency graph
         run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
       - name: Test WASM adapter core graph snapshots
-        # The WASM adapter is a separate Cargo workspace (its own [workspace]),
-        # so -p from the monorepo root cannot resolve this package.
-        run: cargo test --manifest-path crates/wasm-quarto-hub-client/Cargo.toml --lib live_dependencies::tests -- --nocapture
+        # Host-test the actual pure Rust adapter source, not the wasm32-only
+        # client crate (WasmRuntime / async Sass cannot link natively).
+        run: cargo test -p quarto-core --test wasm_live_dependencies -- --nocapture
 
   spa-deps:
     runs-on: ubuntu-latest

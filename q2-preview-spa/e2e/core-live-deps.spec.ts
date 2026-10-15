@@ -43,13 +43,7 @@ async function ticks(page: Page): Promise<number> {
 
 let server: PreviewServerHandle;
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    (window as unknown as { __q2M1Probe?: boolean }).__q2M1Probe = true;
-  });
-  page.on('console', (m) => {
-    if (m.text().startsWith('[q2-m1-probe]')) console.log(m.text());
-  });
+test.beforeEach(async () => {
   server = await startPreviewServer({
     fixtureFiles: [
       { path: '_quarto.yml', content: 'project:\n  type: website\n' },
