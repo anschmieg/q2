@@ -1493,3 +1493,66 @@ describe('PreviewApp: formats with no live preview (bd-kltzdhle, D5)', () => {
     consoleError.mockRestore();
   });
 });
+
+describe('core WASM render-input snapshots', () => {
+  it('filters unrelated source updates without fetching the legacy disk deps endpoint', async () => {
+    runtimeMockState.files = [
+      { path: 'index.qmd', docId: 'automerge:index' },
+      { path: 'partials/leaf.qmd', docId: 'automerge:leaf' },
+      { path: 'unrelated.qmd', docId: 'automerge:unrelated' },
+    ];
+    runtimeMockState.renderResult = {
+      success: true,
+      ast_json: '{"blocks":[]}',
+      render_inputs: ['index.qmd', 'partials/leaf.qmd'],
+    };
+    const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
+    render(<PreviewApp />);
+    await waitFor(() => {
+      expect(screen.queryByTestId('q2-preview-iframe-mock')).not.toBeNull();
+      expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
+    });
+    const callbacks = (setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(callbacks).toBeDefined();
+    const calls = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => {
+      callbacks.onFileContent('unrelated.qmd');
+    });
+    expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBe(calls);
+    expect(
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some(
+        ([url]: [string]) => String(url).includes('/api/preview/deps'),
+      ),
+    ).toBe(false);
+    await act(async () => {
+      callbacks.onFileContent('partials/leaf.qmd');
+    });
+    await waitFor(() => {
+      expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(calls);
+    });
+  });
+
+  it('invalidates a previously complete graph when project membership changes', async () => {
+    runtimeMockState.renderResult = {
+      success: true,
+      ast_json: '{"blocks":[]}',
+      render_inputs: ['index.qmd'],
+    };
+    const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
+    render(<PreviewApp />);
+    await waitFor(() => {
+      expect(screen.queryByTestId('q2-preview-iframe-mock')).not.toBeNull();
+    });
+    const callbacks = (setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    const before = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => {
+      callbacks.onFilesChange([
+        { path: 'index.qmd', docId: 'automerge:doc-index' },
+        { path: 'new.qmd', docId: 'automerge:doc-new' },
+      ]);
+    });
+    await waitFor(() => {
+      expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before);
+    });
+  });
+});
