@@ -34,13 +34,21 @@ jobs:
           remove_dotnet: true
           remove_haskell: true
           remove_tool_cache: true
-      - name: Install required native tools
+      - name: Install pinned native test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake clang libc6-dev gcc-multilib minisign
+          curl --fail --location --retry 3 -o pandoc.deb https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-1-amd64.deb
+          sudo dpkg -i pandoc.deb
+          curl --fail --location --retry 3 -o typst.tar.xz https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz
+          tar -xf typst.tar.xz
+          sudo install -m 0755 typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst
           curl --fail --location --retry 3 -o tree-sitter.gz https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.8/tree-sitter-linux-x86.gz
           gunzip tree-sitter.gz
           sudo install -m 0755 tree-sitter /usr/local/bin/tree-sitter
+          pandoc --version | head -2
+          typst --version
+          tree-sitter --version
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-04-28
@@ -51,6 +59,12 @@ jobs:
           cache: npm
       - name: Install JS workspace dependencies
         run: npm ci
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: "2.9.0"
+      - name: Verify pinned Deno
+        run: deno --version
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -60,5 +74,9 @@ jobs:
         run: cargo fmt --package quarto-core -- --check
       - name: Existing and new core graph regression tests
         run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
-      - name: Full quarto-core library regression tests
-        run: cargo test -p quarto-core --lib
+      - name: Full quarto-core library regression tests (isolated nextest)
+        # Some upstream tests deliberately mutate process-global state or
+        # manage temporary extension trees. Cargo's shared-process test
+        # harness causes unrelated failures; nextest isolates each test.
+        # This matches Q2's already-proven full native CI runner.
+        run: cargo nextest run -p quarto-core --lib --cargo-profile ci --no-fail-fast
