@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { shouldRerenderForTextChange } from './PreviewApp';
+import { decodePreviewDepsResponse, shouldRerenderForTextChange } from './PreviewApp';
 
 describe('shouldRerenderForTextChange', () => {
   const deps = new Set(['included.qmd', 'snippets/part.md']);
@@ -55,5 +55,31 @@ describe('shouldRerenderForTextChange', () => {
   it('is case-insensitive on the extension', () => {
     expect(shouldRerenderForTextChange('NOTES.MD', 'index.qmd', deps)).toBe(false);
     expect(shouldRerenderForTextChange('OTHER.QMD', 'index.qmd', deps)).toBe(false);
+  });
+});
+
+describe('preview transitive dependency response', () => {
+  it('accepts an explicit complete closure and excludes unrelated siblings', () => {
+    const deps = decodePreviewDepsResponse('index.qmd', {
+      deps: ['snippets/outer.qmd', 'snippets/leaf.qmd'],
+    });
+    expect(deps).toEqual(new Set([
+      'index.qmd', 'snippets/outer.qmd', 'snippets/leaf.qmd',
+    ]));
+    expect(shouldRerenderForTextChange('snippets/leaf.qmd', 'index.qmd', deps)).toBe(true);
+    expect(shouldRerenderForTextChange('sibling.qmd', 'index.qmd', deps)).toBe(false);
+  });
+
+  it('fails open for unknown or malformed dependency results', () => {
+    for (const body of [{ deps: null }, {}, null, { deps: 'wrong' }, { deps: [1] }]) {
+      const deps = decodePreviewDepsResponse('index.qmd', body);
+      expect(deps).toBeNull();
+      expect(shouldRerenderForTextChange('new-child.qmd', 'index.qmd', deps)).toBe(true);
+    }
+  });
+
+  it('distinguishes an explicitly empty known set from an unknown closure', () => {
+    expect(decodePreviewDepsResponse('index.qmd', { deps: [] })).toEqual(new Set(['index.qmd']));
+    expect(decodePreviewDepsResponse('index.qmd', { deps: null })).toBeNull();
   });
 });
