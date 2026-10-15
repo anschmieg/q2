@@ -138,6 +138,18 @@ pub async fn deps_handler(
     Json(DepsResponse { deps }).into_response()
 }
 
+/// Conservative alias check using the existing syntax walker, NOT a second
+/// include parser. The native renderer records canonical targets, while hub
+/// file-change notifications are keyed by source-relative paths. Until the
+/// hub provides an alias map, an include through a symlink must fail open.
+/// This check also rejects missing and out-of-project include paths.
+fn include_keys_are_canonical(root: &Path, page_rel: &str, content: &[u8]) -> bool {
+    extract_include_deps(content, page_rel).into_iter().all(|rel| {
+        let lexical = root.join(rel);
+        lexical.canonicalize().is_ok_and(|resolved| resolved == lexical)
+    })
+}
+
 /// Compute the full project-mode include closure using the same parser and
 /// IncludeExpansionStage as the native renderer (including nested containers,
 /// includes within code fences, and recursive includes).
@@ -157,14 +169,18 @@ fn resolve_project_include_deps(
     let root = project_root.canonicalize().ok()?;
     let requested = root.join(page_rel);
     let abs_page = requested.canonicalize().ok()?;
-    if !abs_page.starts_with(&root) || !abs_page.is_file() {
+    if !abs_page.starts_with(&root) || !abs_page.is_file()
+        || abs_page != requested
+    {
         return None;
     }
 
     // The request's source and the expansion's child reads must represent a
     // stable disk snapshot. An overlapping write degrades to unknown.
     let source_snapshot = source.clone();
-    if std::fs::read(&requested).ok()? != source_snapshot {
+    if std::fs::read(&requested).ok()? != source_snapshot
+        || !include_keys_are_canonical(&root, page_rel, &source_snapshot)
+    {
         return None;
     }
 
@@ -206,7 +222,11 @@ fn resolve_project_include_deps(
             return None;
         }
         let rel = canonical.strip_prefix(&root).ok()?;
-        deps.push(normalize_forward_slash(rel));
+        let relative = normalize_forward_slash(rel);
+        if !include_keys_are_canonical(&root, &relative, &current) {
+            return None;
+        }
+        deps.push(relative);
     }
     if std::fs::read(&requested).ok()? != source_snapshot {
         return None;
@@ -529,6 +549,21 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("secret.qmd"), root.join("escape.qmd")).unwrap();
         let closure = resolve_project_include_deps(root, "index.qmd", std::fs::read(root.join("index.qmd")).unwrap());
         assert!(closure.is_none(), "outside-root dependency must never be returned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_mode_fails_open_for_in_root_symlink_alias() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::write(root.join("_quarto.yml"), "project:\n  type: website\n").unwrap();
+        std::fs::write(root.join("index.qmd"), "{{< include alias.qmd >}}\n").unwrap();
+        std::fs::write(root.join("leaf.qmd"), "target\n").unwrap();
+        std::os::unix::fs::symlink(root.join("leaf.qmd"), root.join("alias.qmd")).unwrap();
+        let closure = resolve_project_include_deps(
+            root, "index.qmd", std::fs::read(root.join("index.qmd")).unwrap(),
+        );
+        assert_eq!(closure, None, "VFS alias and canonical path keys could diverge");
     }
 
     #[test]
