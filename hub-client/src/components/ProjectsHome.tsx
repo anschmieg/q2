@@ -2386,6 +2386,7 @@ export default function ProjectsHome({
         isOpen={showLinkDialog}
         shareableUrl={projectSetLinkUrl}
         onClose={() => setShowLinkDialog(false)}
+        variant="projectSet"
       />
 
       <footer className="qh-footer">

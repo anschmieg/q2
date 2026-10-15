@@ -1,7 +1,10 @@
 /**
  * Share Dialog Component
  *
- * Modal dialog for sharing a project with a shareable URL.
+ * Modal dialog for sharing with a shareable URL. Two text variants:
+ * 'project' (default) shares a single project; 'projectSet' is the
+ * link-another-browser flow, whose link grants access to the whole
+ * project list — the warning wording broadens accordingly.
  * Displays a warning about permanent access and allows copying the link.
  */
 
@@ -15,6 +18,8 @@ export interface ShareDialogProps {
   shareableUrl: string | undefined;
   onClose: () => void;
   onCopied?: () => void;
+  /** Which text to show; see the component comment. Default 'project'. */
+  variant?: 'project' | 'projectSet';
 }
 
 export default function ShareDialog({
@@ -22,6 +27,7 @@ export default function ShareDialog({
   shareableUrl,
   onClose,
   onCopied,
+  variant = 'project',
 }: ShareDialogProps) {
   const [copied, setCopied] = useState(false);
   const urlInputRef = useRef<HTMLInputElement>(null);
@@ -91,9 +97,14 @@ export default function ShareDialog({
 
   if (!isOpen || !shareableUrl) return null;
 
+  const text =
+    variant === 'projectSet'
+      ? { ...dialogs.share, ...dialogs.linkBrowser }
+      : dialogs.share;
+
   return (
     <ModalDialog
-      title={dialogs.share.title}
+      title={text.title}
       className="share-dialog"
       onClose={onClose}
       onKeyDown={handleKeyDown}
@@ -102,15 +113,15 @@ export default function ShareDialog({
           <div className="warning-box">
             <span className="warning-icon">&#9888;</span>
             <p>
-              <strong>{dialogs.share.warning}</strong>
+              <strong>{text.warning}</strong>
             </p>
             <p className="warning-detail">
-              {dialogs.share.warningDetail}
+              {text.warningDetail}
             </p>
           </div>
 
           <div className="url-field">
-            <label htmlFor="shareable-url">{dialogs.share.linkLabel}</label>
+            <label htmlFor="shareable-url">{text.linkLabel}</label>
             <input
               ref={urlInputRef}
               id="shareable-url"
@@ -131,7 +142,7 @@ export default function ShareDialog({
             className={`qh-btn primary copy-btn ${copied ? 'copied' : ''}`}
             onClick={handleCopyLink}
           >
-            {copied ? dialogs.share.copied : dialogs.share.copyLink}
+            {copied ? text.copied : text.copyLink}
           </button>
         </div>
     </ModalDialog>
