@@ -1,0 +1,64 @@
+name: Q2 core include dependency graph validation
+on:
+  push:
+    branches: [research/q2-core-file-dependencies]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: q2-core-includes-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core-file-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    steps:
+      - name: Check out current upstream-based research branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Confirm source revision
+        run: |
+          git rev-parse HEAD
+          cat rust-toolchain.toml
+      - name: Free ephemeral runner disk
+        uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - name: Install required native tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libc6-dev gcc-multilib minisign
+          curl --fail --location --retry 3 -o tree-sitter.gz https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.8/tree-sitter-linux-x86.gz
+          gunzip tree-sitter.gz
+          sudo install -m 0755 tree-sitter /usr/local/bin/tree-sitter
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install JS workspace dependencies
+        run: npm ci
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          shared-key: q2-core-file-includes
+      - name: Rust formatting for the changed core crate
+        run: cargo fmt --package quarto-core -- --check
+      - name: Existing and new core graph regression tests
+        run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
+      - name: Full quarto-core library regression tests
+        run: cargo test -p quarto-core --lib
