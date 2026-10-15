@@ -1182,7 +1182,12 @@ export default function PreviewApp() {
           // success, in warning mode. `failure` and `diagnostics`
           // (which only appear on failures) are cleared so the
           // previous failure overlay (if any) goes away.
-          setState((s) => ({
+          setState((s) => {
+            // An edit can arrive after WASM resolved but before React applies
+            // this updater. Never resurrect a stale dependency snapshot.
+            if (cancelled || s.activeFile !== state.activeFile ||
+                s.contentTick !== state.contentTick) return s;
+            return {
             ...s,
             astJson: result.ast_json ?? null,
             deps: decodeRenderInputs(result.render_inputs, state.activeFile!),
@@ -1195,7 +1200,8 @@ export default function PreviewApp() {
               warnings: result.warnings ?? [],
               pass1Failures: result.pass1_failures ?? [],
             },
-          }));
+            };
+          });
         } else if (result.success && result.html !== undefined) {
           // bd-kltzdhle (D5): a *successful* render that produced a full
           // HTML page instead of a preview AST — `format: q2-html-render`
