@@ -298,6 +298,32 @@ impl ProjectDependencyGraph {
         out
     }
 
+    /// The complete known input-file closure for a document-level render.
+    ///
+    /// Traverses both channels: navigation/profile dependencies of the
+    /// requested document (and their transitive dependencies), then file
+    /// includes recorded by each reached document. This is the snapshot
+    /// live-render schedulers can use to decide whether an input-file edit
+    /// affects their active page. It does not schedule or perform rendering.
+    ///
+    /// The document itself is always included. This is a snapshot of
+    /// successfully collected profiles, NOT a claim that a missing or stale
+    /// profile has no dependencies. Callers MUST fall back to broad
+    /// invalidation if their project index is incomplete or out of date.
+    ///
+    /// Future element-level renderers can narrow this result to their own
+    /// render-unit keys without changing the file-dependency index.
+    pub fn render_inputs_for(&self, document: &Path) -> BTreeSet<PathBuf> {
+        let documents = self.forward_closure([document]);
+        let mut inputs = documents.clone();
+        for doc in documents {
+            if let Some(files) = self.include_edges.get(&doc) {
+                inputs.extend(files.iter().cloned());
+            }
+        }
+        inputs
+    }
+
     /// Atomically replace one document's recorded transitive include set
     /// after re-profiling it. This updates only changed edges in both indices
     /// and never rebuilds or reparses unrelated project documents.
@@ -1390,6 +1416,48 @@ mod tests {
             graph.include_dependents([Path::new(absent)]),
             BTreeSet::from([PathBuf::from("index.qmd")]),
         );
+    }
+
+    #[test]
+    fn render_inputs_include_active_sibling_profiles_and_their_nested_files() {
+        let mut profiles = vec![
+            with_includes("index.qmd", &["/project/includes/outer.qmd", "/project/includes/leaf.qmd"]),
+            with_includes("about.qmd", &["/project/includes/about-note.qmd"]),
+            with_includes("unrelated.qmd", &["/project/includes/irrelevant.qmd"]),
+        ];
+        // A page link contributes a profile dependency via the existing
+        // navigation graph. An included file of the linked page can also
+        // affect the active page's output.
+        profiles[0].body_link_targets = vec![PathBuf::from("about.qmd")];
+        let index = ProjectIndex::new(profiles);
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        assert_eq!(
+            graph.render_inputs_for(Path::new("index.qmd")),
+            BTreeSet::from([
+                PathBuf::from("index.qmd"),
+                PathBuf::from("about.qmd"),
+                PathBuf::from("/project/includes/outer.qmd"),
+                PathBuf::from("/project/includes/leaf.qmd"),
+                PathBuf::from("/project/includes/about-note.qmd"),
+            ]),
+        );
+        assert!(!graph.render_inputs_for(Path::new("index.qmd")).contains(Path::new("unrelated.qmd")));
+    }
+
+    #[test]
+    fn render_input_closure_tracks_replacement_without_nav_graph_mutation() {
+        let index = ProjectIndex::new(vec![
+            with_includes("index.qmd", &["/project/old.qmd"]),
+            with_includes("other.qmd", &[]),
+        ]);
+        let mut graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        graph.replace_include_dependencies(Path::new("index.qmd"), [Path::new("/project/new.qmd")]);
+        assert_eq!(
+            graph.render_inputs_for(Path::new("index.qmd")),
+            BTreeSet::from([PathBuf::from("index.qmd"), PathBuf::from("/project/new.qmd")]),
+        );
+        assert!(!graph.render_inputs_for(Path::new("index.qmd")).contains(Path::new("/project/old.qmd")));
+        assert_eq!(graph.render_inputs_for(Path::new("other.qmd")), BTreeSet::from([PathBuf::from("other.qmd")]));
     }
 
     #[test]
