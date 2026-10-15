@@ -1,25 +1,24 @@
-# M1 project-preview dependency correctness — direct research
+# M1 project-preview dependency correctness — verified research
 
-Baseline: upstream quarto-dev/q2 commit d110cf7e47d37f9b9771ba5cc7d92a1855934d4a; changes are on fork anschmieg/q2, branch research/q2-m1-preview-deps-direct. No changes to either repository's default branch.
+**Status: first scoped M1 slice accepted (2026-10-15).** See [final acceptance report](2026-10-15-q2-m1-first-slice-acceptance.md) for exact results, source hashes, skipped tests, timing limitations, and research boundaries.
 
-## Verified targeted CI
+## Source and implementation
 
-- Run [38735589185](https://github.com/anschmieg/q2/actions/runs/38735589185) at 2f0d4cbf194a1a2ff715d280e5f076e1f114272e: Rust project-mode unit tests 5 passed, 0 failed, 134 filtered; SPA dependency filter tests 10 passed and SPA typecheck passed. Rust HTTP integration and full browser E2E were **not run**.
-- Run [38737709018](https://github.com/anschmieg/q2/actions/runs/38737709018) at ad98409047996965efe6bbbeef1fdf722e17d8db: Rust targeted lib tests, Rust real HTTP endpoint integration, SPA filter + request-race tests, SPA typecheck all passed. These are scoped jobs, not whole-repository native/WASM test verification. Inspect logs for precise per-suite totals and filtered tests.
+- Pinned upstream `quarto-dev/q2` `d110cf7e47d37f9b9771ba5cc7d92a1855934d4a`.
+- Work was performed only in fork `anschmieg/q2` on research branch `research/q2-m1-preview-deps-direct`; no default-branch, Quartier, deployment or upstream-PR changes.
+- `crates/quarto-preview/src/deps.rs` now derives transitive included-file closure from real `ParseDocumentStage` / `IncludeExpansionStage` / `DocumentAst::recorded_includes`. It returns null when complete coverage cannot be proven.
+- The SPA filters unrelated edits only for complete dependency sets, refreshes on relevant content and membership changes, rejects out-of-order fetch responses and stays fail-open for unknown closures. Disk-based selectivity is disabled for writable/shared VFS sessions.
 
-## What changed
+## Verification history
 
-The project-mode endpoint now reuses Q2's ParseDocumentStage + IncludeExpansionStage and DocumentAst::recorded_includes for transitive includes instead of treating the syntax-only single-hop collector as authoritative. It returns {deps:null} (unknown) on incomplete or unsafe analysis; the SPA accepts all edits in that state. For complete closures, the SPA filters unrelated .qmd/.md edits, invalidates and re-fetches on relevant edits and file-list changes, and refuses stale async responses. Writable/shared sessions disable disk-based selective filtering while the synced VFS can differ.
+- [38735589185](https://github.com/anschmieg/q2/actions/runs/38735589185): initial focused unit/type checks passed; HTTP integration/browser tests were not part of that run.
+- [38737709018](https://github.com/anschmieg/q2/actions/runs/38737709018): Rust project dependency unit/HTTP tests and SPA checks passed.
+- [38739195904](https://github.com/anschmieg/q2/actions/runs/38739195904): two real Chromium nested-include E2E tests passed; SPA default Vitest inadvertently *excluded* component integration tests.
+- [38752138281](https://github.com/anschmieg/q2/actions/runs/38752138281): jsdom integration tests explicitly enabled and **42 passed**; targeted Rust/SPA/Chromium also green.
+- **[38767256307](https://github.com/anschmieg/q2/actions/runs/38767256307)** at `aafdd3d590ccdd243d0370c80d7d2620cc921ba2`: all four jobs green; **16,080 native Rust tests passed, 202 skipped**, plus 13 SPA unit, 42 jsdom integration, 2 real Chromium E2E, SPA typecheck; targeted Rust 5 unit/1 HTTP integration passed (subset of the full native suite). Native HTML SHA-256 parity succeeded for targeted/clean/warm output after nested include edit; unrelated sibling output SHA and mtime unchanged. Actual timing observations: 334 ms cold full, 34 ms targeted, 38 ms clean full final, 29 ms warm targeted; **not** a controlled speedup comparison.
 
-## Follow-up verification: actual browser
+## Deliberate omissions
 
-Added q2-preview-spa/e2e/project-transitive-deps.spec.ts and a separate browser-transitive-e2e CI job. It exercises the fresh embedded WASM + SPA through the real native q2 preview server in Chromium. The test asserts that changes in index.qmd -> outer.qmd -> leaf.qmd update the active page, an unrelated sibling edit does not trigger a render, and removing/reintroducing the nested dependency updates filtering correctly. **Do not mark these tests passing until their actual CI run completes.**
+No baseline RED browser run against untouched upstream (source contract identifies the single-hop defect); no whole-output-tree/PDF byte parity or general CPU speedup estimate; no all-platform browser matrix; no exhaustive resource channels; no VFS-native selective invalidation. These are documented limitations rather than silently treated as passes. The first slice satisfies its narrowed acceptance criterion; broader Q2-M1 candidates such as Pass-2 resumption are separate work.
 
-## Explicit limitations and gates
-
-- The first RED browser test against the *unmodified* upstream baseline has **not been executed**; the upstream deps.rs contract explicitly documents single-hop behavior, but that is source evidence, not a recorded failing E2E test.
-- A green targeted test run is not full Rust workspace, WASM, Chromium, or cross-platform coverage.
-- The new browser E2E tests and native integration need a completed Actions run; inspect failures before claiming success.
-- Clean-full-vs-incremental Q2 output artifact byte comparison and stage timing/selectivity benchmarks remain required for full M1 acceptance. Q2 browser AST/React preview output is not native serialized HTML.
-- Test resource dependencies (bibliography/CSL, SVG, Sass) conservatively before claiming comprehensive dependency coverage.
-- The native collector is disk-based and deliberately fail-open for writable/shared sessions; a future VFS-aware collector may improve selectivity without stale output.
+No further CI retrigger is necessary for documentation-only sign-off. Tested implementation SHA and CI evidence remain linked above.
