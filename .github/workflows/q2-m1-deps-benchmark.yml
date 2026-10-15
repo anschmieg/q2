@@ -1,0 +1,77 @@
+name: Q2 M1 native dependency endpoint performance
+on:
+  push:
+    branches: [research/q2-m1-perf-evaluation]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: q2-m1-perf-evaluation
+  cancel-in-progress: true
+env:
+  CARGO_INCREMENTAL: "0"
+  BASE_Q2_SHA: d110cf7e47d37f9b9771ba5cc7d92a1855934d4a
+jobs:
+  compare-native-preview-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Free ephemeral runner disk
+        uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install native prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libc6-dev gcc-multilib minisign
+          curl --fail --location --retry 3 -o tree-sitter.gz https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.8/tree-sitter-linux-x86.gz
+          gunzip tree-sitter.gz
+          sudo install -m 0755 tree-sitter /usr/local/bin/tree-sitter
+      - name: Install NPM workspace
+        run: npm ci
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          shared-key: q2-m1-perf
+      - name: Preserve benchmark outside checkout
+        run: cp scripts/ci/q2-m1-deps-benchmark.py "$RUNNER_TEMP/q2-m1-deps-benchmark.py"
+      - name: Compile M1 patched native q2
+        run: |
+          cargo build --bin q2
+          cp target/debug/q2 "$RUNNER_TEMP/q2-patched"
+      - name: Compile pinned upstream baseline native q2
+        run: |
+          git checkout --detach "$BASE_Q2_SHA"
+          test "$(git rev-parse HEAD)" = "$BASE_Q2_SHA"
+          cargo build --bin q2
+          cp target/debug/q2 "$RUNNER_TEMP/q2-baseline"
+      - name: Benchmark native HTTP dependency endpoint
+        run: |
+          python3 "$RUNNER_TEMP/q2-m1-deps-benchmark.py" \
+            --baseline "$RUNNER_TEMP/q2-baseline" \
+            --patched "$RUNNER_TEMP/q2-patched" \
+            --output "$GITHUB_WORKSPACE/m1-performance"
+      - name: Archive raw measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q2-m1-native-deps-overhead
+          path: m1-performance/
+          retention-days: 30
+          if-no-files-found: ignore
