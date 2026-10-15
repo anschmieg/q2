@@ -45,6 +45,23 @@
 //!   `nav_dependencies` paths. The graph builder silently drops
 //!   them; if surfacing matters, the orchestrator iterates and
 //!   warns. (Future bd issue.)
+//!
+//! ## Transitive include-file dependencies
+//!
+//! `DocumentProfile.includes` already records the transitive files consumed
+//! by `IncludeExpansionStage`, including partials which are *not* renderable
+//! project documents. We index these in a **separate** forward/reverse channel
+//! rather than adding them to the navigation/profile graph: its
+//! `forward_closure` and `always-render` behavior must remain unchanged.
+//! Queries touch only reverse entries for the changed input files, not the
+//! whole project and not the parser or filesystem. A single document's
+//! include edges can be replaced when a new profile becomes available.
+//!
+//! This index is valid for the supplied profile snapshot. If profile
+//! construction failed, a file alias cannot be resolved, or inputs may
+//! have changed since the snapshot, consumers MUST fall back to broader
+//! invalidation. A missing file can still be matched by its recorded path;
+//! neither building nor querying this graph requires the file to exist.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -74,6 +91,18 @@ pub struct ProjectDependencyGraph {
     /// pages get implicitly pulled into the render set when their
     /// reverse dependents are user-named targets.
     pub force_render: BTreeSet<PathBuf>,
+
+    /// Document-relative source path -> transitive included input paths.
+    ///
+    /// Input paths retain the resolved spelling recorded by
+    /// `IncludeExpansionStage` (typically canonical absolute paths).
+    /// Unlike `edges`, these need not identify renderable documents.
+    pub include_edges: HashMap<PathBuf, BTreeSet<PathBuf>>,
+
+    /// Included file path -> all renderable documents containing its bytes.
+    /// A changed nested include can be queried in O(number of dependents).
+    /// The caller must use the same path identity as the recorded entries.
+    pub include_reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 impl ProjectDependencyGraph {
@@ -97,6 +126,8 @@ impl ProjectDependencyGraph {
         let mut edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut force_render: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut include_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
+        let mut include_reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
 
         // Helper to add a directed edge plus its reverse mirror.
         // Self-edges (a page depending on itself) are silently
@@ -137,6 +168,24 @@ impl ProjectDependencyGraph {
         // === Per-profile contributions ===
         for profile in index.profiles() {
             let from = &profile.source_path;
+
+            // Already computed in Pass 1: no new parse, disk reads or
+            // project discovery. Includes are transitive and can refer
+            // to partial files absent from the renderable project index.
+            let files: BTreeSet<PathBuf> = profile
+                .includes
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect();
+            for file in &files {
+                include_reverse_edges
+                    .entry(file.clone())
+                    .or_default()
+                    .insert(from.clone());
+            }
+            if !files.is_empty() {
+                include_edges.insert(from.clone(), files);
+            }
 
             // `always-render` flag — collected here once per pass
             // over profiles.
@@ -221,6 +270,72 @@ impl ProjectDependencyGraph {
             edges,
             reverse_edges,
             force_render,
+            include_edges,
+            include_reverse_edges,
+        }
+    }
+
+    /// Return source documents whose (transitive) include closure contains
+    /// any of the changed files. Includes inside nested partials are already
+    /// in their parent profile, so this is a simple reverse-index lookup.
+    ///
+    /// Paths must use the identity stored by `IncludeExpansionStage`:
+    /// usually canonical absolute input paths, *not* project-relative
+    /// document names. The caller additionally handles the changed active
+    /// document itself and MUST fail open if the profile snapshot is stale
+    /// or the changed path has an unresolved filesystem alias.
+    pub fn include_dependents<I, P>(&self, changed_files: I) -> BTreeSet<PathBuf>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut out = BTreeSet::new();
+        for file in changed_files {
+            if let Some(dependents) = self.include_reverse_edges.get(file.as_ref()) {
+                out.extend(dependents.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// Atomically replace one document's recorded transitive include set
+    /// after re-profiling it. This updates only changed edges in both indices
+    /// and never rebuilds or reparses unrelated project documents.
+    ///
+    /// This is an index maintenance operation, not a claim that every
+    /// dependency is known: a caller that cannot obtain a complete fresh
+    /// profile must *not* use this method to mark an incomplete set current.
+    pub fn replace_include_dependencies<I, P>(&mut self, document: &Path, included_files: I)
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let updated: BTreeSet<PathBuf> = included_files
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .collect();
+        let previous = self.include_edges.remove(document).unwrap_or_default();
+
+        for removed in previous.difference(&updated) {
+            let should_remove =
+                if let Some(dependents) = self.include_reverse_edges.get_mut(removed) {
+                    dependents.remove(document);
+                    dependents.is_empty()
+                } else {
+                    false
+                };
+            if should_remove {
+                self.include_reverse_edges.remove(removed);
+            }
+        }
+        for added in updated.difference(&previous) {
+            self.include_reverse_edges
+                .entry(added.clone())
+                .or_default()
+                .insert(document.to_path_buf());
+        }
+        if !updated.is_empty() {
+            self.include_edges.insert(document.to_path_buf(), updated);
         }
     }
 
@@ -342,7 +457,7 @@ impl ProjectDependencyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document_profile::DocumentProfile;
+    use crate::document_profile::{DocumentProfile, IncludeEntry};
     use quarto_pandoc_types::ConfigMapEntry;
     use quarto_source_map::SourceInfo;
 
@@ -1144,6 +1259,155 @@ mod tests {
         assert!(
             !augmented.contains(Path::new("linker.qmd")),
             "body-link without force_render must not get pulled in"
+        );
+    }
+
+    // === Transitive include-file channel (core, independent of preview) ===
+
+    fn with_includes(source: &str, paths: &[&str]) -> DocumentProfile {
+        DocumentProfile {
+            source_path: PathBuf::from(source),
+            output_href: source.replace(".qmd", ".html"),
+            format_id: "html".to_string(),
+            includes: paths
+                .iter()
+                .map(|p| IncludeEntry::new(PathBuf::from(p), b"recorded bytes"))
+                .collect(),
+            ..DocumentProfile::default()
+        }
+    }
+
+    #[test]
+    fn include_graph_indexes_transitive_nonrenderable_files_without_navigation_edges() {
+        // IncludeExpansionStage reports all transitive entries on index.qmd;
+        // neither partial is a separate renderable project document.
+        let index = ProjectIndex::new(vec![
+            with_includes(
+                "index.qmd",
+                &["/project/partials/outer.qmd", "/project/partials/leaf.qmd"],
+            ),
+            with_includes("unrelated.qmd", &[]),
+        ]);
+        let mut diags = Vec::new();
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut diags);
+        assert!(
+            graph.edges.is_empty(),
+            "include edges must not change navigation graph"
+        );
+        assert!(graph.reverse_edges.is_empty());
+        assert_eq!(
+            graph.include_dependents([Path::new("/project/partials/leaf.qmd")]),
+            BTreeSet::from([PathBuf::from("index.qmd")])
+        );
+        assert_eq!(
+            graph.include_edges[Path::new("index.qmd")],
+            BTreeSet::from([
+                PathBuf::from("/project/partials/outer.qmd"),
+                PathBuf::from("/project/partials/leaf.qmd"),
+            ])
+        );
+    }
+
+    #[test]
+    fn include_reverse_queries_union_shared_dependents_without_duplicates() {
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &["/project/leaf.qmd", "/project/leaf.qmd"]),
+            with_includes("b.qmd", &["/project/leaf.qmd", "/project/other.qmd"]),
+            with_includes("c.qmd", &[]),
+        ]);
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        assert_eq!(
+            graph.include_dependents([
+                Path::new("/project/leaf.qmd"),
+                Path::new("/project/other.qmd"),
+                Path::new("/project/leaf.qmd"),
+            ]),
+            BTreeSet::from([PathBuf::from("a.qmd"), PathBuf::from("b.qmd")])
+        );
+        assert!(
+            graph
+                .include_dependents([Path::new("/project/unrelated.qmd")])
+                .is_empty()
+        );
+        assert_eq!(graph.include_reverse_edges.len(), 2);
+    }
+
+    #[test]
+    fn replacing_include_edges_removes_stale_file_and_preserves_other_dependents() {
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &["/project/outer.qmd", "/project/old-leaf.qmd"]),
+            with_includes("b.qmd", &["/project/old-leaf.qmd"]),
+        ]);
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        graph.replace_include_dependencies(
+            Path::new("a.qmd"),
+            [
+                Path::new("/project/outer.qmd"),
+                Path::new("/project/new-leaf.qmd"),
+            ],
+        );
+
+        assert_eq!(
+            graph.include_dependents([Path::new("/project/old-leaf.qmd")]),
+            BTreeSet::from([PathBuf::from("b.qmd")]),
+        );
+        assert_eq!(
+            graph.include_dependents([Path::new("/project/new-leaf.qmd")]),
+            BTreeSet::from([PathBuf::from("a.qmd")]),
+        );
+        // Include updates must not affect existing nav/profile graph semantics.
+        assert!(graph.edges.is_empty());
+    }
+
+    #[test]
+    fn replacing_with_empty_set_prunes_both_include_indices() {
+        let index = ProjectIndex::new(vec![with_includes("index.qmd", &["/project/leaf.qmd"])]);
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        graph.replace_include_dependencies(Path::new("index.qmd"), std::iter::empty::<&Path>());
+        assert!(graph.include_edges.is_empty());
+        assert!(graph.include_reverse_edges.is_empty());
+
+        graph.replace_include_dependencies(
+            Path::new("index.qmd"),
+            [Path::new("/project/new-leaf.qmd")],
+        );
+        assert_eq!(
+            graph.include_dependents([Path::new("/project/new-leaf.qmd")]),
+            BTreeSet::from([PathBuf::from("index.qmd")]),
+        );
+    }
+
+    #[test]
+    fn removed_included_file_remains_addressable_without_disk_reads() {
+        let absent = "/project/this-file-has-been-deleted.qmd";
+        let index = ProjectIndex::new(vec![with_includes("index.qmd", &[absent])]);
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        // No filesystem lookups. The recorded path is intentionally retained
+        // so a deletion event can still find its old dependent document.
+        assert_eq!(
+            graph.include_dependents([Path::new(absent)]),
+            BTreeSet::from([PathBuf::from("index.qmd")]),
+        );
+    }
+
+    #[test]
+    fn many_unrelated_documents_do_not_create_include_edges() {
+        let mut profiles = (0..3000)
+            .map(|i| with_includes(&format!("unrelated-{i:04}.qmd"), &[]))
+            .collect::<Vec<_>>();
+        profiles.push(with_includes("active.qmd", &["/project/leaf.qmd"]));
+        let graph = ProjectDependencyGraph::build(
+            &ProjectIndex::new(profiles),
+            &ConfigValue::default(),
+            &mut Vec::new(),
+        );
+        assert_eq!(graph.include_reverse_edges.len(), 1);
+        assert_eq!(graph.include_edges.len(), 1);
+        assert_eq!(
+            graph.include_dependents([Path::new("/project/leaf.qmd")]),
+            BTreeSet::from([PathBuf::from("active.qmd")]),
         );
     }
 }
