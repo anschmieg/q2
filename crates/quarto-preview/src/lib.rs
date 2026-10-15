@@ -154,6 +154,10 @@ static RESOURCE_DISK_MAP: OnceLock<std::collections::HashMap<String, PathBuf>> =
 /// above (one preview server per process; nextest isolates tests).
 static ALLOW_EDIT: OnceLock<bool> = OnceLock::new();
 
+/// Shared sessions may contain VFS edits not yet represented on disk;
+/// disk-backed dependency discovery must fail open for these sessions.
+static SHARED_PREVIEW: OnceLock<bool> = OnceLock::new();
+
 /// Which embedded frontend this session serves (`--ui`, Phase 4
 /// bd-jt1etjbn). Set once at `run()` from [`PreviewConfig::ui`] and
 /// read by the SPA fallback handler. Same OnceLock pattern as above.
@@ -356,6 +360,7 @@ where
     // bd-ov4gqk3m: stash the edit-permission bit for the
     // `/api/preview/config` handler before the server starts serving.
     let _ = ALLOW_EDIT.set(config.allow_edit);
+    let _ = SHARED_PREVIEW.set(config.share);
 
     // Phase 4 (bd-jt1etjbn): stash the UI choice for the SPA fallback
     // handler before the server starts serving.
