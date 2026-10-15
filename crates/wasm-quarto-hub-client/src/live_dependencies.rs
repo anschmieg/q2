@@ -1,0 +1,142 @@
+//! Translate a completed core project graph into the live preview's file
+//! invalidation snapshot. No parsing, filesystem walks, or separate source
+//! classifier: `ProjectIndex` is the Pass-1 snapshot the renderer just used.
+//!
+//! This module is only a boundary adapter. Render scheduling and all graph
+//! semantics stay in quarto-core. Future element-level invalidation can
+//! attach smaller render-unit keys without changing the source identity
+//! contract or teaching the browser about QMD shortcodes.
+
+use std::path::{Component, Path, PathBuf};
+
+use quarto_core::project::dependency_graph::ProjectDependencyGraph;
+use quarto_core::project::index::ProjectIndex;
+use quarto_pandoc_types::ConfigValue;
+
+/// Complete project-relative paths that may affect the rendered page.
+///
+/// `None` means UNKNOWN, *not* an empty set. Consumers must fail open and
+/// re-render on all file changes when any input cannot be represented.
+/// Pass-1 failures are checked by the caller before invoking this function.
+/// A successful complete snapshot is safe only until the next relevant edit.
+pub(crate) fn render_input_paths(
+    index: &ProjectIndex,
+    project_metadata: &ConfigValue,
+    root: &Path,
+    active_file: &Path,
+) -> Option<Vec<String>> {
+    let active_relative = active_file.strip_prefix(root).ok()?;
+    if index.lookup_by_source(active_relative).is_none() {
+        return None;
+    }
+
+    // Build the graph only from profiles already computed by this render.
+    // This includes the core's cross-document navigation/listing edges and
+    // the transitive IncludeEntry file edges, which can be non-renderable.
+    let mut diagnostics = Vec::new();
+    let graph = ProjectDependencyGraph::build(index, project_metadata, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return None; // incomplete sidebar/config resolution: don't filter
+    }
+    let inputs = graph.render_inputs_for(active_relative);
+
+    inputs
+        .into_iter()
+        .map(|input| path_for_sync(&input, root))
+        .collect()
+}
+
+/// Sync and WASM VFS use project-relative slash-separated paths.
+/// Never strip or silently normalize '..': an out-of-tree or ambiguous
+/// alias must cause broad invalidation, not a false negative.
+fn path_for_sync(input: &Path, root: &Path) -> Option<String> {
+    let relative = if input.is_absolute() {
+        input.strip_prefix(root).ok()?
+    } else {
+        input
+    };
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let path = relative.to_string_lossy().replace('\\', "/");
+    if path.is_empty() || path.starts_with('/') {
+        return None;
+    }
+    Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quarto_core::document_profile::{DocumentProfile, IncludeEntry};
+
+    fn profile(name: &str, files: &[&str]) -> DocumentProfile {
+        DocumentProfile {
+            source_path: PathBuf::from(name),
+            output_href: name.replace(".qmd", ".html"),
+            format_id: "html".to_string(),
+            includes: files.iter().map(|file| IncludeEntry::new(PathBuf::from(file), b"x")).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn live_snapshot_contains_active_and_transitive_partials_not_unrelated_documents() {
+        let index = ProjectIndex::new(vec![
+            profile("index.qmd", &["/project/outer.qmd", "/project/leaf.qmd"]),
+            profile("other.qmd", &[]),
+        ]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+            ),
+            Some(vec![
+                "index.qmd".to_string(),
+                "leaf.qmd".to_string(),
+                "outer.qmd".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
+    fn unknown_or_unrepresentable_dependency_must_fail_open() {
+        let index = ProjectIndex::new(vec![
+            profile("index.qmd", &["/elsewhere/secret.qmd"]),
+        ]);
+        assert_eq!(
+            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/index.qmd")),
+            None,
+        );
+        assert_eq!(path_for_sync(Path::new("a/../b.qmd"), Path::new("/project")), None);
+        assert_eq!(path_for_sync(Path::new("/other/b.qmd"), Path::new("/project")), None);
+        assert_eq!(
+            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/not-indexed.qmd")),
+            None,
+        );
+    }
+
+    #[test]
+    fn profile_edges_are_included_for_active_page() {
+        let mut root = profile("index.qmd", &[]);
+        root.body_link_targets = vec![PathBuf::from("about.qmd")];
+        let index = ProjectIndex::new(vec![
+            root,
+            profile("about.qmd", &["/project/sub/leaf.qmd"]),
+            profile("unrelated.qmd", &[]),
+        ]);
+        assert_eq!(
+            render_input_paths(&index, &ConfigValue::default(), Path::new("/project"), Path::new("/project/index.qmd")),
+            Some(vec!["about.qmd".to_string(), "index.qmd".to_string(), "sub/leaf.qmd".to_string()]),
+        );
+    }
+}
