@@ -3,7 +3,7 @@
 //! Returns the set of project-relative file paths that the page at
 //! `<rel>` depends on — i.e. the files whose edits should cause the
 //! active page to re-render. The SPA fetches this on boot and on
-//! active-file change, caches it locally, and uses it to filter
+//! active-file change and on relevant edits, caches it locally, and uses it to filter
 //! incoming `onFileContent` callbacks so unrelated sibling edits no
 //! longer trigger a re-render.
 //!
@@ -76,7 +76,7 @@ pub async fn deps_handler(
     }
 
     let Some(project_root) = ctx.storage().project_root().map(|p| p.to_path_buf()) else {
-        // Standalone mode (no project) — return empty deps.
+        // Standalone mode (no project) — dependency set is unknown.
         return Json(DepsResponse { deps: None }).into_response();
     };
     let project_root = project_root.canonicalize().unwrap_or(project_root);
@@ -104,10 +104,10 @@ pub async fn deps_handler(
                 tracing::warn!(
                     rel_path = %rel_path,
                     error = %e,
-                    "could not read source for dep extraction; returning empty",
+                    "could not read source for dep extraction; falling back to broad invalidation",
                 );
             }
-            return Json(DepsResponse { deps: vec![] }).into_response();
+            return Json(DepsResponse { deps: None }).into_response();
         }
     };
 
@@ -229,8 +229,8 @@ fn resolve_project_include_deps(
 /// directory and emitted as forward-slash project-relative strings,
 /// deduplicated and sorted.
 ///
-/// On parse failure, returns an empty list — see the module-level
-/// fail-open rationale.
+/// The legacy syntax-only extractor returns an empty list on parse failure;
+/// production does not use it as a complete dependency set.
 ///
 /// Public so unit tests + a potential future debugging surface can
 /// reach it without spinning up an axum router.
