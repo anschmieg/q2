@@ -172,8 +172,11 @@ impl ProjectDependencyGraph {
             // Already computed in Pass 1: no new parse, disk reads or
             // project discovery. Includes are transitive and can refer
             // to partial files absent from the renderable project index.
-            let files: BTreeSet<PathBuf> =
-                profile.includes.iter().map(|entry| entry.path.clone()).collect();
+            let files: BTreeSet<PathBuf> = profile
+                .includes
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect();
             for file in &files {
                 include_reverse_edges
                     .entry(file.clone())
@@ -314,12 +317,13 @@ impl ProjectDependencyGraph {
         let previous = self.include_edges.remove(document).unwrap_or_default();
 
         for removed in previous.difference(&updated) {
-            let should_remove = if let Some(dependents) = self.include_reverse_edges.get_mut(removed) {
-                dependents.remove(document);
-                dependents.is_empty()
-            } else {
-                false
-            };
+            let should_remove =
+                if let Some(dependents) = self.include_reverse_edges.get_mut(removed) {
+                    dependents.remove(document);
+                    dependents.is_empty()
+                } else {
+                    false
+                };
             if should_remove {
                 self.include_reverse_edges.remove(removed);
             }
@@ -1286,7 +1290,10 @@ mod tests {
         ]);
         let mut diags = Vec::new();
         let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut diags);
-        assert!(graph.edges.is_empty(), "include edges must not change navigation graph");
+        assert!(
+            graph.edges.is_empty(),
+            "include edges must not change navigation graph"
+        );
         assert!(graph.reverse_edges.is_empty());
         assert_eq!(
             graph.include_dependents([Path::new("/project/partials/leaf.qmd")]),
@@ -1308,11 +1315,7 @@ mod tests {
             with_includes("b.qmd", &["/project/leaf.qmd", "/project/other.qmd"]),
             with_includes("c.qmd", &[]),
         ]);
-        let graph = ProjectDependencyGraph::build(
-            &index,
-            &ConfigValue::default(),
-            &mut Vec::new(),
-        );
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
         assert_eq!(
             graph.include_dependents([
                 Path::new("/project/leaf.qmd"),
@@ -1321,7 +1324,11 @@ mod tests {
             ]),
             BTreeSet::from([PathBuf::from("a.qmd"), PathBuf::from("b.qmd")])
         );
-        assert!(graph.include_dependents([Path::new("/project/unrelated.qmd")]).is_empty());
+        assert!(
+            graph
+                .include_dependents([Path::new("/project/unrelated.qmd")])
+                .is_empty()
+        );
         assert_eq!(graph.include_reverse_edges.len(), 2);
     }
 
@@ -1331,14 +1338,14 @@ mod tests {
             with_includes("a.qmd", &["/project/outer.qmd", "/project/old-leaf.qmd"]),
             with_includes("b.qmd", &["/project/old-leaf.qmd"]),
         ]);
-        let mut graph = ProjectDependencyGraph::build(
-            &index,
-            &ConfigValue::default(),
-            &mut Vec::new(),
-        );
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
         graph.replace_include_dependencies(
             Path::new("a.qmd"),
-            [Path::new("/project/outer.qmd"), Path::new("/project/new-leaf.qmd")],
+            [
+                Path::new("/project/outer.qmd"),
+                Path::new("/project/new-leaf.qmd"),
+            ],
         );
 
         assert_eq!(
@@ -1355,15 +1362,9 @@ mod tests {
 
     #[test]
     fn replacing_with_empty_set_prunes_both_include_indices() {
-        let index = ProjectIndex::new(vec![with_includes(
-            "index.qmd",
-            &["/project/leaf.qmd"],
-        )]);
-        let mut graph = ProjectDependencyGraph::build(
-            &index,
-            &ConfigValue::default(),
-            &mut Vec::new(),
-        );
+        let index = ProjectIndex::new(vec![with_includes("index.qmd", &["/project/leaf.qmd"])]);
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
         graph.replace_include_dependencies(Path::new("index.qmd"), std::iter::empty::<&Path>());
         assert!(graph.include_edges.is_empty());
         assert!(graph.include_reverse_edges.is_empty());
@@ -1382,11 +1383,7 @@ mod tests {
     fn removed_included_file_remains_addressable_without_disk_reads() {
         let absent = "/project/this-file-has-been-deleted.qmd";
         let index = ProjectIndex::new(vec![with_includes("index.qmd", &[absent])]);
-        let graph = ProjectDependencyGraph::build(
-            &index,
-            &ConfigValue::default(),
-            &mut Vec::new(),
-        );
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
         // No filesystem lookups. The recorded path is intentionally retained
         // so a deletion event can still find its old dependent document.
         assert_eq!(
@@ -1413,5 +1410,4 @@ mod tests {
             BTreeSet::from([PathBuf::from("active.qmd")]),
         );
     }
-
 }
