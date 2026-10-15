@@ -185,7 +185,11 @@ fn resolve_project_include_deps(
     }
 
     let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
-    let project = ProjectContext::discover(&root, runtime.as_ref()).ok()?;
+    // Discover from the requested file, not the project directory.
+    // This loads the same project config and root while avoiding a recursive
+    // project-wide file walk on every dependency lookup. The include expander
+    // only needs the project root and reads the include bytes itself.
+    let project = ProjectContext::discover(&abs_page, runtime.as_ref()).ok()?;
     let document = DocumentInfo::from_path(&abs_page);
     let mut ctx = StageContext::new(runtime, quarto_core::Format::html(), project, document).ok()?;
 
