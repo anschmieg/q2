@@ -7,48 +7,21 @@
 //! incoming `onFileContent` callbacks so unrelated sibling edits no
 //! longer trigger a re-render.
 //!
-//! ## How "dependency" is decided for the MVP
+//! ## Project-mode include closure
 //!
-//! The handler parses the page's qmd source into a Pandoc AST and
-//! walks the *block-level* shortcodes for the same shape
-//! [`IncludeExpansionStage`] uses:
+//! The HTTP endpoint runs Q2's own parse and include-expansion stages,
+//! obtaining the *transitive* file closure from `DocumentAst::recorded_includes`.
+//! The older `extract_include_deps` helper remains single-hop for its
+//! syntax-unit tests; it is not used as a production substitute for the
+//! renderer's nested-include semantics. Image and bibliography dependencies
+//! still use the SPA's broad project-wide binary/config invalidation.
 //!
-//!   - a `Block::Paragraph` or `Block::Plain` containing exactly one
-//!     inline (`Plain` covers tight list items and table cells),
-//!   - that inline is an `Inline::Shortcode`,
-//!   - the shortcode's `name` is `"include"`,
-//!   - the first positional argument is a string,
-//!   - at **any block-list position** — top level or nested inside
-//!     divs, blockquotes, list items, tables, … (bd-1fz3vh99).
-//!
-//! Reusing [`collect_include_paths`](quarto_core::stage::stages::collect_include_paths)
-//! keeps both the recognition rules and the traversal in lock-step
-//! with what the renderer actually treats as an include — no drift
-//! between "this file is a dep" and "this include actually expands
-//! at render time." Going
-//! through the AST (rather than regex over raw text) is also what
-//! the Q1→Q2 migration is about: operate on the parsed syntax, not
-//! on substrings.
-//!
-//! ## Deliberately out of scope for this MVP
-//!
-//! - **Transitive includes.** If `a.qmd` includes `b.qmd` and
-//!   `b.qmd` includes `c.qmd`, this endpoint returns `[b.qmd]` for
-//!   `a.qmd`. A regression test pins single-hop semantics so a
-//!   future transitive expansion is a deliberate change.
-//! - **Image references.** `![](foo.png)` doesn't show up in the
-//!   text-doc dep set. The SPA keeps `onBinaryContent` callbacks
-//!   unfiltered for now — every binary edit bumps `contentTick`.
-//! - **Bibliography / CSL paths.** Same reasoning as images.
-//! - **The full [`ProjectDependencyGraph`].** That graph requires
-//!   running per-page render pipelines to populate
-//!   `DocumentProfile.body_link_targets` etc.; way more expensive
-//!   than D.6 needs.
-//!
-//! Parse / IO errors get logged and downgraded to "no deps" — a
-//! filter that misses a real dep is bad (stale render); a filter
-//! that includes too many is just the pre-D.6 behaviour, so we'd
-//! rather over-broadcast than fail closed.
+//! The response distinguishes known-empty `{"deps":[]}` from UNKNOWN
+//! `{"deps":null}`. Any parse, include, filesystem, symlink, or containment
+//! uncertainty falls open: the SPA accepts every file edit rather than
+//! suppressing the only event that could repair stale preview output.
+//! Since this native collector reads disk, it is disabled for shared and
+//! editable sessions whose VFS may be ahead of the disk source.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -147,7 +120,15 @@ pub async fn deps_handler(
         return Json(DepsResponse { deps: None }).into_response();
     }
 
-    let deps = resolve_project_include_deps(&project_root, &rel_path, source);
+    // The real parser and expansion can be CPU-intensive on large include
+    // trees; keep them off the async HTTP runtime's worker threads.
+    let root = project_root.clone();
+    let page = rel_path.clone();
+    let deps = tokio::task::spawn_blocking(move || {
+        resolve_project_include_deps(&root, &page, source)
+    })
+    .await
+    .unwrap_or(None);
     if deps.is_none() {
         tracing::warn!(
             page = %rel_path,
@@ -180,6 +161,13 @@ fn resolve_project_include_deps(
         return None;
     }
 
+    // The request's source and the expansion's child reads must represent a
+    // stable disk snapshot. An overlapping write degrades to unknown.
+    let source_snapshot = source.clone();
+    if std::fs::read(&requested).ok()? != source_snapshot {
+        return None;
+    }
+
     let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
     let project = ProjectContext::discover(&root, runtime.as_ref()).ok()?;
     let document = DocumentInfo::from_path(&abs_page);
@@ -209,8 +197,19 @@ fn resolve_project_include_deps(
         if canonical != entry.path {
             return None;
         }
+        // Check for concurrent child updates after expansion. The renderer
+        // recorded the content hash of the bytes it actually consumed.
+        let current = std::fs::read(&canonical).ok()?;
+        if quarto_core::document_profile::IncludeEntry::hash_bytes(&current)
+            != entry.content_hash
+        {
+            return None;
+        }
         let rel = canonical.strip_prefix(&root).ok()?;
         deps.push(normalize_forward_slash(rel));
+    }
+    if std::fs::read(&requested).ok()? != source_snapshot {
+        return None;
     }
     deps.sort();
     deps.dedup();
