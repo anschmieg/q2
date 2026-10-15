@@ -162,7 +162,11 @@ mod tests {
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
             ),
-            Some(vec!["about.qmd".to_string(), "index.qmd".to_string(), "sub/leaf.qmd".to_string()]),
+            Some(vec![
+                "about.qmd".to_string(),
+                "index.qmd".to_string(),
+                "sub/leaf.qmd".to_string()
+            ]),
         );
     }
 }
