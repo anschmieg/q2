@@ -51,6 +51,7 @@
 //! rather over-broadcast than fail closed.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -59,6 +60,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use quarto_core::stage::stages::collect_include_paths;
+use quarto_core::project::{DocumentInfo, ProjectContext};
+use quarto_core::stage::{
+    LoadedSource, ParseDocumentStage, PipelineData, PipelineStage, StageContext,
+    expand_document_includes,
+};
+use quarto_system_runtime::{NativeRuntime, SystemRuntime};
 use quarto_error_reporting::DiagnosticMessageBuilder;
 use quarto_hub::context::SharedContext;
 use serde::{Deserialize, Serialize};
@@ -72,10 +79,10 @@ pub struct DepsQuery {
 
 #[derive(Debug, Serialize)]
 pub struct DepsResponse {
-    /// Project-relative paths (forward slashes) the requested page
-    /// directly includes. Single-hop; non-include channels (images,
-    /// bibliography, etc.) are out of scope per the module doc.
-    pub deps: Vec<String>,
+    /// Transitive project-relative include paths. `None` means that the
+    /// analysis could not prove a complete set: clients MUST render on
+    /// every file change (fail-open) rather than treat this as empty.
+    pub deps: Option<Vec<String>>,
 }
 
 /// Axum handler for `GET /api/preview/deps?page=<rel>`.
@@ -97,7 +104,7 @@ pub async fn deps_handler(
 
     let Some(project_root) = ctx.storage().project_root().map(|p| p.to_path_buf()) else {
         // Standalone mode (no project) — return empty deps.
-        return Json(DepsResponse { deps: vec![] }).into_response();
+        return Json(DepsResponse { deps: None }).into_response();
     };
     let project_root = project_root.canonicalize().unwrap_or(project_root);
 
@@ -131,8 +138,83 @@ pub async fn deps_handler(
         }
     };
 
-    let deps = extract_include_deps(&source, &rel_path);
+    // The native resolver reads the project filesystem. In writable or
+    // shared sessions the synchronized VFS can lead the disk; a disk-based
+    // dependency list must not be used to filter live editor changes.
+    if super::ALLOW_EDIT.get().copied().unwrap_or(false)
+        || super::SHARED_PREVIEW.get().copied().unwrap_or(false)
+    {
+        return Json(DepsResponse { deps: None }).into_response();
+    }
+
+    let deps = resolve_project_include_deps(&project_root, &rel_path, source);
+    if deps.is_none() {
+        tracing::warn!(
+            page = %rel_path,
+            "incomplete project include closure; preview dependency filter falls open"
+        );
+    }
     Json(DepsResponse { deps }).into_response()
+}
+
+/// Compute the full project-mode include closure using the same parser and
+/// IncludeExpansionStage as the native renderer (including nested containers,
+/// includes within code fences, and recursive includes).
+///
+/// `None` is not a valid empty set: it means that dependency analysis cannot
+/// certify the closure, so the SPA must accept ALL incoming source edits.
+/// In particular, missing/cyclic includes and paths escaping the project are
+/// *unknown*, never falsely considered to have zero dependencies.
+///
+/// This disk snapshot is only authoritative for non-editable, non-shared
+/// preview sessions; the HTTP handler disables selective filtering otherwise.
+fn resolve_project_include_deps(
+    project_root: &Path,
+    page_rel: &str,
+    source: Vec<u8>,
+) -> Option<Vec<String>> {
+    let root = project_root.canonicalize().ok()?;
+    let requested = root.join(page_rel);
+    let abs_page = requested.canonicalize().ok()?;
+    if !abs_page.starts_with(&root) || !abs_page.is_file() {
+        return None;
+    }
+
+    let runtime: Arc<dyn SystemRuntime> = Arc::new(NativeRuntime::new());
+    let project = ProjectContext::discover(&root, runtime.as_ref()).ok()?;
+    let document = DocumentInfo::from_path(&abs_page);
+    let mut ctx = StageContext::new(runtime, quarto_core::Format::html(), project, document).ok()?;
+
+    let parse = ParseDocumentStage;
+    let PipelineData::DocumentAst(mut doc) = pollster::block_on(parse.run(
+        PipelineData::LoadedSource(LoadedSource::new(abs_page, source)),
+        &mut ctx,
+    )).ok()? else {
+        return None;
+    };
+
+    // The expander populates recorded_includes with the exact transitive
+    // includes the renderer consumed; a failure is conservatively unknown,
+    // even if a partial record exists (missing file, cycle, parse failure).
+    expand_document_includes(&mut doc, &mut ctx).ok()?;
+    let mut deps = Vec::new();
+    for entry in &doc.recorded_includes {
+        let canonical = entry.path.canonicalize().ok()?;
+        if !canonical.starts_with(&root) || !canonical.is_file() {
+            return None;
+        }
+        // Symlink aliases can have a different VFS key from their canonical
+        // target. Until the hub exposes an authoritative alias mapping,
+        // don't silently miss an edit to such a path.
+        if canonical != entry.path {
+            return None;
+        }
+        let rel = canonical.strip_prefix(&root).ok()?;
+        deps.push(normalize_forward_slash(rel));
+    }
+    deps.sort();
+    deps.dedup();
+    Some(deps)
 }
 
 /// Extract include-shortcode dependencies from a qmd source.
@@ -387,6 +469,67 @@ mod tests {
         // contributes no dependency.
         let src = "# A\n\n```{.python}\nx = 1  {{< include app.py >}}\n```\n";
         assert!(deps_for(src, "index.qmd").is_empty());
+    }
+
+    #[test]
+    fn project_mode_tracks_transitive_includes_and_filters_unrelated_files() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::write(root.join("_quarto.yml"), "project:\n  type: website\n").unwrap();
+        std::fs::create_dir(root.join("snippets")).unwrap();
+        std::fs::write(root.join("index.qmd"), "# Page\n\n{{< include snippets/outer.qmd >}}\n").unwrap();
+        std::fs::write(root.join("snippets/outer.qmd"), "{{< include leaf.qmd >}}\n").unwrap();
+        std::fs::write(root.join("snippets/leaf.qmd"), "Current leaf\n").unwrap();
+        std::fs::write(root.join("unrelated.qmd"), "# Sibling\n").unwrap();
+        let source = std::fs::read(root.join("index.qmd")).unwrap();
+        let closure = resolve_project_include_deps(root, "index.qmd", source).unwrap();
+        assert_eq!(closure, vec!["snippets/leaf.qmd", "snippets/outer.qmd"]);
+        assert!(!closure.contains(&"unrelated.qmd".to_string()));
+    }
+
+    #[test]
+    fn project_mode_updates_closure_after_additions_and_removals() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::write(root.join("_quarto.yml"), "project:\n  type: website\n").unwrap();
+        std::fs::write(root.join("index.qmd"), "{{< include outer.qmd >}}\n").unwrap();
+        std::fs::write(root.join("outer.qmd"), "Hello\n").unwrap();
+        let get = || resolve_project_include_deps(root, "index.qmd", std::fs::read(root.join("index.qmd")).unwrap());
+        assert_eq!(get().unwrap(), vec!["outer.qmd"]);
+        std::fs::write(root.join("extra.qmd"), "Hello new dep\n").unwrap();
+        std::fs::write(root.join("outer.qmd"), "{{< include extra.qmd >}}\n").unwrap();
+        assert_eq!(get().unwrap(), vec!["extra.qmd", "outer.qmd"]);
+        std::fs::write(root.join("outer.qmd"), "No longer includes extra\n").unwrap();
+        assert_eq!(get().unwrap(), vec!["outer.qmd"]);
+    }
+
+    #[test]
+    fn project_mode_fails_open_for_missing_and_cyclic_includes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::write(root.join("_quarto.yml"), "project:\n  type: website\n").unwrap();
+        std::fs::write(root.join("index.qmd"), "{{< include outer.qmd >}}\n").unwrap();
+        std::fs::write(root.join("outer.qmd"), "{{< include missing.qmd >}}\n").unwrap();
+        let get = || resolve_project_include_deps(root, "index.qmd", std::fs::read(root.join("index.qmd")).unwrap());
+        assert_eq!(get(), None, "missing child must not yield incomplete known deps");
+        std::fs::write(root.join("missing.qmd"), "recreated\n").unwrap();
+        assert_eq!(get().unwrap(), vec!["missing.qmd", "outer.qmd"]);
+        std::fs::write(root.join("outer.qmd"), "{{< include index.qmd >}}\n").unwrap();
+        assert_eq!(get(), None, "cycles must conservatively disable filtering");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_mode_fails_open_for_outside_root_symlink() {
+        let fixture = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::write(root.join("_quarto.yml"), "project:\n  type: website\n").unwrap();
+        std::fs::write(root.join("index.qmd"), "{{< include escape.qmd >}}\n").unwrap();
+        std::fs::write(outside.path().join("secret.qmd"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.qmd"), root.join("escape.qmd")).unwrap();
+        let closure = resolve_project_include_deps(root, "index.qmd", std::fs::read(root.join("index.qmd")).unwrap());
+        assert!(closure.is_none(), "outside-root dependency must never be returned");
     }
 
     #[test]
