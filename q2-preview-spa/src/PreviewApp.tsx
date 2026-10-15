@@ -620,7 +620,7 @@ export default function PreviewApp() {
   // useCallback so the button doesn't re-mount on every state
   // update.
   const handleRefresh = useCallback(() => {
-    setState((s) => ({ ...s, contentTick: s.contentTick + 1 }));
+    setState((s) => ({ ...s, deps: null, contentTick: s.contentTick + 1 }));
   }, []);
 
   // Phase 4 (target-incremental-writes) + bd-ov4gqk3m: real setAst
@@ -676,7 +676,7 @@ export default function PreviewApp() {
         // Optimistic local update so the re-render is immediate rather
         // than waiting for the sync round-trip.
         vfsAddFile(state.activeFile, newQmd);
-        setState((s) => ({ ...s, contentTick: s.contentTick + 1 }));
+        setState((s) => ({ ...s, deps: null, contentTick: s.contentTick + 1 }));
       } catch (err) {
         console.error('apply_node_edit failed in PreviewApp:', err);
       }
@@ -846,6 +846,7 @@ export default function PreviewApp() {
             setState((s) => ({
               ...s,
               captures,
+              deps: null,
               // Bump contentTick so the render effect re-fires; the
               // newly-recorded capture should now affect the rendered
               // AST for the active page.
@@ -1001,6 +1002,7 @@ export default function PreviewApp() {
             ...s,
             connection: 'connected',
             files: refreshedFiles,
+            deps: null,
             // Content may have changed while we were offline; re-fire
             // the render effect through the usual channel.
             contentTick: s.contentTick + 1,
