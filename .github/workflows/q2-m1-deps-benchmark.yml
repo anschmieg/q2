@@ -1,12 +1,12 @@
 name: Q2 M1 native dependency endpoint performance
 on:
   push:
-    branches: [research/q2-m1-perf-evaluation]
+    branches: [research/q2-m1-perf-optimized]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: q2-m1-perf-evaluation
+  group: q2-m1-perf-optimized
   cancel-in-progress: true
 env:
   CARGO_INCREMENTAL: "0"
@@ -55,6 +55,15 @@ jobs:
         run: |
           cargo build --bin q2
           cp target/debug/q2 "$RUNNER_TEMP/q2-patched"
+      - name: Recheck optimized Rust closure regressions
+        run: |
+          cargo test -p quarto-preview --lib project_mode -- --nocapture
+          cargo test -p quarto-preview --test integration boot::project_deps_http_endpoint_includes_nested_children -- --nocapture
+      - name: Compile original M1 native q2
+        run: |
+          git checkout --detach 7ea131b2dbfdde43a034a90b7a0420214b90913a
+          cargo build --bin q2
+          cp target/debug/q2 "$RUNNER_TEMP/q2-original"
       - name: Compile pinned upstream baseline native q2
         run: |
           git checkout --detach "$BASE_Q2_SHA"
@@ -65,6 +74,7 @@ jobs:
         run: |
           python3 "$RUNNER_TEMP/q2-m1-deps-benchmark.py" \
             --baseline "$RUNNER_TEMP/q2-baseline" \
+            --original "$RUNNER_TEMP/q2-original" \
             --patched "$RUNNER_TEMP/q2-patched" \
             --output "$GITHUB_WORKSPACE/m1-performance"
       - name: Archive raw measurements
