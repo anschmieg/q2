@@ -1453,8 +1453,8 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
     /// using it to filter events; an incomplete index is not authoritative.
     ///
     /// This is a read-only snapshot. Re-running the pipeline refreshes it.
-    pub fn last_project_index(&self) -> Option<&ProjectIndex> {
-        self.last_index.as_deref()
+    pub fn last_project_index(&self) -> Option<Arc<ProjectIndex>> {
+        self.last_index.clone()
     }
 
     /// Run Pass 1 → `pre_render` → Pass 2 → `post_render`.
