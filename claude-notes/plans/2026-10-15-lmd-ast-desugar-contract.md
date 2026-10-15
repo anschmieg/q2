@@ -1,0 +1,202 @@
+---
+title: 'A structural desugaring contract for AST that does not come from the qmd reader (bd-7gqr148v, GH #846)'
+date: 2026-10-15
+description: 'list-table and definition-list divs built from AST nodes in an lmd cell never become Table / DefinitionList, and a list-table written inside a fragment hits an emitter gap. Diagnosis, the set of markdown desugaring steps every pandoc.read()-like entry point is promised to get, where that set is applied today and where it is missing, and a phased fix.'
+status: draft  # awaiting review; no implementation yet
+braid:
+  strand: bd-7gqr148v
+---
+
+**Strand:** bd-7gqr148v (bug, P2; discovered from bd-lmd-exploration-jqv2nbl4; related bd-76ogq4ew, whose phase 2 lists "fragment gaps (Table, …)"). **Issue:** [quarto-dev/q2#846](https://github.com/quarto-dev/q2/issues/846).
+
+**Branch:** `braid/bd-7gqr148v-lmd-ast-desugar-contract` (topic branch in the main checkout, off `main` @ `e308835bd`; no worktree, by request).
+
+**Precedent:** `claude-notes/plans/2026-02-05-div-transforms-json-input.md` (bd-31lk) extracted `transform_divs` out of the reader's postprocess so pampa's CLI `--from json` gets the div sugar. This plan generalizes that decision into a contract and applies it to the entry points bd-31lk did not know about.
+
+## The problem
+
+An `{lmd}` cell that *builds* a list-table or definition-list from nodes:
+
+```lua
+return pandoc.Div({ pandoc.BulletList(rows) }, pandoc.Attr("", {"list-table"}))
+```
+
+renders as `<div class="list-table"><ul><li><ul>…`. The same markup written literally in the document body becomes a `<table>`. The workaround of writing the markup literally inside a `{=: … :=}` fragment fails from the other side: the fragment *is* parsed by the full reader, so it becomes a `Table`, and the lmd emitter has no `Table` constructor, so the cell is rejected with "`Table` nodes are not supported inside markdown fragments yet" and left unrun.
+
+The author's goal (porting an Astro/Hugo "ConfigTable" component: a Lua function that turns data into a table) has exactly one working route today: `pandoc.read(markdown_string, "markdown")`, which defeats the point of building nodes.
+
+## Reproduction (confirmed 2026-10-15 on `main` @ `e308835bd` and on the installed `q2 0.33.0`)
+
+The issue's `repro.qmd` plus probes, rendered with `q2 render --to html`:
+
+| # | Input | Expected | Actual |
+|---|---|---|---|
+| 1 | literal `::: {.list-table}` in the body | `<table>` | `<table>` |
+| 2 | `pandoc.Div({BulletList}, {"list-table"})` returned by a cell | `<table>` | `<div class="list-table"><ul>…` |
+| 3 | literal `::: {.definition-list}` in the body | `<dl>` | `<dl>` |
+| 4 | `pandoc.Div({BulletList}, {"definition-list"})` returned by a cell | `<dl>` | `<div class="definition-list"><ul>…` |
+| 5 | `{=: ::: {.list-table} … :=}` fragment | `<table>` | cell not run; warning "`Table` nodes are not supported inside markdown fragments yet" |
+| A | `{=: ::: {.definition-list} … :=}` fragment | `<dl>` | `<dl>` (the emitter *does* have `DefinitionList`) |
+| B | `pandoc.Para({ pandoc.Image(alt, src) })` returned by a cell | `<figure>`? | `<p><img>` (the reader's implicit-figure sugar is not applied either) |
+| C | `pandoc.Div({ Para }, {"list-table"})` (invalid: no rows list) returned by a cell | Q-2-35 warning | silent; div passes through |
+| D | `pandoc.read(list_table_markdown, "markdown").blocks` from a cell | `<table>` | `<table>` |
+| E | `pandoc.read(json_with_list_table_div, "json").blocks` from a cell | `<table>` | `<div class="list-table">…` |
+| F | the same div returned by a user Lua filter (`filters: [f.lua]`) | (see § Out of scope) | `<div class="list-table">…` (same as Quarto 1) |
+
+Probe files: the issue's repro and `probes.qmd` are reproduced as the fixture in Phase 1 below.
+
+## Diagnosis
+
+The qmd reader does two different kinds of work in its postprocess pass (`crates/pampa/src/pandoc/treesitter_utils/postprocess.rs`, `postprocess()`), and the code does not distinguish them:
+
+1. **Concrete-syntax normalization.** Fixes to what tree-sitter produced from *this spelling* of the markdown: citation numbering, trailing `LineBreak` → `\` in headers/paragraphs/plains, absorbing a trailing `Inline::Attr` into a header and deriving the header's auto id, `* []` empty bullet items, a table caption parsed as the last row, `CaptionBlock` attachment to the preceding table, `SoftBreak`-after-`LineBreak` cleanup, the `$math$ {attr}` pattern, the citation-suffix pattern, leftover `Inline::Attr` errors, abbreviation coalescing and `merge_strs`, and the Q-2-50 doubled-brace-fence warnings. These only make sense on reader output; several depend on byte positions, and none of the shapes they act on can be built from Lua (there is no `pandoc.Attr` *inline*, no `CaptionBlock` constructor).
+
+2. **Structural desugaring.** Rewrites of *AST shapes* that are legal pandoc AST on their own and that an author can produce either by writing markdown or by constructing nodes:
+   - `Div(.list-table)` → `Table` (`transform_list_table_div`), with Q-2-35 for a malformed one;
+   - `Div(.definition-list)` → `DefinitionList` (`transform_definition_list_div`);
+   - `Para([Image])` with non-empty alt → `Figure` (the `.with_paragraph` handler; pandoc's `implicit_figures`).
+
+   The first two were already split out as `pub fn transform_divs(Pandoc, &mut DiagnosticCollector)` by bd-31lk. The third is still inlined in `postprocess()`.
+
+Layer 2 is applied only where someone remembered to call it:
+
+| AST entry point | Where | Layer 1 | Layer 2 today |
+|---|---|---|---|
+| document body, includes, engine output, listing templates, front-matter markdown | `pampa::readers::qmd::read` → `postprocess` | yes | yes (all three) |
+| `pandoc.read(s, "markdown")` from Lua | `lua/readwrite.rs` → `readers::qmd::read` | yes | yes |
+| lmd fragment `{=: … :=}` / `{= … =}` / `{=[ … ]=}` | `lmd/desugar.rs::parse_markdown` → `readers::qmd::read`, then `emit.rs` prints constructors | yes | yes, but the emitter cannot print a `Table` (Figure and DefinitionList it can) |
+| **lmd block cell return value** | `stage/stages/lmd_execute.rs::execute_lmd_cells`, `LmdCellValue::Blocks(result)` spliced as-is | n/a | **none** |
+| **lmd inline cell return value** (can carry blocks inside a `Note`) | same, `LmdInlineValue::Inlines` | n/a | **none** |
+| pampa CLI `--from json` | `pampa/src/main.rs` | n/a | divs only (bd-31lk) |
+| document import (docx/odt/…) | `quarto-core/src/import/mod.rs::read_pandoc_json` | n/a | divs only |
+| **`pandoc.read(s, "json")` from Lua** | `lua/readwrite.rs` json arm | n/a | **none** (inconsistent with the CLI arm two lines up) |
+| user Lua filter return values, shortcode handlers, `quarto.component` | `UserFiltersStage` and friends | n/a | none (Quarto 1 parity: its list-table filter runs in `normalize`, before user filters) |
+
+So the bug is a missing call at two entry points plus one emitter gap, and the reason it was missed is that nothing names the set of steps or says who is owed them.
+
+## The contract
+
+> **Structural desugaring set.** Every block list that enters the render pipeline *other than through the qmd reader* is rewritten by the same three transforms the reader applies, in this order, exactly once:
+>
+> 1. `Div(.list-table)` → `Table` (invalid shape: Q-2-35 warning, div left as is);
+> 2. `Div(.definition-list)` → `DefinitionList` (invalid shape: left as is, no warning, matching the reader);
+> 3. `Para([Image])` whose image has non-empty alt text → `Figure` with the alt as caption (pandoc `implicit_figures`).
+>
+> **Owed to:** lmd block-cell and inline-cell results (per cell, over what the cell returned), lmd fragments (by construction, since they go through the reader; the emitter must be able to print everything the reader produces for the common cases), `pandoc.read(…, "json")`, pampa CLI `--from json`, and document import.
+>
+> **Not owed to:** values returned by user Lua filters, shortcode handlers and components. These are filter semantics, where pandoc and Quarto 1 both leave constructed nodes alone. A filter that wants the sugar calls `pandoc.read` (markdown or json, both now covered) or builds the canonical node.
+>
+> **What the reader does that the set does not:** anything in layer 1 above. In particular, adjacent `Str`s are not merged, headers get no auto ids here (the `heading-id` transform does that later for the whole document), and `[^1]` footnote definitions are not resolved (the `footnotes` transform does that later; a cell cannot build them anyway).
+
+The three members are the complete list of shapes in `postprocess()` that (a) can be built from pampa's Lua constructors and (b) change the *kind* of a block. Everything else in postprocess fails (a) or is a text-level fix-up.
+
+### Decisions to make (flagged for review)
+
+- **D1. Is item 3 (implicit figure) in the set?** Recommendation: **yes.** The rule for membership is "what the reader would have produced from the equivalent markdown", and `![caption](img){#fig-x}` is the next thing a component author builds after a table. The cost is one divergence from pandoc's filter semantics for the json entry points: pandoc JSON that carries `Para [Image]` with alt text would become a `Figure` on the way in. pandoc itself only emits that shape when `implicit_figures` is off, so in practice this changes nothing for pandoc-produced JSON and only helps hand-written JSON. If the answer is no, the set is the two div transforms and `transform_divs` stays the only function; Phase 2 shrinks accordingly.
+- **D2. Where does a Q-2-35 from a cell-built div point?** A Lua-built node's `source_info` is `SourceInfo::generated(By::filter(chunk, line))` (`lua/types.rs::filter_source_info`). For an lmd cell the chunk is the document path with line padding (`ChunkIdentity`), so the line *is* a document line. Recommendation: the lmd stage re-locates any diagnostic whose location is `generated` onto the cell's span, the way `failure_diagnostic` already does for runtime errors, and adds a detail "built by this lmd cell". Precise-line relocation through `ChunkIdentity::locate` is a nice-to-have; the whole-cell underline is the honest resolution available without a column map (same call spike 7 made).
+- **D3. Fragment list-tables: emit `Table`, or parse fragments without the div sugar and let the per-cell pass do it?** Recommendation: **emit `Table`.** The second option makes one code path serve both forms, but it needs a reader knob to skip `transform_divs`, loses the reader's precise Q-2-35 location, and leaves *pipe tables* in fragments unsupported, which is a separate real gap (bd-76ogq4ew phase 2). Printing a `Table` is mechanical: pampa already has `pandoc.Table(caption, colspecs, head, bodies, foot, attr)`, `pandoc.Caption`, `pandoc.Row`, `pandoc.Cell`, `pandoc.TableHead/Body/Foot`, and colspecs are `{ {align, width}, … }` tables (`constructors.rs::parse_colspecs`).
+- **D4. Should user filters get the pass after all (a desugar after `user-filters-pre`)?** Recommendation: **no**, keep Quarto 1 parity and pandoc filter semantics; document the boundary. Revisit if a real filter asks for it. (Cheap to add later: it is the same function over `doc.ast.blocks`, but it would double-warn Q-2-35 on a div the reader already rejected unless the pass is per-returned-value.)
+
+## Design
+
+### pampa: name the set
+
+`crates/pampa/src/pandoc/treesitter_utils/postprocess.rs` (or a new sibling `desugar.rs` re-exported from the same place, so the bd-31lk callers keep compiling):
+
+```rust
+/// The structural desugaring set (see dev-docs/syntax-notes.md § Structural
+/// desugaring contract): list-table, definition-list, implicit figure.
+pub fn desugar_filter<'a>(collector: &'a RefCell<&mut DiagnosticCollector>) -> Filter<'a>;
+pub fn desugar_blocks(blocks: Blocks, collector: &mut DiagnosticCollector) -> Blocks;   // topdown_traverse_blocks
+pub fn desugar_inlines(inlines: Inlines, collector: &mut DiagnosticCollector) -> Inlines; // descends into Note content
+pub fn transform_divs(doc: Pandoc, collector: &mut DiagnosticCollector) -> Pandoc;       // kept; now `desugar_blocks` over doc.blocks
+```
+
+`postprocess()` keeps its own inline `.with_div` and `.with_paragraph` handlers (they are fused with the layer-1 work in the same traversal and carry source-info bookkeeping the standalone pass does not need), but the figure-building code moves into a shared helper so the two sites cannot drift. The transform registry comment at the top of the file gains a "which entry points get this" column and the layer-1/layer-2 distinction.
+
+Idempotence: after a pass there are no valid `.list-table` / `.definition-list` divs and no single-image paragraphs with alt text left, so running the set over already-desugared blocks is a no-op except that an *invalid* list-table div warns again. That is why the pass runs per returned value, never over the whole document.
+
+### quarto-core: apply it at the lmd entry points
+
+`stage/stages/lmd_execute.rs::execute_lmd_cells`:
+
+- block cell: `LmdCellValue::Blocks(result)` → `desugar_blocks(result, &mut collector)` before `out.extend`;
+- inline cell: `LmdInlineValue::Inlines(result)` → `desugar_inlines(result, &mut collector)`;
+- the collector's diagnostics are relocated per D2 and pushed to `diagnostics`.
+
+A block cell nested inside a fragment is an IIFE inside the parent's Lua, so its value is part of the parent's result and is covered by the parent's pass. `echo` output is a `CodeBlock`, unaffected.
+
+### quarto-core: the emitter prints `Table`
+
+`lmd/emit.rs`: a `Block::Table` arm emitting
+
+```lua
+pandoc.Table(
+  { long = { … }, short = { … } },        -- or pandoc.Caption(long, short); either is accepted by parse_caption
+  { { "AlignDefault", 0 }, … },           -- colspecs; width 0 = ColWidthDefault
+  pandoc.TableHead({ pandoc.Row({ pandoc.Cell({ blocks }, "AlignDefault", 1, 1, attr) }) }, attr),
+  { pandoc.TableBody({ rows }, { head_rows }, 0, attr) },
+  pandoc.TableFoot({ rows }, attr),
+  pandoc.Attr(…))
+```
+
+using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LinePreserving` modes. `LmdError::Unsupported { kind: "Table" }` goes away; the unit test that uses a pipe table as its unsupported example switches to a footnote definition (`NoteDefinitionPara`), which stays unsupported, and the `errors.qmd` fixture does the same.
+
+### pampa: `pandoc.read(…, "json")`
+
+`lua/readwrite.rs` json arm: `transform_divs` (now the full set) after `read_completing_source_info`, matching `main.rs` and `import/mod.rs`. The CLI and import call sites switch to the renamed function so all three read the same.
+
+### Documentation
+
+- `dev-docs/syntax-notes.md`: new section "Structural desugaring contract" with the set, the entry-point table and the "not owed to" boundary. This is the artifact the user asked for; the code comments point at it.
+- `docs/guides/authoring/lua-filters.qmd`: a short note under the Quarto-specific-nodes material: the list-table / definition-list / implicit-figure sugar is applied to what lmd cells return and to `pandoc.read`, not to what filter functions return.
+- `docs/errors/markdown/Q-2-35.qmd`: mention that the warning can also come from a div an lmd cell built, located at the cell.
+- The lmd plan's open-question list (`2026-10-12-lmd-exploration.md`, observation 4 / "Table nodes") and bd-76ogq4ew phase 2 get a pointer to this strand.
+
+## Work items (TDD: tests first in every phase)
+
+### Phase 1: pin the current behavior
+
+- [ ] `crates/quarto/tests/integration/fixtures/lmd/desugar.qmd`: the issue's four sections plus probes A, B (with a fixture image), C, D, E, and a pipe table inside a fragment. Register in `FIXTURES` in `lmd_snapshots.rs`; snapshot markdown + stderr. The first snapshot documents the bug (divs, the `Table` warning); each later phase updates it.
+- [ ] `crates/pampa/tests/integration/test_json_div_transforms.rs`: add the implicit-figure case (fails until Phase 2, or is dropped if D1 = no).
+- [ ] `lmd_execute.rs` unit tests (same harness as `a_cell_is_replaced_by_the_blocks_it_returns`): `a_cell_built_list_table_div_becomes_a_table`, `a_cell_built_definition_list_div_becomes_a_definition_list`, `a_cell_built_single_image_para_becomes_a_figure`, `an_invalid_cell_built_list_table_warns_at_the_cell` (asserts Q-2-35 and that the location is the cell span), `an_inline_cell_note_holding_a_list_table_is_desugared`, `a_cell_nested_in_a_fragment_is_covered_by_the_parent_pass`.
+- [ ] `lmd/desugar.rs` unit tests: `table_in_a_fragment_is_emitted` (pipe table and list-table; assert `pandoc.Table(` and that the Lua runs), `line_preserving_table_stays_on_its_lines`; switch `unsupported_node_is_an_error_without_a_location_when_unanchored` to a footnote definition.
+- [ ] A pampa Lua test for `pandoc.read(json, "json")` with a list-table div → `Table` (next to the existing readwrite tests).
+
+### Phase 2: the set, named (pampa)
+
+- [ ] `desugar_filter` / `desugar_blocks` / `desugar_inlines`; `transform_divs` delegates. Figure construction shared with `postprocess()` (D1).
+- [ ] Registry comment at the top of `postprocess.rs` updated.
+- [ ] `main.rs` and `import/mod.rs` call the renamed entry point; `readwrite.rs` json arm calls it (probe E passes).
+
+### Phase 3: lmd cell results (quarto-core)
+
+- [ ] `execute_lmd_cells` runs the set per cell result; diagnostics relocated per D2 (issue sections 2 and 4, probes B and C pass).
+
+### Phase 4: tables in fragments (quarto-core emitter)
+
+- [ ] `Block::Table` arm in `emit.rs`, both modes; `Unsupported("Table")` removed; fixture and unit tests updated (issue section 5 and the pipe-table probe pass).
+
+### Phase 5: docs and bookkeeping
+
+- [ ] `dev-docs/syntax-notes.md` contract section; `lua-filters.qmd` note; `Q-2-35.qmd` note; pointers from the lmd plan and bd-76ogq4ew.
+- [ ] `cargo xtask verify` (full; `lmd_snapshots` reviewed); `cargo clippy --all-targets -- -D warnings`.
+- [ ] PR referencing #846; strand closed with the commit.
+
+## Out of scope (recorded so they are not re-discovered)
+
+- **User-filter return values** (probe F): Quarto 1 parity; see D4.
+- **Footnotes in fragments** (`NoteReference` / `NoteDefinitionPara` unsupported by the emitter): bd-76ogq4ew phase 2.
+- **Column-exact relocation of Q-2-35 inside a cell**: waits for `CodeBlock.text_source` (bd-f6tt2exg).
+- **Numbers in inline splices, string-typed grammar positions**: bd-0o82ly9c.
+- **Lua-callable `quarto.desugar(blocks)` for filter authors**: would be a one-line binding over `desugar_blocks` if D4 ever flips; not needed for #846.
+
+## References
+
+- `crates/pampa/src/pandoc/treesitter_utils/postprocess.rs`: `postprocess()`, `transform_divs()`, `validate_list_table_div()`, `is_valid_definition_list_div()`, the `.with_paragraph` figure handler.
+- `crates/quarto-core/src/stage/stages/lmd_execute.rs::execute_lmd_cells`; `crates/pampa/src/lua/lmd.rs::classify_cell_value` (the cell contract the pass runs after).
+- `crates/quarto-core/src/lmd/desugar.rs::parse_markdown`, `crates/quarto-core/src/lmd/emit.rs::block` (the `Unsupported("Table")` arm).
+- `crates/pampa/src/lua/readwrite.rs::pandoc_read` (qmd vs json arms); `crates/pampa/src/main.rs` `"json"` arm; `crates/quarto-core/src/import/mod.rs::read_pandoc_json`.
+- `crates/pampa/src/lua/constructors.rs`: `pandoc.Table`, `parse_colspecs`, `pandoc.Caption`, `Row`, `Cell`, `TableHead/Body/Foot`.
+- Quarto 1: `external-sources/quarto-cli/src/resources/filters/normalize/astpipeline.lua` (`astpipeline-process-list-tables` runs in normalize, before user filters).
+- Prior plans: `2026-02-05-div-transforms-json-input.md` (bd-31lk), `2026-10-12-lmd-exploration.md` (spikes 1–7), `2026-10-15-lmd-modules-and-qol.md` (bd-76ogq4ew phase 2 fragment gaps).
