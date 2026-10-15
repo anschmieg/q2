@@ -137,3 +137,58 @@ async fn boots_serves_spa_plus_hub_health() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_deps_http_endpoint_includes_nested_children() {
+    let project = tempfile::TempDir::with_prefix("q2-preview-deps-").unwrap();
+    let data = tempfile::TempDir::with_prefix("q2-preview-deps-data-").unwrap();
+    std::fs::write(project.path().join("_quarto.yml"), "project:\\n  type: website\\n").unwrap();
+    std::fs::write(
+        project.path().join("index.qmd"),
+        "# Active\\n\\n{{< include outer.qmd >}}\\n",
+    ).unwrap();
+    std::fs::write(project.path().join("outer.qmd"), "{{< include leaf.qmd >}}\\n").unwrap();
+    std::fs::write(project.path().join("leaf.qmd"), "Updated content\\n").unwrap();
+    std::fs::write(project.path().join("unrelated.qmd"), "# Unrelated\\n").unwrap();
+
+    let port = pick_free_port();
+    let config = PreviewConfig {
+        host: "127.0.0.1".into(),
+        port,
+        project_root: Some(project.path().to_path_buf()),
+        single_file: None,
+        data_dir: data.path().to_path_buf(),
+        spa_dir_override: None,
+        engine_registry: None,
+        engine_policy: Default::default(),
+        resource_html_files: Vec::new(),
+        cache_dir: None,
+        allow_edit: false,
+        share: false,
+        ui: Default::default(),
+    };
+    let server = tokio::spawn(async move {
+        let _ = quarto_preview::run(config).await;
+    });
+    wait_for_health(port).await;
+
+    let client = reqwest::Client::new();
+    let endpoint = format!("http://127.0.0.1:{port}/api/preview/deps?page=index.qmd");
+    let mut deps = serde_json::Value::Null;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(&endpoint).send().await {
+            if response.status().is_success() {
+                deps = response.json().await.expect("valid deps JSON");
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        deps["deps"],
+        serde_json::json!(["leaf.qmd", "outer.qmd"]),
+        "HTTP dependency closure must include nested leaves but not unrelated pages",
+    );
+    server.abort();
+}
