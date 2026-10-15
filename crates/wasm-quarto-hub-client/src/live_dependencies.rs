@@ -25,8 +25,24 @@ pub(crate) fn render_input_paths(
     root: &Path,
     active_file: &Path,
 ) -> Option<Vec<String>> {
-    let active_relative = active_file.strip_prefix(root).ok()?;
+    let active_relative = match active_file.strip_prefix(root) {
+        Ok(relative) => relative,
+        Err(_) => {
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(
+                &format!("[q2-m1-probe] rust-active-outside-root active={active_file:?} root={root:?}").into(),
+            );
+            return None;
+        }
+    };
     if index.lookup_by_source(active_relative).is_none() {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!(
+                "[q2-m1-probe] rust-active-not-indexed active={active_relative:?} profiles={:?}",
+                index.profiles().iter().map(|p| &p.source_path).collect::<Vec<_>>()
+            ).into(),
+        );
         return None;
     }
 
@@ -36,13 +52,26 @@ pub(crate) fn render_input_paths(
     let mut diagnostics = Vec::new();
     let graph = ProjectDependencyGraph::build(index, project_metadata, &mut diagnostics);
     if !diagnostics.is_empty() {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!("[q2-m1-probe] rust-graph-diagnostics count={} active={active_relative:?}", diagnostics.len()).into(),
+        );
         return None; // incomplete sidebar/config resolution: don't filter
     }
     let inputs = graph.render_inputs_for(active_relative);
 
     inputs
         .into_iter()
-        .map(|input| path_for_sync(&input, root))
+        .map(|input| {
+            let relative = path_for_sync(&input, root);
+            #[cfg(target_arch = "wasm32")]
+            if relative.is_none() {
+                web_sys::console::log_1(
+                    &format!("[q2-m1-probe] rust-unrepresentable-input path={input:?} root={root:?}").into(),
+                );
+            }
+            relative
+        })
         .collect()
 }
 

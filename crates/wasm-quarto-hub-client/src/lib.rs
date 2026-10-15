@@ -2296,12 +2296,16 @@ async fn render_single_doc_to_response(
     // Single-file preview uses the same core graph interface, but only
     // the active document has a profile. An unavailable profile is unknown.
     let render_inputs = ctx.document_profile.as_ref().and_then(|profile| {
+        // Discovery canonicalizes project.dir, but the single-file caller may
+        // supply only a relative source name. Compare equivalent identities.
+        // If the active path cannot be resolved, fail open rather than filter.
+        let active_canonical = runtime.canonicalize(path).ok()?;
         let index = quarto_core::project::index::ProjectIndex::new(vec![profile.clone()]);
         live_dependencies::render_input_paths(
             &index,
             &project.config.metadata.clone().unwrap_or_default(),
             &project.dir,
-            path,
+            &active_canonical,
         )
     });
     serde_json::to_string(&RenderResponse {
@@ -2487,6 +2491,17 @@ async fn render_project_active_page_to_response(
     // No extra filesystem walk, shortcode parse, or separate preview-only
     // dependency collector is necessary. If another project page could not
     // be profiled, we cannot safely suppress any change: fail open.
+    // TEMPORARY Q2-M1 probe: identify incompleteness in the real browser.
+    #[cfg(target_arch = "wasm32")]
+    if !summary.pass1_failures.is_empty() {
+        web_sys::console::log_1(
+            &format!(
+                "[q2-m1-probe] rust-pass1-failures {:?}",
+                summary.pass1_failures.iter().map(|f| &f.input).collect::<Vec<_>>()
+            ).into(),
+        );
+    }
+
     let render_inputs = if summary.pass1_failures.is_empty() {
         pass1_index.as_ref().and_then(|index| {
             live_dependencies::render_input_paths(
