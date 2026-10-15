@@ -450,6 +450,23 @@ function buildInitialState(): PreviewAppState {
  *
  * Exported for unit testing.
  */
+/**
+ * Decode a server-proven include closure. Null/malformed/incomplete answers
+ * are deliberately UNKNOWN, not an empty known dependency set. A stale filter
+ * can suppress the only event that would repair a preview.
+ */
+export function decodePreviewDepsResponse(
+  activePath: string,
+  body: unknown,
+): Set<string> | null {
+  if (body === null || typeof body !== 'object') return null;
+  const deps = (body as { deps?: unknown }).deps;
+  if (!Array.isArray(deps) || !deps.every((path) => typeof path === 'string')) {
+    return null;
+  }
+  return new Set([activePath, ...deps]);
+}
+
 export function shouldRerenderForTextChange(
   changedPath: string,
   activeFile: string | null,
@@ -691,6 +708,7 @@ export default function PreviewApp() {
       return {
         ...s,
         activeFile: path,
+        deps: s.activeFile === path ? s.deps : null,
         pendingAnchor: anchor,
         pendingAnchorEpoch: anchor ? s.pendingAnchorEpoch + 1 : s.pendingAnchorEpoch,
       };
@@ -726,6 +744,7 @@ export default function PreviewApp() {
         return {
           ...s,
           activeFile: restored,
+          deps: s.activeFile === restored ? s.deps : null,
           pendingAnchor: restoredAnchor,
           // Bump on any popstate that carries an anchor so the
           // iframe re-scrolls. Same logic as `handleNavigate`.
@@ -779,7 +798,21 @@ export default function PreviewApp() {
         setSyncHandlers({
           onFilesChange: (files) => {
             if (cancelled) return;
-            setState((s) => ({ ...s, files }));
+            setState((s) => {
+              // Deleting a previously tracked file may not produce an
+              // onFileContent event. Invalidate the filter so a missing
+              // include is rendered and diagnosed rather than left stale.
+              const nextPaths = new Set(files.map((file) => file.path));
+              const removedTrackedDep = s.deps !== null && s.files.some(
+                (file) => s.deps!.has(file.path) && !nextPaths.has(file.path),
+              );
+              return {
+                ...s,
+                files,
+                deps: removedTrackedDep ? null : s.deps,
+                contentTick: removedTrackedDep ? s.contentTick + 1 : s.contentTick,
+              };
+            });
           },
           onFileContent: (path: string) => {
             if (cancelled) return;
@@ -798,6 +831,9 @@ export default function PreviewApp() {
               return {
                 ...s,
                 contentTick: s.contentTick + 1,
+                // A tracked include may have gained or lost children.
+                // While re-fetching the closure, accept every edit.
+                deps: null,
                 tsxTick: isTsx ? s.tsxTick + 1 : s.tsxTick,
               };
             });
@@ -1021,14 +1057,12 @@ export default function PreviewApp() {
           console.warn(
             `deps fetch returned ${resp.status} for ${activePath}; filter falls open`,
           );
+          setState((s) => s.activeFile === activePath ? { ...s, deps: null } : s);
           return;
         }
-        const body = (await resp.json()) as { deps?: string[] };
+        const body: unknown = await resp.json();
         if (cancelled) return;
-        const list = body.deps ?? [];
-        // Include the active page itself in the set so the filter
-        // doesn't need a special-case for "edit my own page."
-        const set = new Set<string>([activePath, ...list]);
+        const set = decodePreviewDepsResponse(activePath, body);
         setState((s) =>
           s.activeFile === activePath ? { ...s, deps: set } : s,
         );
@@ -1037,6 +1071,9 @@ export default function PreviewApp() {
         console.warn(
           `deps fetch threw for ${activePath}: ${e instanceof Error ? e.message : String(e)}`,
         );
+        if (!cancelled) {
+          setState((s) => s.activeFile === activePath ? { ...s, deps: null } : s);
+        }
       }
     })();
     return () => {
