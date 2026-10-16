@@ -2,13 +2,13 @@
 title: 'lmd: inline cells reject numbers; meta.version (YAML number) needs tostring() (bd-iqd6niat)'
 date: 2026-10-16
 description: 'Decide where a Lua number (and boolean) becomes text when an lmd inline cell or a pandoc constructor is handed one, now that q2 metadata exposes YAML numbers as real Lua numbers (divergence D-num).'
-status: draft  # Investigation — pending design alignment with user; do not implement before the go-ahead
+status: in-progress  # Design settled with Carlos 2026-10-16 (option b); implementation on the topic branch
 braid:
   strand: bd-iqd6niat
 ---
 
 **Branch:** `braid/bd-iqd6niat-lmd-inline-numbers` (topic branch in the main checkout, based on `main` @ `e308835bd`)
-**Do not start implementation until the user gives the go-ahead.**
+**Design settled 2026-10-16; see § Decisions.** Implementation lives on this branch.
 
 ## Triage verdict
 
@@ -189,42 +189,52 @@ This is independent of Lua and of lmd; filed separately as
 because its fix (add a `Yaml::Real` arm, probably in `as_plain_text`
 itself so every caller benefits) has no design question attached.
 
-## Proposed phases (draft)
+## Decisions (Carlos, 2026-10-16)
 
-Skeleton only; which phase 1 we do depends on design question 1.
+1. **Option (b)**: numbers and booleans are accepted at the lmd
+   inline-cell boundary only (`classify_inline_value`, alone and as list
+   elements). Constructors inside a cell keep pandoc's strictness.
+   Option (a), the fuzzy-layer change, is filed as a follow-up strand
+   (bd-q4gnd5os) so it gets its own divergence review.
+2. **Booleans render** as `true` / `false`, matching the `meta`
+   shortcode.
+3. **Lua `tostring` semantics** for formatting: `3`, `12.1`, `1e+15`,
+   `3.0` for an integral float. Implemented through `lua_tolstring`
+   (mlua `coerce_string`), so the bare form and a hand-written
+   `tostring()` cannot drift.
+4. **Block cells keep rejecting numbers.** A block cell is the fenced
+   ```` ```{lmd} ```` form; "returning 42" means its chunk ends in
+   `return 42`. Nothing sensible to wrap that in at block position.
+5. **Docs later.** The lmd authoring guide (bd-lmd-docs-41adv2nx) may
+   ship with its `tostring()` sentence; a comment on that strand asks for
+   it to be removed once this lands.
 
-- **Phase 0 — Test plan.** Flip the two pinned "a number is an error"
-  assertions in `lmd.rs` into positive tests (number → `Str`, number in
-  a list, float formatting, integer formatting, `meta.version` /
-  `meta.count` end to end through `LmdExecuteStage`). Add a stderr /
-  HTML snapshot for the docs-guide example. If option (a) below: also
-  flip `test_peek_inlines_fuzzy_error_on_number` and add constructor
-  tests (`pandoc.Strong(3)`, `pandoc.Inlines{ "a", 3 }`), plus a
-  conformance-divergence entry.
-- **Phase 1 — The coercion change.** One of:
-  - (a) *fuzzy layer*: `Value::Integer | Value::Number` arm in
-    `peek_inline_fuzzy` and `peek_inlines_fuzzy` → `Str` via Lua
-    `tostring` semantics; register divergence **D-numtext** in
-    `divergences.md` next to D-num ("because q2 metadata hands filters
-    numbers, q2 constructors accept them where pandoc's would error").
-    Block layer (`peek_blocks_fuzzy`) stays strict or goes `Plain{Str}`
-    — same question as strings do today.
-  - (b) *lmd-only*: a `Value::Integer | Value::Number` arm in
-    `classify_inline_value` (and in its list-element loop) that formats
-    and delegates to the string path; constructors unchanged and still
-    pandoc-conformant. Block cells keep rejecting numbers.
-  - (c) *no coercion; better diagnostic*: keep the error, extend the
-    hint with "wrap a number in `tostring()`", and let the docs say so.
-- **Phase 2 — Booleans.** Either the same arm (`"true"` / `"false"`),
-  or an explicit error that names `tostring()`; see question 2.
-- **Phase 3 — Diagnostic.** Whatever is still an error after phases 1–2
-  gets the `tostring()` hint in `failure_diagnostic`.
-- **Phase 4 — Docs.** Update the lmd authoring guide's metadata section
-  (owned by bd-lmd-docs-41adv2nx; coordinate so the "use `tostring()`
-  for now" sentence is removed or kept), and the `divergences.md`
-  entry if (a).
+## Phases (as implemented)
 
-## Open design questions for the user
+- **Tests.** `inline_cells_format_numbers_and_booleans_like_tostring`
+  in `crates/pampa/src/lua/lmd.rs` (integer, float, integral float,
+  `1e15`, negative, both booleans, arithmetic, mixed list, and bare vs
+  `tostring()` agreement); `inline_cells_render_metadata_numbers_and_booleans`
+  in `crates/quarto-core/src/stage/stages/lmd_execute.rs` (YAML
+  `version: 12.1`, `count: 3`, `flag: true` through the real stage).
+  The `"42"` case left the inline rejection table; the block-cell
+  rejection table keeps it. The end-to-end fixture
+  `crates/quarto/tests/integration/fixtures/lmd/cells.qmd` gained a
+  `version: 12.1` / `flag: true` paragraph, so `cells.md.snap` pins the
+  rendered text and `errors.stderr.snap` pins the new message wording.
+- **Coercion.** `scalar_text` in `lmd.rs` formats `Integer` / `Number`
+  / `Boolean` as Lua would and hands the string to
+  `peek_inlines_fuzzy`, from the top-level arm and the list-element
+  arm of `classify_inline_value`.
+- **Diagnostic.** The `NotInlines` message and the stage hint now list
+  "a number, a boolean" among the accepted values.
+- **After-fix evidence.**
+  `lmd-inline-numbers-investigation/repro-output-after.txt`: zero
+  errors; the heading still shows the shortcode sibling bug.
+- **Not done here.** Docs (bd-lmd-docs-41adv2nx), the fuzzy-layer
+  option (bd-q4gnd5os), the shortcode real bug (bd-32nrymty).
+
+## Design questions as asked (answered above)
 
 1. **Where does the number become text?** Three candidates, in
    decreasing blast radius:
