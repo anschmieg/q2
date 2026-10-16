@@ -141,7 +141,7 @@ fn e2e_pptx_content_hidden_gating() {
     let cursor = std::io::Cursor::new(bytes.clone());
     let mut zip = zip::ZipArchive::new(cursor).expect("pptx output should be a valid zip archive");
     let slide_names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
         .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
         .collect();
     assert!(

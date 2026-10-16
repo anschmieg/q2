@@ -379,7 +379,10 @@ fn extract_zip(archive: &Path, sink: &mut ExtractSink) -> Result<(), FetchError>
         let mut entry = zip
             .by_index(i)
             .map_err(|e| FetchError::Archive(format!("reading zip entry {i}: {e}")))?;
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|e| FetchError::Archive(format!("decoding zip entry {i} name: {e}")))?
+            .to_string();
 
         // `enclosed_name()` is the zip crate's own containment check,
         // kept as a second, independent opinion — `sanitize_relative_path`
@@ -416,6 +419,38 @@ fn extract_zip(archive: &Path, sink: &mut ExtractSink) -> Result<(), FetchError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_ceiling_caps_a_reader_that_over_delivers() {
+        // The ceiling enforced *while copying* is the last line against
+        // an entry that lies about its size. The archive readers in
+        // front of it (zip 9's declared-size guard, tar's fixed-length
+        // entries) normally stop such an entry first, so this feeds the
+        // sink a bare reader instead: a declared size of 1 passes the
+        // pre-check, 64 KiB arrive, and the budget of 1 KiB must cut it
+        // off — deleting the ceiling leaves every archive-level test
+        // green, but not this one.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let limits = ExtractLimits {
+            max_uncompressed_bytes: 1024,
+            ..ExtractLimits::default()
+        };
+        let mut sink = ExtractSink::new(tmp.path().to_path_buf(), &limits);
+        let mut reader = std::io::repeat(b'a').take(64 * 1024);
+
+        let err = sink
+            .file("bomb.bin", &mut reader, Some(1))
+            .expect_err("a reader that over-delivers must be capped");
+        assert!(
+            matches!(err, FetchError::TooLarge { limit: 1024 }),
+            "got: {err}"
+        );
+        let written = std::fs::metadata(tmp.path().join("bomb.bin")).map_or(0, |m| m.len());
+        assert!(
+            written <= 1024 + 64 * 1024,
+            "the cap must bound what reached the disk, got {written}"
+        );
+    }
 
     #[test]
     fn sanitizer_accepts_plain_relative_names() {

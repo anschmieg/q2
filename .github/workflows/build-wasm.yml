@@ -27,9 +27,7 @@ jobs:
           platform: x64
     
       - name: Setup wasm-pack
-        shell: bash
-        run: |
-          cargo install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
 
       # tree-sitter setup
       - name: Set up tree-sitter CLI (Linux)
