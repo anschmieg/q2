@@ -141,7 +141,7 @@ fn lua_to_json(lua: &Lua, value: &Value) -> Result<serde_json::Value> {
                 && let Ok(name) = mt.get::<String>("__name")
                 && (name == "Inlines" || name == "Blocks")
             {
-                return Ok(serde_json::Value::String(stringify_value(value)?));
+                return Ok(serde_json::Value::String(stringify_value(lua, value)?));
             }
             // Check if it's an array (sequential integer keys starting from 1)
             // or an object (string keys)
@@ -193,7 +193,7 @@ fn lua_to_json(lua: &Lua, value: &Value) -> Result<serde_json::Value> {
             // the plain JSON of the metadata under it. Anything else is
             // null, as before.
             if ud.is::<LuaInline>() || ud.is::<LuaBlock>() {
-                return Ok(serde_json::Value::String(stringify_value(value)?));
+                return Ok(serde_json::Value::String(stringify_value(lua, value)?));
             }
             if let Ok(proxy) = ud.borrow::<LuaMetaProxy>() {
                 return Ok(proxy

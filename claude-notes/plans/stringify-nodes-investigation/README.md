@@ -24,3 +24,16 @@ type(Nodes('x'))                   -> Nodes
 blocks_to_inlines(Nodes(Para))     -> 0 inlines
 equals(Nodes('x'), Nodes('x'))     -> false
 ```
+
+## Output after the fix (same command, same branch)
+
+```
+Nodes('42')                        -> "42"
+Nodes({'a','2'})                   -> "a2"
+Nodes(pandoc.Para{'p'})            -> "p"
+Nodes()  (empty)                   -> ""
+Span(Nodes('42')) [workaround]     -> "42"
+type(Nodes('x'))                   -> Nodes
+blocks_to_inlines(Nodes(Para))     -> 1 inlines
+equals(Nodes('x'), Nodes('x'))     -> true
+```

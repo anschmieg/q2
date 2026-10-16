@@ -4787,8 +4787,8 @@ mod tests {
                   mixed[2].t .. ":" .. mixed[2].text,
                   mixed[3].t .. ":" .. mixed[3].text,
                   s(pandoc.Str(7)),
-                  s(pandoc.Span(pandoc.Nodes(42))),
-                  s(pandoc.Span(pandoc.Nodes({ "a", 2 }))),
+                  s(pandoc.Nodes(42)),
+                  s(pandoc.Nodes({ "a", 2 })),
                   tostring(1e15) == s(pandoc.Strong(1e15)),
                 }
                 for i, v in ipairs(out) do out[i] = tostring(v) end

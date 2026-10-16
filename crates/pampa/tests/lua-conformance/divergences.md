@@ -106,6 +106,34 @@ which conformance cases are permanently xfailed.
   `peek_block_fuzzy` / `peek_blocks_fuzzy`), `crates/pampa/src/lua/nodes.rs`
   (`build_nodes`), `crates/pampa/src/lua/lmd.rs` (`classify_inline_value`).
 
+## `pandoc.utils.stringify(nil)` is `""` (D-stringify-nil)
+
+- **Decision**: Carlos, 2026-10-16, strand bd-lt7rgi90 (option (b) of
+  the plan's question 3). Plan:
+  `claude-notes/plans/2026-10-16-stringify-nodes.md`.
+- **What**: pandoc's `stringify` is `forcePeek . retrieving
+  "stringifyable element"`: a value none of its peekers accept
+  (Pandoc, Inline, Block, Caption, Cell, Citation, TableHead,
+  TableFoot, MetaValue) is an error, with `Attr` and `ListAttributes`
+  mapped to `""` explicitly. q2 matches that for userdata (an
+  `Attributes` proxy, a `SourceInfo`, an `Alignment` all raise
+  `Q-11-3: ... expected, got <type>`), but **`nil` stringifies to
+  `""`**, and so does an explicit `quarto.config.null()`. Values pandoc
+  does not have stringify by their contents: a `pandoc.Nodes` as its
+  blocks or inlines, a `meta` map proxy as the concatenation of its
+  values in key order (pandoc's own MetaMap rule), a path/glob/expr
+  special as its text.
+- **Why**: in q2 a missing metadata key and a missing shortcode kwarg
+  both read as `nil` (D-null), and `pandoc.utils.stringify(kwargs.title)`
+  with a fallback on `""` is the idiom every Quarto 1 shortcode uses.
+  Erroring on `nil` would break them for no gain. Erroring on other
+  unknown userdata is kept because the silent `""` is exactly what hid
+  the missing `Nodes` arm for as long as it did.
+- **Permanent xfails**: none (no upstream conformance case stringifies
+  `nil`).
+- **Code**: `crates/pampa/src/lua/utils.rs` (`stringify_value`,
+  `stringify_config_value`).
+
 ## Meta null reads as nil (D-null)
 
 - **Decision**: same review as D-num (Carlos, 2026-07-20).

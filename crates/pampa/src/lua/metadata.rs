@@ -289,6 +289,16 @@ mod tests {
             .to_string()
     }
 
+    /// `pandoc.utils.stringify` of a map proxy is the text of its values
+    /// in key order, as pandoc renders a MetaMap (bd-lt7rgi90; it was `""`).
+    #[test]
+    fn meta_proxy_stringifies_like_a_metamap() {
+        let lua = env();
+        assert_eq!(text(&lua, "meta.author"), "AnalyticalAda");
+        assert_eq!(text(&lua, "meta.authors[1]"), "Adaxy");
+        assert_eq!(text(&lua, "meta.author.affil"), "Analytical");
+    }
+
     // ----- quarto.metadata.get -----
 
     #[test]

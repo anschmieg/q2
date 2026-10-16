@@ -2,13 +2,57 @@
 title: 'pandoc.utils.stringify returns an empty string for a pandoc.Nodes value (bd-lt7rgi90)'
 date: 2026-10-16
 description: 'stringify_value in pampa''s pandoc.utils dispatches on LuaInline and LuaBlock only, so a pandoc.Nodes value silently stringifies to ""; add a LuaNodes arm and decide what the other pandoc.utils dispatchers and the unknown-userdata fallthrough should do.'
-status: draft  # Investigation — pending design alignment with user; do not implement before the go-ahead
+status: implemented  # design settled 2026-10-16, implemented on the branch the same day
 braid:
   strand: bd-lt7rgi90
 ---
 
-**Branch:** `braid/bd-lt7rgi90-stringify-nodes` in the main checkout (no worktree, per the user's request), based on `main` @ `8e0345009`.
-**Do not start implementation until the user gives the go-ahead.**
+**Branch:** `braid/bd-lt7rgi90-stringify-nodes` in the main checkout (no worktree, per the user's request), based on `main` @ `8e0345009`, then merged with `origin/main` once PR #859 landed.
+
+## Decisions (Carlos, 2026-10-16)
+
+1. **Sequencing**: PR #859 merged while the investigation was open, so
+   the branch merged `origin/main` and dropped the `pandoc.Span(...)`
+   workaround in the #859 test itself.
+2. **Scope**: the sibling fixes are in this strand: `blocks_to_inlines`
+   accepts a `Nodes`, and `LuaNodes` gets a structural `__eq`.
+3. **Fallthrough**: option (b). Unknown userdata is a `Q-11-3` error;
+   `nil` stays `""`. Registered as D-stringify-nil in
+   `crates/pampa/tests/lua-conformance/divergences.md`. Citation, meta
+   proxies, Attr, ListAttributes, config null and config specials got
+   real arms rather than errors.
+4. **Blocks-shaped Nodes**: delegate to `stringify_blocks` and inherit
+   whatever it does, to keep one code path (bd-0jtai5dh).
+
+## What was done
+
+- `crates/pampa/src/lua/utils.rs`: `stringify_value` takes the `Lua`
+  handle and dispatches on Nodes (by shape), Citation (prefix + suffix),
+  meta proxy (`stringify_config_value`: prose through the inline/block
+  walk, arrays and maps concatenated, maps in key order, scalars through
+  `push_config_value` then back into `stringify_value`), config specials
+  (their text), and `Attr` / `ListAttributes` / `quarto.config.null()`
+  (`""`); any other userdata is `Q-11-3: ... expected, got <type>`. The
+  userdata-naming branch of `pandoc.utils.type` moved into
+  `userdata_type_name` so the error names types the same way.
+  `extract_blocks` (behind `blocks_to_inlines`) accepts a `Nodes` alone
+  or as a list element, via `to_blocks`.
+- `crates/pampa/src/lua/nodes.rs`: `LuaNodes::structurally_eq` and the
+  `__eq` metamethod; two empty Nodes are equal regardless of shape.
+- `crates/pampa/src/lua/json.rs`: the two `stringify_value` callers pass
+  `lua`; their Inline/Block guard is unchanged, so `pandoc.json.encode`
+  of a Nodes is still null (deliberate non-change).
+- Tests: six new in utils.rs (Nodes, Citation, Attr/ListAttributes/null/
+  specials, rejection, `blocks_to_inlines` with Nodes), one in nodes.rs
+  (`equality_is_structural_over_shape_and_contents`), one in metadata.rs
+  (`meta_proxy_stringifies_like_a_metamap`); the Span wrapper removed from
+  the D-numtext test in constructors.rs.
+- Docs: none needed. The lmd and components guides use stringify on meta
+  values and Inlines lists, which already worked; no page describes
+  stringify on a Nodes.
+- Verification: `cargo nextest run -p pampa` 5122 passed (conformance
+  included), clippy `-D warnings` clean, fmt clean; repro output after
+  the fix captured in the investigation README.
 
 ## Pre-flight
 
