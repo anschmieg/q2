@@ -337,7 +337,8 @@ fn desugar_cell_inlines(
 /// offset into that call's private source context. The whole cell is the
 /// honest resolution available; the reader's precise position is
 /// available only for markup the reader itself parsed, which never reaches
-/// this pass with sugar left in it.
+/// this pass with sugar left in it. Code, title, problem and hints are
+/// kept; details are not, since each carries its own (unusable) location.
 fn relocate_to_cell(diag: &DiagnosticMessage, cell: &PendingCell) -> DiagnosticMessage {
     let mut builder = DiagnosticMessageBuilder::new(diag.kind, diag.title.clone())
         .with_location(cell.anchor.span.clone());

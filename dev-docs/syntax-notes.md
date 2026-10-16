@@ -8,6 +8,64 @@ We aim to be largely compatible with Pandoc's `markdown` and `Commonmark` format
 
 Syntax extensions are handled by [desugaring](https://cs.brown.edu/courses/cs173/2012/book/Desugaring_as_a_Language_Feature.html) into regular Pandoc AST nodes.
 
+### Structural desugaring contract
+
+The qmd reader's postprocess pass (`pampa/src/pandoc/treesitter_utils/postprocess.rs`)
+does two kinds of work that the code keeps apart:
+
+1. **Concrete-syntax clean-up.** Fixes to what tree-sitter produced from *this
+   spelling* of the markdown: trailing line breaks, header attributes and auto
+   ids, the `* []` empty item, a caption parsed as a table row, `CaptionBlock`
+   attachment, citation numbering, abbreviation coalescing, the Q-2-50 fence
+   warnings, and so on. These only make sense on reader output, and the shapes
+   they act on cannot be built from Lua.
+2. **Structural desugaring.** Rewrites of AST *shapes* that are legal pandoc AST
+   on their own and that an author can produce either by writing markdown or
+   by constructing nodes. There are three, and together they are the
+   **structural desugaring set** (`pampa::pandoc::desugar`):
+
+   | Sugar | Canonical node | Malformed |
+   |---|---|---|
+   | `Div(.list-table)` | `Table` | warns `Q-2-35`, div left as is |
+   | `Div(.definition-list)` | `DefinitionList` | left as is, silently |
+   | `Para([Image])` with non-empty alt text | `Figure` captioned by the alt (pandoc's `implicit_figures`) | — |
+
+   All three apply at any depth (inside divs, blockquotes, list items), as
+   pandoc and the reader both do. The one known reader divergence from pandoc
+   is a tight list item, which q2 parses straight to `Plain`, so its image is
+   never a figure.
+
+**The contract.** Every block list that enters the render pipeline *other than
+through the qmd reader* is rewritten by the set, in that order, exactly once.
+It is owed to:
+
+| Entry point | Where it is applied |
+|---|---|
+| document body, includes, engine output, listing templates, front-matter markdown, `pandoc.read(…, "markdown")` | the reader itself |
+| lmd fragments `{= … =}` / `{=: … :=}` / `{=[ … ]=}` | the reader (fragments are parsed by it; the emitter prints the result, `Table` included) |
+| lmd block-cell and inline-cell return values | `stage/stages/lmd_execute.rs`, per cell, over what the cell returned; a `Q-2-35` is relocated onto the cell |
+| `pandoc.read(…, "json")` from Lua | `pampa/src/lua/readwrite.rs` |
+| pampa CLI `--from json` | `pampa/src/main.rs` |
+| document import (docx, odt, …) | `quarto-core/src/import/mod.rs` |
+
+It is **not** owed to what user Lua filters, shortcode handlers and components
+return. Those are filter semantics, where pandoc and Quarto 1 (whose list-table
+filter runs in `normalize`, before user filters) both leave constructed nodes
+alone: a filter that wants a table returns `pandoc.Table`, or calls
+`pandoc.read`. A filter that uses lmd internally gets the set through its lmd
+cells.
+
+The pass is idempotent on its own output except that a malformed list-table div
+warns again, which is why each entry point runs it over what *it* produced,
+never over a document the reader already processed.
+
+Adding a member: it must be a shape that pampa's Lua constructors can build,
+the reader must apply it through the same shared helper (so the two cannot
+drift), and every entry point in the table gets it for free. History:
+bd-31lk split the two div transforms out for `--from json`; bd-7gqr148v
+(GH #846) named the set, added the figure, and covered lmd cells and
+`pandoc.read` json.
+
 ### Scoped metadata
 
 Our intermediate representation can store a metadata block inside the document, allowing (in principle)

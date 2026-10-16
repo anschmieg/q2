@@ -35,6 +35,12 @@ Common shapes that trigger the error:
 - Nesting is wrong — the cells are listed at the same level as
   the rows.
 
+The same check runs on a `list-table` div that an `{lmd}` cell
+builds from nodes (`pandoc.Div({ … }, pandoc.Attr("", {"list-table"}))`),
+or that `pandoc.read` returns. A node built in a cell has no
+position of its own in the document, so the warning then points at
+the cell's code and says the node was built there.
+
 ## How to fix
 
 Restructure the body so that each top-level list item is a row
