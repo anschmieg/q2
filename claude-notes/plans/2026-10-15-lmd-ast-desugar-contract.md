@@ -220,7 +220,7 @@ The title, code, problem and hint are the reader's own Q-2-35; the location and 
 
 - [x] `dev-docs/syntax-notes.md` § Structural desugaring contract (the two layers, the set, the entry-point table, the "not owed to" boundary, how to add a member); `docs/guides/authoring/lua-filters.qmd` § "Tables, definition lists and figures built from Lua"; `docs/errors/markdown/Q-2-35.qmd` notes the cell-built case; the lmd exploration plan's unsupported-node list no longer names `Table`; bd-76ogq4ew carries a comment that its phase-2 `Table` gap is closed (its plan file lives on that strand's branch, not this one).
 - [x] `cargo xtask verify` green (2026-10-16): lint + clippy, fmt, Rust build, tree-sitter grammars, Rust tests, ts-packages, hub-client build (WASM) and tests, trace-viewer, q2-preview-spa. Two environment detours worth knowing: the claude-notes render in the lint step rejects an apostrophe right after a code span (writing-notes rule 1), which this plan tripped twice; and the main checkout's `node_modules` predated the 2026-10-14 `@modelcontextprotocol/server` bump, so `npm install` had to run before ts-packages built.
-- [ ] PR referencing #846; strand closed with the merge.
+- [x] PR [#850](https://github.com/quarto-dev/q2/pull/850) open against `main` (2026-10-16); strand closes with the merge.
 
 ## Out of scope (recorded so they are not re-discovered)
 
