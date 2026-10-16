@@ -40,10 +40,12 @@ pub(crate) fn render_input_paths(
     }
     let inputs = graph.render_inputs_for(active_relative);
 
-    inputs
+    let mut paths = inputs
         .into_iter()
         .map(|input| path_for_sync(&input, root))
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    paths.sort();
+    Some(paths)
 }
 
 /// Sync and WASM VFS use project-relative slash-separated paths.
