@@ -3,7 +3,8 @@ source: crates/quarto/tests/integration/lmd_snapshots.rs
 expression: md
 ---
 <!-- Mirrors examples/lmd/01..08 (the documents behind docs/guides/authoring/lmd.qmd),
-     with their front matters merged. Keep the three in step. -->
+     with their front matters merged. Keep the three in step. 09-modules is
+     mirrored by modules.qmd, which needs the modules/ directory beside it. -->
 
 # 01-first-cell
 
