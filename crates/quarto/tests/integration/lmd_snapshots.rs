@@ -32,7 +32,14 @@ use super::coalesced_diagnostics::strip_ansi;
 
 const Q2_BIN: &str = env!("CARGO_BIN_EXE_q2");
 
-const FIXTURES: &[&str] = &["fragments", "cells", "nodes-and-ids", "errors", "patterns"];
+const FIXTURES: &[&str] = &[
+    "fragments",
+    "cells",
+    "nodes-and-ids",
+    "errors",
+    "patterns",
+    "modules",
+];
 
 /// Fixtures rendered to HTML through the native pipeline (not the pandoc
 /// leg) and snapshotted as the page's `<main>`. `--to markdown` runs
@@ -60,10 +67,10 @@ fn render_html(name: &str) -> (String, String) {
 /// Render one fixture with `--to <format>` in a scratch copy and read back
 /// `<name>.<ext>`; return (output, normalized stderr).
 ///
-/// The scratch copy holds the fixture's `.qmd` and every non-`.qmd` file
-/// in the fixtures directory (shared resources such as images), so a
-/// fixture that references one renders without a missing-resource
-/// warning.
+/// The scratch copy holds the fixture's `.qmd`, every non-`.qmd` file in
+/// the fixtures directory (shared resources such as images) and every
+/// subdirectory (the `modules/` the modules fixture requires), so a fixture
+/// that references one renders without a missing-resource warning.
 fn render_to(name: &str, format: &str, ext: &str) -> (String, String) {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
@@ -72,7 +79,10 @@ fn render_to(name: &str, format: &str, ext: &str) -> (String, String) {
     for entry in std::fs::read_dir(fixtures_dir()).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().is_some_and(|e| e != "qmd") {
+        if path.is_dir() {
+            // Module directories (`modules/*.lmd`) and other grouped resources.
+            copy_dir(&path, &dir.join(entry.file_name()));
+        } else if path.extension().is_some_and(|e| e != "qmd") {
             std::fs::copy(&path, dir.join(entry.file_name())).unwrap();
         }
     }
@@ -110,19 +120,30 @@ fn normalize(stderr: &str, dir: &Path, name: &str) -> String {
     for d in [&canonical, &raw] {
         out = out.replace(d, "<dir>");
     }
-    // Lua's abbreviated chunk name: `...<tail>/<name>.qmd:` -> `<dir>/<name>.qmd:`.
+    // Lua's abbreviated chunk name, `...<tail of dir>/<file>:`, becomes
+    // `<dir>/<file>:`. The scratch directory's own last component marks
+    // where the tail ends (so a module under `modules/` keeps its relative
+    // path); when the abbreviation cut into that component too, the
+    // fixture's own file name is the fallback marker.
+    let base = format!("{}/", dir.file_name().unwrap().to_string_lossy());
     let file = format!("{name}.qmd:");
+    let unbroken = |s: &str| !s.contains(char::is_whitespace);
     let mut result = String::new();
     let mut rest = out.as_str();
     while let Some(i) = rest.find("...") {
         let after = &rest[i + 3..];
-        match after.find(&file) {
-            Some(j) if !after[..j].contains(char::is_whitespace) => {
+        let cut = after
+            .find(&base)
+            .map(|j| j + base.len())
+            .filter(|&j| unbroken(&after[..j]))
+            .or_else(|| after.find(&file).filter(|&j| unbroken(&after[..j])));
+        match cut {
+            Some(j) => {
                 result.push_str(&rest[..i]);
                 result.push_str("<dir>/");
                 rest = &after[j..];
             }
-            _ => {
+            None => {
                 result.push_str(&rest[..i + 3]);
                 rest = after;
             }

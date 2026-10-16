@@ -1,0 +1,7 @@
+local M = {}
+
+function M.go()
+  return {=: pages' :=}
+end
+
+return M

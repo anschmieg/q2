@@ -1,0 +1,57 @@
+---
+title: "lmd module did not compile"
+description: "An `.lmd` module that a cell, filter or shortcode handler required has a Lua syntax error or a markdown fragment that does not parse, so `require` failed. The requiring cell is left as written."
+code: Q-26-8
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-8` — lmd module did not compile
+
+> An `.lmd` module that a cell, filter or shortcode handler required has a Lua syntax error or a markdown fragment that does not parse, so `require` failed. The requiring cell is left as written.
+
+## What this means
+
+`require("name")` found `name.lmd` (an lmd module: Lua with markdown
+fragments) and compiled it before loading, and the compile step failed.
+The message names the module file and the position inside it; when the
+problem is a markdown fragment that does not parse, the reader\'s own
+diagnostic for that fragment follows as an info line. The error is
+located on the `require` line of the cell, which is left displayed; a
+Lua filter or shortcode handler that required the module fails the way
+it would for any error in `require`.
+
+## Why this happens
+
+- A Lua syntax error in the module, reported with the module\'s own line
+  and column.
+- A markdown fragment in the module that the reader rejects, for
+  example a bare apostrophe after a word ([`Q-2-10`](../markdown/Q-2-10.qmd)).
+- A fragment holding markdown the emitter has no constructor for yet
+  ([`Q-26-2`](Q-26-2.qmd)), or an inline fragment that parses to several
+  blocks ([`Q-26-3`](Q-26-3.qmd)).
+
+## How to fix
+
+Fix the module file at the position the message names. To see the Lua
+a module compiles to, call `quarto.lmd.compile(source, name)` from a
+cell, which returns the compiled text or raises this same error.
+
+A module written in lmd is an ordinary Lua chunk otherwise: it returns
+its value (by convention a table of functions), and `require` resolves
+it relative to the requiring file, then relative to the document.
+
+````markdown
+```{lmd}
+local cards = require("components/cards")
+return cards.card("Hello", {=[ from a module ]=})
+```
+````
+
+## Related errors
+
+- [`Q-26-1`](Q-26-1.qmd): the same Lua syntax error, in a cell rather than a module.
+- [`Q-26-4`](Q-26-4.qmd): the module compiled but raised while running; the message names the module line.

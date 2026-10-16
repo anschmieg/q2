@@ -374,27 +374,90 @@ pub fn register_scoped_require(
                 dirs.push(d);
             }
         }
-        let mut candidates: Vec<PathBuf> = Vec::new();
+        // Candidate files, in the order they are tried. For each form of
+        // the name (as written, dots as separators, `<name>/init`) every
+        // registered source dialect's extension comes before `.lua`, so a
+        // module kept in dialect source wins over a compiled copy beside
+        // it (bd-76ogq4ew): the copy may be stale, the source is what the
+        // author edits, and the shadowed copy is reported as a warning.
+        struct Candidate {
+            path: PathBuf,
+            dialect: Option<Arc<dyn super::dialect::SourceDialect>>,
+            /// For a dialect candidate, the `.lua` of the same stem, whose
+            /// presence is worth a warning.
+            shadowed: Option<PathBuf>,
+        }
+        let dialects = super::dialect::registered_dialects(lua);
+        let mut stems: Vec<String> = vec![name.clone()];
+        if name.contains('.') {
+            stems.push(name.replace('.', "/"));
+        }
+        stems.push(format!("{name}/init"));
+        let mut candidates: Vec<Candidate> = Vec::new();
         for dir in &dirs {
             let base = PathBuf::from(dir);
-            candidates.push(base.join(format!("{}.lua", name)));
-            if name.contains('.') {
-                candidates.push(base.join(format!("{}.lua", name.replace('.', "/"))));
+            for stem in &stems {
+                let lua_path = base.join(format!("{stem}.lua"));
+                for dialect in &dialects {
+                    candidates.push(Candidate {
+                        path: base.join(format!("{stem}.{}", dialect.extension())),
+                        dialect: Some(dialect.clone()),
+                        shadowed: Some(lua_path.clone()),
+                    });
+                }
+                candidates.push(Candidate {
+                    path: lua_path,
+                    dialect: None,
+                    shadowed: None,
+                });
             }
-            candidates.push(base.join(&name).join("init.lua"));
         }
 
         for candidate in &candidates {
-            let key = candidate.to_string_lossy().to_string();
+            let key = candidate.path.to_string_lossy().to_string();
             if let Ok(cached) = cache.get::<Value>(key.as_str())
                 && !matches!(cached, Value::Nil)
             {
                 return Ok(cached);
             }
-            let Ok(bytes) = runtime.file_read(candidate) else {
+            let Ok(bytes) = runtime.file_read(&candidate.path) else {
                 continue;
             };
             let source = String::from_utf8(bytes).map_err(mlua::Error::external)?;
+
+            // A dialect source is compiled to Lua before it is loaded; the
+            // compile step is the dialect's, the file access was the
+            // runtime's, so a read policy on the runtime governs both.
+            let source = match &candidate.dialect {
+                None => source,
+                Some(dialect) => {
+                    if let Some(shadowed) = &candidate.shadowed
+                        && runtime
+                            .path_exists(shadowed, Some(quarto_system_runtime::PathKind::File))
+                            .unwrap_or(false)
+                    {
+                        warn_from_loader(
+                            lua,
+                            &format!(
+                                "`{}` is loaded and `{}` beside it is ignored: a `.{}` module takes precedence over a `.lua` file of the same name. Delete the `.lua` file if it is a stale compiled copy.",
+                                candidate.path.display(),
+                                shadowed.display(),
+                                dialect.extension()
+                            ),
+                        );
+                    }
+                    dialect
+                        .compile(&source, &candidate.path)
+                        .map_err(|error| {
+                            mlua::Error::external(crate::dialect::ModuleCompileError {
+                                module: name.clone(),
+                                path: candidate.path.clone(),
+                                dialect: dialect.name().to_string(),
+                                error,
+                            })
+                        })?
+                }
+            };
 
             // Sandboxed module environment inheriting globals.
             let env = lua.create_table()?;
@@ -403,6 +466,7 @@ pub fn register_scoped_require(
             env.set_metatable(Some(env_mt))?;
 
             let module_dir = candidate
+                .path
                 .parent()
                 .unwrap_or(Path::new(""))
                 .to_string_lossy()
@@ -411,9 +475,11 @@ pub fn register_scoped_require(
             // must not move while a module loads (GH #588).
             let len = module_stack.raw_len();
             module_stack.set(len + 1, module_dir)?;
+            // `@path` is Lua's convention for a chunk that came from a
+            // file: messages and tracebacks print `path:line:`.
             let result = lua
                 .load(&source)
-                .set_name(key.clone())
+                .set_name(format!("@{key}"))
                 .set_environment(env)
                 .eval::<Value>();
             module_stack.set(len + 1, Value::Nil)?;
@@ -429,28 +495,49 @@ pub fn register_scoped_require(
             return Ok(value);
         }
 
-        // Not found relative to the script dir: defer to the original
-        // require (native stdlib) when available.
+        // Not found relative to the script dirs. The scoped search is the
+        // one the author can act on, so it is reported first; on native
+        // the stock `require` (package.path, C modules) gets a turn and
+        // its own report becomes the hint when it fails too.
+        let searched = if candidates.is_empty() {
+            "no script directory on the stack".to_string()
+        } else {
+            candidates
+                .iter()
+                .map(|c| c.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let scoped = format!(
+            "module '{name}' not found (searched relative to the current script directory: {searched})"
+        );
         if let Some(orig) = &original {
-            return orig.call::<Value>(name);
+            return match orig.call::<Value>(name.clone()) {
+                Ok(value) => Ok(value),
+                Err(err) => Err(mlua::Error::RuntimeError(format!(
+                    "{scoped}\nLua's own search failed as well: {err}"
+                ))),
+            };
         }
-        Err(mlua::Error::RuntimeError(format!(
-            "module '{}' not found (searched relative to the current script directory: {})",
-            name,
-            if candidates.is_empty() {
-                "no script directory on the stack".to_string()
-            } else {
-                candidates
-                    .iter()
-                    .map(|c| c.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        )))
+        Err(mlua::Error::RuntimeError(scoped))
     })?;
 
     globals.set("require", require)?;
     Ok(())
+}
+
+/// Record a warning from the loader through `quarto.warn`, so it reaches
+/// the same diagnostics the host drains after the script ran, located at
+/// the Lua caller (the `require` line). A state without `quarto.warn`
+/// (not one pampa builds) drops it.
+fn warn_from_loader(lua: &Lua, message: &str) {
+    let Ok(quarto) = lua.globals().get::<Table>("quarto") else {
+        return;
+    };
+    let Ok(warn) = quarto.get::<mlua::Function>("warn") else {
+        return;
+    };
+    let _ = warn.call::<()>(message);
 }
 
 /// Push a directory onto the script-dir stack.
@@ -1424,6 +1511,209 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(sib, "GREET");
+    }
+
+    // =========================================================================
+    // Scoped require × source dialects (bd-76ogq4ew)
+    //
+    // A registered dialect's extension is tried ahead of `.lua` for every
+    // candidate form; a hit is compiled before `load`; a `.lua` of the same
+    // stem beside it is a warning, not the winner.
+    // =========================================================================
+
+    fn create_dialect_require_test_lua() -> Lua {
+        let lua = create_require_test_lua();
+        super::super::dialect::register_source_dialect(
+            &lua,
+            Arc::new(super::super::dialect::test_support::Shout),
+        )
+        .unwrap();
+        lua
+    }
+
+    fn drained_warnings(lua: &Lua) -> Vec<String> {
+        super::super::diagnostics::extract_lua_diagnostics(lua)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.title)
+            .collect()
+    }
+
+    #[test]
+    fn test_require_loads_a_dialect_file_by_bare_name() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "greet.shout", r#"SHOUT "hello")"#);
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let got: String = lua.load(r#"return require("greet")"#).eval().unwrap();
+        assert_eq!(got, "HELLO");
+        assert!(drained_warnings(&lua).is_empty());
+    }
+
+    #[test]
+    fn test_require_dialect_dotted_and_init_forms() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "ui/cards.shout", r#"SHOUT "cards")"#);
+        write_file(tmp.path(), "widgets/init.shout", r#"SHOUT "widgets")"#);
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let dotted: String = lua.load(r#"return require("ui.cards")"#).eval().unwrap();
+        let slashed: String = lua.load(r#"return require("ui/cards")"#).eval().unwrap();
+        let init: String = lua.load(r#"return require("widgets")"#).eval().unwrap();
+        assert_eq!(
+            (dotted.as_str(), slashed.as_str(), init.as_str()),
+            ("CARDS", "CARDS", "WIDGETS")
+        );
+    }
+
+    #[test]
+    fn test_require_dialect_wins_over_lua_sibling_with_a_warning() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "greet.shout", r#"SHOUT "from dialect")"#);
+        write_file(tmp.path(), "greet.lua", r#"return "from stale lua""#);
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let got: String = lua.load(r#"return require("greet")"#).eval().unwrap();
+        assert_eq!(got, "FROM DIALECT");
+        let warnings = drained_warnings(&lua);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("greet.shout") && warnings[0].contains("greet.lua"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_require_dialect_file_is_ignored_when_no_dialect_is_registered() {
+        let lua = create_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "greet.shout", r#"SHOUT "hello")"#);
+        write_file(tmp.path(), "greet.lua", r#"return "plain""#);
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let got: String = lua.load(r#"return require("greet")"#).eval().unwrap();
+        assert_eq!(got, "plain");
+    }
+
+    #[test]
+    fn test_require_dialect_compile_error_names_module_and_position() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "bad.shout", "SHOUT \"ok\")\nBOOM\n");
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let err = lua
+            .load(r#"return require("bad")"#)
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("module 'bad'"), "{err}");
+        assert!(err.contains("bad.shout:2: BOOM is not a word"), "{err}");
+    }
+
+    #[test]
+    fn test_require_dialect_runtime_error_reports_module_file_and_line() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "boom.shout", "local x = 1\nerror('kaboom')\n");
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let err = lua
+            .load(r#"return require("boom")"#)
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        // `@path` chunk names make Lua print `path:line:`; no `[string "…"]`.
+        assert!(err.contains("boom.shout:2: kaboom"), "{err}");
+        assert!(!err.contains("[string"), "{err}");
+    }
+
+    #[test]
+    fn test_require_from_inside_a_dialect_module_resolves_beside_it() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "lib/outer.shout",
+            "local inner = require(\"inner\")\nSHOUT inner)\n",
+        );
+        write_file(tmp.path(), "lib/inner.shout", r#"SHOUT "nested")"#);
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let got: String = lua.load(r#"return require("lib/outer")"#).eval().unwrap();
+        assert_eq!(got, "NESTED");
+    }
+
+    #[test]
+    fn test_require_dialect_module_is_cached_per_state() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "counter.shout",
+            "_G.loads = (_G.loads or 0) + 1\nSHOUT \"x\")\n",
+        );
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let loads: i64 = lua
+            .load(r#"require("counter"); require("counter"); return loads"#)
+            .eval()
+            .unwrap();
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn test_require_miss_lists_dialect_candidates_before_the_stock_search() {
+        let lua = create_dialect_require_test_lua();
+        let tmp = tempfile::TempDir::new().unwrap();
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(tmp.path())).unwrap();
+        let err = lua
+            .load(r#"return require("nowhere")"#)
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("module 'nowhere' not found"), "{err}");
+        assert!(err.contains("nowhere.shout"), "{err}");
+        assert!(err.contains("nowhere.lua"), "{err}");
+        // The scoped search is reported first; Lua's own search is the hint.
+        let scoped = err.find("nowhere.shout").unwrap();
+        let stock = err.find("package.preload").unwrap_or(usize::MAX);
+        assert!(scoped < stock, "{err}");
+    }
+
+    #[test]
+    fn test_require_reads_only_through_the_runtime_so_a_read_policy_governs_it() {
+        // The loader never touches std::fs: a SandboxedRuntime whose policy
+        // excludes the module's directory makes `require` fail with the
+        // policy's error, for `.lua` and dialect files alike (bd-76ogq4ew).
+        use quarto_system_runtime::{SandboxedRuntime, SecurityPolicy};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let allowed = tmp.path().join("proj");
+        let denied = tmp.path().join("vendor");
+        write_file(&allowed, "ok.shout", r#"SHOUT "ok")"#);
+        write_file(&denied, "secret.lua", r#"return "secret""#);
+        write_file(&denied, "secret.shout", r#"SHOUT "secret")"#);
+
+        let lua = create_test_lua();
+        let sandboxed: Arc<dyn crate::lua::runtime::SystemRuntime> =
+            Arc::new(SandboxedRuntime::new(
+                NativeRuntime::new(),
+                SecurityPolicy::untrusted(allowed.clone()),
+            ));
+        register_scoped_require(&lua, sandboxed).unwrap();
+        super::super::dialect::register_source_dialect(
+            &lua,
+            Arc::new(super::super::dialect::test_support::Shout),
+        )
+        .unwrap();
+
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(&allowed)).unwrap();
+        let ok: String = lua.load(r#"return require("ok")"#).eval().unwrap();
+        assert_eq!(ok, "OK");
+
+        pop_script_dir(&lua).unwrap();
+        push_script_dir(&lua, &quarto_util::to_forward_slashes(&denied)).unwrap();
+        let err = lua
+            .load(r#"return require("secret")"#)
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("module 'secret' not found"), "{err}");
     }
 
     // =========================================================================

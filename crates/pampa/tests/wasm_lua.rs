@@ -310,6 +310,98 @@ fn shortcode_engine_init_wasm() {
 }
 
 // ============================================================================
+// Test 3b: a source dialect module loaded through `require` from the VFS
+// ============================================================================
+
+/// The scoped `require` loads a registered dialect's `.ext` file from the
+/// virtual filesystem, compiles it through the dialect, and prefers it over
+/// a `.lua` of the same stem (bd-76ogq4ew). Uses a toy dialect so the test
+/// stays inside pampa; q2 registers lmd the same way.
+#[wasm_bindgen_test]
+async fn dialect_module_require_wasm() {
+    use pampa::dialect::{DialectError, SourceDialect};
+    use pampa::lua::apply_lua_filters_with;
+    use pampa::lua::runtime::{VirtualFileSystem, WasmRuntime};
+    use pampa::pandoc::{ASTContext, Block, Inline, Pandoc, Paragraph, Str};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    struct Shout;
+    impl SourceDialect for Shout {
+        fn name(&self) -> &str {
+            "shout"
+        }
+        fn extension(&self) -> &str {
+            "shout"
+        }
+        fn compile(&self, source: &str, _path: &Path) -> Result<String, DialectError> {
+            Ok(source.replace("SHOUT ", "return string.upper("))
+        }
+    }
+
+    let mut vfs = VirtualFileSystem::new();
+    vfs.add_file(
+        Path::new("/project/mods/greet.shout"),
+        br#"SHOUT "from-dialect")"#.to_vec(),
+    );
+    vfs.add_file(
+        Path::new("/project/mods/greet.lua"),
+        br#"return "from-stale-lua""#.to_vec(),
+    );
+    vfs.add_file(
+        Path::new("/project/filter.lua"),
+        br#"
+local greet = require("mods/greet")
+function Str(elem)
+    return pandoc.Str(greet)
+end
+"#
+        .to_vec(),
+    );
+
+    let runtime: Arc<dyn pampa::lua::runtime::SystemRuntime> = Arc::new(WasmRuntime::with_vfs(vfs));
+    let pandoc = Pandoc {
+        meta: quarto_pandoc_types::ConfigValue::default(),
+        blocks: vec![Block::Paragraph(Paragraph {
+            content: vec![Inline::Str(Str {
+                text: "hello".to_string(),
+                source_info: quarto_source_map::SourceInfo::for_test(),
+            })],
+            source_info: quarto_source_map::SourceInfo::for_test(),
+        })],
+    };
+
+    let dialects: Vec<Arc<dyn SourceDialect>> = vec![Arc::new(Shout)];
+    let output = apply_lua_filters_with(
+        pandoc,
+        ASTContext::new(),
+        &[PathBuf::from("/project/filter.lua")],
+        "html",
+        runtime,
+        None,
+        &dialects,
+    )
+    .await
+    .expect("filter execution failed");
+
+    let Block::Paragraph(p) = &output.pandoc.blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    let Inline::Str(s) = &p.content[0] else {
+        panic!("expected a Str");
+    };
+    assert_eq!(s.text, "FROM-DIALECT");
+    // The shadowed .lua beside the dialect source is a warning.
+    assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
+    assert!(
+        output.diagnostics[0].title.contains("greet.shout")
+            && output.diagnostics[0].title.contains("greet.lua"),
+        "{:?}",
+        output.diagnostics
+    );
+}
+
+// ============================================================================
 // Test 4: Error handling (panic_unwind works)
 // ============================================================================
 

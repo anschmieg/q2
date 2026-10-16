@@ -50,7 +50,7 @@ use std::sync::Arc;
 use mlua::{Lua, MultiValue, Value};
 use quarto_error_reporting::DiagnosticMessage;
 
-use super::filter::{FilterResult, create_filter_environment};
+use super::filter::{FilterResult, create_filter_environment_with};
 use super::list::get_or_create_blocks_metatable;
 use super::list::get_or_create_inlines_metatable;
 use super::nodes::LuaNodes;
@@ -121,15 +121,23 @@ impl LmdRuntime {
     /// (`pandoc.*`, `quarto.*`, `FORMAT`, scoped `require`), with
     /// `document_path` standing in for the filter script's path so
     /// `quarto.utils.resolve_path` and `require` resolve relative to the
-    /// document.
+    /// document. `dialects` are the source dialects `require` may load
+    /// (q2 passes lmd itself, so a cell can `require` an `.lmd` module).
     pub fn new(
         runtime: Arc<dyn SystemRuntime>,
         target_format: &str,
         document_path: &Path,
         attribution: Option<Arc<dyn AttributionLookup>>,
         meta: &quarto_pandoc_types::config_value::ConfigValue,
+        dialects: &[Arc<dyn crate::dialect::SourceDialect>],
     ) -> FilterResult<Self> {
-        let lua = create_filter_environment(runtime, target_format, document_path, attribution)?;
+        let lua = create_filter_environment_with(
+            runtime,
+            target_format,
+            document_path,
+            attribution,
+            dialects,
+        )?;
         // quarto.metadata.get / global `meta`: the document's merged
         // metadata, the same snapshot every cell sees.
         super::metadata::register_quarto_metadata(&lua, meta)?;
@@ -398,6 +406,7 @@ mod tests {
             Path::new("doc.qmd"),
             None,
             &quarto_pandoc_types::config_value::ConfigValue::default(),
+            &[],
         )
         .expect("lmd runtime")
     }

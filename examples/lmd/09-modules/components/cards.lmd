@@ -1,0 +1,20 @@
+-- An lmd module: a Lua chunk that may hold markdown fragments. It returns
+-- a table of functions; `require("components/cards")` loads it once per
+-- document and hands back that table.
+local M = {}
+
+function M.card(title, body)
+  return {=:
+::: {.card .p-3 .mb-3}
+### `{lmd} title`
+
+`{lmd} body`
+:::
+:=}
+end
+
+function M.deck(items)
+  return items:map(function(it) return M.card(it.title, it.body) end)
+end
+
+return M

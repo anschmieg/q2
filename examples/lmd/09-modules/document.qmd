@@ -1,0 +1,24 @@
+---
+title: "Reusable modules"
+---
+
+The functions live in `components/cards.lmd`, a Lua file that may hold
+markdown fragments. `require` loads it relative to this document, so any
+cell on the page can use it:
+
+```{lmd}
+local cards = require("components/cards")
+return cards.card("Hello", {=[ from a *module* ]=})
+```
+
+The module ran once; a second `require` returns the same table. Its
+functions take ordinary Lua values, so a list of records becomes a deck
+of cards:
+
+```{lmd}
+local cards = require("components/cards")
+return cards.deck(pandoc.List({
+  { title = "One", body = "first" },
+  { title = "Two", body = "second" },
+}))
+```

@@ -277,6 +277,31 @@ fn failure_diagnostic(
     err: &LmdCellError,
     location: Option<SourceInfo>,
 ) -> DiagnosticMessage {
+    // A module the cell required that did not compile is its own failure
+    // (bd-76ogq4ew): the fix is in the module file, not in the cell, and
+    // the dialect's own diagnostics name where.
+    if let LmdCellError::Lua(lua_err) = err
+        && let Some(module_err) = pampa::dialect::ModuleCompileError::find_in(lua_err)
+    {
+        let location = location.unwrap_or_else(|| cell.anchor.span.clone());
+        let mut builder = DiagnosticMessageBuilder::error("lmd module did not compile")
+            .with_code("Q-26-8")
+            .with_location(location)
+            .problem(module_err.to_string());
+        // The dialect's own diagnostics, when they say more than the
+        // message already does (the lmd desugarer's summary is the first
+        // reader diagnostic's title, so a lone one adds nothing).
+        let message = module_err.to_string();
+        for inner in &module_err.error.diagnostics {
+            if !message.contains(&inner.title) {
+                builder =
+                    builder.add_hint(format!("{}: {}", module_err.path.display(), inner.title));
+            }
+        }
+        return builder
+            .add_hint("Fix the module file; the cell that requires it is left as written.")
+            .build();
+    }
     let (code, title, hint) = match err {
         LmdCellError::Lua(_) => ("Q-26-4", "lmd cell failed", None),
         LmdCellError::NotBlocks { .. } => (
@@ -587,6 +612,7 @@ impl PipelineStage for LmdExecuteStage {
             &ctx.document.input,
             attribution,
             &doc.ast.meta,
+            &crate::lmd::dialects(),
         )
         .map_err(|err| PipelineError::stage_error(self.name(), err.to_string()))?;
 
@@ -614,13 +640,19 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    fn runtime(meta: &quarto_pandoc_types::config_value::ConfigValue) -> LmdRuntime {
+    /// A runtime whose document lives at `document`, so `require` resolves
+    /// beside it; lmd is registered as it is in the stage.
+    fn runtime_at(
+        meta: &quarto_pandoc_types::config_value::ConfigValue,
+        document: &Path,
+    ) -> LmdRuntime {
         LmdRuntime::new(
             Arc::new(NativeRuntime::new()),
             "html",
-            Path::new("doc.qmd"),
+            document,
             None,
             meta,
+            &crate::lmd::dialects(),
         )
         .expect("lmd runtime")
     }
@@ -633,6 +665,14 @@ mod tests {
     }
 
     fn render_with_sources(qmd: &str) -> (Vec<Block>, Vec<DiagnosticMessage>, SourceContext) {
+        render_at(qmd, Path::new("doc.qmd"))
+    }
+
+    /// [`render_with_sources`] for a document at `document`.
+    fn render_at(
+        qmd: &str,
+        document: &Path,
+    ) -> (Vec<Block>, Vec<DiagnosticMessage>, SourceContext) {
         let mut sink: Vec<u8> = Vec::new();
         let (ast, ctx, _warnings) =
             pampa::readers::qmd::read(qmd.as_bytes(), false, "test.qmd", &mut sink, true, None)
@@ -644,11 +684,147 @@ mod tests {
         let mut diagnostics = Vec::new();
         pollster::block_on(execute_lmd_cells(
             &mut blocks,
-            &runtime(&ast.meta),
+            &runtime_at(&ast.meta, document),
             &sources,
             &mut diagnostics,
         ));
         (blocks, diagnostics, sources)
+    }
+
+    // ---- modules: `require` of `.lmd` files (bd-76ogq4ew, phase 1) ----
+
+    fn write_module(dir: &Path, name: &str, content: &str) {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    const CARDS_LMD: &str = "local M = {}\n\nfunction M.card(title, body)\n  return {=:\n::: {.card}\n### `{lmd} title`\n\n`{lmd} body`\n:::\n:=}\nend\n\nreturn M\n";
+
+    #[test]
+    fn a_cell_requires_an_lmd_module_and_uses_its_component() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_module(tmp.path(), "components/cards.lmd", CARDS_LMD);
+        let (blocks, diags, _) = render_at(
+            "```{lmd}\nlocal cards = require(\"components/cards\")\nreturn cards.card(\"Hello\", {=[ from a *module* ]=})\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        let Block::Div(div) = &blocks[0] else {
+            panic!("expected the card div, got {:?}", blocks[0]);
+        };
+        assert_eq!(div.attr.1, vec!["card".to_string()]);
+        let Block::Header(h) = &div.content[0] else {
+            panic!("expected a heading, got {:?}", div.content[0]);
+        };
+        assert_eq!(inlines_text(&h.content), "Hello");
+        assert_eq!(para_text(&div.content[1]), "from a *module*");
+    }
+
+    #[test]
+    fn a_runtime_error_inside_a_module_names_the_module_file_and_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_module(
+            tmp.path(),
+            "boom.lmd",
+            "local M = {}\nfunction M.go()\n  error(\"boom\")\nend\nreturn M\n",
+        );
+        let (_, diags, sources) = render_at(
+            // Not `return m.go()`: a tail call drops the cell's frame from
+            // the traceback, and then the whole cell is the honest location.
+            "```{lmd}\nlocal m = require(\"boom\")\nlocal r = m.go()\nreturn r\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-26-4"));
+        let problem = problem_text(&diags[0]);
+        // The module's own position leads the message…
+        assert!(problem.contains("boom.lmd:3: boom"), "{problem}");
+        // …and the cell's frame in the traceback locates the diagnostic.
+        assert_eq!(
+            located_text(&diags[0], &sources),
+            "local r = m.go()",
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn a_desugar_failure_inside_a_module_is_reported_at_the_require() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_module(
+            tmp.path(),
+            "bad.lmd",
+            "local M = {}\nfunction M.go()\n  return {=: pages' :=}\nend\nreturn M\n",
+        );
+        let (_, diags, sources) = render_at(
+            "```{lmd}\nlocal m = require(\"bad\")\nreturn m.go()\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-26-8"), "{diags:?}");
+        let problem = problem_text(&diags[0]);
+        assert!(
+            problem.contains("module 'bad' could not be compiled from lmd"),
+            "{problem}"
+        );
+        // The reader's own title is in the message; the hint is the fix.
+        assert!(problem.contains("Quote"), "{problem}");
+        let hints = format!("{:?}", diags[0].hints);
+        assert!(hints.contains("Fix the module file"), "{hints}");
+        assert!(problem.contains("bad.lmd"), "{problem}");
+        assert!(
+            problem.contains("markdown fragment failed to parse"),
+            "{problem}"
+        );
+        assert_eq!(
+            located_text(&diags[0], &sources),
+            "local m = require(\"bad\")"
+        );
+    }
+
+    #[test]
+    fn a_module_may_require_a_sibling_lmd_module() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_module(tmp.path(), "ui/cards.lmd", CARDS_LMD);
+        write_module(
+            tmp.path(),
+            "ui/page.lmd",
+            "local cards = require(\"cards\")\nreturn { hero = function(t) return cards.card(t, {=[ hero ]=}) end }\n",
+        );
+        let (blocks, diags, _) = render_at(
+            "```{lmd}\nreturn require(\"ui/page\").hero(\"Top\")\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Div(div) = &blocks[0] else {
+            panic!("expected the card div, got {:?}", blocks[0]);
+        };
+        let Block::Header(h) = &div.content[0] else {
+            panic!("expected a heading");
+        };
+        assert_eq!(inlines_text(&h.content), "Top");
+    }
+
+    #[test]
+    fn an_lmd_module_wins_over_a_lua_file_of_the_same_name_with_a_warning() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_module(tmp.path(), "cards.lmd", CARDS_LMD);
+        write_module(
+            tmp.path(),
+            "cards.lua",
+            "return { card = function() error(\"stale\") end }\n",
+        );
+        let (blocks, diags, _) = render_at(
+            "```{lmd}\nreturn require(\"cards\").card(\"Hello\", {=[ x ]=})\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert!(matches!(blocks[0], Block::Div(_)), "{blocks:?}");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].title.contains("cards.lmd") && diags[0].title.contains("cards.lua"),
+            "{diags:?}"
+        );
     }
 
     /// The text a diagnostic's location resolves to in the test file.

@@ -136,6 +136,19 @@ pub fn create_filter_environment(
     script_path: &Path,
     attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
 ) -> FilterResult<Lua> {
+    create_filter_environment_with(runtime, target_format, script_path, attribution, &[])
+}
+
+/// [`create_filter_environment`] with source dialects registered on the
+/// state, so `require` loads their files and `quarto.<name>.compile` exists
+/// (bd-76ogq4ew). The host passes the dialects it knows; q2 passes lmd.
+pub fn create_filter_environment_with(
+    runtime: Arc<dyn SystemRuntime>,
+    target_format: &str,
+    script_path: &Path,
+    attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
+    dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+) -> FilterResult<Lua> {
     // Create Lua state
     // On WASM, we can't load all libraries (no package/io/os/debug support),
     // so use a restricted set. On native, load everything for full compatibility.
@@ -168,6 +181,9 @@ pub fn create_filter_environment(
     // On native the stock `require` remains the fallback for anything not
     // found relative to the script dirs.
     super::quarto_api::register_scoped_require(&lua, runtime.clone())?;
+    for dialect in dialects {
+        super::dialect::register_source_dialect(&lua, dialect.clone())?;
+    }
 
     // Register quarto.attribution.{lookup, lookup_range, identities}.
     // When `attribution` is `None`, registers no-op stubs:
@@ -242,6 +258,29 @@ pub async fn apply_lua_filter(
     runtime: Arc<dyn SystemRuntime>,
     attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
 ) -> FilterResult<FilterOutput> {
+    apply_lua_filter_with(
+        pandoc,
+        context,
+        filter_path,
+        target_format,
+        runtime,
+        attribution,
+        &[],
+    )
+    .await
+}
+
+/// [`apply_lua_filter`] with source dialects available to the filter's
+/// `require` (bd-76ogq4ew).
+pub async fn apply_lua_filter_with(
+    pandoc: &Pandoc,
+    context: &ASTContext,
+    filter_path: &Path,
+    target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
+    attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
+    dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+) -> FilterResult<FilterOutput> {
     // Read filter file via runtime (supports VFS on WASM)
     let filter_bytes = runtime.file_read(filter_path).map_err(|e| {
         LuaFilterError::FileReadError(filter_path.to_owned(), std::io::Error::other(e.to_string()))
@@ -253,7 +292,8 @@ pub async fn apply_lua_filter(
         )
     })?;
 
-    let lua = create_filter_environment(runtime, target_format, filter_path, attribution)?;
+    let lua =
+        create_filter_environment_with(runtime, target_format, filter_path, attribution, dialects)?;
     // quarto.metadata.get / `meta`: a snapshot of the document's metadata
     // as this filter starts (Q1 parity, quarto-cli PR 13246).
     super::metadata::register_quarto_metadata(&lua, &pandoc.meta)?;
@@ -334,6 +374,29 @@ pub async fn apply_lua_filters(
     runtime: Arc<dyn SystemRuntime>,
     attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
 ) -> FilterResult<FilterOutput> {
+    apply_lua_filters_with(
+        pandoc,
+        context,
+        filter_paths,
+        target_format,
+        runtime,
+        attribution,
+        &[],
+    )
+    .await
+}
+
+/// [`apply_lua_filters`] with source dialects available to every filter's
+/// `require` (bd-76ogq4ew).
+pub async fn apply_lua_filters_with(
+    pandoc: Pandoc,
+    context: ASTContext,
+    filter_paths: &[std::path::PathBuf],
+    target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
+    attribution: Option<Arc<dyn crate::attribution::AttributionLookup>>,
+    dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+) -> FilterResult<FilterOutput> {
     let mut current_pandoc = pandoc;
     let mut current_context = context;
     let mut all_diagnostics = Vec::new();
@@ -342,13 +405,14 @@ pub async fn apply_lua_filters(
     let mut all_resources = Vec::new();
 
     for filter_path in filter_paths {
-        let output = apply_lua_filter(
+        let output = apply_lua_filter_with(
             &current_pandoc,
             &current_context,
             filter_path,
             target_format,
             runtime.clone(),
             attribution.clone(),
+            dialects,
         )
         .await?;
         current_pandoc = output.pandoc;

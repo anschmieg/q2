@@ -11,6 +11,7 @@
 mod config_value;
 mod constructors;
 mod diagnostics;
+mod dialect;
 mod dofile_wasm;
 mod filter;
 mod io_wasm;
@@ -38,9 +39,16 @@ mod utils;
 mod walk;
 
 #[allow(unused_imports)]
+pub use crate::dialect::ModuleCompileError;
+#[allow(unused_imports)]
+pub use dialect::{DialectError, SourceDialect, register_source_dialect};
+#[allow(unused_imports)]
 pub use filter::FilterOutput;
 #[allow(unused_imports)]
-pub use filter::{LuaFilterError, apply_lua_filter, apply_lua_filters, create_filter_environment};
+pub use filter::{
+    LuaFilterError, apply_lua_filter, apply_lua_filter_with, apply_lua_filters,
+    apply_lua_filters_with, create_filter_environment, create_filter_environment_with,
+};
 #[allow(unused_imports)]
 pub use quarto_doc::{
     HtmlDependency, IncludeLocation, TextInclude, extract_html_dependencies, extract_text_includes,

@@ -1,0 +1,54 @@
+---
+source: crates/quarto/tests/integration/lmd_snapshots.rs
+expression: md
+---
+A module written in lmd, required from a cell:
+
+::: card
+### Hello
+
+from a *module*
+:::
+
+The same module, used over a list:
+
+::: card
+### One
+
+first
+:::
+
+::: card
+### Two
+
+second
+:::
+
+`require` caches per document, so the module ran once:
+
+Same table: true
+
+An `.lmd` module wins over a `.lua` file of the same name, with a
+warning:
+
+Loaded the lmd one.
+
+The compiler is reachable from Lua:
+
+compiled *at run time*
+
+A module that does not compile fails the requiring cell at the
+`require`:
+
+``` {.lmd .code-with-copy}
+local m = require("modules/broken")
+return m.go()
+```
+
+A module that raises names its own file and line:
+
+``` {.lmd .code-with-copy}
+local m = require("modules/boom")
+local r = m.go()
+return r
+```

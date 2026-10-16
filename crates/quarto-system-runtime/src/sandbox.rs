@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::traits::{
-    CommandOutput, PathKind, PathMetadata, RuntimeResult, SystemRuntime, TempDir, XdgDirKind,
+    CommandOutput, PathKind, PathMetadata, RuntimeError, RuntimeResult, SystemRuntime, TempDir,
+    XdgDirKind,
 };
 
 /// A path pattern that can match files/directories.
@@ -160,6 +161,20 @@ impl SecurityPolicy {
             allow_sys: vec!["osRelease".to_string()],
         }
     }
+
+    /// Whether `path` may be read: on the allow list and not on the deny
+    /// list (deny wins, as in Deno).
+    pub fn can_read(&self, path: &Path) -> bool {
+        !self.deny_read.iter().any(|p| p.matches(path))
+            && self.allow_read.iter().any(|p| p.matches(path))
+    }
+
+    /// Whether `path` may be written, created, removed or renamed; same
+    /// rule as [`can_read`](Self::can_read) over the write lists.
+    pub fn can_write(&self, path: &Path) -> bool {
+        !self.deny_write.iter().any(|p| p.matches(path))
+            && self.allow_write.iter().any(|p| p.matches(path))
+    }
 }
 
 /// Sandboxed runtime that enforces security policies.
@@ -168,7 +183,6 @@ impl SecurityPolicy {
 /// the configured SecurityPolicy on all operations.
 pub struct SandboxedRuntime<R: SystemRuntime> {
     inner: R,
-    #[allow(dead_code)] // Will be used when full permission checking is implemented
     policy: SecurityPolicy,
 }
 
@@ -177,10 +191,40 @@ impl<R: SystemRuntime> SandboxedRuntime<R> {
     pub fn new(inner: R, policy: SecurityPolicy) -> Self {
         Self { inner, policy }
     }
+
+    /// The policy this runtime enforces.
+    pub fn policy(&self) -> &SecurityPolicy {
+        &self.policy
+    }
+
+    fn check_read(&self, path: &Path) -> RuntimeResult<()> {
+        if self.policy.can_read(path) {
+            Ok(())
+        } else {
+            Err(RuntimeError::PermissionDenied(format!(
+                "read access to {}",
+                path.display()
+            )))
+        }
+    }
+
+    fn check_write(&self, path: &Path) -> RuntimeResult<()> {
+        if self.policy.can_write(path) {
+            Ok(())
+        } else {
+            Err(RuntimeError::PermissionDenied(format!(
+                "write access to {}",
+                path.display()
+            )))
+        }
+    }
 }
 
-// Stub implementation that just delegates to inner runtime
-// Full permission checking will be implemented in the future
+// File-system operations check the policy's read and write lists before
+// delegating (bd-76ogq4ew: the Lua loaders read only through the runtime
+// they are given, so this is where a capability flag such as
+// `--allow-read` takes effect). Network, process, environment and system
+// checks are still TODO and delegate unchecked.
 //
 // Note: Using conditional async_trait to match the trait's Send bounds:
 // - Native targets: Send futures required (multi-threaded async)
@@ -189,48 +233,59 @@ impl<R: SystemRuntime> SandboxedRuntime<R> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<R: SystemRuntime> SystemRuntime for SandboxedRuntime<R> {
     fn file_read(&self, path: &Path) -> RuntimeResult<Vec<u8>> {
-        // TODO: Check policy.can_read(path)
+        self.check_read(path)?;
         self.inner.file_read(path)
     }
 
     fn file_write(&self, path: &Path, contents: &[u8]) -> RuntimeResult<()> {
-        // TODO: Check policy.can_write(path)
+        self.check_write(path)?;
         self.inner.file_write(path, contents)
     }
 
     fn path_exists(&self, path: &Path, kind: Option<PathKind>) -> RuntimeResult<bool> {
+        self.check_read(path)?;
         self.inner.path_exists(path, kind)
     }
 
     fn canonicalize(&self, path: &Path) -> RuntimeResult<PathBuf> {
+        self.check_read(path)?;
         self.inner.canonicalize(path)
     }
 
     fn path_metadata(&self, path: &Path) -> RuntimeResult<PathMetadata> {
+        self.check_read(path)?;
         self.inner.path_metadata(path)
     }
 
     fn file_copy(&self, src: &Path, dst: &Path) -> RuntimeResult<()> {
+        self.check_read(src)?;
+        self.check_write(dst)?;
         self.inner.file_copy(src, dst)
     }
 
     fn path_rename(&self, old: &Path, new: &Path) -> RuntimeResult<()> {
+        self.check_write(old)?;
+        self.check_write(new)?;
         self.inner.path_rename(old, new)
     }
 
     fn file_remove(&self, path: &Path) -> RuntimeResult<()> {
+        self.check_write(path)?;
         self.inner.file_remove(path)
     }
 
     fn dir_create(&self, path: &Path, recursive: bool) -> RuntimeResult<()> {
+        self.check_write(path)?;
         self.inner.dir_create(path, recursive)
     }
 
     fn dir_remove(&self, path: &Path, recursive: bool) -> RuntimeResult<()> {
+        self.check_write(path)?;
         self.inner.dir_remove(path, recursive)
     }
 
     fn dir_list(&self, path: &Path) -> RuntimeResult<Vec<PathBuf>> {
+        self.check_read(path)?;
         self.inner.dir_list(path)
     }
 
@@ -346,6 +401,43 @@ mod tests {
         let policy = SecurityPolicy::trusted();
         assert!(!policy.allow_read.is_empty());
         assert!(policy.allow_cwd);
+    }
+
+    #[test]
+    fn can_read_is_allow_minus_deny() {
+        let mut policy = SecurityPolicy::untrusted(PathBuf::from("/proj"));
+        assert!(policy.can_read(Path::new("/proj/a/b.lmd")));
+        assert!(!policy.can_read(Path::new("/elsewhere/b.lmd")));
+        policy.deny_read.push(PathPattern::new("/proj/secret/"));
+        assert!(!policy.can_read(Path::new("/proj/secret/key.lua")));
+        assert!(policy.can_read(Path::new("/proj/open/key.lua")));
+    }
+
+    #[test]
+    fn sandboxed_runtime_refuses_reads_outside_the_policy() {
+        use crate::native::NativeRuntime;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let allowed = tmp.path().join("proj");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(allowed.join("in.txt"), b"in").unwrap();
+        std::fs::write(outside.join("out.txt"), b"out").unwrap();
+
+        let rt = SandboxedRuntime::new(
+            NativeRuntime::new(),
+            SecurityPolicy::untrusted(allowed.clone()),
+        );
+        assert_eq!(rt.file_read(&allowed.join("in.txt")).unwrap(), b"in");
+        assert!(rt.path_exists(&allowed.join("in.txt"), None).unwrap());
+
+        let err = rt.file_read(&outside.join("out.txt")).unwrap_err();
+        assert!(matches!(err, RuntimeError::PermissionDenied(_)), "{err:?}");
+        let err = rt.path_exists(&outside.join("out.txt"), None).unwrap_err();
+        assert!(matches!(err, RuntimeError::PermissionDenied(_)), "{err:?}");
+        // Writing inside the project but outside `_output` is refused too.
+        let err = rt.file_write(&allowed.join("w.txt"), b"x").unwrap_err();
+        assert!(matches!(err, RuntimeError::PermissionDenied(_)), "{err:?}");
     }
 
     #[test]

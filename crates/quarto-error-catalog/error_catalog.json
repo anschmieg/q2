@@ -2238,5 +2238,12 @@
     "message_template": "The `--|` option lines at the top of an lmd cell are not valid YAML, or name an option with the wrong type. The cell runs as if it had no options.",
     "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-7",
     "since_version": "99.9.9"
+  },
+  "Q-26-8": {
+    "subsystem": "lmd",
+    "title": "lmd module did not compile",
+    "message_template": "An `.lmd` module that a cell, filter or shortcode handler required has a Lua syntax error or a markdown fragment that does not parse, so `require` failed. The requiring cell is left as written.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-8",
+    "since_version": "99.9.9"
   }
 }

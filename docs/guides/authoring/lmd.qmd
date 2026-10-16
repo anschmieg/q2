@@ -335,6 +335,96 @@ needs a longer fence than the one inside it. And an inline cell whose
 fragment holds a code span needs double-backtick delimiters, since single
 backticks pair up left to right.
 
+## Reusable modules
+
+A function defined in a cell is visible to the later cells of the same
+document and nowhere else. To share it between documents, put it in a
+**module**: a `.lmd` file, which is a Lua chunk that may hold markdown
+fragments, returning a table of functions. `require` loads it the way it
+loads a `.lua` file, relative to the requiring file first and then
+relative to the document, compiling the fragments on the way in. Here
+`components/cards.lmd` holds the `card` function from the previous
+section, plus a `deck` that maps it over a list:
+
+```lua
+-- components/cards.lmd
+local M = {}
+
+function M.card(title, body)
+  return {=:
+::: {.card .p-3 .mb-3}
+### `{lmd} title`
+
+`{lmd} body`
+:::
+:=}
+end
+
+function M.deck(items)
+  return items:map(function(it) return M.card(it.title, it.body) end)
+end
+
+return M
+```
+
+@demo-modules loads it from two cells:
+
+::::: {#demo-modules .embed-example-iframe file="/examples/lmd/09-modules/document.html"}
+````markdown
+---
+title: "Reusable modules"
+---
+
+The functions live in `components/cards.lmd`, a Lua file that may hold
+markdown fragments. `require` loads it relative to this document, so any
+cell on the page can use it:
+
+```{lmd}
+local cards = require("components/cards")
+return cards.card("Hello", {=[ from a *module* ]=})
+```
+
+The module ran once; a second `require` returns the same table. Its
+functions take ordinary Lua values, so a list of records becomes a deck
+of cards:
+
+```{lmd}
+local cards = require("components/cards")
+return cards.deck(pandoc.List({
+  { title = "One", body = "first" },
+  { title = "Two", body = "second" },
+}))
+```
+````
+
+The module is named without its extension, and a module may `require`
+its own neighbours the same way. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/09-modules)
+:::::
+
+A few things to know about modules:
+
+- **A module runs once per document.** `require` caches by file, so every
+  cell that requires `components/cards` gets the same table, and a module
+  that sets up state does so once. Two documents are two Lua states, so
+  nothing is shared between pages.
+- **A module sees what a cell sees.** `pandoc`, `quarto`, `meta` (the
+  requiring document\'s metadata) and `FORMAT` are all in scope.
+- **`.lmd` wins over `.lua`.** When `cards.lmd` and `cards.lua` sit side by
+  side, the `.lmd` is the one that loads and a warning names both files, so
+  a stale compiled copy can never shadow the source you are editing.
+- **Errors name the module.** A Lua error inside a module reports
+  `cards.lmd:12:` with the module\'s own line, and the cell that required
+  it is underlined. A module that does not compile, because of a Lua
+  syntax error or a fragment the reader rejects, fails the requiring cell
+  at its `require` line with [`Q-26-8`](../../errors/lmd/Q-26-8.qmd).
+- **The compiler is a function.** `quarto.lmd.compile(source, name)`
+  returns the plain Lua an lmd source compiles to, or raises with the
+  position of the problem, so a cell can compile lmd text it holds (from a
+  data file, say) and `load` the result itself.
+
+Plain Lua filters and shortcode handlers can `require` an `.lmd` module
+too; the loader is the same one.
+
 ## Conditional content
 
 A cell that returns `nil` vanishes, so an `if` around the `return` is all it
@@ -500,8 +590,8 @@ run, and are unique across the document. An explicit `{#id}` is kept.
 
 **What a cell can use.** The `pandoc` and `quarto` tables a Lua filter gets
 (constructors, `pandoc.utils`, `quarto.doc.is_format`, `quarto.utils`),
-`meta` and `quarto.metadata.get`, `FORMAT`, and `require` for a `.lua` file
-next to the document.
+`meta` and `quarto.metadata.get`, `FORMAT`, and `require` for a `.lua` or
+`.lmd` module next to the document (see [Reusable modules](#reusable-modules)).
 
 ## Current limitations
 
@@ -516,9 +606,12 @@ next to the document.
   boolean as `tostring` would. One inside a fragment is spliced into a
   `pandoc` constructor argument, which takes only Inlines and strings, so
   there it is still `` `{lmd} tostring(i)` ``.
-- **Modules.** `require` of a `.lua` file next to the document works; a
-  module written in lmd (a `.lmd` file with fragments) does not load yet.
-  Reusable lmd modules are coming.
+- **`pandoc.OrderedList`** needs explicit `pandoc.ListAttributes` for output
+  formats other than HTML.
+- **Modules resolve next to the document.** `require` looks beside the
+  requiring file and beside the document; a project-wide module directory,
+  modules shipped by an extension, and a project-level autoload are not
+  there yet.
 
 ## Where this leads
 

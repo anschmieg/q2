@@ -243,6 +243,34 @@ pub async fn apply_filter(
     attribution: Option<Arc<dyn AttributionLookup>>,
     base_dir: &Path,
 ) -> Result<FilterOutput, FilterError> {
+    apply_filter_with(
+        pandoc,
+        context,
+        filter,
+        target_format,
+        runtime,
+        attribution,
+        base_dir,
+        &[],
+    )
+    .await
+}
+
+/// [`apply_filter`] with source dialects a Lua filter's `require` may load
+/// (bd-76ogq4ew). Non-Lua filters ignore them.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_filter_with(
+    pandoc: Pandoc,
+    context: ASTContext,
+    filter: &FilterSpec,
+    target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
+    attribution: Option<Arc<dyn AttributionLookup>>,
+    base_dir: &Path,
+    dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+) -> Result<FilterOutput, FilterError> {
+    #[cfg(not(feature = "lua-filter"))]
+    let _ = dialects;
     match filter {
         FilterSpec::Citeproc => {
             let (new_pandoc, new_context, diagnostics, citation_manifest) =
@@ -269,13 +297,14 @@ pub async fn apply_filter(
 
         #[cfg(feature = "lua-filter")]
         FilterSpec::Lua(path) => {
-            let lua_output = crate::lua::apply_lua_filters(
+            let lua_output = crate::lua::apply_lua_filters_with(
                 pandoc,
                 context,
                 &[path.clone()],
                 target_format,
                 runtime,
                 attribution,
+                dialects,
             )
             .await?;
             Ok(FilterOutput {
@@ -340,6 +369,32 @@ pub async fn apply_filters(
     attribution: Option<Arc<dyn AttributionLookup>>,
     base_dir: &Path,
 ) -> Result<FilterOutput, FilterError> {
+    apply_filters_with(
+        pandoc,
+        context,
+        filters,
+        target_format,
+        runtime,
+        attribution,
+        base_dir,
+        &[],
+    )
+    .await
+}
+
+/// [`apply_filters`] with source dialects available to every Lua filter's
+/// `require` (bd-76ogq4ew).
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_filters_with(
+    pandoc: Pandoc,
+    context: ASTContext,
+    filters: &[FilterSpec],
+    target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
+    attribution: Option<Arc<dyn AttributionLookup>>,
+    base_dir: &Path,
+    dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+) -> Result<FilterOutput, FilterError> {
     let mut current_pandoc = pandoc;
     let mut current_context = context;
     let mut all_diagnostics = Vec::new();
@@ -352,7 +407,7 @@ pub async fn apply_filters(
     let mut citation_manifest = None;
 
     for filter in filters {
-        let output = apply_filter(
+        let output = apply_filter_with(
             current_pandoc,
             current_context,
             filter,
@@ -360,6 +415,7 @@ pub async fn apply_filters(
             runtime.clone(),
             attribution.clone(),
             base_dir,
+            dialects,
         )
         .await?;
         current_pandoc = output.pandoc;

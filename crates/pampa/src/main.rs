@@ -13,6 +13,7 @@ use std::path::Path;
 
 mod attribution;
 mod citeproc_filter;
+mod dialect;
 mod errors;
 mod filter_context;
 mod filters;
