@@ -22,6 +22,7 @@ pub mod jupyter_kernel_cleanup_e2e;
 pub mod lmd_snapshots;
 pub mod nested_projects_cli;
 pub mod nightly_gate;
+pub mod pandoc_read_stderr_e2e;
 pub mod preview_cli;
 pub mod preview_static_e2e;
 pub mod project_pandoc_gate_e2e;

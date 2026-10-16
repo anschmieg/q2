@@ -536,18 +536,68 @@ mod tests {
 
     #[test]
     fn unsupported_node_is_an_error_without_a_location_when_unanchored() {
-        let src = "return {=: | a | b |\n|---|---|\n| 1 | 2 | :=}";
+        // A footnote: the reader's `NoteDefinitionPara` (and the matching
+        // `NoteReference`) are resolved later in the pipeline and have no
+        // constructor.
+        let src = "return {=: text[^1]\n\n[^1]: the note :=}";
         let err = desugar_lua(src).unwrap_err();
         assert!(
             matches!(
                 err,
                 LmdError::Unsupported {
-                    kind: "Table",
+                    kind: "NoteDefinitionPara",
                     location: None
                 }
             ),
             "{err}"
         );
+    }
+
+    /// bd-7gqr148v: tables are printed, pipe tables and list-tables alike
+    /// (the reader has already turned the latter into a `Table`).
+    #[test]
+    fn table_in_a_fragment_is_emitted() {
+        let pipe = desugar_lua("return {=: | a | b |\n|---|--:|\n| 1 | 2 | :=}").unwrap();
+        assert!(pipe.starts_with("return pandoc.Blocks({\n"), "{pipe}");
+        assert!(pipe.contains("pandoc.Table({}, {\n"), "{pipe}");
+        assert!(
+            pipe.contains("{\"AlignDefault\", pandoc.ColWidthDefault}"),
+            "{pipe}"
+        );
+        assert!(
+            pipe.contains("{\"AlignRight\", pandoc.ColWidthDefault}"),
+            "{pipe}"
+        );
+        assert!(pipe.contains("pandoc.TableHead({\n"), "{pipe}");
+        assert!(pipe.contains("pandoc.Row({\n"), "{pipe}");
+        assert!(pipe.contains("pandoc.Cell({\n"), "{pipe}");
+        assert!(pipe.contains("}, \"AlignDefault\", 1, 1)"), "{pipe}");
+        assert!(pipe.contains("pandoc.TableBody({\n"), "{pipe}");
+        assert!(pipe.contains("pandoc.TableFoot({})"), "{pipe}");
+
+        let list_table = desugar_lua(
+            "return {=:\n::: {.list-table widths=\"30,70\"}\n* - k\n  - v\n* - a\n  - 1\n:::\n:=}",
+        )
+        .unwrap();
+        assert!(list_table.contains("pandoc.Table("), "{list_table}");
+        assert!(
+            list_table.contains("{\"AlignDefault\", 0.3}"),
+            "{list_table}"
+        );
+        assert!(
+            list_table.contains("{\"AlignDefault\", 0.7}"),
+            "{list_table}"
+        );
+        assert!(!list_table.contains("list-table"), "{list_table}");
+    }
+
+    #[test]
+    fn line_preserving_table_stays_on_its_lines() {
+        let src = "local t = {=:\n| a | b |\n|---|---|\n| 1 | 2 |\n:=}\nlocal b = 1";
+        let out = line_preserving(src).unwrap();
+        assert_eq!(out.lines().count(), src.lines().count(), "{out}");
+        assert_eq!(out.lines().last(), Some("local b = 1"));
+        assert!(out.contains("pandoc.Table({}, {{\"AlignDefault\", pandoc.ColWidthDefault}, {\"AlignDefault\", pandoc.ColWidthDefault}}, pandoc.TableHead({pandoc.Row({pandoc.Cell({pandoc.Plain({pandoc.Str(\"a\")})}, \"AlignDefault\", 1, 1), pandoc.Cell({pandoc.Plain({pandoc.Str(\"b\")})}, \"AlignDefault\", 1, 1)})}), {pandoc.TableBody({pandoc.Row({pandoc.Cell({pandoc.Plain({pandoc.Str(\"1\")})}, \"AlignDefault\", 1, 1), pandoc.Cell({pandoc.Plain({pandoc.Str(\"2\")})}, \"AlignDefault\", 1, 1)})}, {}, 0)}, pandoc.TableFoot({}))"), "{out}");
     }
 
     #[test]

@@ -291,14 +291,13 @@ fn main() {
             );
             match result {
                 Ok((pandoc, context)) => {
-                    // Apply div transforms (definition-list, list-table) to JSON input
-                    // so they get the same treatment as qmd input.
+                    // The structural desugaring set (list-table, definition-list,
+                    // implicit figure), so JSON input gets the same treatment as
+                    // qmd input. Its Q-2-35 warnings are not reported here, as
+                    // they never were for this entry point.
                     let mut error_collector =
                         utils::diagnostic_collector::DiagnosticCollector::new();
-                    let pandoc = pandoc::treesitter_utils::postprocess::transform_divs(
-                        pandoc,
-                        &mut error_collector,
-                    );
+                    let pandoc = pandoc::desugar::desugar_document(pandoc, &mut error_collector);
                     (pandoc, context)
                 }
                 Err(e) => {

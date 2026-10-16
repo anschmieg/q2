@@ -36,8 +36,18 @@
 //! underline lands on the line. Cells from an included file name the
 //! included file, since include expansion registers it in the source
 //! context under its own id.
+//!
+//! What a cell returns gets the structural desugaring set
+//! (`pampa::pandoc::desugar`: list-table and definition-list divs, the
+//! implicit figure) before it is spliced in, per cell, so a cell that
+//! builds `pandoc.Div({…}, {"list-table"})` from nodes ends up with the
+//! same `Table` the reader would have made from the markdown (bd-7gqr148v).
+//! A node a cell built has no document position of its own, so a Q-2-35
+//! from that pass is relocated onto the cell.
 
 use async_trait::async_trait;
+use pampa::pandoc::desugar::{desugar_blocks, desugar_inlines};
+use pampa::utils::diagnostic_collector::DiagnosticCollector;
 use quarto_error_reporting::{DiagnosticMessage, DiagnosticMessageBuilder};
 use quarto_pandoc_types::attr::AttrSourceInfo;
 use quarto_pandoc_types::block::{Block, CodeBlock};
@@ -280,12 +290,74 @@ fn failure_diagnostic(
             "Q-26-6",
             "Inline lmd cell did not produce inlines",
             Some(
-                "An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
+                "An inline cell's expression must be an Inline, a list of Inlines, a string, a number, a boolean, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
             ),
         ),
     };
     let location = location.unwrap_or_else(|| cell.anchor.span.clone());
     cell_error(code, title, location, err.to_string(), hint)
+}
+
+/// The structural desugaring set over a block cell's result, with any
+/// diagnostic it raises relocated onto the cell.
+fn desugar_cell_blocks(
+    blocks: Vec<Block>,
+    cell: &PendingCell,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> Vec<Block> {
+    let mut collector = DiagnosticCollector::new();
+    let blocks = desugar_blocks(blocks, &mut collector);
+    diagnostics.extend(
+        collector
+            .diagnostics()
+            .iter()
+            .map(|diag| relocate_to_cell(diag, cell)),
+    );
+    blocks
+}
+
+/// [`desugar_cell_blocks`] for an inline cell's result (its sugar, if
+/// any, sits in the blocks of a `Note`).
+fn desugar_cell_inlines(
+    inlines: Inlines,
+    cell: &PendingCell,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+) -> Inlines {
+    let mut collector = DiagnosticCollector::new();
+    let inlines = desugar_inlines(inlines, &mut collector);
+    diagnostics.extend(
+        collector
+            .diagnostics()
+            .iter()
+            .map(|diag| relocate_to_cell(diag, cell)),
+    );
+    inlines
+}
+
+/// A diagnostic the desugaring pass raised about a node the cell
+/// produced, located on the cell instead. The node's own location is not
+/// usable: a node the cell built carries the Lua chunk position
+/// (`SourceInfo::generated`), and a node `pandoc.read` returned carries an
+/// offset into that call's private source context. The whole cell is the
+/// honest resolution available; the reader's precise position is
+/// available only for markup the reader itself parsed, which never reaches
+/// this pass with sugar left in it. Code, title, problem and hints are
+/// kept; details are not, since each carries its own (unusable) location.
+fn relocate_to_cell(diag: &DiagnosticMessage, cell: &PendingCell) -> DiagnosticMessage {
+    let mut builder = DiagnosticMessageBuilder::new(diag.kind, diag.title.clone())
+        .with_location(cell.anchor.span.clone());
+    if let Some(code) = &diag.code {
+        builder = builder.with_code(code.clone());
+    }
+    if let Some(problem) = &diag.problem {
+        builder = builder.problem(problem.clone());
+    }
+    for hint in &diag.hints {
+        builder = builder.add_hint(hint.clone());
+    }
+    builder
+        .add_info("The node was built by this lmd cell.")
+        .build()
 }
 
 /// Split a block cell's text into its code, the `echo` option, and the
@@ -376,7 +448,7 @@ pub async fn execute_lmd_cells(
                             out.push(displayed_block_cell(&code, &cell.source_info));
                         }
                         if let LmdCellValue::Blocks(result) = value {
-                            out.extend(result);
+                            out.extend(desugar_cell_blocks(result, cell, diagnostics));
                         }
                     }
                     Err(err) => {
@@ -394,7 +466,9 @@ pub async fn execute_lmd_cells(
                     .await
                 {
                     Ok(LmdInlineValue::Nothing) => CellOutput::Inlines(Vec::new()),
-                    Ok(LmdInlineValue::Inlines(result)) => CellOutput::Inlines(result),
+                    Ok(LmdInlineValue::Inlines(result)) => {
+                        CellOutput::Inlines(desugar_cell_inlines(result, cell, diagnostics))
+                    }
                     Err(err) => {
                         // The code span is on the reported line and tighter
                         // than the line, so it stays the location.
@@ -629,6 +703,121 @@ mod tests {
         assert!(!blocks.iter().any(is_pending_block_cell));
     }
 
+    // ----- the structural desugaring set over cell results (bd-7gqr148v) -----
+
+    const LIST_TABLE_DIV: &str = "pandoc.Div({ pandoc.BulletList({ { pandoc.BulletList({ { pandoc.Plain({ pandoc.Str('k') }) }, { pandoc.Plain({ pandoc.Str('v') }) } }) } }) }, pandoc.Attr('', {'list-table'}))";
+
+    #[test]
+    fn a_cell_built_list_table_div_becomes_a_table() {
+        let (blocks, diags) = render(&format!("```{{lmd}}\nreturn {LIST_TABLE_DIV}\n```\n"));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(matches!(blocks.as_slice(), [Block::Table(_)]), "{blocks:?}");
+    }
+
+    #[test]
+    fn a_cell_built_definition_list_div_becomes_a_definition_list() {
+        let qmd = "```{lmd}\nreturn pandoc.Div({ pandoc.BulletList({ { pandoc.Plain({ pandoc.Str('t') }), pandoc.BulletList({ { pandoc.Plain({ pandoc.Str('d') }) } }) } }) }, pandoc.Attr('', {'definition-list'}))\n```\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            matches!(blocks.as_slice(), [Block::DefinitionList(_)]),
+            "{blocks:?}"
+        );
+    }
+
+    #[test]
+    fn a_cell_built_single_image_para_becomes_a_figure() {
+        let qmd = "```{lmd}\nreturn pandoc.Para({ pandoc.Image({ pandoc.Str('alt') }, 'x.png', '', pandoc.Attr('fig-x')) })\n```\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let [Block::Figure(figure)] = blocks.as_slice() else {
+            panic!("expected Figure, got {blocks:?}");
+        };
+        assert_eq!(figure.attr.0, "fig-x");
+    }
+
+    #[test]
+    fn an_invalid_cell_built_list_table_warns_at_the_cell() {
+        let qmd = "Before\n\n```{lmd}\nreturn pandoc.Div({ pandoc.Para({ pandoc.Str('x') }) }, pandoc.Attr('', {'list-table'}))\n```\n";
+        let (blocks, diags, sources) = render_with_sources(qmd);
+        assert!(
+            matches!(blocks.as_slice(), [_, Block::Div(_)]),
+            "{blocks:?}"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-2-35"));
+        assert_eq!(
+            diags[0].kind,
+            quarto_error_reporting::DiagnosticKind::Warning
+        );
+        // Located on the cell's text, not on the Lua chunk position the
+        // constructed div carries.
+        assert_eq!(
+            located_text(&diags[0], &sources),
+            "return pandoc.Div({ pandoc.Para({ pandoc.Str('x') }) }, pandoc.Attr('', {'list-table'}))"
+        );
+    }
+
+    #[test]
+    fn an_inline_cell_note_holding_a_list_table_is_desugared() {
+        let qmd = format!("A note`{{lmd}} pandoc.Note({{ {LIST_TABLE_DIV} }})` here.\n");
+        let (blocks, diags) = render(&qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        let note = p
+            .content
+            .iter()
+            .find_map(|i| match i {
+                Inline::Note(n) => Some(n),
+                _ => None,
+            })
+            .expect("the note is spliced in");
+        assert!(
+            matches!(note.content.as_slice(), [Block::Table(_)]),
+            "{:?}",
+            note.content
+        );
+    }
+
+    #[test]
+    fn a_cell_nested_in_a_fragment_is_covered_by_the_parent_pass() {
+        let qmd = format!(
+            "````{{lmd}}\nreturn {{=:\nIntro\n\n```{{lmd}}\nreturn {LIST_TABLE_DIV}\n```\n:=}}\n````\n"
+        );
+        let (blocks, diags) = render(&qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            matches!(blocks.as_slice(), [Block::Paragraph(_), Block::Table(_)]),
+            "{blocks:?}"
+        );
+    }
+
+    /// bd-7gqr148v: a table written inside a fragment runs and is spliced
+    /// in, whether it was a pipe table or a list-table the reader desugared.
+    #[test]
+    fn tables_in_fragments_run_and_are_spliced_in() {
+        let qmd = "```{lmd}\nreturn {=:\n| a | b |\n|---|--:|\n| 1 | 2 |\n\n::: {.list-table}\n* - k\n  - v\n* - x\n  - y\n:::\n:=}\n```\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let [Block::Table(pipe), Block::Table(list)] = blocks.as_slice() else {
+            panic!("expected two tables, got {blocks:?}");
+        };
+        assert_eq!(pipe.head.rows.len(), 1);
+        assert_eq!(pipe.bodies[0].body.len(), 1);
+        assert_eq!(
+            pipe.colspec[1].0,
+            quarto_pandoc_types::table::Alignment::Right
+        );
+        assert_eq!(
+            list.head.rows.len(),
+            1,
+            "bare list-table promotes its first row"
+        );
+        assert_eq!(list.bodies[0].body.len(), 1);
+    }
+
     #[test]
     fn the_motivating_example_with_immediate_values() {
         let qmd = "::: foo\n\n```{lmd}\nlocal out = pandoc.Blocks({})\nfor _, v in ipairs({'a', 'b'}) do\n  out:extend({=: **`{lmd} v`** :=})\nend\nreturn out\n```\n\n:::\n";
@@ -655,6 +844,20 @@ mod tests {
         let texts: Vec<String> = div.content.iter().map(para_text).collect();
         assert_eq!(texts, vec!["**a**", "**b**", "**c**", "**d**"]);
         assert_eq!(para_text(&blocks[1]), "Also d and 4.");
+    }
+
+    /// bd-iqd6niat: metadata numbers and booleans are Lua numbers and
+    /// booleans (divergence D-num), and an inline cell renders them as
+    /// `tostring` would, so `version: 12.1` needs no `tostring()`.
+    #[test]
+    fn inline_cells_render_metadata_numbers_and_booleans() {
+        let qmd = "---\nversion: 12.1\ncount: 3\nflag: true\n---\n\nVersion `{lmd} meta.version`, count `{lmd} meta.count`, twice `{lmd} meta.count * 2`, flag `{lmd} meta.flag`, pair `{lmd} {meta.count, ' of ', meta.version}`.\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            para_text(&blocks[0]),
+            "Version 12.1, count 3, twice 6, flag true, pair 3 of 12.1."
+        );
     }
 
     #[test]

@@ -1,0 +1,17 @@
+$ q2 render repro.qmd --to html   (branch braid/bd-iqd6niat-lmd-inline-numbers, after the inline-cell change; same fixture as repro-output.txt)
+
+--- stderr ---
+Rendering single file: repro.qmd
+
+--- rendered body (h1 / p lines) ---
+<h1 class="title">lmd inline number repro</h1>
+<h1>Heading  and 3</h1>
+<p>Version via inline cell: 12.1</p>
+<p>Count via inline cell: 3</p>
+<p>Flag via inline cell: true</p>
+<p>Workaround: 12.1</p>
+<p>Literal number: 42</p>
+<p>Arithmetic: 6</p>
+<p>In a list with a string: v12.1</p>
+
+The heading still loses the YAML real: that is the shortcode sibling bug, bd-32nrymty, not fixed here.

@@ -14,7 +14,8 @@ use quarto_error_reporting::DiagnosticMessage;
 use quarto_source_map::By;
 
 /// Read pandoc's JSON the way the CLI's `--from json` does: the lenient reader (pandoc's JSON
-/// carries no source info), then `transform_divs`. A read error is Q-24-12.
+/// carries no source info), then the structural desugaring set (`pampa::pandoc::desugar`).
+/// A read error is Q-24-12.
 pub fn read_pandoc_json(json_text: &str) -> Result<Pandoc, DiagnosticMessage> {
     let (pandoc, _context) =
         pampa::readers::json::read_completing_source_info(&mut json_text.as_bytes(), By::unknown())
@@ -22,7 +23,10 @@ pub fn read_pandoc_json(json_text: &str) -> Result<Pandoc, DiagnosticMessage> {
                 report::internal_error(&format!("pandoc's JSON could not be read: {e}"))
             })?;
     let mut collector = pampa::utils::diagnostic_collector::DiagnosticCollector::new();
-    Ok(pampa::pandoc::treesitter_utils::postprocess::transform_divs(pandoc, &mut collector))
+    Ok(pampa::pandoc::desugar::desugar_document(
+        pandoc,
+        &mut collector,
+    ))
 }
 pub mod media;
 

@@ -4,6 +4,7 @@
  */
 
 pub mod ast_context;
+pub mod desugar;
 pub mod location;
 pub mod meta;
 mod meta_annotations;

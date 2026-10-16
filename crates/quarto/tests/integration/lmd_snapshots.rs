@@ -34,19 +34,51 @@ const Q2_BIN: &str = env!("CARGO_BIN_EXE_q2");
 
 const FIXTURES: &[&str] = &["fragments", "cells", "nodes-and-ids", "errors", "patterns"];
 
+/// Fixtures rendered to HTML through the native pipeline (not the pandoc
+/// leg) and snapshotted as the page's `<main>`. `--to markdown` runs
+/// Quarto 1's Lua filters, whose own list-table filter would convert the
+/// cell-built divs this fixture exists to observe.
+const HTML_FIXTURES: &[&str] = &["desugar"];
+
 fn fixtures_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/fixtures/lmd")
 }
 
-/// Render one fixture in a scratch copy; return (markdown, normalized stderr).
+/// Render one fixture to markdown in a scratch copy; return (markdown,
+/// normalized stderr).
 fn render(name: &str) -> (String, String) {
+    render_to(name, "markdown", "md")
+}
+
+/// Render one fixture to HTML in a scratch copy; return (the `<main>`
+/// element, normalized stderr).
+fn render_html(name: &str) -> (String, String) {
+    let (html, stderr) = render_to(name, "html", "html");
+    (main_element(&html).to_string(), stderr)
+}
+
+/// Render one fixture with `--to <format>` in a scratch copy and read back
+/// `<name>.<ext>`; return (output, normalized stderr).
+///
+/// The scratch copy holds the fixture's `.qmd` and every non-`.qmd` file
+/// in the fixtures directory (shared resources such as images), so a
+/// fixture that references one renders without a missing-resource
+/// warning.
+fn render_to(name: &str, format: &str, ext: &str) -> (String, String) {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().to_path_buf();
     let qmd = dir.join(format!("{name}.qmd"));
     std::fs::copy(fixtures_dir().join(format!("{name}.qmd")), &qmd).unwrap();
+    for entry in std::fs::read_dir(fixtures_dir()).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e != "qmd") {
+            std::fs::copy(&path, dir.join(entry.file_name())).unwrap();
+        }
+    }
 
     let output = Command::new(Q2_BIN)
-        .args(["render", &format!("{name}.qmd"), "--to", "markdown"])
+        .args(["render", &format!("{name}.qmd"), "--to", format])
         .current_dir(&dir)
         .env("NO_COLOR", "1")
         .output()
@@ -56,14 +88,14 @@ fn render(name: &str) -> (String, String) {
         &dir,
         name,
     );
-    let md = std::fs::read_to_string(dir.join(format!("{name}.md"))).unwrap_or_else(|e| {
+    let out = std::fs::read_to_string(dir.join(format!("{name}.{ext}"))).unwrap_or_else(|e| {
         panic!(
-            "no markdown output for {name}: {e}\nexit: {:?}\nstdout:\n{}\nstderr:\n{stderr}",
+            "no {format} output for {name}: {e}\nexit: {:?}\nstdout:\n{}\nstderr:\n{stderr}",
             output.status,
             String::from_utf8_lossy(&output.stdout)
         )
     });
-    (md, stderr)
+    (out, stderr)
 }
 
 /// Replace the scratch directory (in both its raw and canonical spellings,
@@ -181,6 +213,25 @@ fn lmd_blog_project_renders_as_snapshotted() {
         );
         insta::assert_snapshot!("blog.main.html", main);
         insta::assert_snapshot!("blog.stderr", stderr);
+    });
+}
+
+/// bd-7gqr148v (GH #846): the structural desugaring contract. A
+/// list-table / definition-list div or a single-image paragraph must
+/// become a `Table` / `DefinitionList` / `Figure` whether the reader
+/// parsed it, an lmd cell built it from nodes, a fragment carried it, or
+/// `pandoc.read` returned it.
+#[test]
+fn lmd_html_fixtures_render_as_snapshotted() {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("snapshots/lmd");
+    settings.set_prepend_module_to_snapshot(false);
+    settings.bind(|| {
+        for name in HTML_FIXTURES {
+            let (main, stderr) = render_html(name);
+            insta::assert_snapshot!(format!("{name}.main.html"), main);
+            insta::assert_snapshot!(format!("{name}.stderr"), stderr);
+        }
     });
 }
 
