@@ -42,3 +42,4 @@ projects:
   - lmd/06-conditional
   - lmd/07-walk
   - lmd/08-echo
+  - lmd/09-modules

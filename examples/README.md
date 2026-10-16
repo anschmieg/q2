@@ -84,6 +84,7 @@ their rendered output.
 | [`lmd/06-conditional`](lmd/06-conditional/) | A callout returned only when a front-matter flag is set; `quarto.doc.is_format` |
 | [`lmd/07-walk`](lmd/07-walk/) | `Blocks:walk` on a fragment |
 | [`lmd/08-echo`](lmd/08-echo/) | `--| echo: true`, showing the desugared Lua above the result |
+| [`lmd/09-modules`](lmd/09-modules/) | `require` of a module written in lmd (`components/cards.lmd`), used by two cells |
 
 ## Other example categories
 

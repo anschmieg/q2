@@ -2,7 +2,7 @@
 title: 'lmd infrastructure: `require` of `.lmd` modules, component call sites, and an ecosystem survey (bd-76ogq4ew)'
 date: 2026-10-15
 description: 'Survey of the JSX/MDX, Hugo/templating, Typst and Lua-dialect ecosystems for quality-of-life features worth borrowing into lmd, a design for loading `.lmd` modules through `require`, and a phased plan for the reusability work that follows the landed lmd feature.'
-status: in-progress  # survey done 2026-10-15; decisions recorded and go-ahead given 2026-10-16; Phase 1 in progress
+status: in-progress  # survey done 2026-10-15; decisions recorded and go-ahead given 2026-10-16; Phase 1 implemented on the branch (commits f45d54b5e, 73588f3e5, docs following), awaiting verify + PR
 braid:
   strand: bd-76ogq4ew
   priority: P2
@@ -318,16 +318,16 @@ This strand ends at Phase 3. Component call sites are a separate strand whose de
 
 Tests first, per the TDD rule; each bullet names its pin.
 
-- [ ] `pampa::lua::quarto_api`: a loader hook type and registry slot; `.lmd` candidates in the scoped `require` in the order of the resolution table; `.lmd`-over-`.lua` rule with a warning. Pins: `quarto_api::tests` for each candidate form, the precedence rule (the `.lmd` loads, the warning names both files), and the hook being called with the right path.
-- [ ] `quarto_core`: supply the hook from `LmdExecuteStage`, `UserFiltersStage` and the shortcode engine (one constructor). Pins: `lmd_execute::tests` requiring a module that defines a component and uses it from a cell; a Lua *filter* requiring an `.lmd` module.
-- [ ] Chunk naming and errors: `@<path>` chunk name, line-preserving emit, desugar failures as Lua errors at the `require` line with the module\'s position in the message. Pins: `lmd_execute::tests` for a runtime error on a module line, a markdown error inside a module fragment, and a nested `require` from a module.
-- [ ] `quarto.lmd.compile(src, name)` in Lua, built on the same hook. Pin: a Lua test compiling a fragment and `load`ing the result.
-- [ ] Scoped-`require` miss message on native: the scoped candidates first, the stock message as the hint. Module-load failures get `Q-26` codes (continuing #855\'s catalog) with reference pages.
-- [ ] `docs/guides/authoring/lmd.qmd` (from #855): a "Reusable modules" section with an `examples/lmd/09-modules` project in the manifest and the `patterns.qmd` fixture; drop the modules bullet from "Current limitations"; update the "What a cell can use" rule.
-- [ ] `crates/pampa/tests/wasm_lua.rs`: a cell requiring an `.lmd` module from the VFS; and a native test that a `SandboxedRuntime` denying the module\'s directory makes `require` fail with the policy\'s error.
-- [ ] Snapshot fixture `tests/integration/fixtures/lmd/modules/` under `lmd_snapshots.rs`: a module, a consumer, an error inside the module.
-- [ ] Stretch: `q2 lmd compile <file>` printing the pretty desugaring.
-- [ ] Update `2026-10-12-lmd-exploration.md`\'s open questions and this plan.
+- [x] `pampa::lua::quarto_api`: a loader hook type and registry slot; `.lmd` candidates in the scoped `require` in the order of the resolution table; `.lmd`-over-`.lua` rule with a warning. Pins: `quarto_api::tests` for each candidate form, the precedence rule (the `.lmd` loads, the warning names both files), and the hook being called with the right path. *Landed as a generic `SourceDialect` trait (`pampa::dialect`, feature-independent) with Lua-side registration in `pampa::lua::dialect` (app data on the state); the loader tries every registered dialect\'s extension before `.lua`; chunk names are `@path` for all modules; the toy `Shout` dialect in `dialect::test_support` drives nine loader tests (commit `f45d54b5e`).*
+- [x] `quarto_core`: supply the hook from `LmdExecuteStage`, `UserFiltersStage` and the shortcode engine (one constructor). Pins: `lmd_execute::tests` requiring a module that defines a component and uses it from a cell; a Lua *filter* requiring an `.lmd` module. *`quarto_core::lmd::LmdDialect` and `lmd::dialects()`; threaded through new `_with` entry points (`create_filter_environment_with`, `apply_lua_filter(s)_with`, `unified_filter::apply_filter(s)_with`, `LuaShortcodeEngine::new_with`, a `dialects` parameter on `LmdRuntime::new`) so the existing signatures stay as wrappers. Filter and shortcode-handler pins live in `lmd::dialect::tests`.*
+- [x] Chunk naming and errors: `@<path>` chunk name, line-preserving emit, desugar failures as Lua errors at the `require` line with the module\'s position in the message. Pins: `lmd_execute::tests` for a runtime error on a module line, a markdown error inside a module fragment, and a nested `require` from a module. *A compile failure is a typed `ModuleCompileError` the execute stage recognises in the error chain and reports as `Q-26-8` (catalog entry, reference page, sidebar), located on the `require` line. Found on the way: a cell whose last statement is `return m.go()` is a Lua tail call, so the cell\'s own frame is absent from the traceback and the whole cell is the honest location; the tests avoid the tail call.*
+- [x] `quarto.lmd.compile(src, name)` in Lua, built on the same hook. Pin: a Lua test compiling a fragment and `load`ing the result. *Generic: registering a dialect installs `quarto.<name>.compile`; pinned in `pampa::lua::dialect::tests` and in the `modules.qmd` fixture.*
+- [x] Scoped-`require` miss message on native: the scoped candidates first, the stock message as the hint. Module-load failures get `Q-26` codes (continuing #855\'s catalog) with reference pages. *`Q-26-8` for a module that does not compile; a module that raises stays `Q-26-4` with the module\'s `path:line:` leading the message; the shadowing warning comes through `quarto.warn` and so carries the generic Lua-warning code.*
+- [x] `docs/guides/authoring/lmd.qmd` (from #855): a "Reusable modules" section with an `examples/lmd/09-modules` project in the manifest and the `patterns.qmd` fixture; drop the modules bullet from "Current limitations"; update the "What a cell can use" rule. *The modules pattern is pinned by its own fixture, `modules.qmd` plus `modules/`, rather than by `patterns.qmd`, since it needs files beside the document; the limitations bullet now says what is left: project-wide directories, extension modules and autoload (Phase 3).*
+- [x] `crates/pampa/tests/wasm_lua.rs`: a cell requiring an `.lmd` module from the VFS; and a native test that a `SandboxedRuntime` denying the module\'s directory makes `require` fail with the policy\'s error. *The WASM test uses a toy dialect through `apply_lua_filters_with` (pampa cannot see lmd); it runs in Linux CI, not locally. `SandboxedRuntime` turned out to delegate every file operation unchecked (a `TODO`), so `SecurityPolicy::can_read` / `can_write` and their enforcement on the read and write operations landed with this, which is what makes the denial test real.*
+- [x] Snapshot fixture `tests/integration/fixtures/lmd/modules/` under `lmd_snapshots.rs`: a module, a consumer, an error inside the module. *`modules.qmd` plus `modules/{cards,broken,boom,shadowed}.lmd` and `shadowed.lua`; the harness now copies fixture subdirectories and its normalizer maps Lua\'s abbreviated chunk names for files under them.*
+- [ ] Stretch: `q2 lmd compile <file>` printing the pretty desugaring. *Not started; `quarto.lmd.compile` covers the "show me the Lua" need from inside a document.*
+- [ ] Update `2026-10-12-lmd-exploration.md`\'s open questions and this plan. *This plan is current as of the commits above; the exploration plan gets its pointer when Phase 1 merges.*
 
 ### Phase 2: documentation and fragment gaps
 
@@ -365,7 +365,7 @@ Recorded 2026-10-16 from the user\'s answers to the first draft\'s questions.
 5. **Desugarer stays in quarto-core for now; the loader gets it through an injected hook.** Moving the lmd language into pampa is recorded as a later cleanup.
 6. **The call form `callout{=: body :=}` is in** (Phase 2), and the future markup-side div call site desugars to exactly that call, so the two spellings are one mechanism.
 7. **Scope ends at Phase 3.** The former Phase 5 (element handlers, scoped show rules, per-language hooks) is not now; the former Phase 4 is the call-site strand.
-8. **File access through the runtime only**, so the VFS serves WASM and the `SandboxedRuntime` policy can carry Deno-style capability flags later with no loader change.
+8. **File access through the runtime only**, so the VFS serves WASM and the `SandboxedRuntime` policy can carry Deno-style capability flags later with no loader change. *Landed: `SandboxedRuntime` now enforces `allow_read`/`deny_read` and `allow_write`/`deny_write` on every file operation it wraps (it used to delegate unchecked); network, process and environment checks remain TODO there.*
 
 ## Open questions for the user
 
