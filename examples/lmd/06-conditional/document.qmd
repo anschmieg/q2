@@ -1,0 +1,27 @@
+---
+title: "Conditional content"
+draft: true
+version: 0.4
+---
+
+A cell that returns `nil` vanishes, so a condition around `return` is all
+it takes:
+
+```{lmd}
+if meta.draft then
+  return {=:
+::: {.callout-warning}
+This is a draft of version `{lmd} tostring(meta.version)`.
+:::
+:=}
+end
+```
+
+The same works per format:
+
+```{lmd}
+if quarto.doc.is_format("html") then
+  return {=: You are reading the HTML version. :=}
+end
+return {=: You are not reading the HTML version. :=}
+```

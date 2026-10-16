@@ -1,0 +1,57 @@
+---
+title: "lmd cell failed"
+description: "The Lua in an lmd cell raised an error while compiling or running. The cell is left displayed in the document and produces no output."
+code: Q-26-4
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-4` — lmd cell failed
+
+> The Lua in an lmd cell raised an error while compiling or running. The cell is left displayed in the document and produces no output.
+
+## What this means
+
+The cell was desugared and run, and the Lua raised an error. Nothing from
+the cell reaches the document; the cell stays displayed as a code block so
+the failing code can be read, and the rest of the page renders. Later cells
+in the same document still run, with whatever globals earlier cells set.
+
+The error is located at the document line the Lua error names, and the
+message carries Lua's own traceback.
+
+## Why this happens
+
+- Indexing a `nil` value: `meta.missing.inner` when `missing` is not in
+  the front matter. Use `quarto.metadata.get("missing.inner")`, which
+  returns `nil` for an absent path, when a key may not be there.
+- Calling a function that does not exist, often a typo, or a function
+  defined in a cell that comes *later* in the document. Cells run in
+  document order and share one Lua state, so a definition must come
+  before its first use.
+- An explicit `error(...)` in your own code.
+- A wrong argument to a `pandoc.*` constructor, for example a string
+  where a list of blocks was expected.
+
+## How to fix
+
+Read the line number and the traceback, fix the Lua, and render again.
+`--| echo: true` at the top of the cell shows the desugared Lua that
+actually ran, which helps when the error is inside a fragment.
+
+````markdown
+```{lmd}
+local x = 1
+error("boom")
+```
+````
+
+## Related errors
+
+- [`Q-26-1`](Q-26-1.qmd): the cell never ran because its Lua did not
+  parse.
+- [`Q-26-5`](Q-26-5.qmd): the cell ran but returned the wrong kind of
+  value.

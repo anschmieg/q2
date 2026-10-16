@@ -25,6 +25,10 @@ version: "12.1"
 
 writing `{{{< meta version >}}}` anywhere in the body inserts `12.1`.
 
+A shortcode inserts a value as it is. To compute on a metadata value,
+or to build markup from a list in the front matter, use an
+[lmd cell](lmd.qmd#reaching-for-metadata) instead.
+
 ## Where shortcodes are evaluated
 
 Shortcodes resolve in:

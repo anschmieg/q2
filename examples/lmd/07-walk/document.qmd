@@ -1,0 +1,10 @@
+---
+title: "A filter on a piece of markdown"
+---
+
+A fragment is a `pandoc.Blocks` value, so it has `walk`:
+
+```{lmd}
+local frag = {=: Some *text* to shout. :=}
+return frag:walk({ Str = function(s) return pandoc.Str(s.text:upper()) end })
+```

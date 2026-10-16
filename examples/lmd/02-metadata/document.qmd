@@ -1,0 +1,19 @@
+---
+title: "Reading metadata"
+version: 12.1
+team: [ada, grace, linus]
+author:
+  name: Ada
+  affil: Analytical Engines
+---
+
+The team has `{lmd} #meta.team` members:
+`{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
+The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`.
+
+This is version `{lmd} meta.version` (a number in the front matter; an
+inline cell writes it the way `tostring` would).
+
+`{lmd} meta.author.name` works at `{lmd} quarto.metadata.get("author.affil")`.
+A key that may be absent is read with `quarto.metadata.get`, which returns
+`nil` instead of raising: `{lmd} quarto.metadata.get("author.phone") or "no phone on file"`.

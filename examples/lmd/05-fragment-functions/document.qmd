@@ -1,0 +1,22 @@
+---
+title: "Fragments as functions"
+---
+
+A function that returns a fragment is a reusable piece of markup. The
+fragment here contains a block cell of its own, which splices `body` in,
+so the outer cell needs a four-backtick fence:
+
+````{lmd}
+local function card(title, body)
+  return {=:
+::: {.card .p-3 .mb-3}
+### `{lmd} title`
+
+```{lmd}
+return body
+```
+:::
+:=}
+end
+return card("Hello", {=: Some *body* text. :=}) .. card("Bye", {=: More. :=})
+````

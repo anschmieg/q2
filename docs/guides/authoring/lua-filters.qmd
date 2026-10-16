@@ -175,6 +175,11 @@ its richer configuration model:
   strings — appear as small typed values with a `.value` string
   property, and survive a filter round-trip losslessly.
 
+Besides the `meta` argument of a `Meta` or `Pandoc` handler, every filter
+can read the document metadata directly through `quarto.metadata.get("a.b")`
+and the `meta` global, in the same shapes. The [lmd page](lmd.qmd#reaching-for-metadata)
+describes both.
+
 ## Constructing configuration values: `quarto.config`
 
 The `quarto.config` table mirrors Quarto's YAML tag system, so a filter

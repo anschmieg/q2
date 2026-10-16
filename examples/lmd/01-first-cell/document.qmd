@@ -1,0 +1,11 @@
+---
+title: "A first lmd cell"
+stuff: [a, b, c, d]
+---
+
+The front matter of this document has `stuff: [a, b, c, d]`. The cell below
+produces one bold paragraph per item:
+
+```{lmd}
+return meta.stuff:map(function(v) return {=: **`{lmd} v`** :=} end)
+```

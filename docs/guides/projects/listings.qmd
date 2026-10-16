@@ -349,8 +349,8 @@ listing needs logic — grouping by year, a count, a layout that depends
 on the items — write the markup in Lua instead. Every listing a page
 declares is also published into the page\'s metadata, resolved: the
 items are matched, filtered, sorted and truncated exactly as the
-rendered listing would show them, and a Lua filter reads them from
-`meta.listings.<id>`.
+rendered listing would show them, and a Lua filter or an
+[lmd cell](../authoring/lmd.qmd) reads them from `meta.listings.<id>`.
 
 ```yaml
 listing:

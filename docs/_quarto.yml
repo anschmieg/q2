@@ -63,8 +63,11 @@ website:
             - guides/authoring/migrating-markdown.qmd
             - guides/authoring/figures.qmd
             - guides/authoring/tables.qmd
+            - guides/authoring/cross-references.qmd
             - guides/authoring/diagrams.qmd
             - guides/authoring/shortcodes.qmd
+            - guides/authoring/lmd.qmd
+            - guides/authoring/lua-filters.qmd
             - guides/authoring/brand.qmd
             - guides/authoring/layout.qmd
             - guides/authoring/tabsets.qmd
@@ -451,6 +454,15 @@ website:
             - errors/components/Q-25-7.qmd
             - errors/components/Q-25-8.qmd
             - errors/components/Q-25-9.qmd
+        - section: "lmd"
+          contents:
+            - errors/lmd/Q-26-1.qmd
+            - errors/lmd/Q-26-2.qmd
+            - errors/lmd/Q-26-3.qmd
+            - errors/lmd/Q-26-4.qmd
+            - errors/lmd/Q-26-5.qmd
+            - errors/lmd/Q-26-6.qmd
+            - errors/lmd/Q-26-7.qmd
 
 format:
   html:

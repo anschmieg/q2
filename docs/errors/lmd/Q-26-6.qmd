@@ -1,0 +1,53 @@
+---
+title: "Inline lmd cell did not produce inlines"
+description: "An inline lmd cell evaluated to a value that is not an Inline, a list of Inlines, a string, a number, a boolean, or nil. The code span is left displayed and produces no output."
+code: Q-26-6
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-6` — Inline lmd cell did not produce inlines
+
+> An inline lmd cell evaluated to a value that is not an Inline, a list of Inlines, a string, a number, a boolean, or nil. The code span is left displayed and produces no output.
+
+## What this means
+
+An inline lmd cell, `` `{lmd} expr` `` in a paragraph, heading or list
+item, replaces itself with the value of its expression, and that value has
+to fit inside a line of text: an Inline, a list of Inlines (a
+`pandoc.Inlines` or a plain table), a string, a number or a boolean
+(written as `tostring` prints them), or `nil`, which makes the span
+vanish. The expression evaluated to something else. The message names
+what it was. The span stays displayed as code and produces no output.
+
+## Why this happens
+
+- The expression is a block fragment, `{=: … :=}`, or a `pandoc.Para`,
+  `pandoc.Div` or other Block.
+- The expression is a function or a table that is not a list of inlines.
+
+## How to fix
+
+Produce inlines. A block fragment becomes the inline form:
+
+````markdown
+Written `{lmd} {=[ *in italics* ]=}`.
+````
+
+A number needs nothing here: `` `{lmd} meta.version` `` with
+`version: 12.1` in the front matter reads as `12.1`. That is the inline
+cell's own courtesy, though. A `pandoc` constructor inside a cell takes
+Inlines and strings, as in pandoc, so `pandoc.Strong(meta.version)` and
+an inline cell spliced inside a fragment still want `tostring()`.
+
+If the value really is a block, move it out of the paragraph into a block
+cell.
+
+## Related errors
+
+- [`Q-26-5`](Q-26-5.qmd): the mirror image, for block cells.
+- [`Q-26-3`](Q-26-3.qmd): an inline *fragment* that parsed to more than
+  one block.
