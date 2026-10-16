@@ -170,15 +170,19 @@ fn render_document_to_file_docx_embeds_a_relatively_referenced_image() {
     let bytes = std::fs::read(&result.output_path).expect("output file should be readable");
     let cursor = std::io::Cursor::new(bytes);
     let zip = zip::ZipArchive::new(cursor).expect("output should be a valid ZIP archive");
-    let media_entries: Vec<&str> = zip
+    let media_entries: Vec<String> = zip
         .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .filter(|name| name.starts_with("word/media/"))
+        .map(|name| name.into_owned())
         .collect();
     assert!(
         !media_entries.is_empty(),
         "expected the relatively-referenced image to be embedded under word/media/, \
          found no such entry among: {:?}",
-        zip.file_names().collect::<Vec<_>>()
+        zip.file_names()
+            .map(|n| n.expect("zip entry name should decode"))
+            .collect::<Vec<_>>()
     );
 }
 

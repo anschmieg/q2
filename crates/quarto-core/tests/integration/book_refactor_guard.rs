@@ -614,7 +614,11 @@ fn epub_snapshot(r: &Rendered) -> String {
         for o in &summary.outputs {
             let bytes = std::fs::read(&o.output_path).unwrap();
             let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-            let mut names: Vec<String> = zip.file_names().map(String::from).collect();
+            let mut names: Vec<String> = zip
+                .file_names()
+                .map(|n| n.expect("zip entry name should decode"))
+                .map(String::from)
+                .collect();
             names.sort();
             writeln!(out, "\nepub_entries:").unwrap();
             for n in &names {
