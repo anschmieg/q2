@@ -48,7 +48,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
 
       - name: Install wasm-bindgen-cli
         run: |
