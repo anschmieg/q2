@@ -204,7 +204,7 @@ pub fn extract_pptx(bytes: &[u8]) -> Result<Extraction> {
 
     let mut slide_entries: Vec<(u32, String)> = Vec::new();
     for i in 0..archive.len() {
-        let Some(name) = archive.name_for_index(i) else {
+        let Some(Ok(name)) = archive.name_for_index(i) else {
             continue;
         };
         if let Some(rest) = name.strip_prefix("ppt/slides/slide")
@@ -238,7 +238,7 @@ pub fn extract_pptx(bytes: &[u8]) -> Result<Extraction> {
 
     let mut rels_names = Vec::new();
     for i in 0..archive.len() {
-        if let Some(name) = archive.name_for_index(i)
+        if let Some(Ok(name)) = archive.name_for_index(i)
             && name.starts_with("ppt/")
             && name.ends_with(".rels")
         {
@@ -301,7 +301,7 @@ fn read_entry_string(
 fn media_file_names(archive: &ZipArchive<Cursor<&[u8]>>, prefix: &str) -> Vec<String> {
     let mut set = BTreeSet::new();
     for i in 0..archive.len() {
-        if let Some(name) = archive.name_for_index(i)
+        if let Some(Ok(name)) = archive.name_for_index(i)
             && let Some(rest) = name.strip_prefix(prefix)
             && !rest.is_empty()
             && !rest.ends_with('/')

@@ -128,7 +128,7 @@ fn build_zip(dir: &Path, entries: &[Entry]) -> PathBuf {
     let path = dir.join("archive.zip");
     let file = std::fs::File::create(&path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options: zip::write::FileOptions<'_, ()> =
+    let options: zip::write::SimpleFileOptions =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     for entry in entries {
@@ -444,8 +444,11 @@ fn zip_entry_that_understates_its_size_is_refused() {
     // Zip-specific: `ZipFile::size()` comes from the archive's own
     // metadata and is attacker-controlled. An entry that declares 1
     // byte and delivers 64 KiB would sail past a declared-size-only
-    // budget check. The real ceiling is enforced while copying, and the
-    // mismatch itself is reported.
+    // budget check. Since zip 9 the reader itself refuses to deliver
+    // more bytes than the entry declares (an `InvalidData` read error,
+    // surfaced here as `Io`); our own size cross-check behind it is
+    // the second line and reports `SizeMismatch` if the reader ever
+    // stops doing that.
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("src");
     let dest = tmp.path().join("dest");
@@ -456,7 +459,7 @@ fn zip_entry_that_understates_its_size_is_refused() {
     {
         let file = std::fs::File::create(&archive).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::SimpleFileOptions =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("repo-main/big.bin", options).unwrap();
         zip.write_all(&vec![b'a'; 64 * 1024]).unwrap();
@@ -471,7 +474,7 @@ fn zip_entry_that_understates_its_size_is_refused() {
     assert!(
         matches!(
             err,
-            FetchError::SizeMismatch { .. } | FetchError::Archive(_)
+            FetchError::SizeMismatch { .. } | FetchError::Archive(_) | FetchError::Io { .. }
         ),
         "got: {err}"
     );
@@ -498,14 +501,17 @@ fn understate_zip_sizes(path: &Path) {
 
 #[test]
 fn a_lying_declared_size_still_trips_the_streaming_ceiling() {
-    // The decisive bomb test, and the one the obvious tests miss.
+    // The decisive bomb test: an entry whose declared size is a lie,
+    // small enough to pass the cheap declared-size pre-check, large
+    // enough to exhaust the budget on delivery.
     //
-    // `oversized_expansion_is_refused` is caught by the cheap
-    // declared-size pre-check, so it never exercises the ceiling
-    // enforced *while copying* — deleting that ceiling leaves those
-    // tests green (verified by mutation). The only input that reaches
-    // it is an entry whose declared size is a lie: small enough to pass
-    // the pre-check, large enough to exhaust the budget on delivery.
+    // Since zip 9 the reader refuses to hand over more bytes than the
+    // entry declares, so the lie is caught at the first read, before
+    // our ceiling enforced *while copying* gets a chance to fire. Both
+    // outcomes are accepted here; what this test pins down is that the
+    // archive is refused and the cap bounds what reached the disk. The
+    // ceiling itself is exercised directly, with a reader the zip crate
+    // is not in front of, by `archive::tests::streaming_ceiling_caps_a_reader_that_over_delivers`.
     //
     // Zip-only by nature. A tar entry's declared size is what the
     // reader consumes, so tar cannot understate and over-deliver.
@@ -519,7 +525,7 @@ fn a_lying_declared_size_still_trips_the_streaming_ceiling() {
     {
         let file = std::fs::File::create(&archive).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::SimpleFileOptions =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("repo-main/bomb.bin", options).unwrap();
         zip.write_all(&vec![b'a'; 64 * 1024]).unwrap();
@@ -534,10 +540,13 @@ fn a_lying_declared_size_still_trips_the_streaming_ceiling() {
     let err = extract_into(&archive, &dest, &limits)
         .expect_err("an entry that lies about its size must still be capped");
     assert!(
-        matches!(err, FetchError::TooLarge { limit: 1024 }),
-        "the streaming ceiling should fire before the size cross-check — \
-         a declared size of 1 passes every pre-check, so only the ceiling \
-         enforced while copying can stop it. Got: {err}"
+        matches!(
+            err,
+            FetchError::TooLarge { limit: 1024 } | FetchError::Io { .. }
+        ),
+        "a declared size of 1 passes every pre-check, so either the zip \
+         reader's own declared-size guard or the ceiling enforced while \
+         copying must stop it. Got: {err}"
     );
 
     // And the cap must bound what actually reached the disk.

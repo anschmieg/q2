@@ -293,7 +293,7 @@ fn rewrite_zip(
     let mut last = None;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
+        let name = entry.name()?.to_string();
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
         let mut opts = SimpleFileOptions::default().compression_method(entry.compression());

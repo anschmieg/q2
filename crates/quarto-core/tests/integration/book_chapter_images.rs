@@ -116,7 +116,11 @@ fn typst_book_subdir_chapter_images_resolve() {
 fn epub_book_subdir_chapter_images_are_packaged() {
     let (_temp, _dir, out) = render("epub");
     let mut zip = ZipArchive::new(std::io::Cursor::new(std::fs::read(&out).unwrap())).unwrap();
-    let names: Vec<String> = zip.file_names().map(String::from).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
+        .map(String::from)
+        .collect();
     let media = names.iter().filter(|n| n.contains("media/")).count();
     // Four distinct images, all with the same pixel content, so the
     // packaged count is what matters: none may be silently dropped.

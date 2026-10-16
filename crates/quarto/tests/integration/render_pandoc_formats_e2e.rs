@@ -255,7 +255,7 @@ fn e2e_render_epub() {
     {
         let mut entry = zip.by_index(0).expect("epub zip should have a first entry");
         assert_eq!(
-            entry.name(),
+            entry.name().unwrap(),
             "mimetype",
             "the EPUB spec requires `mimetype` be the first zip entry"
         );
@@ -271,6 +271,7 @@ fn e2e_render_epub() {
 
     let chapter_names: Vec<String> = zip
         .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .filter(|n| n.ends_with(".xhtml") && n.contains("text"))
         .map(|n| n.to_string())
         .collect();
@@ -318,6 +319,7 @@ fn e2e_render_epub_format_defaults() {
     {
         let name = zip
             .file_names()
+            .map(|n| n.expect("zip entry name should decode"))
             .find(|n| n.ends_with(".xhtml") && n.contains("text") && !n.contains("title_page"))
             .map(|n| n.to_string())
             .expect("epub should contain a non-title-page chapter XHTML file");
@@ -364,6 +366,7 @@ fn e2e_render_epub_chapter_level() {
         let cursor = std::io::Cursor::new(bytes);
         let zip = zip::ZipArchive::new(cursor).expect("epub should be a valid zip archive");
         zip.file_names()
+            .map(|n| n.expect("zip entry name should decode"))
             .filter(|n| n.ends_with(".xhtml") && n.contains("text") && !n.contains("title_page"))
             .count()
     };
@@ -413,6 +416,7 @@ fn e2e_render_epub_cover_image() {
     {
         let name = zip
             .file_names()
+            .map(|n| n.expect("zip entry name should decode"))
             .find(|n| n.ends_with("content.opf"))
             .map(|n| n.to_string())
             .expect("epub should contain an OPF package document");
@@ -455,6 +459,7 @@ fn e2e_render_epub_css() {
     let mut zip = zip::ZipArchive::new(cursor).expect("epub should be a valid zip archive");
     let found = zip
         .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .filter(|n| n.ends_with(".css"))
         .map(|n| n.to_string())
         .collect::<Vec<_>>()
@@ -519,6 +524,7 @@ fn e2e_render_epub_callout_and_crossref() {
     {
         let name = zip
             .file_names()
+            .map(|n| n.expect("zip entry name should decode"))
             .find(|n| n.ends_with(".xhtml") && n.contains("text") && !n.contains("title_page"))
             .map(|n| n.to_string())
             .expect("epub should contain a non-title-page chapter XHTML file");
@@ -556,6 +562,7 @@ fn media_entries(bytes: &[u8]) -> Vec<String> {
     let cursor = std::io::Cursor::new(bytes);
     let zip = zip::ZipArchive::new(cursor).expect("docx should be a valid zip archive");
     zip.file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .filter(|n| n.starts_with("word/media/"))
         .map(|n| n.to_string())
         .collect()
@@ -649,7 +656,7 @@ fn build_reference_doc_with_unique_style(dest: &Path, style_name: &str) {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).unwrap();
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
         if name == "word/styles.xml" {
@@ -1158,7 +1165,7 @@ fn e2e_render_chunkedhtml() {
     let mut zip = zip::ZipArchive::new(cursor).expect("output should be a valid zip archive");
     let mut names: Vec<String> = Vec::new();
     for i in 0..zip.len() {
-        names.push(zip.by_index(i).unwrap().name().to_string());
+        names.push(zip.by_index(i).unwrap().name().unwrap().to_string());
     }
     assert!(
         names.iter().any(|n| n == "index.html"),

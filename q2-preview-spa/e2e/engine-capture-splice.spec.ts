@@ -39,7 +39,7 @@ import { cp, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { startPreviewServer, type PreviewServerHandle } from './helpers/previewServer';
+import { Q2_BINARY, startPreviewServer, type PreviewServerHandle } from './helpers/previewServer';
 
 /** Repo root, relative to this file (`q2-preview-spa/e2e/`). */
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
@@ -71,12 +71,23 @@ function nodeAvailable(): boolean {
 /**
  * Assemble a temp project dir containing `index.qmd` + the echo-engine
  * extension under `_extensions/`, then start `q2 preview` against it.
+ *
+ * bd-r6tkuwhh: TS engine extensions run from a `dist/<name>.js` bundle
+ * (built with `q2 call build-ts-extension`), and the fixture's `dist/` is
+ * gitignored — the native tests regenerate it at test time
+ * (`engine_fixture_build::build_bundle`). Copying the raw fixture left the
+ * extension unbundled, so `q2 preview` logged "has no bundled .js file",
+ * the eager capture failed (Q-PREVIEW-CAP-1), and PC5 timed out on every
+ * CI run since the Node switch. Build the copy before starting the server.
  */
 async function startEchoPreview(): Promise<PreviewServerHandle> {
   const projSrc = await mkdtemp(path.join(tmpdir(), 'q2-pc5-echo-src-'));
   await mkdir(path.join(projSrc, '_extensions'), { recursive: true });
-  await cp(ECHO_ENGINE_FIXTURE, path.join(projSrc, '_extensions', 'echo-engine'), {
-    recursive: true,
+  const extDir = path.join(projSrc, '_extensions', 'echo-engine');
+  await cp(ECHO_ENGINE_FIXTURE, extDir, { recursive: true });
+  execFileSync(Q2_BINARY, ['call', 'build-ts-extension', extDir], {
+    cwd: REPO_ROOT,
+    stdio: 'pipe',
   });
   await writeFile(path.join(projSrc, 'index.qmd'), INDEX_QMD);
   return startPreviewServer({ copyFromDir: projSrc });
