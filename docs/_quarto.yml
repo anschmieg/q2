@@ -63,8 +63,11 @@ website:
             - guides/authoring/migrating-markdown.qmd
             - guides/authoring/figures.qmd
             - guides/authoring/tables.qmd
+            - guides/authoring/cross-references.qmd
             - guides/authoring/diagrams.qmd
             - guides/authoring/shortcodes.qmd
+            - guides/authoring/lmd.qmd
+            - guides/authoring/lua-filters.qmd
             - guides/authoring/brand.qmd
             - guides/authoring/layout.qmd
             - guides/authoring/tabsets.qmd

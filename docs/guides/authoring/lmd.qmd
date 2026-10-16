@@ -1,0 +1,527 @@
+---
+title: "lmd: Markdown and Lua in the same file"
+description: "Write Lua cells whose results are markdown, and markdown fragments that are Lua values: read metadata and compute on it, repeat markup over a list, share state between cells, and build reusable fragments, all inside the document."
+# Sample values read by the live cells on this page; see "Reaching for metadata".
+version: 12.1
+team: [ada, grace, linus]
+---
+
+An **lmd** cell (Lua and markdown) is an executable cell whose language is
+Lua and whose result is markdown. It needs no engine or runtime: Quarto runs
+it while rendering, and whatever the cell returns takes the cell's place in
+the document. Two ideas, layered, make it more than "Lua in a code block":
+
+1. **Markdown in your Lua.** Inside the cell, a piece of markdown is an
+   expression. `{=: … :=}` is a block value and `{=[ … ]=}` an inline value,
+   written as markdown and handed to you as the `pandoc.Blocks` or
+   `pandoc.Inlines` you would otherwise assemble out of constructors. Inside
+   such a fragment, `` `{lmd} expr` `` puts a Lua value back into the
+   markdown, so the two languages nest in both directions.
+2. **Lua in your markdown.** A ```` ```{lmd} ```` block is replaced by what it
+   returns, where it sits; `` `{lmd} expr` `` in a paragraph is replaced by the
+   value of the expression. A cell is a filter that acts in place, so it
+   never has to name a class to match on.
+
+A [Lua filter](lua-filters.qmd) is Lua *for* your markdown: a separate file,
+applied to the whole document from outside. lmd is markdown right in your
+Lua, and Lua right in your markdown, in the same file.
+
+@demo-first-cell is the whole thing in one cell:
+
+::::: {#demo-first-cell .embed-example-iframe file="/examples/lmd/01-first-cell/document.html"}
+````markdown
+---
+title: "A first lmd cell"
+stuff: [a, b, c, d]
+---
+
+The front matter of this document has `stuff: [a, b, c, d]`. The cell below
+produces one bold paragraph per item:
+
+```{lmd}
+return meta.stuff:map(function(v) return {=: **`{lmd} v`** :=} end)
+```
+````
+
+One cell, four paragraphs. `meta.stuff` is the front-matter list; `:map` is a `pandoc.List` method; `{=: … :=}` turns markdown into a value; the inner `` `{lmd} v` `` puts each item back into the markdown; the list of blocks the cell returns replaces the cell. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/01-first-cell)
+:::::
+
+Everything on this page is a pattern of use. The mechanics are introduced as
+each pattern needs them and collected in [The rules, in one place](#the-rules-in-one-place)
+near the end.
+
+Two facts shape all of it. All the cells of a document run in **one Lua
+state, in document order**, so a cell can define something a later cell
+uses. And cells run **after the engines and before everything else**: user
+filters, shortcodes, cross-references and callouts all see what a cell
+returned, exactly as if you had typed it.
+
+## Reaching for metadata
+
+The most common reason to reach for a cell is a value in the front matter.
+This page's own front matter has:
+
+```yaml
+version: 12.1
+team: [ada, grace, linus]
+```
+
+and the cells on this page read it. `meta` is the document metadata as a
+Lua value you navigate: `meta.version`, `meta.team[1]`, `meta.author.name`
+for nested keys. Each metadata value arrives in the shape a Lua filter would
+see it:
+
+| front-matter value | in Lua |
+|---|---|
+| a string (markdown by default) | `Inlines`, so emphasis and code in a title survive |
+| a number, a boolean | the number, the boolean |
+| a list | a `pandoc.List`, with `#`, `ipairs`, `:map`, `:filter` |
+| a map | a value you keep navigating, `meta.author.affil` |
+
+A path that may be absent is read with `quarto.metadata.get("a.b.c")`,
+which returns `nil` for a missing key where `meta.a.b.c` would raise. The
+two agree everywhere else; numeric segments index lists, so
+`quarto.metadata.get("authors.2.name")` is `meta.authors[2].name`.
+
+### Computing on it
+
+The `{{{< meta version >}}}` shortcode inserts a value. A cell can also
+*compute* on it. Live, from this page's front matter:
+
+````markdown
+The team has `{lmd} tostring(#meta.team)` members:
+`{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
+The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`,
+and this is version `{lmd} tostring(meta.version)`.
+````
+
+> The team has `{lmd} tostring(#meta.team)` members:
+> `{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
+> The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`,
+> and this is version `{lmd} tostring(meta.version)`.
+
+Two things to know, both visible above:
+
+- A **number** must go through `tostring()` in an inline cell. An inline cell
+  may produce an Inline, a list of Inlines, a string, or `nil`, and a bare
+  `` `{lmd} meta.version` `` is an error ([`Q-26-6`](../../errors/lmd/Q-26-6.qmd)).
+- Metadata **strings are `Inlines`**, not Lua strings, so `table.concat` and
+  `:upper()` need `pandoc.utils.stringify` first. Keep the `Inlines` when
+  you want the formatting kept: `` `{lmd} meta.title` `` renders a title's
+  emphasis and code as written.
+
+@demo-metadata puts the two halves together with a nested key and a
+fallback for a key that is not there:
+
+::::: {#demo-metadata .embed-example-iframe file="/examples/lmd/02-metadata/document.html"}
+````markdown
+---
+title: "Reading metadata"
+version: 12.1
+team: [ada, grace, linus]
+author:
+  name: Ada
+  affil: Analytical Engines
+---
+
+The team has `{lmd} tostring(#meta.team)` members:
+`{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
+The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`.
+
+This is version `{lmd} tostring(meta.version)` (a number in the front
+matter, so it goes through `tostring`).
+
+`{lmd} meta.author.name` works at `{lmd} quarto.metadata.get("author.affil")`.
+A key that may be absent is read with `quarto.metadata.get`, which returns
+`nil` instead of raising: `{lmd} quarto.metadata.get("author.phone") or "no phone on file"`.
+````
+
+Reading and computing on metadata: a count, a joined list, a string method, a number through `tostring`, a nested key through `meta` and through `quarto.metadata.get`, and a fallback for an absent key. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/02-metadata)
+:::::
+
+## Repeating markdown over a list
+
+The second pattern: the same markup for every element of a list. The
+natural shape is `:map` from the list to a fragment per element, and then
+the question is what to do with the pieces.
+
+**Items of a list.** The item of a `pandoc.BulletList` is a list of blocks.
+An inline fragment wrapped in `pandoc.Plain` gives a tight list; a block
+fragment gives an item of one or more paragraphs:
+
+````markdown
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` (`{lmd} a.role`) ]=})
+end))
+```
+````
+
+Two shapes that look right and are not: an inline fragment passed *bare* as
+an item (`return {=[ … ]=}` inside the `:map`) is coerced one inline at a
+time, so the item renders one word per line; and returning one
+`{=: - item :=}` fragment per element gives a list of one-item lists, which
+render as separate lists.
+
+**A section per element.** Accumulate into a `pandoc.Blocks` with `:extend`,
+and return it:
+
+````markdown
+```{lmd}
+local out = pandoc.Blocks({})
+for i, t in ipairs(meta.team) do
+  out:extend({=:
+### `{lmd} t`
+
+Member number `{lmd} tostring(i)`.
+:=})
+end
+return out
+```
+````
+
+Headings built this way get their ids from their final text, unique across
+the document, so they are linkable and show up in the table of contents like
+any other heading.
+
+**Two fragments.** `a .. b` concatenates two `Blocks` values, for the case
+where a loop is more than you need.
+
+@demo-lists shows all of these, and an ordered list:
+
+::::: {#demo-lists .embed-example-iframe file="/examples/lmd/03-lists/document.html"}
+````markdown
+---
+title: "Repeating markdown over a list"
+team: [ada, grace, linus]
+authors:
+  - name: Ada
+    role: lead
+  - name: Grace
+    role: reviewer
+---
+
+## A tight list
+
+Each item of a bullet list is a list of blocks, so an inline fragment is
+wrapped in `pandoc.Plain`:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` (`{lmd} a.role`) ]=})
+end))
+```
+
+## Items with several blocks
+
+A block fragment can hold any number of blocks, so an item can be more
+than one paragraph:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return {=:
+`{lmd} a.name` is the `{lmd} a.role`.
+
+A second paragraph about `{lmd} a.name`.
+:=}
+end))
+```
+
+## An ordered list
+
+```{lmd}
+return pandoc.OrderedList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` ]=})
+end), pandoc.ListAttributes(1, "Decimal", "Period"))
+```
+
+## A section per item
+
+```{lmd}
+local out = pandoc.Blocks({})
+for i, t in ipairs(meta.team) do
+  out:extend({=:
+### `{lmd} t`
+
+Member number `{lmd} tostring(i)`.
+:=})
+end
+return out
+```
+````
+
+A tight list from `pandoc.Plain` items, items with several blocks from block fragments, an ordered list, and a section per element from `:extend`. The ordered list spells out its `pandoc.ListAttributes`; see [Current limitations](#current-limitations). [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/03-lists)
+:::::
+
+## Setup cells and shared state
+
+A cell with no `return` leaves nothing in the document. That makes it the
+natural place for definitions: every cell of a document runs in the same Lua
+state, in document order, so a variable or function defined in one cell is
+there for every cell after it, block and inline alike.
+
+::::: {#demo-shared-state .embed-example-iframe file="/examples/lmd/04-shared-state/document.html"}
+````markdown
+---
+title: "Setup cells and shared state"
+---
+
+A cell with no `return` leaves nothing behind. Everything it defines is
+visible to the cells after it:
+
+```{lmd}
+greeting = "Hello"
+function badge(text)
+  return {=[ [`{lmd} text`]{.badge .text-bg-secondary} ]=}
+end
+```
+
+## `{lmd} greeting`, world
+
+A `{lmd} badge("new")` feature and a `{lmd} badge("beta")` one. The heading
+above got its id from its final text.
+````
+
+A setup cell defines `greeting` and `badge`; the heading and the paragraph after it use them. The heading's id is `hello-world`, derived from its final text. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/04-shared-state)
+:::::
+
+Document order is pre-order: a cell inside a fenced div runs before a
+top-level cell that follows the div, and an inline cell in the paragraph
+*above* a setup cell sees `nil` for what that cell defines.
+
+## Fragments as functions
+
+A function that returns a fragment is a reusable piece of markup, with the
+arguments spliced in wherever an inline `` `{lmd} expr` `` appears. A fragment can also
+hold a block cell of its own, which is how a function splices a whole body
+of blocks into its markup:
+
+::::: {#demo-fragment-functions .embed-example-iframe file="/examples/lmd/05-fragment-functions/document.html"}
+`````markdown
+---
+title: "Fragments as functions"
+---
+
+A function that returns a fragment is a reusable piece of markup. The
+fragment here contains a block cell of its own, which splices `body` in,
+so the outer cell needs a four-backtick fence:
+
+````{lmd}
+local function card(title, body)
+  return {=:
+::: {.card .p-3 .mb-3}
+### `{lmd} title`
+
+```{lmd}
+return body
+```
+:::
+:=}
+end
+return card("Hello", {=: Some *body* text. :=}) .. card("Bye", {=: More. :=})
+````
+`````
+
+`card(title, body)` returns a fragment whose heading splices `title` inline and whose nested block cell splices `body`. The outer cell uses four backticks because it contains a three-backtick fence, the ordinary markdown rule. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/05-fragment-functions)
+:::::
+
+Two markdown nesting rules come up here. A cell that contains a fenced block
+needs a longer fence than the one inside it. And an inline cell whose
+fragment holds a code span needs double-backtick delimiters, since single
+backticks pair up left to right.
+
+## Conditional content
+
+A cell that returns `nil` vanishes, so an `if` around the `return` is all it
+takes to include something conditionally:
+
+::::: {#demo-conditional .embed-example-iframe file="/examples/lmd/06-conditional/document.html"}
+````markdown
+---
+title: "Conditional content"
+draft: true
+version: 0.4
+---
+
+A cell that returns `nil` vanishes, so a condition around `return` is all
+it takes:
+
+```{lmd}
+if meta.draft then
+  return {=:
+::: {.callout-warning}
+This is a draft of version `{lmd} tostring(meta.version)`.
+:::
+:=}
+end
+```
+
+The same works per format:
+
+```{lmd}
+if quarto.doc.is_format("html") then
+  return {=: You are reading the HTML version. :=}
+end
+return {=: You are not reading the HTML version. :=}
+```
+````
+
+A callout that appears only because `draft: true` is in the front matter, and a branch on `quarto.doc.is_format`. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/06-conditional)
+:::::
+
+The callout is a callout: whatever a cell returns is processed as if typed,
+so fenced divs with classes, cross-reference labels and callouts inside a
+fragment all work.
+
+## A filter on a piece of markdown
+
+A fragment is a `pandoc.Blocks` value, and `Blocks` has `walk`. So the
+filter vocabulary you may know from [Lua filters](lua-filters.qmd) applies to a
+value in hand rather than to the whole document:
+
+::::: {#demo-walk .embed-example-iframe file="/examples/lmd/07-walk/document.html"}
+````markdown
+---
+title: "A filter on a piece of markdown"
+---
+
+A fragment is a `pandoc.Blocks` value, so it has `walk`:
+
+```{lmd}
+local frag = {=: Some *text* to shout. :=}
+return frag:walk({ Str = function(s) return pandoc.Str(s.text:upper()) end })
+```
+````
+
+`walk` with a `Str` handler over a fragment: a one-off filter on one piece of markdown. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/07-walk)
+:::::
+
+Every `pandoc.*` constructor is available too, for whatever markdown does not
+express conveniently (`pandoc.Table`, for instance). The Lua filters page
+describes the API.
+
+## Seeing what ran, and when a cell fails
+
+`--| echo: true` at the top of a block cell keeps the Lua the cell actually
+ran visible above its result. Fragments appear rewritten into `pandoc`
+constructor calls, which is also the clearest explanation of what a
+fragment *is*:
+
+::::: {#demo-echo .embed-example-iframe file="/examples/lmd/08-echo/document.html"}
+````markdown
+---
+title: "Seeing what ran"
+---
+
+With `--| echo: true` the cell shows the Lua it ran, fragments rewritten
+into `pandoc` constructor calls, above its result:
+
+```{lmd}
+--| echo: true
+return {=: A paragraph with *emphasis*, built from a fragment. :=}
+```
+````
+
+The desugared Lua above the result. `--|` is the option syntax for lmd cells, as `#|` is for Python and R cells. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/08-echo)
+:::::
+
+A cell that fails produces an error located at the line, with the cell left
+displayed as a code block so the page still renders and the failing code can
+be read:
+
+```
+Error: [Q-26-4] lmd cell failed
+    ╭─[ report.qmd:32:1 ]
+    │
+ 32 │ error("boom")
+    │ ──────┬──────
+    │       ╰──────── runtime error: report.qmd:32: boom
+stack traceback:
+	[C]: in function 'error'
+	report.qmd:32: in main chunk
+────╯
+```
+
+The failures, each with a reference page: the Lua does not parse
+([`Q-26-1`](../../errors/lmd/Q-26-1.qmd)); a fragment holds markdown that
+cannot be built, such as a table or a footnote
+([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)); an inline fragment parses to more
+than one block ([`Q-26-3`](../../errors/lmd/Q-26-3.qmd)); the Lua raises at
+run time ([`Q-26-4`](../../errors/lmd/Q-26-4.qmd)); a block cell returns
+something that is not blocks ([`Q-26-5`](../../errors/lmd/Q-26-5.qmd)); an
+inline cell produces something that is not inlines
+([`Q-26-6`](../../errors/lmd/Q-26-6.qmd)); the cell options do not parse
+([`Q-26-7`](../../errors/lmd/Q-26-7.qmd)). A markdown syntax error inside a
+fragment is reported with the markdown reader's own code and underlined
+inside the fragment. The [error reference](../../errors/index.qmd) lists
+them all.
+
+### Writing about lmd
+
+This page shows cells without running them, which is the ordinary markdown
+rule described under [Computations](computations.qmd#displaying-code-cells-without-running-them):
+a cell inside a `markdown` fence with more backticks is displayed. In prose,
+`` `{lmd}` `` on its own is a mention and stays as code; a tag followed by
+an expression runs.
+
+## The rules, in one place
+
+**What a cell may return.** A block cell returns a Block, a list of Blocks
+(a `pandoc.Blocks`, a plain table of blocks, or a list of such lists), or
+`nil`. An inline cell evaluates to an Inline, a list of Inlines, a string,
+or `nil`; a string is split into words and spaces as pandoc does.
+
+**The three fragment forms.**
+
+| form | value | notes |
+|---|---|---|
+| `{=: … :=}` | `pandoc.Blocks` | any markdown; a top-level paragraph is a `Para` |
+| `{=[ … ]=}` | `pandoc.Inlines` | one paragraph or nothing, else [`Q-26-3`](../../errors/lmd/Q-26-3.qmd) |
+| `{= … =}` | `pandoc.Nodes` | decided by context: blocks where blocks go (a paragraph stays a paragraph), inlines where inlines go (a one-paragraph fragment unwraps) |
+
+The two marked forms cover everything on this page. The unmarked form exists
+for a value that is passed to both kinds of position; `pandoc.Para({= x =})`
+and `pandoc.Div({= x =})` both work.
+
+**When cells run.** After the engines, so a Python or R cell has already run
+and neither side sees the other's variables; before user filters,
+shortcodes, cross-references, callouts and the table of contents. One Lua
+state per document; cells run in document order, pre-order through nested
+blocks.
+
+**Heading ids** follow the final text of the heading, after every cell has
+run, and are unique across the document. An explicit `{#id}` is kept.
+
+**What a cell can use.** The `pandoc` and `quarto` tables a Lua filter gets
+(constructors, `pandoc.utils`, `quarto.doc.is_format`, `quarto.utils`),
+`meta` and `quarto.metadata.get`, `FORMAT`, and `require` for a `.lua` file
+next to the document.
+
+## Current limitations
+
+- **Tables inside a fragment** (pipe tables, grid tables, `.list-table` divs)
+  fail the cell ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)). Build the table
+  with `pandoc.Table` and splice it in beside the fragment.
+- **Footnotes inside a fragment** fail the cell. Put the note in the document
+  body.
+- **Shortcodes inside a fragment** fail the cell. Read the value in Lua
+  instead: `` `{lmd} meta.key` `` rather than `{{{< meta key >}}}`.
+- **Inline cells in attribute values** (a fenced div's `data-x="…"`, a link
+  title) are not evaluated.
+- **Numbers** need `tostring()` in inline cells.
+- **`pandoc.OrderedList`** needs explicit `pandoc.ListAttributes` for output
+  formats other than HTML.
+- **Modules.** `require` of a `.lua` file next to the document works; a
+  module written in lmd (a `.lmd` file with fragments) does not load yet.
+  Reusable lmd modules are coming.
+
+## Where this leads
+
+A listing declared with `type: metadata` renders nothing of its own and
+publishes its resolved items at `meta.listings.<id>`, for a cell to turn into
+whatever markup the page wants; see [Listings as data](../projects/listings.qmd#listings-as-data).
+And a cell can hand what it builds to a React component with
+`quarto.component`, so the markup it writes is the no-script version of an
+interactive element; see [Building the element from Lua](components.qmd#building-the-element-from-lua).
+The `websites/09-interactive-listing` example in the repository has both
+together.
