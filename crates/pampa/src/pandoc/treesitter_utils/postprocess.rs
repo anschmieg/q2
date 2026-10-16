@@ -12,6 +12,16 @@
 // writing. Any changes to these transforms must consider the incremental writer
 // (writers::incremental), which relies on the safe-rewrite-boundary assumption.
 //
+// Two of the three transforms below, plus the implicit-figure conversion in
+// `postprocess()`'s paragraph handler, are the *structural desugaring set*: shape
+// rewrites that an author can also produce by constructing nodes, and that every
+// non-reader AST entry point (lmd cell results, `pandoc.read(…, "json")`, pampa's
+// `--from json`, document import) is promised. The per-node rewrites live in
+// `pandoc::desugar` (`desugar_div`, `implicit_figure`) and are shared with this
+// pass; the reusable traversal is `pandoc::desugar::desugar_blocks`. Everything
+// else in `postprocess()` is concrete-syntax clean-up that only makes sense on
+// reader output. See dev-docs/syntax-notes.md § Structural desugaring contract.
+//
 // Transform          | Read (desugar)                      | Write (sugar)                        | Sugared form uses
 //                    |                                     |                                      | indentation boundaries?
 // -------------------|-------------------------------------|--------------------------------------|------------------------
@@ -36,10 +46,11 @@ use crate::filter_context::FilterContext;
 use crate::filters::{
     Filter, FilterReturn::FilterResult, FilterReturn::Unchanged, topdown_traverse,
 };
+use crate::pandoc::desugar::{desugar_div, implicit_figure};
 use crate::pandoc::location::empty_source_info;
 use crate::pandoc::{
-    Attr, Block, Blocks, Caption, DefinitionList, Div, Figure, Inline, Inlines, Pandoc, Paragraph,
-    Plain, Space, Span, Str, Superscript, is_empty_attr,
+    Attr, Block, Blocks, Caption, DefinitionList, Div, Inline, Inlines, Pandoc, Paragraph, Plain,
+    Space, Span, Str, Superscript, is_empty_attr,
 };
 use crate::utils::autoid;
 use crate::utils::diagnostic_collector::DiagnosticCollector;
@@ -80,7 +91,7 @@ pub enum ListTableValidation {
 /// - `Valid` if the div can be transformed to a Table
 /// - `NotListTable` if the div doesn't have the list-table class
 /// - `Invalid` with reason and location if the structure is malformed
-fn validate_list_table_div(div: &Div) -> ListTableValidation {
+pub(crate) fn validate_list_table_div(div: &Div) -> ListTableValidation {
     // Check if div has "list-table" class
     if !div.attr.1.contains(&"list-table".to_string()) {
         return ListTableValidation::NotListTable;
@@ -385,7 +396,7 @@ fn with_synthesized_leading_class(mut attr_source: AttrSourceInfo) -> AttrSource
 /// Transform a valid list-table div into a Table block.
 ///
 /// PRECONDITION: div must pass validate_list_table_div() check with Valid result.
-fn transform_list_table_div(div: Div) -> Block {
+pub(crate) fn transform_list_table_div(div: Div) -> Block {
     let source_info = div.source_info.clone();
 
     // Extract attributes from div (LinkedHashMap iteration returns (&String, &String))
@@ -832,7 +843,7 @@ pub fn coalesce_abbreviations(inlines: Vec<Inline>) -> (Vec<Inline>, bool) {
 ///   - Second block must be a BulletList (contains the definitions)
 ///
 /// Returns true if valid, false otherwise.
-fn is_valid_definition_list_div(div: &Div) -> bool {
+pub(crate) fn is_valid_definition_list_div(div: &Div) -> bool {
     // Check if div has "definition-list" class
     if !div.attr.1.contains(&"definition-list".to_string()) {
         return false;
@@ -881,7 +892,7 @@ fn is_valid_definition_list_div(div: &Div) -> bool {
 ///
 /// PRECONDITION: div must pass is_valid_definition_list_div() check.
 /// This function uses unwrap() liberally since the structure has been pre-validated.
-fn transform_definition_list_div(div: Div) -> Block {
+pub(crate) fn transform_definition_list_div(div: Div) -> Block {
     // Extract the bullet list (validated to exist)
     let Block::BulletList(bullet_list) = div.content.into_iter().next().unwrap() else {
         panic!("BulletList expected after validation");
@@ -912,54 +923,6 @@ fn transform_definition_list_div(div: Div) -> Block {
         content: definition_items,
         source_info: div.source_info,
     })
-}
-
-/// Transform special divs (definition-list, list-table) into their proper AST representations.
-///
-/// This function applies div transforms that convert divs with specific classes into
-/// DefinitionList and Table blocks. It can be called independently from `postprocess()`
-/// to apply these transforms to AST from any source (qmd parsing or JSON input).
-///
-/// Transforms applied:
-/// - `definition-list` class divs → DefinitionList blocks
-/// - `list-table` class divs → Table blocks
-///
-/// INCREMENTAL WRITER COUPLING: This is the desugar entry point. The incremental writer
-/// reconciles post-desugared ASTs (Option A), relying on the fact that all sugared forms
-/// are fully rewritten (never incrementally spliced). See the transform registry at the
-/// top of this file.
-pub fn transform_divs(doc: Pandoc, error_collector: &mut DiagnosticCollector) -> Pandoc {
-    let error_collector_ref = RefCell::new(error_collector);
-
-    let mut filter = Filter::new().with_div(|div, _ctx| {
-        // First check for list-table
-        match validate_list_table_div(&div) {
-            ListTableValidation::Valid => FilterResult(vec![transform_list_table_div(div)], false),
-            ListTableValidation::Invalid { reason, location } => {
-                // Emit warning for malformed list-table div
-                error_collector_ref.borrow_mut().add(
-                    DiagnosticMessageBuilder::warning("Invalid List-Table Structure")
-                        .with_code("Q-2-35")
-                        .with_location(location)
-                        .problem(reason)
-                        .add_hint("Check the list-table documentation for the correct structure?")
-                        .build(),
-                );
-                Unchanged(div) // Leave as-is
-            }
-            ListTableValidation::NotListTable => {
-                // Not a list-table, check for definition-list
-                if is_valid_definition_list_div(&div) {
-                    FilterResult(vec![transform_definition_list_div(div)], false)
-                } else {
-                    Unchanged(div)
-                }
-            }
-        }
-    });
-
-    let mut ctx = FilterContext::new();
-    topdown_traverse(doc, &mut filter, &mut ctx)
 }
 
 /// Is `line` a fence opener carrying Quarto 1's doubled-brace escape?
@@ -1138,56 +1101,10 @@ pub fn postprocess(
                 // Per spec, hard line breaks don't work at end of block elements
                 let trailing_lb_converted = convert_trailing_linebreak_to_str(&mut para.content);
 
-                // Check for single-image paragraph (for figure conversion)
-                if para.content.len() == 1
-                    && let Some(Inline::Image(image)) = para.content.first()
-                    && !image.content.is_empty()
-                {
-                    let figure_attr: Attr = (image.attr.0.clone(), vec![], LinkedHashMap::new());
-                    let image_attr: Attr =
-                        (String::new(), image.attr.1.clone(), image.attr.2.clone());
-
-                    // Split attr_source between figure and image
-                    let figure_attr_source = crate::pandoc::attr::AttrSourceInfo {
-                        id: image.attr_source.id.clone(),
-                        classes: vec![],
-                        attributes: vec![],
-                    };
-                    let image_attr_source = crate::pandoc::attr::AttrSourceInfo {
-                        id: None,
-                        classes: image.attr_source.classes.clone(),
-                        attributes: image.attr_source.attributes.clone(),
-                    };
-
-                    let mut new_image = image.clone();
-                    new_image.attr = image_attr;
-                    new_image.attr_source = image_attr_source;
-
-                    // Use proper source info from the original paragraph and image
-                    return FilterResult(
-                        vec![Block::Figure(Figure {
-                            attr: figure_attr,
-                            caption: Caption {
-                                short: None,
-                                long: Some(vec![Block::Plain(Plain {
-                                    content: image.content.clone(),
-                                    // Caption text comes from image's alt text
-                                    source_info: image.source_info.clone(),
-                                })]),
-                                // Caption as a whole also uses image's source info
-                                source_info: image.source_info.clone(),
-                            },
-                            content: vec![Block::Plain(Plain {
-                                content: vec![Inline::Image(new_image)],
-                                // Content contains the image
-                                source_info: image.source_info.clone(),
-                            })],
-                            // Figure spans the entire paragraph
-                            source_info: para.source_info.clone(),
-                            attr_source: figure_attr_source,
-                        })],
-                        true,
-                    );
+                // Item 3 of the structural desugaring set (`pandoc::desugar`):
+                // a single-image paragraph with alt text is a figure.
+                if let Some(figure) = implicit_figure(&para) {
+                    return FilterResult(vec![Block::Figure(figure)], true);
                 }
 
                 // Not a figure conversion case, but may have converted trailing LineBreak
@@ -1208,37 +1125,10 @@ pub fn postprocess(
                     Unchanged(plain)
                 }
             })
-            // Convert list-table divs to Table blocks and definition-list divs to DefinitionList blocks
-            .with_div(|div, _ctx| {
-                // First check for list-table
-                match validate_list_table_div(&div) {
-                    ListTableValidation::Valid => {
-                        FilterResult(vec![transform_list_table_div(div)], false)
-                    }
-                    ListTableValidation::Invalid { reason, location } => {
-                        // Emit warning for malformed list-table div
-                        error_collector_ref.borrow_mut().add(
-                            DiagnosticMessageBuilder::warning("Invalid List-Table Structure")
-                                .with_code("Q-2-35")
-                                .with_location(location)
-                                .problem(reason)
-                                .add_hint(
-                                    "Check the list-table documentation for the correct structure?",
-                                )
-                                .build(),
-                        );
-                        Unchanged(div) // Leave as-is
-                    }
-                    ListTableValidation::NotListTable => {
-                        // Not a list-table, check for definition-list
-                        if is_valid_definition_list_div(&div) {
-                            FilterResult(vec![transform_definition_list_div(div)], false)
-                        } else {
-                            Unchanged(div)
-                        }
-                    }
-                }
-            })
+            // Items 1 and 2 of the structural desugaring set (`pandoc::desugar`):
+            // list-table divs to Table blocks, definition-list divs to
+            // DefinitionList blocks.
+            .with_div(|div, _ctx| desugar_div(div, &mut error_collector_ref.borrow_mut()))
             // Warn on doubled-brace fence openers (Quarto 1's display escape,
             // e.g. ```{{python}}). A class beginning with `{{` can only arise
             // from such an opener: attribute-form openers ({python}, {.foo})

@@ -176,12 +176,14 @@ using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LineP
   - **Finding:** the fixture had to be pinned through the native HTML pipeline, not `--to markdown` like the other lmd fixtures. The markdown leg hands the AST to pandoc with Quarto 1's Lua filters, whose own `astpipeline-process-list-tables` converts the cell-built divs and hides the bug; it also emits a `Q-11-1` warning carrying an unnormalized temp path. `lmd_snapshots.rs` gained `HTML_FIXTURES` / `render_html` / `render_to`, and `render_to` copies non-`.qmd` files from the fixtures directory so images resolve.
 - [x] Unit-level failing tests are written at the start of the phase that fixes them (Phases 2–4 below) rather than all in Phase 1, so that each phase boundary commit is green: the plan's TDD rule (tests before implementation) and the commit rule (full suite green at a boundary) both hold.
 
-### Phase 2: the set, named (pampa)
+### Phase 2: the set, named (pampa) (done 2026-10-16)
 
-- [ ] Tests first: `test_json_div_transforms.rs` gains the implicit-figure case and a nested (div-inside-blockquote) list-table case; a `readwrite.rs` test for `pandoc.read(json, "json")` with a list-table div → `Table`.
-- [ ] `desugar_filter` / `desugar_blocks` / `desugar_inlines`; `transform_divs` delegates. Figure construction shared with `postprocess()` (D1).
-- [ ] Registry comment at the top of `postprocess.rs` updated.
-- [ ] `main.rs` and `import/mod.rs` call the renamed entry point; `readwrite.rs` json arm calls it (fixture section 11 passes).
+- [x] Tests first: `test_json_div_transforms.rs` gained the implicit-figure case and a list-table-inside-blockquote case; `readwrite.rs` gained `pandoc_read_json_applies_the_structural_desugaring_set` (list-table, definition-list and image paragraph round-tripped through JSON come back as `Table`, `DefinitionList`, `Figure`); `pandoc/desugar.rs` has eight unit tests of its own (each member, invalid list-table warns Q-2-35, any depth, through a `Note`, idempotence).
+- [x] New module `crates/pampa/src/pandoc/desugar.rs`: `desugar_blocks`, `desugar_inlines`, `desugar_document`, plus the shared per-node rewrites `desugar_div` and `implicit_figure` (`pub(crate)`). `postprocess()`'s `.with_div` and the figure branch of `.with_paragraph` now call those helpers, so the reader and the set cannot drift. `transform_divs` is gone (its three callers moved); the list-table / definition-list validators and transforms stay in `postprocess.rs` as `pub(crate)`.
+  - Implementation note: the figure rewrite returns `FilterResult(…, true)` and the div rewrites `FilterResult(…, false)`, exactly as the reader did, so nested sugar inside a list-table cell is (still) not rewritten, matching the reader.
+- [x] Registry comment at the top of `postprocess.rs` names the set, the shared helpers and the entry points.
+- [x] `main.rs` and `import/mod.rs` call `desugar_document`; the `readwrite.rs` json arm calls it too (fixture section 11 passes). `pandoc.read` has no diagnostics channel (the Lua `quarto._diagnostics` table carries kind, message and location only), so a malformed list-table's Q-2-35 is dropped on that arm, as the CLI arm always has; cell-built divs are reported in Phase 3 where the stage owns the diagnostics.
+- [x] Full `pampa` (5045) and `quarto-core` (6093) suites green; clippy clean.
 
 ### Phase 3: lmd cell results (quarto-core)
 

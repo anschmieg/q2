@@ -144,20 +144,24 @@ A definition.
 </section>
 <section id="pandoc.read-of-json-holding-a-list-table-div" class="section level2">
 <h2>11. pandoc.read of JSON holding a list-table div</h2>
-<div class="list-table">
-<ul>
-<li><ul>
-<li>Key</li>
-<li>Value</li>
-</ul>
-</li>
-<li><ul>
-<li>f</li>
-<li>six</li>
-</ul>
-</li>
-</ul>
-</div>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Key
+</th>
+<th>Value
+</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>f
+</td>
+<td>six
+</td>
+</tr>
+</tbody>
+</table>
 </section>
 <section id="inline-cell-whose-footnote-holds-a-list-table-div" class="section level2">
 <h2>12. Inline cell whose footnote holds a list-table div</h2>

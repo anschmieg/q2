@@ -294,7 +294,17 @@ fn pandoc_read(lua: &Lua, args: mlua::MultiValue) -> Result<Value> {
                 &mut cursor,
                 quarto_source_map::By::unknown(),
             ) {
-                Ok((pandoc, _context)) => rust_pandoc_to_lua_table(lua, &pandoc),
+                Ok((pandoc, _context)) => {
+                    // The structural desugaring set (list-table, definition-list,
+                    // implicit figure), as for the qmd arm above (where the reader
+                    // applies it) and the CLI's `--from json`. `pandoc.read` has
+                    // no diagnostics channel, so a malformed list-table's Q-2-35
+                    // is not reported here; the div is left as is.
+                    let mut collector =
+                        crate::utils::diagnostic_collector::DiagnosticCollector::new();
+                    let pandoc = crate::pandoc::desugar::desugar_document(pandoc, &mut collector);
+                    rust_pandoc_to_lua_table(lua, &pandoc)
+                }
                 Err(e) => Err(Error::runtime(format!("pandoc.read (json) failed: {}", e))),
             }
         }
@@ -594,6 +604,45 @@ mod tests {
 
         assert!(result.contains("Hello"));
         assert!(result.contains("World"));
+    }
+
+    /// bd-7gqr148v: the json arm applies the structural desugaring set, like
+    /// the qmd arm (through the reader) and the CLI's `--from json`.
+    #[test]
+    fn pandoc_read_json_applies_the_structural_desugaring_set() {
+        let lua = Lua::new();
+        super::super::constructors::register_pandoc_namespace(
+            &lua,
+            std::sync::Arc::new(super::super::runtime::NativeRuntime::new()),
+            super::super::mediabag::create_shared_mediabag(),
+        )
+        .unwrap();
+
+        let kinds: Vec<String> = lua
+            .load(
+                r#"
+                local function cell(s) return { pandoc.Plain({ pandoc.Str(s) }) } end
+                local rows = pandoc.BulletList({
+                  { pandoc.BulletList({ cell("k"), cell("v") }) },
+                  { pandoc.BulletList({ cell("a"), cell("1") }) },
+                })
+                local doc = pandoc.Pandoc({
+                  pandoc.Div({ rows }, pandoc.Attr("", {"list-table"})),
+                  pandoc.Div({ pandoc.BulletList({ { pandoc.Plain({ pandoc.Str("t") }),
+                                                     pandoc.BulletList({ cell("d") }) } }) },
+                             pandoc.Attr("", {"definition-list"})),
+                  pandoc.Para({ pandoc.Image({ pandoc.Str("alt") }, "x.png") }),
+                })
+                local back = pandoc.read(pandoc.write(doc, "json"), "json")
+                local out = {}
+                for _, b in ipairs(back.blocks) do table.insert(out, b.t) end
+                return out
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(kinds, vec!["Table", "DefinitionList", "Figure"]);
     }
 
     #[test]
