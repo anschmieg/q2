@@ -74,7 +74,7 @@ Spike 1 first shipped with a single `{= … =}` form that always produced blocks
 
 - **`pandoc.Nodes`** exists in pampa's Lua API as a stub that raises an error naming the two marked forms, so the desugared Lua is well-formed but an unmarked fragment cannot run until the context-deferred semantics are designed.
 
-  The emitter (`lmd/emit.rs`) covers every `Block` and `Inline` that has a pandoc constructor, with pandoc's argument order (`Link(content, target, title, attr)`, `Header(level, content, attr)`, ...). An empty `Attr` is omitted. Unsupported nodes (`Table`, note definitions, `Shortcode`, the CriticMarkup inlines, `Custom`) fail the cell with `LmdError::Unsupported`.
+  The emitter (`lmd/emit.rs`) covers every `Block` and `Inline` that has a pandoc constructor, with pandoc's argument order (`Link(content, target, title, attr)`, `Header(level, content, attr)`, ...). An empty `Attr` is omitted. Unsupported nodes (note definitions, `Shortcode`, the CriticMarkup inlines, `Custom`) fail the cell with `LmdError::Unsupported`. (`Table` was on that list until bd-7gqr148v, 2026-10-16, which also made cell *results* get the reader's list-table / definition-list / implicit-figure rewrites; see `2026-10-15-lmd-ast-desugar-contract.md`.)
 
   The escape hatches back to Lua: an inline `` `{lmd} expr` `` (a `Code` whose text starts with `{lmd}`) becomes `expr` in the enclosing inline list, parsed as a Lua *expression* (wrapped in `return` for the parse) and desugared recursively; a block `` ```{lmd} `` cell inside a fragment becomes `(function() body end)()` in the enclosing block list.
 

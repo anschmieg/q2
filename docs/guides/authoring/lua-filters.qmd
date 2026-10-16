@@ -223,6 +223,26 @@ an equation unnumbered. The attribute exists only once cross-references
 have been resolved, so list the filter *after* the `quarto` entry in
 `filters:`; a filter listed before it runs too early to see the number.
 
+## Tables, definition lists and figures built from Lua
+
+Quarto's markdown has shorthand for three structures: a `::: {.list-table}`
+div becomes a table, a `::: {.definition-list}` div becomes a definition list,
+and a paragraph holding nothing but an image with alt text becomes a figure.
+The reader rewrites those shapes as it parses, so by the time a filter runs,
+the document holds `Table`, `DefinitionList` and `Figure` nodes, never the
+shorthand.
+
+The same rewrite is applied to markdown and JSON that `pandoc.read` returns,
+and to what an `{lmd}` cell returns, so a cell that builds
+`pandoc.Div({ rows }, pandoc.Attr("", {"list-table"}))` from nodes gets the
+same `Table` the markdown would have. A list-table div with the wrong shape is
+reported as `Q-2-35`, pointing at the cell that built it.
+
+It is **not** applied to what a filter function returns. A filter that wants a
+table returns a `pandoc.Table` (or the result of `pandoc.read`); a
+`.list-table` div returned from a `Div` handler stays a div, as it does in
+pandoc and in Quarto 1.
+
 ## Attaching scripts and stylesheets: `quarto.doc.add_html_dependency`
 
 A filter that needs JavaScript or CSS in the rendered page registers an

@@ -346,14 +346,17 @@ mod tests {
     #[test]
     fn an_unsupported_node_is_located_at_the_node() {
         let (mut blocks, sources) =
-            parse("```{lmd}\nreturn {=:\n| a | b |\n|---|---|\n| 1 | 2 |\n:=}\n```\n");
+            parse("```{lmd}\nreturn {=:\ntext[^1]\n\n[^1]: the note\n:=}\n```\n");
         let errors = desugar_lmd_cells(&mut blocks, &sources);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(matches!(
             errors[0].error,
-            LmdError::Unsupported { kind: "Table", .. }
+            LmdError::Unsupported {
+                kind: "NoteDefinitionPara",
+                ..
+            }
         ));
-        assert!(span_text(&errors[0].location, &sources).starts_with("| a | b |"));
+        assert!(span_text(&errors[0].location, &sources).starts_with("[^1]: the note"));
     }
 
     #[test]

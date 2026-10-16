@@ -37,8 +37,10 @@
 
 use quarto_pandoc_types::attr::Attr;
 use quarto_pandoc_types::block::Block;
+use quarto_pandoc_types::caption::Caption;
 use quarto_pandoc_types::inline::{CitationMode, Inline, MathType, QuoteType};
 use quarto_pandoc_types::list::{ListNumberDelim, ListNumberStyle};
+use quarto_pandoc_types::table::{Alignment, Cell, ColWidth, Row, TableBody};
 use quarto_source_map::SourceInfo;
 
 use super::anchor::Anchor;
@@ -312,22 +314,39 @@ impl Emitter {
             }),
             Block::Figure(b) => self.call("Figure", |e| {
                 e.blocks(&b.content)?;
-                e.push(", {");
-                if let Some(long) = &b.caption.long {
-                    e.push("long = ");
-                    e.blocks(long)?;
-                }
-                if let Some(short) = &b.caption.short {
-                    if b.caption.long.is_some() {
-                        e.push(", ");
-                    }
-                    e.push("short = ");
-                    e.inlines(short)?;
-                }
-                e.push("}");
+                e.push(", ");
+                e.caption(&b.caption)?;
                 e.attr_arg(&b.attr)
             }),
-            Block::Table(_) => Err(self.unsupported("Table", span)),
+            // pandoc.Table(caption, colspecs, head, bodies, foot, attr)
+            Block::Table(b) => self.call("Table", |e| {
+                e.caption(&b.caption)?;
+                e.push(", ");
+                e.list(&b.colspec, |e, (align, width)| {
+                    e.push("{");
+                    e.string(alignment_name(align));
+                    e.push(", ");
+                    match width {
+                        ColWidth::Default => e.push("pandoc.ColWidthDefault"),
+                        ColWidth::Percentage(w) => e.push(&lua_number(*w)),
+                    }
+                    e.push("}");
+                    Ok(())
+                })?;
+                e.push(", ");
+                e.call("TableHead", |e| {
+                    e.rows(&b.head.rows)?;
+                    e.attr_arg(&b.head.attr)
+                })?;
+                e.push(", ");
+                e.list(&b.bodies, |e, body| e.table_body(body))?;
+                e.push(", ");
+                e.call("TableFoot", |e| {
+                    e.rows(&b.foot.rows)?;
+                    e.attr_arg(&b.foot.attr)
+                })?;
+                e.attr_arg(&b.attr)
+            }),
             Block::BlockMetadata(_) => Err(self.unsupported("BlockMetadata", span)),
             Block::NoteDefinitionPara(_) => Err(self.unsupported("NoteDefinitionPara", span)),
             Block::NoteDefinitionFencedBlock(_) => {
@@ -336,6 +355,59 @@ impl Emitter {
             Block::CaptionBlock(_) => Err(self.unsupported("CaptionBlock", span)),
             Block::Custom(_) => Err(self.unsupported("Custom", span)),
         }
+    }
+
+    // ----- tables -------------------------------------------------------
+
+    /// `{long = { blocks }, short = { inlines }}`, each key only when
+    /// present; `{}` for an empty caption. Accepted by `pandoc.Figure` and
+    /// `pandoc.Table` alike (`pampa::lua::constructors::parse_caption`).
+    fn caption(&mut self, caption: &Caption) -> Result<(), LmdError> {
+        self.push("{");
+        if let Some(long) = &caption.long {
+            self.push("long = ");
+            self.blocks(long)?;
+        }
+        if let Some(short) = &caption.short {
+            if caption.long.is_some() {
+                self.push(", ");
+            }
+            self.push("short = ");
+            self.inlines(short)?;
+        }
+        self.push("}");
+        Ok(())
+    }
+
+    fn rows(&mut self, rows: &[Row]) -> Result<(), LmdError> {
+        self.list(rows, |e, row| {
+            e.call("Row", |e| {
+                e.list(&row.cells, |e, cell| e.cell(cell))?;
+                e.attr_arg(&row.attr)
+            })
+        })
+    }
+
+    /// `pandoc.Cell(blocks, align, rowspan, colspan, attr)`.
+    fn cell(&mut self, cell: &Cell) -> Result<(), LmdError> {
+        self.call("Cell", |e| {
+            e.blocks(&cell.content)?;
+            e.push(", ");
+            e.string(alignment_name(&cell.alignment));
+            e.push(&format!(", {}, {}", cell.row_span, cell.col_span));
+            e.attr_arg(&cell.attr)
+        })
+    }
+
+    /// `pandoc.TableBody(body, head, row_head_columns, attr)`.
+    fn table_body(&mut self, body: &TableBody) -> Result<(), LmdError> {
+        self.call("TableBody", |e| {
+            e.rows(&body.body)?;
+            e.push(", ");
+            e.rows(&body.head)?;
+            e.push(&format!(", {}", body.rowhead_columns));
+            e.attr_arg(&body.attr)
+        })
     }
 
     // ----- inlines ------------------------------------------------------
@@ -468,6 +540,24 @@ pub(crate) fn inline_lmd_source<'a>(attr: &Attr, text: &'a str) -> Option<&'a st
         return None;
     };
     (!expr.is_empty()).then_some(expr)
+}
+
+/// Alignment constructor name, as `pampa::lua::constructors::parse_alignment`
+/// reads it.
+fn alignment_name(alignment: &Alignment) -> &'static str {
+    match alignment {
+        Alignment::Default => "AlignDefault",
+        Alignment::Left => "AlignLeft",
+        Alignment::Center => "AlignCenter",
+        Alignment::Right => "AlignRight",
+    }
+}
+
+/// A Lua numeric literal that round-trips `n` (Lua numbers are f64). The
+/// `Debug` form keeps a trailing `.0` on whole numbers, so the literal
+/// reads as the float it is.
+fn lua_number(n: f64) -> String {
+    format!("{n:?}")
 }
 
 fn list_number_style(style: &ListNumberStyle) -> &'static str {

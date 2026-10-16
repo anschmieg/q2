@@ -1,9 +1,12 @@
+//! Tests for the structural desugaring set (definition-list, list-table,
+//! implicit figure) applied to JSON input.
+//!
+//! These transforms work regardless of whether the input is qmd or json.
+//! See bd-31lk (`claude-notes/plans/2026-02-05-div-transforms-json-input.md`)
+//! and bd-7gqr148v (`claude-notes/plans/2026-10-15-lmd-ast-desugar-contract.md`).
+
 use pampa::pandoc::Block;
-/// Tests for div transforms (definition-list, list-table) with JSON input.
-///
-/// These transforms should work regardless of whether the input is qmd or json.
-/// See issue bd-31lk and plan claude-notes/plans/2026-02-05-div-transforms-json-input.md
-use pampa::pandoc::treesitter_utils::postprocess::transform_divs;
+use pampa::pandoc::desugar::desugar_document;
 use pampa::readers::json;
 use pampa::utils::diagnostic_collector::DiagnosticCollector;
 
@@ -15,7 +18,8 @@ fn make_json_doc(blocks_json: &str) -> String {
     )
 }
 
-/// Read JSON and apply div transforms (mimics what main.rs does for JSON input).
+/// Read JSON and apply the structural desugaring set (mimics what main.rs
+/// does for JSON input).
 ///
 /// The test JSON is hand-crafted in pampa format without `s:` references —
 /// same shape as Pandoc subprocess output. Route through the completing
@@ -28,7 +32,69 @@ fn read_json_with_transforms(json_input: &str) -> pampa::pandoc::Pandoc {
     )
     .expect("Failed to read JSON input");
     let mut error_collector = DiagnosticCollector::new();
-    transform_divs(pandoc, &mut error_collector)
+    desugar_document(pandoc, &mut error_collector)
+}
+
+/// bd-7gqr148v: a single-image paragraph with alt text is a figure, as
+/// the reader makes it (pandoc's `implicit_figures`).
+#[test]
+fn test_single_image_paragraph_becomes_figure_from_json() {
+    let json_input = make_json_doc(
+        r#"[{
+            "t": "Para",
+            "c": [{
+                "t": "Image",
+                "c": [["fig-x", [], []], [{"t": "Str", "c": "Alt"}], ["img.png", ""]]
+            }]
+        }]"#,
+    );
+
+    let pandoc = read_json_with_transforms(&json_input);
+
+    match pandoc.blocks.as_slice() {
+        [Block::Figure(figure)] => {
+            assert_eq!(figure.attr.0, "fig-x", "the image's id moves to the figure");
+            assert!(figure.caption.long.is_some(), "the alt text is the caption");
+        }
+        other => panic!("Expected Figure, got {other:?}"),
+    }
+}
+
+/// bd-7gqr148v: the set applies at any depth, not only at the top level.
+#[test]
+fn test_list_table_nested_in_a_blockquote_from_json() {
+    let json_input = make_json_doc(
+        r#"[{
+            "t": "BlockQuote",
+            "c": [{
+                "t": "Div",
+                "c": [
+                    ["", ["list-table"], []],
+                    [{
+                        "t": "BulletList",
+                        "c": [
+                            [{"t": "BulletList", "c": [
+                                [{"t": "Plain", "c": [{"t": "Str", "c": "a"}]}]
+                            ]}]
+                        ]
+                    }]
+                ]
+            }]
+        }]"#,
+    );
+
+    let pandoc = read_json_with_transforms(&json_input);
+
+    match pandoc.blocks.as_slice() {
+        [Block::BlockQuote(quote)] => {
+            assert!(
+                matches!(quote.content.as_slice(), [Block::Table(_)]),
+                "Expected Table inside the blockquote, got {:?}",
+                quote.content
+            );
+        }
+        other => panic!("Expected BlockQuote, got {other:?}"),
+    }
 }
 
 /// Test that a div with class "definition-list" is transformed to DefinitionList
