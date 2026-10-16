@@ -791,6 +791,26 @@ fn native_visitor<T: Write>(
             // Math delimiters - these are processed by parent math nodes
             PandocNativeIntermediate::IntermediateUnknown(node_location(node))
         }
+        "-" | "pipe_table_align_left" | "pipe_table_align_right" => {
+            // Pipe-table delimiter-row tokens: the anonymous dashes and the
+            // aliased alignment colons of `pipe_table_delimiter_cell`.
+            // `process_pipe_table_delimiter_cell` reads them by node name and
+            // ignores the intermediate, so without an arm they fell through
+            // to the catch-all below and each one wrote an "Unhandled node
+            // kind" trace line (GH #847, bd-okfxemnj). The delimiter row is
+            // the only place a bare `-` token reaches this visitor: list
+            // markers and thematic breaks are named nodes, and hyphens in
+            // text, link destinations, titles and autolinks are folded into
+            // their parent's token (checked with `pampa -v` on the unfixed
+            // tree; see the plan's investigation notes).
+            PandocNativeIntermediate::IntermediateUnknown(node_location(node))
+        }
+        "![" => {
+            // Image opener, consumed by `process_pandoc_image` (which skips
+            // every child it does not read by name). Same situation as the
+            // delimiter-row tokens above.
+            PandocNativeIntermediate::IntermediateUnknown(node_location(node))
+        }
         "pandoc_math" => {
             // Extract math content (text between $ delimiters).
             //

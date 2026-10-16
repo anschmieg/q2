@@ -258,13 +258,21 @@ fn pandoc_read(lua: &Lua, args: mlua::MultiValue) -> Result<Value> {
     // Dispatch to the appropriate reader
     match base_format {
         "qmd" => {
-            // Use the QMD reader
-            let mut stderr = std::io::stderr();
+            // Use the QMD reader.
+            //
+            // The reader's output stream is its verbose trace (what
+            // `pampa -v` shows), not a diagnostic channel; every pipeline
+            // caller sinks it. Pointing it at stderr here is what leaked
+            // one "[TOP-LEVEL MISSING NODE]" line per pipe-table delimiter
+            // dash into every render that called pandoc.read (GH #847,
+            // bd-okfxemnj). The reader's real diagnostics come back as the
+            // third tuple element; forwarding those is bd-fwswbxnl.
+            let mut trace = crate::utils::output::VerboseOutput::Sink(std::io::sink());
             match crate::readers::qmd::read(
                 &content,
                 false, // loose
                 "<pandoc.read>",
-                &mut stderr,
+                &mut trace,
                 true, // prune_errors
                 None, // parent_source_info
             ) {

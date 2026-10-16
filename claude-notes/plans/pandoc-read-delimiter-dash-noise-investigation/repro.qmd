@@ -1,0 +1,11 @@
+---
+title: pandoc.read of a pipe table
+---
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+```{lmd}
+return pandoc.read("| a | b |\n|---|---|\n| 1 | 2 |\n", "markdown").blocks
+```
