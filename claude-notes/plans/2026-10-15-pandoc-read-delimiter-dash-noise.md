@@ -2,7 +2,7 @@
 title: 'pandoc.read from Lua leaks "[TOP-LEVEL MISSING NODE]" lines for pipe-table delimiter dashes (bd-okfxemnj)'
 date: 2026-10-15
 description: 'The Lua pandoc.read binding wires the qmd reader''s verbose trace buffer to stderr, so marker tokens that hit the tree-sitter dispatch catch-all print one line each; route the buffer to a sink and give the tokens explicit arms.'
-status: draft  # Investigation — pending design alignment with user; do not implement before the go-ahead
+status: draft  # Design decisions recorded 2026-10-16; awaiting the user's go-ahead to implement
 braid:
   strand: bd-okfxemnj
 github:
@@ -30,7 +30,12 @@ Braid strand `bd-okfxemnj` was created for this investigation (type `bug`, prior
 
 ## Dependency graph
 
-Empty. The strand was created today from the GitHub issue and has no `discovered-from`, `blocks`, or `related` edges. The only external pressure is the issue itself and its sibling #846 (the reason `pandoc.read` is on the hot path for the docs port). No other strand is waiting on this.
+The strand was created on 2026-10-15 from the GitHub issue with no incoming edges. The only external pressure is the issue itself and its sibling #846 (the reason `pandoc.read` is on the hot path for the docs port). No other strand is waiting on this.
+
+Two follow-ups were filed `discovered-from:bd-okfxemnj` on 2026-10-16 (see Design decisions):
+
+- `bd-fwswbxnl` (bug, p3) — `pandoc.read` from Lua drops the qmd reader's diagnostics.
+- `bd-yi613i1r` (task, p4) — make the tree-sitter dispatch catch-all visible to tests.
 
 ## What the code looks like today
 
@@ -94,12 +99,16 @@ The same `pandoc_read` arm discards the reader's real diagnostics: `Ok((pandoc, 
 
 Phases 1 and 2 are independent; either can land alone.
 
-## Open design questions for the user
+## Design decisions (2026-10-16)
 
-1. **Scope.** Land both Phase 1 (sink) and Phase 2 (explicit arms), or only Phase 1? Recommendation: both. Phase 1 fixes the user-visible bug; Phase 2 is four token kinds in the existing pattern and keeps the catch-all honest for `pampa -v` users. Together they are under twenty lines of non-test code.
-2. **Forward reader diagnostics from `pandoc.read`?** Today `pandoc.read` drops the reader's `warnings`. Should this strand also push them into `quarto._diagnostics`, or should that be a separate strand filed `discovered-from:bd-okfxemnj`? Recommendation: separate strand. It needs a decision about how `<pandoc.read>` text gets registered in the document's `SourceContext` (or whether the locations are stripped), which is a design question of its own and would hold up the one-line fix.
-3. **Make the catch-all louder in tests?** The catch-all currently only writes to the trace buffer, so a newly unhandled kind is invisible unless someone runs `pampa -v`. Options: (a) leave as is; (b) also emit a `tracing::debug!`; (c) have the Phase 0 reader-level test grow into a small corpus sweep asserting an empty buffer across `crates/pampa/tests/` fixtures. Recommendation: (a) for this strand, with (c) noted as a possible follow-up if you want it. Changing the reader's `buf: &mut T` plumbing itself (200+ call sites) is clearly out of scope.
-4. **End-to-end test, yes or no?** The `q2 render` stderr test is the only test that exercises the Lua binding's buffer choice directly; the unit-level `readwrite.rs` tests cannot observe stderr in-process. It costs one more fixture and a process spawn. Recommendation: include it; it is the regression test for the actual report.
+Answered by the user; the questions as originally posed are kept for the record.
+
+1. **Scope: land both Phase 1 (sink) and Phase 2 (explicit arms).** Phase 1 fixes the user-visible bug; Phase 2 is four token kinds in the existing pattern and keeps the catch-all honest for `pampa -v` users.
+2. **Forwarding reader diagnostics from `pandoc.read` is out of scope here.** Filed as `bd-fwswbxnl` (`discovered-from:bd-okfxemnj`). It needs its own decision about how `<pandoc.read>` text gets registered in the document's `SourceContext`, or whether locations are stripped, and would hold up the one-line fix.
+3. **Making the catch-all louder in tests is out of scope here.** Filed as `bd-yi613i1r` (`discovered-from:bd-okfxemnj`, low priority). Options recorded there: a `tracing::debug!` alongside the trace write, or growing the Phase 0 reader-level test into a corpus sweep across `crates/pampa/tests/` fixtures. Replacing the reader's `buf: &mut T` plumbing (200+ call sites) stays out of scope.
+4. **Include the end-to-end `q2 render` stderr test.** It is the only test that observes the Lua binding's buffer choice directly; the unit-level `readwrite.rs` tests cannot see stderr in-process.
+
+Implementation starts only on the user's explicit go-ahead.
 
 ## Risks / tradeoffs (draft)
 
