@@ -51,7 +51,7 @@ becomes
 
 ````markdown
 ```{lmd}
-return {=: Version `{lmd} tostring(meta.version)` here. :=}
+return {=: Version `{lmd} meta.version` here. :=}
 ```
 ````
 

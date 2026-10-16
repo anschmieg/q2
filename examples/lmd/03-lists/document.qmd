@@ -50,7 +50,7 @@ for i, t in ipairs(meta.team) do
   out:extend({=:
 ### `{lmd} t`
 
-Member number `{lmd} tostring(i)`.
+Member number `{lmd} i`.
 :=})
 end
 return out

@@ -103,11 +103,10 @@ and this is version `{lmd} meta.version`.
 Two things to know, both visible above:
 
 - A **number or boolean** reads the way `tostring` prints it: `12.1`, `3`,
-  `true`. That courtesy is the inline cell's own. A `pandoc` constructor
-  takes Inlines and strings, as in pandoc, so `pandoc.Strong(meta.version)`
-  wants `tostring()`, and so does an inline cell *inside a fragment*, which
-  is spliced into the constructor call the fragment becomes (the
-  [lists](#repeating-markdown-over-a-list) below show one).
+  `true`. The same holds wherever an Inline is expected, so
+  `pandoc.Strong(meta.version)` works, and so does an inline cell inside a
+  fragment. Pandoc itself rejects `pandoc.Strong(3)`; Quarto accepts it
+  because its metadata hands cells real numbers.
 - Metadata **strings are `Inlines`**, not Lua strings, so `table.concat` and
   `:upper()` need `pandoc.utils.stringify` first. Leave the `Inlines` alone
   when the formatting should survive: `` `{lmd} meta.title` `` renders a
@@ -175,7 +174,7 @@ for i, t in ipairs(meta.team) do
   out:extend({=:
 ### `{lmd} t`
 
-Member number `{lmd} tostring(i)`.
+Member number `{lmd} i`.
 :=})
 end
 return out
@@ -184,9 +183,7 @@ return out
 
 Headings built this way get their ids from their final text, unique across
 the document, so they are linkable and show up in the table of contents like
-any other heading. The `tostring(i)` is needed here: an inline cell inside
-a fragment is spliced into the `pandoc.Para` call the paragraph becomes,
-and constructors take Inlines and strings, not numbers.
+any other heading.
 
 **Two fragments.** `a .. b` concatenates two `Blocks` values, for the case
 where a loop is more than you need.
@@ -247,7 +244,7 @@ for i, t in ipairs(meta.team) do
   out:extend({=:
 ### `{lmd} t`
 
-Member number `{lmd} tostring(i)`.
+Member number `{lmd} i`.
 :=})
 end
 return out
@@ -445,7 +442,7 @@ it takes:
 if meta.draft then
   return {=:
 ::: {.callout-warning}
-This is a draft of version `{lmd} tostring(meta.version)`.
+This is a draft of version `{lmd} meta.version`.
 :::
 :=}
 end
@@ -602,10 +599,6 @@ run, and are unique across the document. An explicit `{#id}` is kept.
   instead: `` `{lmd} meta.key` `` rather than `{{{< meta key >}}}`.
 - **Inline cells in attribute values** (a fenced div's `data-x="…"`, a link
   title) are not evaluated.
-- **Numbers inside a fragment.** A top-level inline cell writes a number or
-  boolean as `tostring` would. One inside a fragment is spliced into a
-  `pandoc` constructor argument, which takes only Inlines and strings, so
-  there it is still `` `{lmd} tostring(i)` ``.
 - **`pandoc.OrderedList`** needs explicit `pandoc.ListAttributes` for output
   formats other than HTML.
 - **Modules resolve next to the document.** `require` looks beside the
