@@ -64,6 +64,11 @@ export interface PreviewServerHandle {
    * `extraEnv.RUST_LOG` that raises the relevant target (default is `warn`).
    */
   serverLog: () => string;
+  /**
+   * The `q2preview…` string a `share: true` host printed (waits for it). Throws if the host was not started with
+   * `share`, or prints none within the timeout.
+   */
+  joinTicket(timeoutMs?: number): Promise<string>;
   /** Stop the server and remove its temp dirs. */
   stop(): Promise<void>;
 }
@@ -179,6 +184,18 @@ export interface StartOptions {
    */
   allowEdit?: boolean;
   /**
+   * Which UI the server serves: `'viewer'` (the default, the preview SPA) or `'editor'` (`--ui editor`, the
+   * hub-client embed). The editor's launch URL is a hash-route share URL that `waitForUrl`'s banner regex already
+   * matches. The `embed-*.spec.ts` specs need a binary built with the real embed (`cargo xtask
+   * build-hub-client-embed` before `cargo build --bin q2`); `isEmbedBuilt` says whether this one has it.
+   */
+  ui?: 'viewer' | 'editor';
+  /**
+   * Pass `--share`: the host also serves its session over the iroh tunnel and prints a join string
+   * (`handle.joinTicket()`), which `startJoinGuest` takes. The tunnel goes through iroh's relay, so it needs network.
+   */
+  share?: boolean;
+  /**
    * GH #402 / bd-ue80chl0: launch in SINGLE-FILE mode — the spawned
    * command targets `<projectDir>/<targetFile>` (a file path) instead
    * of the project directory, exercising the CLI's single-file branch
@@ -270,6 +287,8 @@ export async function startPreviewServer(opts: StartOptions): Promise<PreviewSer
       '--no-browser',
       ...(opts.staticMode ? ['--static', '--no-watch'] : ['--data-dir', dataDir]),
       ...(opts.allowEdit ? ['--allow-edit'] : []),
+      ...(opts.ui === 'editor' ? ['--ui', 'editor'] : []),
+      ...(opts.share ? ['--share'] : []),
       // Single-file mode targets one file inside the temp project;
       // project mode targets the directory (the default).
       opts.targetFile ? path.join(projectDir, opts.targetFile) : projectDir,
@@ -322,6 +341,7 @@ export async function startPreviewServer(opts: StartOptions): Promise<PreviewSer
     projectDir,
     dataDir,
     serverLog: () => serverLog,
+    joinTicket: (timeoutMs = 30_000) => ticketFrom(() => serverLog, opts.share === true, timeoutMs),
     async stop() {
       if (!proc.killed) {
         proc.kill('SIGTERM');
@@ -345,4 +365,80 @@ export async function startPreviewServer(opts: StartOptions): Promise<PreviewSer
       ]);
     },
   };
+}
+
+/** Poll a host's log for the join string it prints under `--share`. */
+async function ticketFrom(log: () => string, shared: boolean, timeoutMs: number): Promise<string> {
+  if (!shared) throw new Error('joinTicket: the host was not started with `share: true`');
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const match = log().match(/q2 preview --join (q2preview\S+)/);
+    if (match) return match[1];
+    if (Date.now() > deadline) throw new Error(`no join string within ${timeoutMs}ms; log:\n${log()}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+export interface JoinGuestHandle {
+  /** The guest's local proxy URL (the host's UI, tunnelled). */
+  url: string;
+  port: number;
+  serverLog: () => string;
+  stop(): Promise<void>;
+}
+
+/**
+ * `q2 preview --join <ticket>`: a local proxy for a host started with `share: true`. Nothing is read from or written
+ * to disk here; every non-GET request (an import upload, for one) crosses the tunnel to the host.
+ */
+export async function startJoinGuest(ticket: string): Promise<JoinGuestHandle> {
+  const proc = spawn(Q2_BINARY, ['preview', '--no-browser', '--join', ticket], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? 'warn' },
+  });
+  let log = '';
+  const accumulate = (chunk: Buffer) => {
+    log += chunk.toString();
+  };
+  proc.stdout?.on('data', accumulate);
+  proc.stderr?.on('data', accumulate);
+  let url: string;
+  let port: number;
+  try {
+    ({ url, port } = await waitForUrl(proc, 60_000));
+  } catch (err) {
+    proc.kill('SIGTERM');
+    throw err;
+  }
+  await waitForBind(port, 5_000);
+  return {
+    url,
+    port,
+    serverLog: () => log,
+    async stop() {
+      if (proc.killed) return;
+      proc.kill('SIGTERM');
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          proc.kill('SIGKILL');
+          resolve();
+        }, 5000);
+        proc.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+/**
+ * True when the running `q2` embeds the real hub-client editor build rather than `build.rs`'s placeholder: a
+ * real editor's `index.html` references content-hashed files under `assets/`, the placeholder does not. The embed
+ * specs call this (inside `test.skip`) instead of the repo-wide `globalSetup`, because `cargo xtask verify --e2e`
+ * runs every project and would otherwise fail on a build made without the embed.
+ */
+export async function isEmbedBuilt(server: Pick<PreviewServerHandle, 'port'>): Promise<boolean> {
+  const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text();
+  return html.includes('assets/');
 }

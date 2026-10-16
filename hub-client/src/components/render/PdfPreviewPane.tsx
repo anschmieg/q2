@@ -7,10 +7,14 @@
  *
  * The first compile fetches about 33 MB, so until a PDF exists the pane shows a spinner with the
  * fetch progress. A failed compile keeps the last PDF that compiled on screen under an error banner.
+ *
+ * In the `q2 preview --ui editor` embed there is no pandoc.wasm or typst worker: the same pane asks the
+ * server's `POST /api/preview/pdf` (native pandoc and typst) with the editor's current text, and the
+ * server drops a superseded request, so there is no warm pool to acquire.
  */
 import { useEffect, useRef, useState } from 'react';
-import { createPdfPreviewController, formatByKey } from '../../pandoc/downloadService';
-import { pandocWarmEnabled } from '../../pandoc/featureFlag';
+import { createNativePdfPreviewController, createPdfPreviewController, formatByKey } from '../../pandoc/downloadService';
+import { isPreviewEmbed, pandocWarmEnabled } from '../../pandoc/featureFlag';
 import type { DownloadController, DownloadStatus } from '../../pandoc/downloadController';
 import { workingText } from '../../pandoc/downloadText';
 import { mountPdfViewer } from '../../pandoc/pdfViewer';
@@ -20,6 +24,7 @@ import LoadingIndicator from '../Loading';
 import '../DownloadAsControl.css';
 import './PdfPreviewPane.css';
 import { TYPST_PDF_KEY } from '../../pandoc/formatKeys';
+import { bookScopeMetadata } from '../../pandoc/bookScope';
 
 /** Edits closer together than this share one compile (the pandoc step alone is 0.2-0.3 s). */
 export const PDF_PREVIEW_DEBOUNCE_MS = 500;
@@ -64,20 +69,20 @@ export default function PdfPreviewPane({
   useEffect(() => {
     if (!hostRef.current) return;
     const viewer = mountPdfViewer(hostRef.current);
-    const controller = createPdfPreviewController(
-      (pdf, info) => {
-        viewer.show(pdf, { key: info.path, fileName: info.fileName }).then(
-          () => {
-            setHasPdf(true);
-            setViewerError(null);
-          },
-          (e: unknown) => setViewerError(e instanceof Error ? e.message : String(e)),
-        );
-      },
-      { warm },
-    );
+    const onPdf = (pdf: Uint8Array, info: { path: string; fileName: string }) => {
+      viewer.show(pdf, { key: info.path, fileName: info.fileName }).then(
+        () => {
+          setHasPdf(true);
+          setViewerError(null);
+        },
+        (e: unknown) => setViewerError(e instanceof Error ? e.message : String(e)),
+      );
+    };
+    const embed = isPreviewEmbed();
+    const controller = embed ? createNativePdfPreviewController(onPdf) : createPdfPreviewController(onPdf, { warm });
     controllerRef.current = controller;
     // The pool refcount covers StrictMode's mount, cleanup, mount: the workers outlive the gap.
+    // (The embed's controller has no pool, so these are no-ops there.)
     controller.acquire();
     const unsubscribe = controller.subscribe(() => {
       const snapshot = controller.getSnapshot();
@@ -107,7 +112,15 @@ export default function PdfPreviewPane({
     // The first compile after mount (or a retry) starts at once; later edits are debounced.
     const delay = firstRef.current ? 0 : wait;
     firstRef.current = false;
-    const timer = setTimeout(() => void controller.start({ path, format, projectKey, captureDocId }), delay);
+    const timer = setTimeout(() => void controller.start({
+        path,
+        format,
+        projectKey,
+        captureDocId,
+        // Only the native executor reads the text and the metadata (the browser chain is chapter-alone already and
+        // reads the document from the hub); omitting `content` there gives a blank PDF. The pane shows one page.
+        ...(isPreviewEmbed() ? { content, metadata: bookScopeMetadata('chapter') } : {}),
+      }), delay);
     return () => clearTimeout(timer);
   }, [path, projectKey, captureDocId, content, retry, wait]);
 

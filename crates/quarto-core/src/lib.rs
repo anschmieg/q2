@@ -40,8 +40,12 @@ pub mod artifact;
 pub mod artifact_flush;
 pub mod ast_walk;
 pub mod attribution;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod book_download;
 pub mod brand_fonts;
 pub mod cell_options;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod child_runner;
 pub mod components;
 pub mod config_sources;
 pub mod crossref;
@@ -55,6 +59,7 @@ pub mod error;
 pub mod extension;
 pub mod filter_resolve;
 pub mod format;
+pub mod format_resolution;
 pub mod get_config;
 pub mod glob;
 pub mod import;
@@ -63,12 +68,17 @@ pub mod language;
 pub mod lmd;
 pub mod math_method;
 pub mod metadata;
+pub mod metadata_flag;
+pub mod metadata_layers;
 pub mod output_ext;
 pub mod output_sink;
+pub mod overlay_runtime;
 pub mod pandoc_filters;
 pub mod pandoc_formats;
 pub mod pandoc_request;
 pub mod pipeline;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod preview_out;
 pub mod project;
 pub mod project_resources;
 pub mod render;
@@ -95,6 +105,9 @@ pub use pipeline::{
     build_html_pipeline, build_html_pipeline_stages, build_html_pipeline_with_stages,
     render_qmd_to_html, render_qmd_to_preview_ast,
 };
+pub use project::book::BookScope;
+#[cfg(not(target_arch = "wasm32"))]
+pub use project::book::render_chapter_alone;
 pub use project::{DocumentInfo, ProjectConfig, ProjectContext, ProjectKind};
 pub use render::{BinaryDependencies, RenderContext, RenderOptions, RenderResult};
 pub use resource_resolver::ResourceResolverContext;
@@ -115,8 +128,13 @@ pub fn version() -> &'static str {
     quarto_util::cli_version()
 }
 
+// Pandoc binary resolution plus version gate (`Q-20-1`/`Q-20-2`), for callers
+// outside the render pipeline (the preview server's import route).
+#[cfg(not(target_arch = "wasm32"))]
+pub use stage::stages::resolve_and_gate_pandoc;
+
 // Re-export render-to-file types (native only)
 #[cfg(not(target_arch = "wasm32"))]
 pub use render_to_file::{
-    RenderToFileOptions, RenderToFileResult, render_document_to_file, render_to_file,
+    RenderToFileOptions, RenderToFileResult, TypstTarget, render_document_to_file, render_to_file,
 };

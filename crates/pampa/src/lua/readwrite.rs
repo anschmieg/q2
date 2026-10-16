@@ -653,6 +653,44 @@ mod tests {
         assert_eq!(kinds, vec!["Table", "DefinitionList", "Figure"]);
     }
 
+    /// bd-3h6iasmz: a list built with default attributes is written with
+    /// pandoc's names for them, so pandoc accepts the JSON and the native
+    /// output, and pampa reads its own JSON back.
+    #[test]
+    fn default_list_attributes_are_written_with_pandoc_names() {
+        let lua = Lua::new();
+        super::super::constructors::register_pandoc_namespace(
+            &lua,
+            std::sync::Arc::new(super::super::runtime::NativeRuntime::new()),
+            super::super::mediabag::create_shared_mediabag(),
+        )
+        .unwrap();
+
+        let (json, native, back_style, back_delim): (String, String, String, String) = lua
+            .load(
+                r#"
+                local doc = pandoc.Pandoc({
+                  pandoc.OrderedList({ { pandoc.Plain({ pandoc.Str("a") }) } }),
+                })
+                local json = pandoc.write(doc, "json")
+                local back = pandoc.read(json, "json").blocks[1].listAttributes
+                return json, pandoc.write(doc, "native"), back.style, back.delimiter
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert!(json.contains(r#"{"t":"DefaultStyle"}"#), "{json}");
+        assert!(json.contains(r#"{"t":"DefaultDelim"}"#), "{json}");
+        assert!(!json.contains(r#""Default""#), "{json}");
+        assert!(native.contains("DefaultStyle"), "{native}");
+        assert!(native.contains("DefaultDelim"), "{native}");
+        assert_eq!(
+            (back_style.as_str(), back_delim.as_str()),
+            ("DefaultStyle", "DefaultDelim")
+        );
+    }
+
     #[test]
     fn test_pandoc_write_native() {
         let lua = Lua::new();

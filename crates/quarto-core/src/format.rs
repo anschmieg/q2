@@ -597,54 +597,8 @@ pub fn lua_format_for(target_format: &str) -> &str {
     }
 }
 
-/// Extract the chosen output format from a document's leading YAML
-/// front-matter: the `format:` scalar, or the first key when `format:` is a
-/// map (e.g. `format: {revealjs: {...}}`). Returns `None` when there is no
-/// front matter or no `format:` key.
-///
-/// This is the lightweight, pre-pipeline peek used to resolve a per-document
-/// format (e.g. a `format: revealjs` deck inside an otherwise-HTML project)
-/// before the render context — and thus the transform pipeline / output
-/// extension — is chosen. The CLI's single-input detection delegates here so
-/// the two paths agree.
-pub fn format_key_from_frontmatter(content: &str) -> Option<String> {
-    let yaml = extract_yaml_frontmatter(content)?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
-    match value.get("format")? {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Mapping(m) => m.keys().find_map(|k| k.as_str().map(str::to_string)),
-        _ => None,
-    }
-}
-
-/// Extract every key a document's leading YAML front-matter `format:`
-/// declares, in declaration order: the scalar wrapped as a single-element
-/// vec, or every key when it is a map (e.g. `format: {docx: default, html:
-/// default}` → `["docx", "html"]`). Returns an empty vec when there is no
-/// front matter or no `format:` key.
-///
-/// The counterpart to [`format_key_from_frontmatter`], which returns only
-/// the single key that reduction picks; this returns the full declaration so
-/// [`multi_format_diagnostics`] can name what else was skipped.
-pub fn format_keys_from_frontmatter(content: &str) -> Vec<String> {
-    let Some(yaml) = extract_yaml_frontmatter(content) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
-        return Vec::new();
-    };
-    match value.get("format") {
-        Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-        Some(serde_yaml::Value::Mapping(m)) => m
-            .keys()
-            .filter_map(|k| k.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Warn when a document's `format:` declares more than one key but only one
-/// is actually rendered — a signal `render.rs`'s blanket non-native-format
+/// Warn (`Q-20-8`: not yet supported) when a layer's `format:` declares more
+/// than one key but only one is actually rendered — a signal `render.rs`'s blanket non-native-format
 /// refusal used to provide as a side effect before P7-foundation relaxed it
 /// to admit `Docx`/`Pptx` (design doc §14). Returns an empty vec when
 /// `all_keys` has zero or one entries, or when every declared key besides
@@ -671,15 +625,18 @@ pub fn multi_format_diagnostics(
         return Vec::new();
     }
     vec![
-        DiagnosticMessageBuilder::warning(
-            "`format:` declares more than one format; only one is rendered",
-        )
-        .with_code("Q-20-8")
-        .problem(format!(
-            "rendered `{used_key}`; skipped `{}`.",
-            skipped.join("`, `")
-        ))
-        .build(),
+        DiagnosticMessageBuilder::warning("Multiple formats in one render are not yet supported")
+            .with_code("Q-20-8")
+            .problem(format!(
+                "`format:` declares more than one format, and rendering several formats in one \
+             invocation is not yet supported: rendered `{used_key}`; skipped `{}`.",
+                skipped.join("`, `")
+            ))
+            .add_hint(
+                "Render each format on its own: name it with `--to <format>` or \
+             `-M format:<format>`.",
+            )
+            .build(),
     ]
 }
 
@@ -707,66 +664,6 @@ pub fn format_key_from_config_value(value: &ConfigValue) -> Option<String> {
     value
         .as_map_entries()
         .and_then(|entries| entries.first().map(|e| e.key.clone()))
-}
-
-/// Resolve a document's effective output format key by prefer-merging the
-/// `format:` declarations, lowest precedence to highest:
-///
-/// ```text
-///   project config   →   document front matter   →   `--to` override
-/// ```
-///
-/// The `--to` override is modeled as a synthesized `format: !prefer <to>`
-/// layer merged on top — uniform with a document that had written that
-/// instruction itself — so an explicit `--to` wins over every in-document
-/// declaration, while in its absence a per-file or project-level `format:` is
-/// honored (the per-file one winning over the project default). Returns
-/// `default` when no layer declares a format.
-///
-/// This runs *before* the render pipeline is built because the format key
-/// selects both the transform pipeline (reveal vs. generic) and the output
-/// file extension; the full format-specific config flattening still happens
-/// later in `MetadataMergeStage`.
-pub fn resolve_format_key(
-    project_format: Option<&str>,
-    document_format: Option<&str>,
-    cli_to: Option<&str>,
-    default: &str,
-) -> String {
-    use quarto_config::MergedConfig;
-    use quarto_pandoc_types::{ConfigMapEntry, MergeOp};
-    use quarto_source_map::{By, SourceInfo};
-
-    // One `{format: !prefer <key>}` layer. All layers use `Prefer` (last
-    // wins); ordering project → document → `--to` encodes the precedence.
-    let format_layer = |key: &str| -> ConfigValue {
-        let si = SourceInfo::generated(By::unknown());
-        ConfigValue::new_map(
-            vec![ConfigMapEntry {
-                key: "format".to_string(),
-                key_source: si.clone(),
-                value: ConfigValue::new_string(key, si.clone()).with_merge_op(MergeOp::Prefer),
-            }],
-            si,
-        )
-    };
-
-    let owned: Vec<ConfigValue> = [project_format, document_format, cli_to]
-        .into_iter()
-        .flatten()
-        .map(format_layer)
-        .collect();
-    if owned.is_empty() {
-        return default.to_string();
-    }
-    let layers: Vec<&ConfigValue> = owned.iter().collect();
-    MergedConfig::new(layers)
-        .materialize()
-        .ok()
-        .as_ref()
-        .and_then(|merged| merged.get("format"))
-        .and_then(format_key_from_config_value)
-        .unwrap_or_else(|| default.to_string())
 }
 
 /// Map a FormatIdentifier to its output file extension.
@@ -2140,27 +2037,6 @@ mod tests {
     fn test_single_format_no_warning() {
         assert!(multi_format_diagnostics(&keys(&["html"]), "html").is_empty());
         assert!(multi_format_diagnostics(&[], "html").is_empty());
-    }
-
-    #[test]
-    fn test_format_keys_from_frontmatter_map_preserves_order() {
-        let content =
-            "---\nformat:\n  docx: default\n  pptx: default\n  html: default\n---\nbody\n";
-        assert_eq!(
-            format_keys_from_frontmatter(content),
-            vec!["docx", "pptx", "html"]
-        );
-    }
-
-    #[test]
-    fn test_format_keys_from_frontmatter_scalar() {
-        let content = "---\nformat: html\n---\nbody\n";
-        assert_eq!(format_keys_from_frontmatter(content), vec!["html"]);
-    }
-
-    #[test]
-    fn test_format_keys_from_frontmatter_absent() {
-        assert!(format_keys_from_frontmatter("no front matter here").is_empty());
     }
 
     // === long-tail Phase 2: Tier A bulk tail (25 variants) ===

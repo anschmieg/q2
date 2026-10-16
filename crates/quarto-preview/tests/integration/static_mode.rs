@@ -25,7 +25,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use quarto_preview::static_mode::{ReloadEvent, ReloadHub, StaticServerConfig, build_router};
+use quarto_preview::static_mode::{
+    EVENTS_PATH, ReloadEvent, ReloadHub, StaticServerConfig, build_router,
+};
 use tower::ServiceExt;
 
 const INDEX: &str = "<!DOCTYPE html>\n<html><head><title>Home</title></head>\n<body>\n<p>Welcome home.</p>\n</body>\n</html>\n";
@@ -69,6 +71,7 @@ fn router(root: PathBuf, default_file: Option<&str>) -> (Router, ReloadHub) {
             root,
             default_file: default_file.map(str::to_string),
             page_requests: None,
+            pdfjs: None,
         },
         hub.clone(),
     );
@@ -84,6 +87,7 @@ fn router_with_page_requests(root: PathBuf) -> (Router, tokio::sync::mpsc::Recei
             root,
             default_file: None,
             page_requests: Some(tx),
+            pdfjs: None,
         },
         ReloadHub::new(),
     );
@@ -125,6 +129,26 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
 
 fn text(body: &[u8]) -> String {
     String::from_utf8(body.to_vec()).expect("utf-8 body")
+}
+
+#[tokio::test]
+async fn root_shows_the_render_failure_when_nothing_was_rendered() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (app, hub) = router(root, None);
+
+    hub.set_failure(Some("Error: [Q-1-1] broken <chapter>".to_string()));
+    let (status, _, body) = get(&app, "/").await;
+    let page = text(&body);
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("The render failed"), "{page}");
+    assert!(page.contains("broken &lt;chapter&gt;"), "escaped: {page}");
+    assert!(!page.contains("has no <code>index.html</code>"), "{page}");
+    assert!(page.contains(EVENTS_PATH), "client injected: {page}");
+
+    hub.set_failure(None);
+    let (_, _, body) = get(&app, "/").await;
+    assert!(text(&body).contains("Rendered pages"));
 }
 
 #[tokio::test]
@@ -552,4 +576,171 @@ async fn search_bundle_is_served_with_open_cors_and_nothing_else_is() {
             "{path} must not be CORS-open"
         );
     }
+}
+
+// ── pdf.js viewer for PDF output (hub-parity Plan 8) ─────────────────
+
+const NAVIGATE: [(&str, &str); 2] = [
+    ("sec-fetch-mode", "navigate"),
+    ("sec-fetch-dest", "document"),
+];
+const PDF_BYTES: &[u8] = b"%PDF-1.7\nnot really a pdf";
+const VIEWER_HTML: &str = "<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'\"></head><body><div id=\"viewer\"></div></body></html>";
+
+/// A tiny in-memory pdf.js tree: viewer page, a module, and the en-US locale.
+fn fake_pdfjs() -> quarto_preview::PdfjsTree {
+    std::sync::Arc::new(|rel: &str| match rel {
+        "pdfjs/web/viewer.html" => Some(VIEWER_HTML.as_bytes().to_vec()),
+        "pdfjs/build/pdf.mjs" => Some(b"export {};".to_vec()),
+        "pdfjs/web/locale/en-US/viewer.ftl" => Some(b"en = 1".to_vec()),
+        _ => None,
+    })
+}
+
+fn pdf_router(
+    default_file: Option<&str>,
+    pdfjs: Option<quarto_preview::PdfjsTree>,
+) -> (
+    Router,
+    tokio::sync::mpsc::Receiver<PathBuf>,
+    PathBuf,
+    tempfile::TempDir,
+) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    write(&root.join("my doc.pdf"), PDF_BYTES);
+    write(&root.join("about.html"), ABOUT.as_bytes());
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let app = build_router(
+        StaticServerConfig {
+            root: root.clone(),
+            default_file: default_file.map(str::to_string),
+            page_requests: Some(tx),
+            pdfjs,
+        },
+        ReloadHub::new(),
+    );
+    (app, rx, root, temp)
+}
+
+#[tokio::test]
+async fn pdf_navigation_redirects_to_the_viewer_without_a_hash() {
+    let (app, mut rx, root, _t) = pdf_router(None, Some(fake_pdfjs()));
+    let (status, headers, _) = request(&app, Method::GET, "/my%20doc.pdf", &NAVIGATE).await;
+    assert_eq!(status, StatusCode::FOUND);
+    let location = header_str(&headers, "location");
+    assert_eq!(
+        location,
+        "/__q2-preview/pdfjs/web/viewer.html?file=/my%20doc.pdf"
+    );
+    assert!(!location.contains('#'), "a hash resets page and zoom");
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        root.join("my doc.pdf"),
+        "the redirect is the page view (the viewer's own fetch is cors and skipped)"
+    );
+}
+
+#[tokio::test]
+async fn pdf_bytes_stay_raw_for_the_viewers_fetch_and_for_non_navigations() {
+    let (app, mut rx, _root, _t) = pdf_router(None, Some(fake_pdfjs()));
+    for extra in [
+        vec![("sec-fetch-mode", "cors"), ("sec-fetch-dest", "empty")],
+        vec![],
+    ] {
+        let (status, headers, body) = request(&app, Method::GET, "/my%20doc.pdf", &extra).await;
+        assert_eq!(status, StatusCode::OK, "{extra:?}");
+        assert_eq!(header_str(&headers, "content-type"), "application/pdf");
+        assert_eq!(body, PDF_BYTES);
+    }
+    // The cors fetch is not a view; the bare GET (curl) is.
+    assert!(rx.try_recv().is_ok());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn without_a_pdfjs_tree_a_pdf_navigation_is_served_raw() {
+    let (app, _rx, _root, _t) = pdf_router(None, None);
+    let (status, headers, body) = request(&app, Method::GET, "/my%20doc.pdf", &NAVIGATE).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header_str(&headers, "content-type"), "application/pdf");
+    assert_eq!(body, PDF_BYTES);
+}
+
+#[tokio::test]
+async fn root_of_a_pdf_only_output_goes_straight_to_the_viewer() {
+    let (app, mut rx, root, _t) = pdf_router(Some("my doc.pdf"), Some(fake_pdfjs()));
+    std::fs::remove_file(root.join("about.html")).unwrap();
+    let (status, headers, _) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(
+        header_str(&headers, "location"),
+        "/__q2-preview/pdfjs/web/viewer.html?file=/my%20doc.pdf"
+    );
+    assert_eq!(rx.try_recv().unwrap(), root.join("my doc.pdf"));
+}
+
+#[tokio::test]
+async fn the_pdfjs_tree_is_served_with_types_cache_and_locale_alias() {
+    let (app, _rx, _root, _t) = pdf_router(None, Some(fake_pdfjs()));
+    let (status, headers, body) = get(&app, "/__q2-preview/pdfjs/build/pdf.mjs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header_str(&headers, "content-type"),
+        "application/javascript"
+    );
+    assert!(
+        !header_str(&headers, "cache-control").contains("no-store"),
+        "the tree only changes with the binary"
+    );
+    assert_eq!(body, b"export {};");
+
+    let (status, _, body) = get(&app, "/__q2-preview/pdfjs/web/locale/de/viewer.ftl").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pruned locale is answered with en-US"
+    );
+    assert_eq!(body, b"en = 1");
+
+    let (status, _, _) = get(&app, "/__q2-preview/pdfjs/build/missing.mjs").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_viewer_page_gets_the_external_reload_client() {
+    let (app, _rx, _root, _t) = pdf_router(None, Some(fake_pdfjs()));
+    let (status, headers, body) = get(&app, "/__q2-preview/pdfjs/web/viewer.html").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(header_str(&headers, "content-type").starts_with("text/html"));
+    let html = text(&body);
+    let tag = "<script src=\"/__q2-preview/client.js\"></script>";
+    assert!(html.find(tag).unwrap() < html.find("</body>").unwrap());
+    assert!(
+        !html.contains("EventSource"),
+        "no inline copy: the viewer's CSP would block it"
+    );
+
+    let (status, headers, js) = get(&app, "/__q2-preview/client.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header_str(&headers, "content-type"),
+        "application/javascript"
+    );
+    let js = text(&js);
+    assert!(js.contains("/__q2-preview/events"));
+    assert!(
+        !js.contains("setAttribute(\"style\""),
+        "the viewer's style-src blocks setAttribute(\"style\"); use the CSSOM"
+    );
+    assert!(js.contains("/__q2-preview/pdfjs/web/viewer.html"));
+}
+
+#[tokio::test]
+async fn pdfjs_paths_traversal_is_refused() {
+    let (app, _rx, _root, _t) = pdf_router(None, Some(fake_pdfjs()));
+    let (status, _, _) = get(&app, "/__q2-preview/pdfjs/../about.html").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = get(&app, "/__q2-preview/pdfjs/%2e%2e/about.html").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

@@ -40,7 +40,6 @@ fn render_as(
     pollster::block_on(render_pandoc_request(
         PandocRequestInput {
             attribution: None,
-            scope: quarto_core::pandoc_request::render::BookScope::Auto,
             captures_by_path: Default::default(),
             capture_error: None,
             hooks: None,

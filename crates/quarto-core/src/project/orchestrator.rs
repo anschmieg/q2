@@ -922,6 +922,30 @@ pub enum RenderMode {
     ActivePage(std::path::PathBuf),
 }
 
+/// A file named on the command line of a book render, with the format it
+/// resolved to and whether the book lists it as a chapter.
+#[cfg(not(target_arch = "wasm32"))]
+struct NamedFile {
+    path: std::path::PathBuf,
+    canonical: std::path::PathBuf,
+    key: String,
+    format: Format,
+    membership: crate::project::book::BookMembership,
+}
+
+/// What [`ProjectPipeline::run_head`] hands on to Pass 2 and the tail.
+struct RunHeadState {
+    initial_diagnostics: Vec<DiagnosticMessage>,
+    index: Arc<ProjectIndex>,
+    pass1_failures: Vec<FileFailure>,
+}
+
+/// The head either ran to `pre_render` or stopped the render early.
+enum RunHead<O> {
+    Stopped(ProjectRenderSummary<O>),
+    Continue(RunHeadState),
+}
+
 /// What the whole-book pandoc request needs beyond the pipeline's own state.
 pub(crate) struct BookRequestParams<'a> {
     pub prepare_options: crate::pandoc_request::PrepareOptions,
@@ -944,6 +968,11 @@ pub struct ProjectPipeline<'a, R: Pass2Renderer> {
     project_type: Box<dyn ProjectType>,
     format: Format,
     format_str: String,
+    /// The project's own format (FR11, F5a-D2), when it differs from the
+    /// dispatch format in `format`: Pass 1, its cache key and the book-wide
+    /// index always use it, because a book-wide index is a property of the
+    /// book, not of the chapter being rendered. `None` means `format`.
+    project_format: Option<Format>,
     runtime: Arc<dyn SystemRuntime>,
     /// Render mode. Default `Full`; CLI subset args (Mode B) set
     /// this via [`with_mode`](Self::with_mode) before `run()`.
@@ -1033,41 +1062,106 @@ impl<'a> ProjectPipeline<'a, RenderToFileRenderer<'a>> {
     pub async fn run_with_book_support(
         &mut self,
     ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
-        let result = if self.project_type.kind() == ProjectKind::Book {
+        // The requested scope comes from the target and the `book-scope`
+        // layers (FR3, FR5); nothing else carries it.
+        let request = crate::format_resolution::resolve_render_scope(
+            self.project,
+            &self.mode,
+            self.runtime.as_ref(),
+        );
+        // `book-scope: chapter` with a whole book to render and no file named
+        // (FR6): there is no chapter to choose.
+        if let Some(error) = request.error() {
+            return Err(QuartoError::Parse(crate::error::ParseError::new(
+                vec![error.clone()],
+                quarto_source_map::SourceContext::new(),
+            )));
+        }
+        // What the user asked for (`--to`), before the book decision below
+        // installs the project's format as the override.
+        let requested_format = self.renderer.format_override.clone();
+        let mut scope_diagnostics = self.decide_member_format(&request);
+        // Whether the scope notices were already decided (by
+        // `resolve_book_scope`, or by the several-files branch below).
+        let mut notices_emitted = false;
+        let is_book = self.project_type.kind() == ProjectKind::Book;
+
+        // A Book project's named files, requested as chapters (F5a-D3b,
+        // D3c): each file is resolved in its own format; named pages that are
+        // not chapters join the render list as extras; several files either
+        // collapse into the whole-book render (every chapter named, all in the
+        // project's non-consolidating format) or each render on their own.
+        let mut separate: Option<Vec<NamedFile>> = None;
+        if is_book && request.value == crate::BookScope::Chapter {
+            let named: Vec<std::path::PathBuf> = match &self.mode {
+                RenderMode::Subset(set) => {
+                    let mut files: Vec<_> = set.iter().cloned().collect();
+                    files.sort();
+                    files
+                }
+                RenderMode::ActivePage(page) => vec![page.clone()],
+                RenderMode::Full => Vec::new(),
+            };
+            if !named.is_empty() {
+                let entries = self.resolve_named_files(&request, &named)?;
+                for entry in entries.iter().filter(|e| !e.membership.active_is_chapter) {
+                    if let Ok(rel) = entry.path.strip_prefix(&self.project.dir)
+                        && !self.project.extra_render_files.iter().any(|f| f == rel)
+                    {
+                        self.project.extra_render_files.push(rel.to_path_buf());
+                    }
+                }
+                if named.len() > 1 {
+                    notices_emitted = true;
+                    scope_diagnostics.extend(self.named_files_notices(&request, &entries));
+                    if self.named_files_collapse(&request, &entries, requested_format.as_deref())? {
+                        self.mode = RenderMode::Full;
+                        let project_format = crate::format_resolution::resolve_project_format(
+                            self.project,
+                            &request,
+                            requested_format.as_deref(),
+                            self.runtime.as_ref(),
+                        );
+                        self.renderer.format_override =
+                            Some(project_format.key_or(&self.format_str).to_string());
+                    } else {
+                        separate = Some(entries);
+                    }
+                }
+            }
+        }
+        let result = if let Some(entries) = separate {
+            self.run_book_named_separately(entries).await
+        } else if is_book {
             // Books render only to formats with book support. Unknown
             // (extension) format identifiers fall through — they may
             // be html-based; gating known identifiers is the general
-            // rule P3's docx/pptx diagnostic is one instance of.
-            let unsupported = FormatIdentifier::try_from(self.format_str.as_str())
-                .is_ok_and(|id| !crate::project::book::is_supported_format(&id));
-            // A Subset render (`q2 render ch1.qmd`) stays on the ordinary
-            // per-document path: the P5 book orchestration below always
-            // renders the whole book, while the CLI contract for a
-            // named-file render is exactly that file (pinned by
-            // book_project_type::
+            // rule P3's docx/pptx diagnostic is one instance of. The gate
+            // judges the whole-book format, so it applies only when the
+            // requested scope is the book (a chapter may render to any
+            // format: FR11).
+            let unsupported = request.value == crate::BookScope::Book
+                && FormatIdentifier::try_from(self.format_str.as_str())
+                    .is_ok_and(|id| !crate::project::book::is_supported_format(&id));
+            // Scope is explicit (P3-D1): the whole book, or the page named on
+            // the command line as a standalone document. Only formats that
+            // consolidate a book into one file (typst, epub) have a
+            // whole-book output; `None` behaves as `Book` there. An html
+            // Subset render (`q2 render ch1.qmd`) stays on the ordinary
+            // per-document path (pinned by book_project_type::
             // single_chapter_subset_render_keeps_one_file_render_set).
-            // Typst/Epub keep P2's committed dispatch (merge always); the
-            // per-document typst path has never carried the book
-            // orchestration and its template invocation is unverified.
             let full_render = matches!(self.mode, RenderMode::Full);
             if unsupported {
-                Err(crate::project::book::render_item::book_diagnostic(
-                    "Q-5-33",
-                    format!("Book projects cannot render to `{}`", self.format_str),
-                    format!(
-                        "This book project targets the `{}` format, which has no book \
-                         support. Book projects render only to `html`, `typst`, and `epub`.",
-                        self.format_str
-                    ),
-                    "Render to a supported format (`q2 render --to html`), or change the \
-                     project's `format:` key.",
-                ))
-            } else if matches!(
-                self.format.identifier,
-                FormatIdentifier::Typst | FormatIdentifier::Epub
-            ) {
-                // book-projects P2: single-file merge.
-                self.run_book_single_file_merge().await
+                let from_request = crate::format_resolution::resolve_project_format(
+                    self.project,
+                    &request,
+                    requested_format.as_deref(),
+                    self.runtime.as_ref(),
+                )
+                .requested;
+                Err(self.unsupported_book_format_error(from_request))
+            } else if crate::project::book::format_consolidates_book(&self.format) {
+                self.run_book_scoped(&request, &mut notices_emitted).await
             } else if full_render && self.format.identifier == FormatIdentifier::Html {
                 // book-projects P5: multi-file pass 3 (pause at Navigation
                 // / aggregate the crossref registry / resume from
@@ -1080,10 +1174,394 @@ impl<'a> ProjectPipeline<'a, RenderToFileRenderer<'a>> {
         } else {
             self.run_inner().await
         };
+        let mut result = result;
+        // The scope notices for a dispatch that did not go through
+        // `resolve_book_scope` (a format with no whole-book output, html
+        // included): `scope_notices` is the one place that builds them.
+        if !notices_emitted
+            && !crate::project::book::format_consolidates_book(&self.format)
+            && let Ok(summary) = &mut result
+        {
+            let notices = self.tail_scope_notices(&request);
+            summary.project_diagnostics.extend(notices);
+        }
+        if let Ok(summary) = &mut result {
+            summary.project_diagnostics.extend(scope_diagnostics);
+        }
         if let Err(e) = self.project.registry.shutdown_all() {
             tracing::warn!("engine registry shutdown_all failed at end of project render: {e}");
         }
         result
+    }
+
+    /// `Q-5-33`: the book's own format has no book support. Names where the
+    /// format came from.
+    fn unsupported_book_format_error(&self, from_request: bool) -> QuartoError {
+        let format = &self.format_str;
+        let (problem, hint): (String, &str) = if from_request {
+            (
+                format!(
+                    "The requested `{format}` format has no book support. Book projects \
+                     render only to `html`, `typst`, and `epub`."
+                ),
+                "Render to a supported format (`q2 render --to html`), or name a chapter \
+                 to render it on its own.",
+            )
+        } else {
+            (
+                format!(
+                    "This book project's `format:` is `{format}`, which has no book \
+                     support. Book projects render only to `html`, `typst`, and `epub`."
+                ),
+                "Change the project's `format:` key, render to a supported format \
+                 (`q2 render --to html`), or name a chapter to render it on its own.",
+            )
+        };
+        crate::project::book::render_item::book_diagnostic(
+            "Q-5-33",
+            format!("Book projects cannot render to `{format}`"),
+            problem,
+            hint,
+        )
+    }
+
+    /// Resolve each named file's own format and book membership (F5a-D3b).
+    fn resolve_named_files(
+        &self,
+        request: &crate::format_resolution::ScopeRequest,
+        named: &[std::path::PathBuf],
+    ) -> Result<Vec<NamedFile>> {
+        let requested = self.requested_format_for_documents();
+        let mut entries = Vec::with_capacity(named.len());
+        for path in named {
+            let canonical = self
+                .runtime
+                .canonicalize(path)
+                .unwrap_or_else(|_| path.clone());
+            let membership = crate::project::book::book_membership(
+                self.project,
+                &canonical,
+                self.runtime.as_ref(),
+            )?;
+            let resolution = crate::format_resolution::resolve_document_format(
+                self.project,
+                path,
+                None,
+                request,
+                requested.as_deref(),
+                self.runtime.as_ref(),
+            );
+            let format = Format::from_format_string(&resolution.key)
+                .map_err(|e| QuartoError::other(format!("format `{}`: {e}", resolution.key)))?;
+            entries.push(NamedFile {
+                path: path.clone(),
+                canonical,
+                key: resolution.key,
+                format,
+                membership,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// The `--to` the user gave (the renderer's override before the book
+    /// decision rewrote it), for the per-document resolver.
+    fn requested_format_for_documents(&self) -> Option<String> {
+        self.renderer.format_override.clone()
+    }
+
+    /// `scope_notices` for each named file, once each, for the dispatches the
+    /// several-files branch handles itself.
+    fn named_files_notices(
+        &self,
+        request: &crate::format_resolution::ScopeRequest,
+        entries: &[NamedFile],
+    ) -> Vec<DiagnosticMessage> {
+        entries
+            .iter()
+            .flat_map(|e| {
+                crate::project::book::scope_notices(
+                    request,
+                    Some(&e.membership),
+                    &e.format,
+                    Some(&e.canonical),
+                    &self.project.dir,
+                )
+            })
+            .collect()
+    }
+
+    /// Whether naming these files is the whole-book render (F5a-D3b step 2):
+    /// every chapter named, every named file in the project's format, and that
+    /// format html (the one book format with a whole-book pass that does not
+    /// consolidate). Anything else renders each file on its own.
+    fn named_files_collapse(
+        &self,
+        request: &crate::format_resolution::ScopeRequest,
+        entries: &[NamedFile],
+        requested_format: Option<&str>,
+    ) -> Result<bool> {
+        let project_format = crate::format_resolution::resolve_project_format(
+            self.project,
+            request,
+            requested_format,
+            self.runtime.as_ref(),
+        );
+        if project_format.key != "html" {
+            return Ok(false);
+        }
+        if entries.iter().any(|e| e.key != project_format.key) {
+            return Ok(false);
+        }
+        let paths: Vec<std::path::PathBuf> = entries.iter().map(|e| e.canonical.clone()).collect();
+        crate::project::book::names_every_chapter(self.project, &paths, self.runtime.as_ref())
+    }
+
+    /// Several named files, each rendered on its own (F5a-D3b, D3d): the head
+    /// (Pass 1, `pre_render`) and the tail (resources, manifest,
+    /// `post_resources`) run once; Pass 2 runs once per partition, the files
+    /// whose format consolidates a book (each alone, in its own format) and
+    /// then all the others together, each in its own format.
+    async fn run_book_named_separately(
+        &mut self,
+        entries: Vec<NamedFile>,
+    ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
+        let head = match self.run_head().await? {
+            RunHead::Stopped(summary) => return Ok(summary),
+            RunHead::Continue(head) => head,
+        };
+        let skip: std::collections::HashSet<std::path::PathBuf> = head
+            .pass1_failures
+            .iter()
+            .map(|f| f.input.clone())
+            .collect();
+        let (consolidating, rest): (Vec<&NamedFile>, Vec<&NamedFile>) = entries
+            .iter()
+            .partition(|e| crate::project::book::format_consolidates_book(&e.format));
+
+        let saved_format = self.format.clone();
+        let saved_format_str = self.format_str.clone();
+        let saved_override = self.renderer.format_override.clone();
+        let saved_metadata = self.project.config.metadata.clone();
+        let mut outputs: Vec<RenderToFileResult> = Vec::new();
+        let mut failures: Vec<FileFailure> = Vec::new();
+
+        for entry in &consolidating {
+            if self.fail_fast && !failures.is_empty() {
+                break;
+            }
+            // The page skips the book merge: typst gets the book's title
+            // for this page only.
+            if entry.format.identifier == FormatIdentifier::Typst {
+                crate::project::book::chapter::seed_book_title_metadata(self.project);
+            }
+            self.format = entry.format.clone();
+            self.format_str = entry.format.identifier.to_string();
+            self.renderer.format_override = Some(entry.format.target_format.clone());
+            let set = std::collections::HashSet::from([entry.path.clone()]);
+            let (o, f) = self.pass_two(head.index.clone(), &skip, Some(&set)).await;
+            outputs.extend(o);
+            failures.extend(f);
+            self.project.config.metadata = saved_metadata.clone();
+        }
+        self.format = saved_format;
+        self.format_str = saved_format_str;
+        self.renderer.format_override = saved_override;
+
+        if !rest.is_empty() && !(self.fail_fast && !failures.is_empty()) {
+            let set: std::collections::HashSet<std::path::PathBuf> =
+                rest.iter().map(|e| e.path.clone()).collect();
+            let saved_mode = std::mem::replace(&mut self.mode, RenderMode::Subset(set));
+            let augmented = self.compute_augmented_render_set(&head.index);
+            self.mode = saved_mode;
+            let (o, f) = self
+                .pass_two(head.index.clone(), &skip, augmented.as_ref())
+                .await;
+            outputs.extend(o);
+            failures.extend(f);
+        }
+
+        // `ProjectRenderSummary` lists outputs in `project.files` order; Pass 2
+        // keeps that order only within one partition.
+        let position = |p: &std::path::Path| {
+            self.project
+                .files
+                .iter()
+                .position(|d| d.input == p)
+                .unwrap_or(usize::MAX)
+        };
+        outputs.sort_by_key(|o| position(&o.input_path));
+        let run_post_render = rest.iter().any(|e| e.format.identifier.is_html_based());
+        self.run_tail(head, outputs, failures, run_post_render)
+            .await
+    }
+
+    /// Decide once, for the whole render, the format every member of a book
+    /// renders in (epic FR4, F3a-D2), and return the scope request's notices.
+    ///
+    /// The requested scope comes from the render's target and the
+    /// `book-scope` layers ([`crate::format_resolution::resolve_render_scope`]).
+    /// For a **Book** project whose requested scope is `Book`, only the
+    /// project's formats select, so the project format (the project's keys
+    /// plus a `--to` or runtime scalar `format`) is installed as the
+    /// renderer's `format_override`: every per-document render, Pass 3
+    /// included, then uses it, even when a chapter's front matter says
+    /// otherwise. For any other project, and for a chapter render, nothing is
+    /// forced: each document resolves its own format, so a website's
+    /// `format: revealjs` page stays a deck and a named chapter renders in
+    /// its own format. `render_document_to_file` never learns the target.
+    ///
+    /// The FR6 error (`book-scope: chapter` with nothing to render) is not
+    /// raised here; the CLI's interim check owns it until the dispatch moves
+    /// onto the request (F3b), so only the non-error notices are returned.
+    fn decide_member_format(
+        &mut self,
+        request: &crate::format_resolution::ScopeRequest,
+    ) -> Vec<DiagnosticMessage> {
+        if self.project_type.kind() == ProjectKind::Book && request.value == crate::BookScope::Book
+        {
+            let project_format = crate::format_resolution::resolve_project_format(
+                self.project,
+                request,
+                self.renderer.format_override.as_deref(),
+                self.runtime.as_ref(),
+            );
+            let key = project_format.key_or(&self.format_str).to_string();
+            self.renderer.format_override = Some(key);
+        }
+        request
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind != quarto_error_reporting::DiagnosticKind::Error)
+            .cloned()
+            .collect()
+    }
+
+    /// [`crate::project::book::scope_notices`] for each file this render
+    /// names (one notice at most per file), or once with no file for a
+    /// whole-project render. Empty for a project that is not a book.
+    fn tail_scope_notices(
+        &self,
+        request: &crate::format_resolution::ScopeRequest,
+    ) -> Vec<DiagnosticMessage> {
+        if self.project_type.kind() != ProjectKind::Book {
+            return Vec::new();
+        }
+        let named: Vec<Option<std::path::PathBuf>> = match &self.mode {
+            RenderMode::Full => vec![None],
+            RenderMode::ActivePage(page) => vec![Some(page.clone())],
+            RenderMode::Subset(set) => {
+                let mut files: Vec<std::path::PathBuf> = set.iter().cloned().collect();
+                files.sort();
+                files.into_iter().map(Some).collect()
+            }
+        };
+        let mut notices = Vec::new();
+        for file in named {
+            // A whole-project render has no file: membership only has to
+            // exist, and no file is tested against it.
+            let probe = file.clone().unwrap_or_else(|| self.project.dir.clone());
+            let Ok(membership) =
+                crate::project::book::book_membership(self.project, &probe, self.runtime.as_ref())
+            else {
+                // The pipeline reports a broken chapter list itself.
+                continue;
+            };
+            notices.extend(crate::project::book::scope_notices(
+                request,
+                Some(&membership),
+                &self.format,
+                file.as_deref(),
+                &self.project.dir,
+            ));
+        }
+        notices
+    }
+
+    /// A book rendered to a format that consolidates it (typst, epub):
+    /// resolve the explicit scope against the one page named, if any, then
+    /// either merge the whole book or render that page alone through
+    /// [`crate::project::book::render_chapter_alone`]'s mechanism. A render
+    /// naming no page, or several, covers the whole book.
+    async fn run_book_scoped(
+        &mut self,
+        request: &crate::format_resolution::ScopeRequest,
+        notices_emitted: &mut bool,
+    ) -> Result<ProjectRenderSummary<RenderToFileResult>> {
+        let active = match &self.mode {
+            RenderMode::Subset(set) if set.len() == 1 => set.iter().next().cloned(),
+            RenderMode::ActivePage(page) => Some(page.clone()),
+            _ => None,
+        };
+        let Some(active) = active else {
+            return self.run_book_single_file_merge().await;
+        };
+        let active = self
+            .runtime
+            .canonicalize(&active)
+            .unwrap_or_else(|_| active.clone());
+        let resolution = crate::project::book::resolve_book_scope(
+            self.project,
+            &active,
+            request,
+            &self.format,
+            self.runtime.as_ref(),
+        )?;
+        *notices_emitted = true;
+        if resolution.scope == crate::project::book::ResolvedBookScope::Book {
+            return self.run_book_single_file_merge().await;
+        }
+        let mut summary = crate::project::book::chapter::render_chapter_alone_summary(
+            self.project,
+            &active,
+            &self.format,
+            self.pass1_format(),
+            self.renderer.options,
+            self.runtime.clone(),
+        )
+        .await?;
+        summary
+            .project_diagnostics
+            .splice(0..0, resolution.diagnostics);
+        Ok(summary)
+    }
+
+    /// The preview server's whole-book download (epic E3, P10-D4): Pass 1,
+    /// `pre_render` and the single-file merge, as
+    /// [`Self::run_book_single_file_merge`] runs them, but with no tail. The
+    /// caller hands in a `ProjectContext` whose `output_dir` is the request
+    /// directory (so the resolver, the resource flush and the output all land
+    /// there) and gets the one output file back. No resource copy, no render
+    /// manifest, no `post_resources`: the user's `_book/`,
+    /// `render-manifest.json` and `llms-manifest.json` are never touched.
+    /// (`.quarto/` is not untouched: Pass 1 writes `cache/profiles/*` and the
+    /// crossref filter writes `crossref-index.json`.) Pre- and post-render
+    /// scripts are CLI-only and do not run. `pass1_failures` are ignored, as
+    /// native does without `--fail-fast`.
+    pub(crate) async fn run_book_download(
+        &mut self,
+        extras: crate::project::book::single_file_render::BookFileExtras<'_>,
+    ) -> Result<crate::project::book::single_file_render::BookFileOutcome> {
+        let (profiles, _pass1_failures) = self.pass_one().await;
+        let index = Arc::new(ProjectIndex::new(profiles));
+        self.project_type
+            .pre_render(self.project, &index, self.runtime.as_ref())
+            .await
+            .map_err(|e| match e {
+                QuartoError::Parse(_) => e,
+                other => QuartoError::other(format!("pre_render failed: {other}")),
+            })?;
+        let book_items = self.project.book_render_items.clone().unwrap_or_default();
+        crate::project::book::single_file_render::render_book_single_file_with(
+            self.project,
+            &book_items,
+            &self.format,
+            self.runtime.clone(),
+            None,
+            self.renderer.options,
+            extras,
+        )
+        .await
     }
 
     /// book-projects P2: the single-file-merge dispatch
@@ -1402,6 +1880,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             project_type,
             format,
             format_str: format_str.into(),
+            project_format: None,
             runtime,
             mode: RenderMode::Full,
             project_artifacts: crate::artifact::ArtifactStore::new(),
@@ -1409,6 +1888,19 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             fail_fast: false,
             jobs: None,
         }
+    }
+
+    /// Name the project's own format when it differs from the dispatch format
+    /// passed to the constructor (a chapter rendered in its own format): Pass 1
+    /// and its cache key use it (FR11).
+    pub fn with_project_format(mut self, project_format: Format) -> Self {
+        self.project_format = Some(project_format);
+        self
+    }
+
+    /// The format Pass 1 runs under: the project's.
+    fn pass1_format(&self) -> &Format {
+        self.project_format.as_ref().unwrap_or(&self.format)
     }
 
     /// Set the render mode. Default is [`RenderMode::Full`]; CLI
@@ -1488,7 +1980,44 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             .collect()
     }
 
+    /// [`Self::run`] without the engine shutdown, for a caller that shuts the
+    /// registry down once itself (the orchestrator's chapter-alone render).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn run_without_shutdown(&mut self) -> Result<ProjectRenderSummary<R::Output>> {
+        self.run_inner().await
+    }
+
     async fn run_inner(&mut self) -> Result<ProjectRenderSummary<R::Output>> {
+        let head = match self.run_head().await? {
+            RunHead::Stopped(summary) => return Ok(summary),
+            RunHead::Continue(head) => head,
+        };
+        // Phase 8.2: in Mode B, build the dependency graph from
+        // the freshly-loaded profiles, augment the user-named
+        // targets with always-render dependents, and tell pass_two
+        // to render only that set. Mode A renders every page; the
+        // augmented set is `None`.
+        let augmented_render_set = self.compute_augmented_render_set(&head.index);
+
+        // Skip Pass-2 on files that failed Pass 1 — Pass 2 does
+        // strictly more work, so it can only produce duplicate errors.
+        let skip: std::collections::HashSet<std::path::PathBuf> = head
+            .pass1_failures
+            .iter()
+            .map(|f| f.input.clone())
+            .collect();
+        let (outputs, pass2_failures) = self
+            .pass_two(head.index.clone(), &skip, augmented_render_set.as_ref())
+            .await;
+        let run_post_render = self.format.identifier.is_html_based();
+        self.run_tail(head, outputs, pass2_failures, run_post_render)
+            .await
+    }
+
+    /// The part of a project render that happens once, before any Pass 2:
+    /// the initial diagnostics, Pass 1, the engine warning, the fail-fast
+    /// barrier, `pre_render` and the book's chapter seeds.
+    async fn run_head(&mut self) -> Result<RunHead<R::Output>> {
         let mut initial_diagnostics = self.empty_render_set_diagnostic();
         // `project.render` patterns that contributed nothing
         // (bd-mt7a6uc4 D7). Computed here rather than inside
@@ -1574,13 +2103,13 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             // diagnostic the render had already produced (bd-exhbc6h8).
             let mut project_diagnostics = initial_diagnostics;
             project_diagnostics.extend(self.drain_registry_diagnostics());
-            return Ok(ProjectRenderSummary {
+            return Ok(RunHead::Stopped(ProjectRenderSummary {
                 outputs: Vec::new(),
                 pass1_failures,
                 pass2_failures: Vec::new(),
                 project_diagnostics,
                 stopped_early: true,
-            });
+            }));
         }
 
         // Map hook errors through so the caller sees exactly which
@@ -1604,20 +2133,28 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             self.renderer.install_book_chapter_seeds(seeds);
         }
 
-        // Phase 8.2: in Mode B, build the dependency graph from
-        // the freshly-loaded profiles, augment the user-named
-        // targets with always-render dependents, and tell pass_two
-        // to render only that set. Mode A renders every page; the
-        // augmented set is `None`.
-        let augmented_render_set = self.compute_augmented_render_set(&index);
+        Ok(RunHead::Continue(RunHeadState {
+            initial_diagnostics,
+            index,
+            pass1_failures,
+        }))
+    }
 
-        // Skip Pass-2 on files that failed Pass 1 — Pass 2 does
-        // strictly more work, so it can only produce duplicate errors.
-        let skip: std::collections::HashSet<std::path::PathBuf> =
-            pass1_failures.iter().map(|f| f.input.clone()).collect();
-        let (outputs, pass2_failures) = self
-            .pass_two(index.clone(), &skip, augmented_render_set.as_ref())
-            .await;
+    /// The part that happens once, after every Pass 2: `post_render` (when
+    /// `run_post_render`), the resource copy, the render manifest,
+    /// `post_resources`, the registry drain and the summary.
+    async fn run_tail(
+        &mut self,
+        head: RunHeadState,
+        outputs: Vec<R::Output>,
+        pass2_failures: Vec<FileFailure>,
+        run_post_render: bool,
+    ) -> Result<ProjectRenderSummary<R::Output>> {
+        let RunHeadState {
+            initial_diagnostics,
+            index,
+            pass1_failures,
+        } = head;
 
         // Phase 9 sub-phase 9.2: extract on-disk paths from the
         // per-doc outputs (`None` for in-memory WASM renders) and
@@ -1641,7 +2178,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // diagnostic. Matches Q1's own `websiteProjectType.postRender`,
         // which filters `outputFiles` to HTML-only before running this
         // logic.
-        if self.format.identifier.is_html_based() {
+        if run_post_render {
             self.project_type
                 .post_render(
                     self.project,
@@ -1937,12 +2474,20 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // per-doc future. Native keeps the sync `pass_one_dispatch` for
         // rayon compatibility.
         #[cfg(not(target_arch = "wasm32"))]
-        let (profiles, failures) =
-            pass_one_dispatch(&self.runtime, self.project, &self.format, self.fail_fast);
+        let (profiles, failures) = pass_one_dispatch(
+            &self.runtime,
+            self.project,
+            self.pass1_format(),
+            self.fail_fast,
+        );
         #[cfg(target_arch = "wasm32")]
-        let (profiles, failures) =
-            pass_one_dispatch_async(&self.runtime, self.project, &self.format, self.fail_fast)
-                .await;
+        let (profiles, failures) = pass_one_dispatch_async(
+            &self.runtime,
+            self.project,
+            self.pass1_format(),
+            self.fail_fast,
+        )
+        .await;
         // bd-m7x9s Phase 0: feed the `perf.pass1` gauge with cumulative
         // doc count and wall time. `pass1_profile_with_cache`
         // increments the thread-set; here we add the per-`pass_one`
@@ -2580,6 +3125,8 @@ async fn pass1_profile_with_cache(
         })
         .collect();
 
+    let runtime_metadata =
+        crate::project::cache_key::canonical_runtime_metadata(runtime.runtime_metadata().as_ref());
     let key_inputs = crate::project::cache_key::Pass1KeyInputs {
         format_id: &format_id,
         source_path: &source_path,
@@ -2590,6 +3137,7 @@ async fn pass1_profile_with_cache(
         extension_contributions: &extension_contributions,
         active_config_profiles: &active_profile_names,
         profile_config_files: &profile_config_files,
+        runtime_metadata: &runtime_metadata,
     };
     let key_bytes = crate::project::cache_key::pass1_key(&key_inputs);
     let key_hex = crate::project::cache_key::hex_encode(&key_bytes);

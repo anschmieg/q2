@@ -1027,23 +1027,14 @@ fn write_inlines(inlines: &Inlines, ctx: &mut JsonWriterContext) -> Value {
     )
 }
 
+/// Emit ListAttributes as `[start, {"t": style}, {"t": delim}]`, with
+/// pandoc's constructor names (`DefaultStyle`, `DefaultDelim`) as tags.
 fn write_list_attributes(attr: &ListAttributes) -> Value {
-    let number_style = match attr.1 {
-        crate::pandoc::ListNumberStyle::Decimal => json!({"t": "Decimal"}),
-        crate::pandoc::ListNumberStyle::LowerAlpha => json!({"t": "LowerAlpha"}),
-        crate::pandoc::ListNumberStyle::UpperAlpha => json!({"t": "UpperAlpha"}),
-        crate::pandoc::ListNumberStyle::LowerRoman => json!({"t": "LowerRoman"}),
-        crate::pandoc::ListNumberStyle::UpperRoman => json!({"t": "UpperRoman"}),
-        crate::pandoc::ListNumberStyle::Example => json!({"t": "Example"}),
-        crate::pandoc::ListNumberStyle::Default => json!({"t": "Default"}),
-    };
-    let number_delimiter = match attr.2 {
-        crate::pandoc::ListNumberDelim::Period => json!({"t": "Period"}),
-        crate::pandoc::ListNumberDelim::OneParen => json!({"t": "OneParen"}),
-        crate::pandoc::ListNumberDelim::TwoParens => json!({"t": "TwoParens"}),
-        crate::pandoc::ListNumberDelim::Default => json!({"t": "Default"}),
-    };
-    json!([attr.0, number_style, number_delimiter])
+    json!([
+        attr.0,
+        {"t": attr.1.pandoc_name()},
+        {"t": attr.2.pandoc_name()}
+    ])
 }
 
 fn write_blockss(blockss: &[Vec<Block>], ctx: &mut JsonWriterContext) -> Value {
@@ -2107,22 +2098,8 @@ fn stream_write_list_attributes<W: io::Write>(
     w: &mut JsonStreamWriter<W>,
     attr: &ListAttributes,
 ) -> io::Result<()> {
-    use crate::pandoc::{ListNumberDelim, ListNumberStyle};
-    let style = match attr.1 {
-        ListNumberStyle::Decimal => "Decimal",
-        ListNumberStyle::LowerAlpha => "LowerAlpha",
-        ListNumberStyle::UpperAlpha => "UpperAlpha",
-        ListNumberStyle::LowerRoman => "LowerRoman",
-        ListNumberStyle::UpperRoman => "UpperRoman",
-        ListNumberStyle::Example => "Example",
-        ListNumberStyle::Default => "Default",
-    };
-    let delim = match attr.2 {
-        ListNumberDelim::Period => "Period",
-        ListNumberDelim::OneParen => "OneParen",
-        ListNumberDelim::TwoParens => "TwoParens",
-        ListNumberDelim::Default => "Default",
-    };
+    let style = attr.1.pandoc_name();
+    let delim = attr.2.pandoc_name();
     w.begin_array()?;
     w.u64_value(attr.0 as u64)?;
     w.begin_object()?;
