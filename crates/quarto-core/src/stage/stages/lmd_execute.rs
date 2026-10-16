@@ -776,6 +776,30 @@ mod tests {
         );
     }
 
+    /// bd-7gqr148v: a table written inside a fragment runs and is spliced
+    /// in, whether it was a pipe table or a list-table the reader desugared.
+    #[test]
+    fn tables_in_fragments_run_and_are_spliced_in() {
+        let qmd = "```{lmd}\nreturn {=:\n| a | b |\n|---|--:|\n| 1 | 2 |\n\n::: {.list-table}\n* - k\n  - v\n* - x\n  - y\n:::\n:=}\n```\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        let [Block::Table(pipe), Block::Table(list)] = blocks.as_slice() else {
+            panic!("expected two tables, got {blocks:?}");
+        };
+        assert_eq!(pipe.head.rows.len(), 1);
+        assert_eq!(pipe.bodies[0].body.len(), 1);
+        assert_eq!(
+            pipe.colspec[1].0,
+            quarto_pandoc_types::table::Alignment::Right
+        );
+        assert_eq!(
+            list.head.rows.len(),
+            1,
+            "bare list-table promotes its first row"
+        );
+        assert_eq!(list.bodies[0].body.len(), 1);
+    }
+
     #[test]
     fn the_motivating_example_with_immediate_values() {
         let qmd = "::: foo\n\n```{lmd}\nlocal out = pandoc.Blocks({})\nfor _, v in ipairs({'a', 'b'}) do\n  out:extend({=: **`{lmd} v`** :=})\nend\nreturn out\n```\n\n:::\n";

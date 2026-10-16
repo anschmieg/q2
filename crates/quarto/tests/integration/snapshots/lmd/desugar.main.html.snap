@@ -80,28 +80,49 @@ A definition.
 </section>
 <section id="list-table-inside-a-fragment" class="section level2">
 <h2>5. list-table inside a fragment</h2>
-<div class="code-copy-outer-scaffold">
-<pre class="lmd code-with-copy"><code>return {=:
-::: {.list-table}
-* - Key
-  - Value
-* - `c`
-  - three
-:::
-:=}</code></pre>
-<button title="Copy to Clipboard" class="code-copy-button" aria-label="Copy code"><i class="bi"></i></button>
-</div>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Key
+</th>
+<th>Value
+</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>c</code>
+</td>
+<td>three
+</td>
+</tr>
+</tbody>
+</table>
 </section>
 <section id="pipe-table-inside-a-fragment" class="section level2">
 <h2>6. Pipe table inside a fragment</h2>
-<div class="code-copy-outer-scaffold">
-<pre class="lmd code-with-copy"><code>return {=:
-| Key | Value |
-|-----|------:|
-| `d` | four  |
-:=}</code></pre>
-<button title="Copy to Clipboard" class="code-copy-button" aria-label="Copy code"><i class="bi"></i></button>
-</div>
+<table class="caption-top table">
+<colgroup>
+<col />
+<col align="right" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Key
+</th>
+<th>Value
+</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>d</code>
+</td>
+<td>four
+</td>
+</tr>
+</tbody>
+</table>
 </section>
 <section id="definition-list-inside-a-fragment" class="section level2">
 <h2>7. definition-list inside a fragment</h2>

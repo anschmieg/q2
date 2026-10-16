@@ -23,13 +23,11 @@ Error: [Q-2-10] Closed Quote Without Matching Open Quote
 ℹ Inside an lmd markdown fragment; the cell is left as written and will not run.
 
 Warning: lmd cell could not be desugared
-    ╭─[ <dir>/errors.qmd:22:1 ]
+    ╭─[ <dir>/errors.qmd:24:1 ]
     │
- 22 │ ╭─▶ | a | b |
-    ┆ ┆
- 24 │ ├─▶ | 1 | 2 |
-    │ │
-    │ ╰─────────────── lmd: `Table` nodes are not supported inside markdown fragments yet
+ 24 │ [^1]: The note.
+    │ ────────┬───────
+    │         ╰───────── lmd: `NoteDefinitionPara` nodes are not supported inside markdown fragments yet
 ────╯
 ℹ The cell is left as written and will not run.
 

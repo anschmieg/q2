@@ -209,10 +209,12 @@ Warning: [Q-2-35] Invalid List-Table Structure
 
 The title, code, problem and hint are the reader's own Q-2-35; the location and the first info line are what the lmd stage adds.
 
-### Phase 4: tables in fragments (quarto-core emitter)
+### Phase 4: tables in fragments (quarto-core emitter) (done 2026-10-16)
 
-- [ ] Tests first, in `lmd/desugar.rs`: `table_in_a_fragment_is_emitted` (pipe table and list-table; assert `pandoc.Table(` and that the Lua runs), `line_preserving_table_stays_on_its_lines`; switch `unsupported_node_is_an_error_without_a_location_when_unanchored` to a footnote definition.
-- [ ] `Block::Table` arm in `emit.rs`, both modes; `Unsupported("Table")` removed; `errors.qmd` fixture's unsupported example switched to a footnote definition; snapshots updated (fixture sections 5 and 6 pass).
+- [x] Tests first: `lmd/desugar.rs` gained `table_in_a_fragment_is_emitted` (pipe table with a right-aligned column, and a list-table with `widths` that the reader already turned into a `Table` with percentage colspecs) and `line_preserving_table_stays_on_its_lines` (the whole table on one line, exact text pinned); `lmd_execute.rs` gained `tables_in_fragments_run_and_are_spliced_in` (end to end: both forms come back as `Block::Table`). The two tests that used a pipe table as their *unsupported* example (`unsupported_node_is_an_error_without_a_location_when_unanchored`, `lmd_desugar::an_unsupported_node_is_located_at_the_node`) now use a footnote definition, whose `NoteDefinitionPara` stays unsupported.
+- [x] `Block::Table` arm in `emit.rs`: `pandoc.Table(caption, colspecs, pandoc.TableHead(rows, attr), { pandoc.TableBody(body, head, row_head_columns, attr) }, pandoc.TableFoot(rows, attr), attr)`, rows as `pandoc.Row({ pandoc.Cell(blocks, align, rowspan, colspan, attr) }, attr)`, colspecs as `{ {"AlignX", pandoc.ColWidthDefault | number} }`. The caption printer is shared with `Figure`. Works in both modes through the existing `call` / `list` helpers. `Unsupported("Table")` is gone.
+- [x] `errors.qmd`'s unsupported example is a footnote now; `errors` and `desugar` snapshots updated (fixture sections 5 and 6 render as tables; the desugar fixture's stderr is down to the one intended Q-2-35).
+- [x] Full `quarto-core` suite (6102) green; clippy clean on `quarto-core` and `quarto`.
 
 ### Phase 5: docs and bookkeeping
 

@@ -19,9 +19,9 @@ An unsupported node inside a fragment (left as written):
 
 ``` {.lmd .code-with-copy}
 return {=:
-| a | b |
-|---|---|
-| 1 | 2 |
+A footnote reference[^1] is resolved later in the pipeline.
+
+[^1]: The note.
 :=}
 ```
 

@@ -2,28 +2,6 @@
 source: crates/quarto/tests/integration/lmd_snapshots.rs
 expression: stderr
 ---
-Warning: lmd cell could not be desugared
-    ╭─[ <dir>/desugar.qmd:55:1 ]
-    │
- 55 │ ╭─▶ ::: {.list-table}
-    ┆ ┆
- 60 │ ├─▶ :::
-    │ │
-    │ ╰───────── lmd: `Table` nodes are not supported inside markdown fragments yet
-────╯
-ℹ The cell is left as written and will not run.
-
-Warning: lmd cell could not be desugared
-    ╭─[ <dir>/desugar.qmd:68:1 ]
-    │
- 68 │ ╭─▶ | Key | Value |
-    ┆ ┆
- 70 │ ├─▶ | `d` | four  |
-    │ │
-    │ ╰───────────────────── lmd: `Table` nodes are not supported inside markdown fragments yet
-────╯
-ℹ The cell is left as written and will not run.
-
 Warning: [Q-2-35] Invalid List-Table Structure
     ╭─[ <dir>/desugar.qmd:94:1 ]
     │
@@ -34,4 +12,4 @@ Warning: [Q-2-35] Invalid List-Table Structure
 ℹ The node was built by this lmd cell.
 ℹ Check the list-table documentation for the correct structure?
 
-3 warnings
+1 warning
