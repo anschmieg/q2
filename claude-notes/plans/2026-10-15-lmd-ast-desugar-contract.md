@@ -185,11 +185,29 @@ using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LineP
 - [x] `main.rs` and `import/mod.rs` call `desugar_document`; the `readwrite.rs` json arm calls it too (fixture section 11 passes). `pandoc.read` has no diagnostics channel (the Lua `quarto._diagnostics` table carries kind, message and location only), so a malformed list-table's Q-2-35 is dropped on that arm, as the CLI arm always has; cell-built divs are reported in Phase 3 where the stage owns the diagnostics.
 - [x] Full `pampa` (5045) and `quarto-core` (6093) suites green; clippy clean.
 
-### Phase 3: lmd cell results (quarto-core)
+### Phase 3: lmd cell results (quarto-core) (done 2026-10-16)
 
-- [ ] Tests first, in `lmd_execute.rs` (same harness as `a_cell_is_replaced_by_the_blocks_it_returns`): `a_cell_built_list_table_div_becomes_a_table`, `a_cell_built_definition_list_div_becomes_a_definition_list`, `a_cell_built_single_image_para_becomes_a_figure`, `an_invalid_cell_built_list_table_warns_at_the_cell` (asserts Q-2-35 and that the location is the cell span), `an_inline_cell_note_holding_a_list_table_is_desugared`, `a_cell_nested_in_a_fragment_is_covered_by_the_parent_pass`.
-- [ ] `execute_lmd_cells` runs the set per cell result; diagnostics relocated per D2 (fixture sections 2, 4, 8, 9, 12, 13 pass).
-- [ ] Paste the rendered Q-2-35 diagnostic for fixture section 9 (ANSI-stripped `q2 render` stderr) into this plan under a "Diagnostic example" heading, for review before the PR.
+- [x] Tests first, in `lmd_execute.rs`: the six tests listed in the plan, all green.
+- [x] `execute_lmd_cells` runs the set per cell result (`desugar_cell_blocks` for block cells, `desugar_cell_inlines` for inline cells) and relocates every diagnostic the pass raises onto the cell (`relocate_to_cell`). Fixture sections 2, 4, 8, 9, 12 and 13 now render as the reader would have: tables, a definition list, a numbered cross-referenced figure, a table inside the footnote, a table from the nested cell; section 9 keeps its div and warns.
+  - Relocation is unconditional, not only for `SourceInfo::generated` locations as D2 first said: a node `pandoc.read` returned carries an offset into that call's *private* source context, whose file ids collide with the document's, so no location the pass sees can be trusted against the document. Nodes the reader parsed never reach the pass with sugar left in them, so nothing precise is lost.
+  - The cell's `anchor.span` is the Lua text of the cell, not the fenced block, so the underline is the code the author wrote.
+- [x] Full `quarto-core` suite (6099) green; clippy clean.
+
+#### Diagnostic example (fixture section 9, `q2 render --to html`, ANSI stripped)
+
+```
+Warning: [Q-2-35] Invalid List-Table Structure
+    ╭─[ <dir>/desugar.qmd:94:1 ]
+    │
+ 94 │ return pandoc.Div({ pandoc.Para({ pandoc.Str("not a list") }) }, pandoc.Attr("", {"list-table"}))
+    │ ────────────────────────────────────────────────┬────────────────────────────────────────────────
+    │                                                 ╰────────────────────────────────────────────────── list-table div's last block must be a bullet list (the rows)
+────╯
+ℹ The node was built by this lmd cell.
+ℹ Check the list-table documentation for the correct structure?
+```
+
+The title, code, problem and hint are the reader's own Q-2-35; the location and the first info line are what the lmd stage adds.
 
 ### Phase 4: tables in fragments (quarto-core emitter)
 

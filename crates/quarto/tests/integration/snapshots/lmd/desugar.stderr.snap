@@ -24,4 +24,14 @@ Warning: lmd cell could not be desugared
 ────╯
 ℹ The cell is left as written and will not run.
 
-2 warnings
+Warning: [Q-2-35] Invalid List-Table Structure
+    ╭─[ <dir>/desugar.qmd:94:1 ]
+    │
+ 94 │ return pandoc.Div({ pandoc.Para({ pandoc.Str("not a list") }) }, pandoc.Attr("", {"list-table"}))
+    │ ────────────────────────────────────────────────┬────────────────────────────────────────────────
+    │                                                 ╰────────────────────────────────────────────────── list-table div's last block must be a bullet list (the rows)
+────╯
+ℹ The node was built by this lmd cell.
+ℹ Check the list-table documentation for the correct structure?
+
+3 warnings
