@@ -3,6 +3,7 @@
 
 pub mod attribution_cli_e2e;
 pub mod book_docx_diagnostic_e2e;
+pub mod book_scope_cli_e2e;
 pub mod bootstrap_sh;
 pub mod brand_font_weight;
 pub mod build_ts_extension_e2e;
@@ -15,13 +16,16 @@ pub mod diagnostic_render_panic_boundary;
 pub mod docs_llms_cli;
 pub mod engine_diagnostics_cli;
 pub mod extension_config_spans;
+pub mod format_resolution_cli;
 pub mod founding_crash_config_span_e2e;
 pub mod get_config_cli;
 pub mod json_errors;
 pub mod jupyter_kernel_cleanup_e2e;
 pub mod lmd_snapshots;
+pub mod metadata_flag_cli_e2e;
 pub mod nested_projects_cli;
 pub mod nightly_gate;
+pub mod output_dir_images_e2e;
 pub mod pandoc_read_stderr_e2e;
 pub mod preview_cli;
 pub mod preview_static_e2e;

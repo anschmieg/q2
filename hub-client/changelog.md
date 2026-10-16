@@ -28,6 +28,13 @@ WASM rebuild is needed for a changelog-only edit.
 - [`9ee269ea0`](https://github.com/quarto-dev/q2/commits/9ee269ea0): The "Link another browser" dialog now says what it actually shares — its warning reads "access and edit every project in your project list" instead of the single-project wording, since the link carries the whole project list.
 - [`fb4daf6b7`](https://github.com/quarto-dev/q2/commits/fb4daf6b7): Remove the stale "collections UI exploration" label shown next to the build hash in the projects home footer.
 
+### 2026-10-16
+
+- [`c25ecaf92`](https://github.com/quarto-dev/q2/commits/c25ecaf92): Preview no longer freezes in Firefox after you leave old editor tabs open; stale tabs used to block the live-update connection of the tab you were using.
+- [`e0de5295b`](https://github.com/quarto-dev/q2/commits/e0de5295b): A document now renders to the same format in the live preview, the static preview and `q2 render`, following your project's `_quarto.yml` and any `--to`, `-M` or `--profile` you pass.
+- [`f03100fa1`](https://github.com/quarto-dev/q2/commits/f03100fa1): `q2 preview --ui editor` shows a `format: typst` document as a PDF in the preview pane and re-renders it as you edit.
+- [`286bb6a8c`](https://github.com/quarto-dev/q2/commits/286bb6a8c): In `q2 preview --ui editor`, Download as offers odt, Typst source and PDF alongside docx, pptx and EPUB. Pages in a book can download the whole book or just that chapter, with a notice (`Q-5-48`) if the page isn't part of the book. The Import button now works too, reading docx, odt, rtf, epub and pptx files with your installed pandoc.
+
 ### 2026-10-07
 
 - [`75eb053bc`](https://github.com/quarto-dev/q2/commits/75eb053bc): Share links produced by the Quarto Hub MCP server (for example by create_project) now always carry the sync server, file, and project name the app requires, so opening one shows the invite page instead of the "This share link is incomplete" error.

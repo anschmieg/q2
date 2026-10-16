@@ -46,10 +46,20 @@ declare module 'wasm-quarto-hub-client' {
     path: string,
     user_grammars?: JsUserGrammars,
   ): Promise<string>;
+  /**
+   * `options` is the live viewer's `{ to?, metadata? }`: `to` is the requested
+   * format (`q2 preview --to`; wins over the document's and the project's) and
+   * `metadata` the render's runtime metadata layer (`-M`, a JSON object).
+   */
+  export interface RenderPageForPreviewOptions {
+    to?: string;
+    metadata?: Record<string, unknown>;
+  }
   export function render_page_for_preview(
     path: string,
     user_grammars?: JsUserGrammars,
     capture_gz_json?: Uint8Array,
+    options?: RenderPageForPreviewOptions,
   ): Promise<string>;
 
   // ---- pandoc-wasm epic (R2): build a pandoc request inside the wasm ----
@@ -105,7 +115,7 @@ declare module 'wasm-quarto-hub-client' {
     diagnostics: AstDiagnostic[];
     stats: {
       unexecuted_cells: number;
-      book: { scope: 'book' | 'chapter'; chapters: number } | null;
+      book: { scope: 'book' | 'chapter' | 'none'; chapters: number } | null;
     };
     request?: PandocRequestWire;
   }
@@ -118,8 +128,11 @@ declare module 'wasm-quarto-hub-client' {
    * `capture_gz_json` is as for `render_page_for_preview` (R3 wires it) and
    * serves the active page when the request is chapter-alone.
    *
-   * A book chapter requested as typst, pdf or epub is the whole book unless
-   * `options.scope` is `'chapter'` (R9). `options.capturesByPath` maps each
+   * A book chapter requested as typst, pdf or epub is the chapter alone unless
+   * `options.metadata['book-scope']` is `'book'` (R9); a page that is not a chapter is
+   * delivered alone with the `Q-5-41` notice (`stats.book.scope` `'none'`). `options.metadata`
+   * is this call's runtime-layer metadata (a JSON object; overlaid on the process-wide
+   * `vfs_set_runtime_metadata`, never replacing it). `options.capturesByPath` maps each
    * chapter's `/`-normalized path relative to the VFS project root to its
    * capture blob. `options.onProgress` is awaited before each chapter of a
    * book render (`index` is 1-based); if it rejects the call fails with that
@@ -127,7 +140,13 @@ declare module 'wasm-quarto-hub-client' {
    * no `request`.
    */
   export interface RenderPandocRequestOptions {
-    scope?: 'auto' | 'chapter';
+    metadata?: Record<string, unknown>;
+    /**
+     * The viewer's requested format, accepted beside `metadata` so one options
+     * shape serves every entry. The request already names its output format
+     * (`format`), so nothing reads it.
+     */
+    to?: string;
     capturesByPath?: Record<string, Uint8Array>;
     onProgress?: (index: number, total: number, file: string) => void | Promise<void>;
     /**
@@ -305,6 +324,17 @@ declare module 'wasm-quarto-hub-client' {
          * is not `pdf`: the literal file extension to download it under.
          */
         formats: { key: string; class: PandocFormatClass; extension?: string }[];
+        /** The document's own resolved format (`formats[0]`); a `typst` document resolves to `typst-pdf`. */
+        key: string;
+        class: PandocFormatClass;
+        /**
+         * The format the live preview renders `key` with (`html` → `q2-preview`, `revealjs`
+         * and the `q2-*` formats as themselves), or `null` when the preview does not render
+         * it through the React pipeline.
+         */
+        pseudoFormat: string | null;
+        /** The scope the resolution was made for: the preview always asks for a chapter. */
+        scope: 'chapter';
         /**
          * `null` outside a book project. In a book: `chapters` are the
          * file-bearing chapters in book order as sidecar keys (`/`-normalized,
@@ -316,7 +346,12 @@ declare module 'wasm-quarto-hub-client' {
         book?: { chapter: boolean; chapters: string[] } | null;
       }
     | { success: false; error: string };
-  export function resolve_pandoc_formats(path: string): string;
+  export function resolve_pandoc_formats(
+    path: string,
+    options?: { contentOverride?: string; to?: string; metadata?: Record<string, unknown> },
+  ): string;
+  /** `{ hits, misses }` of the resolver's project cache. Test support. */
+  export function project_cache_stats(): string;
 
   /** Test-only: calls the user-grammar bridge directly. Phase 4.3 of syntax-highlighting. */
   export function quarto_highlight_with_user_for_test(

@@ -72,13 +72,28 @@ use crate::artifact_flush::{enqueue_artifacts, route_drained_project_artifacts};
 use crate::error::QuartoError;
 use crate::format::{Format, FormatIdentifier};
 use crate::output_sink::{OutputSink, OutputSinkError};
-use crate::pipeline::{HtmlRenderConfig, RenderOutput, render_qmd_to_html, render_qmd_to_pandoc};
+use crate::pipeline::{
+    HtmlRenderConfig, RenderOutput, render_qmd_to_html, render_qmd_to_pandoc_with_captures,
+};
 use crate::project::index::ProjectIndex;
 use crate::project::orchestrator::project_type_for;
 use crate::project::{DocumentInfo, ProjectContext};
 use crate::render::{BinaryDependencies, RenderContext};
 use crate::resource_resolver::ResourceResolverContext;
 use crate::resources;
+
+/// What a typst render produces (epic E8). Unset (`None` on
+/// [`RenderToFileOptions::typst_target`]) keeps `q2 render` semantics:
+/// `output-ext` decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypstTarget {
+    /// Compile to a PDF whatever `output-ext` says (the browser's
+    /// `typst-pdf` never refuses).
+    Pdf,
+    /// Write the typst source and skip the compile: `output-ext`, or
+    /// `typ` when unset or `pdf`. A literal `output-ext: typst` is kept.
+    Source,
+}
 
 /// Options for rendering a document to a file.
 #[derive(Debug, Clone, Default)]
@@ -124,6 +139,16 @@ pub struct RenderToFileOptions {
     /// [`GitBlameProvider`]: crate::attribution::GitBlameProvider
     pub attribution: Option<crate::attribution::AttributionMode>,
 
+    /// Client-built attribution transport JSON (hub-client's
+    /// `attributionJsonFor`: Automerge history and hub identities), as the
+    /// preview routes receive it. Installs a [`PreBuiltAttributionProvider`]
+    /// and takes precedence over `attribution`. A `String` rather than the
+    /// provider so the options stay `Debug`. `None` (the default) changes
+    /// nothing.
+    ///
+    /// [`PreBuiltAttributionProvider`]: crate::attribution::PreBuiltAttributionProvider
+    pub attribution_json: Option<String>,
+
     /// This document's book chapter seed (book-projects P4): the
     /// chapter number / appendix flag the crossref index transform
     /// seeds its section counter from and the crossref render transform
@@ -139,6 +164,41 @@ pub struct RenderToFileOptions {
     /// path still anchors project discovery and relative resources, and
     /// nothing is written back. `None` (the default) reads the file.
     pub source_override: Option<Vec<u8>>,
+
+    /// Kill the native child processes (typst, pandoc) when this is
+    /// cancelled. `None` (the default) never cancels.
+    pub cancellation: Option<crate::stage::Cancellation>,
+
+    /// Wall-clock limit for each native child process (typst, pandoc).
+    /// `None` (the default) never times out, so `q2 render` lets a long
+    /// run finish.
+    pub child_deadline: Option<std::time::Duration>,
+
+    /// Directory holding materialized capture outputs (plots) that the
+    /// pandoc writers should be able to find, as an extra
+    /// `--resource-path` entry next to the source directory (epic E10).
+    /// `None` (the default) adds nothing; Plan 6 fills it.
+    pub capture_materialize_dir: Option<PathBuf>,
+
+    /// Typst only: force a PDF or the typst source regardless of
+    /// `output-ext` (epic E8). `None` (the default) leaves `q2 render`
+    /// unchanged. Ignored for other formats.
+    pub typst_target: Option<TypstTarget>,
+
+    /// Server-recorded engine captures spliced into the AST in place of
+    /// running engines (epic E10); only the Pandoc-hybrid leg (typst,
+    /// docx, ...) uses them. Their plot files are written into
+    /// `capture_materialize_dir`, never beside the source. Empty (the
+    /// default) splices nothing.
+    pub captures: Vec<quarto_trace::EngineCapture>,
+
+    /// Per-render overlay (file overrides and runtime metadata; FR12).
+    /// Data for whoever creates the render's runtime: the creator calls
+    /// [`RenderOverlay::apply`] once, before project discovery.
+    /// `ProjectPipeline::new`, `render_to_file` and
+    /// `render_document_to_file` never read it, so nothing wraps twice.
+    /// `None` (the default) changes nothing.
+    pub overlay: Option<Arc<crate::overlay_runtime::RenderOverlay>>,
 }
 
 /// Result of rendering a document to a file.
@@ -162,6 +222,10 @@ pub struct RenderToFileResult {
     /// merged with the static-channel list before the copy step.
     /// Empty for renders that produced no engine/filter resources.
     pub resource_report: crate::project_resources::DocumentResourceReport,
+    /// Engine cells left unexecuted and shown as source: counted only on
+    /// the Pandoc-hybrid leg under [`crate::engine::ExecutionPolicy::None`]
+    /// (the preview routes), `0` otherwise.
+    pub unexecuted_cells: usize,
 }
 
 /// Render a QMD document to a file (simple API).
@@ -281,30 +345,25 @@ pub fn render_document_to_file(
         }
     };
 
-    // Per-document format resolution (bd-l6itt34u minimal slice). The
-    // effective format key is a prefer-merge of the `format:` declarations:
-    // project config → this document's front matter → `--to` (synthesized as
-    // `format: !prefer`). So a `format: revealjs` deck inside an otherwise-HTML
-    // `type: default` project — or a project-level `format: revealjs` — renders
-    // as a real deck, while an explicit `--to` still wins for every document.
-    // The result drives BOTH the transform pipeline (reveal assembly) and the
-    // output paths/extension, so it must be resolved here, before the pipeline
-    // is built. `format` is the caller's fallback default (e.g. "html").
-    let project_format = project
-        .config
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("format"))
-        .and_then(crate::format::format_key_from_config_value);
-    let document_format = std::str::from_utf8(&input_bytes)
-        .ok()
-        .and_then(crate::format::format_key_from_frontmatter);
-    let resolved_format = crate::format::resolve_format_key(
-        project_format.as_deref(),
-        document_format.as_deref(),
+    // Per-document format resolution (epic FR1-FR4, F3a): the resolver reads
+    // the same layers the merge stage does (project, `_metadata.yml` chain,
+    // this document's front matter, runtime) and applies Quarto 1's
+    // key-list rule. `format_override` is the requested format (`--to`, or
+    // the project format the orchestrator decided once for a whole-book
+    // render); it wins over every declaration. `format` is the caller's
+    // default for a document no layer gives a format. The document layer is
+    // read from `input_bytes`, the same bytes the render uses, so an
+    // editor-buffer render and its format cannot disagree.
+    let resolved_format = crate::format_resolution::resolve_document_format(
+        project,
+        input_path,
+        std::str::from_utf8(&input_bytes).ok(),
+        &crate::format_resolution::ScopeRequest::chapter(),
         format_override,
-        format,
-    );
+        runtime.as_ref(),
+    )
+    .key_or(format)
+    .to_string();
     let format: &str = &resolved_format;
 
     // Determine output paths. If the options don't specify an
@@ -316,7 +375,14 @@ pub fn render_document_to_file(
     // `output-ext` (Q1 semantics): for typst, `pdf` (the default) means
     // compile; any other value is literal and means "pandoc output only".
     // Resolved once, here, so path computation and the stages agree.
-    let output_ext = typst_output_ext(&input_bytes, project, format);
+    let output_ext = typst_output_ext(
+        &input_bytes,
+        project,
+        runtime.as_ref(),
+        input_path,
+        format,
+        options.typst_target,
+    );
     let (output_path, output_dir, output_stem) = determine_output_paths_with_ext(
         input_path,
         format,
@@ -379,6 +445,13 @@ pub fn render_document_to_file(
             crate::attribution::GitBlameProvider::new(),
         ));
     }
+    // A client-built payload wins over git blame: the hub's Automerge
+    // history is the authorship the editor shows.
+    if let Some(json) = &options.attribution_json {
+        ctx.attribution_provider = Some(std::sync::Arc::new(
+            crate::attribution::PreBuiltAttributionProvider::new(json.clone()),
+        ));
+    }
 
     // Phase 5: build a scope-aware resolver from the doc's
     // output location and the project's lib dir. Single-doc /
@@ -388,12 +461,28 @@ pub fn render_document_to_file(
     // projects pass `lib_dir == "site_libs"` so Project-scope
     // artifacts resolve under `{output_dir}/site_libs/`.
     let project_type = project_type_for(project);
-    let resolver = ResourceResolverContext::website(
-        &project.output_dir,
+    //
+    // Pandoc-written binary formats and typst (epic P2-D1) are the
+    // exception: their output may sit outside the source tree (a temp
+    // or `.quarto/preview-out/` request directory), so the rewrite is
+    // computed against the *source* location instead of the project's
+    // output directory (see `source_mirroring_resolver`).
+    let resolver = source_mirroring_resolver(
+        &render_format.identifier,
+        project,
+        input_path,
         &output_path,
-        project_type.lib_dir(),
+        &project_type.lib_dir(),
         &output_stem,
-    );
+    )
+    .unwrap_or_else(|| {
+        ResourceResolverContext::website(
+            &project.output_dir,
+            &output_path,
+            project_type.lib_dir(),
+            &output_stem,
+        )
+    });
     // Phase 6: make the same resolver available to AST transforms
     // via `RenderContext::resource_resolver` so the body-link
     // rewriter (`LinkRewriteTransform`) can compute page-relative
@@ -427,6 +516,9 @@ pub fn render_document_to_file(
     // (bd-sl79jjiq): both legs run `EngineExecutionStage`.
     config.execution_policy = options.execution_policy.clone();
     ctx.execution_policy = options.execution_policy.clone();
+    ctx.cancellation = options.cancellation.clone();
+    ctx.child_deadline = options.child_deadline;
+    ctx.capture_materialize_dir = options.capture_materialize_dir.clone();
 
     // Run the render pipeline
     let render_output = if render_format.identifier.is_native() {
@@ -438,11 +530,12 @@ pub fn render_document_to_file(
             runtime.clone(),
         ))?
     } else {
-        let (rendered, diagnostics) = pollster::block_on(render_qmd_to_pandoc(
+        let (rendered, diagnostics) = pollster::block_on(render_qmd_to_pandoc_with_captures(
             &input_bytes,
             &input_path.to_string_lossy(),
             &mut ctx,
             runtime.clone(),
+            options.captures.clone(),
         ))?;
         // Finding 3's decision (see `render_qmd_to_pandoc`'s doc comment):
         // no binary bytes travel through `content` — `PandocWriteStage`
@@ -582,13 +675,72 @@ pub(crate) fn finalize_rendered_output(
     debug!("Output: {}", output_path.display());
 
     let resource_report = std::mem::take(&mut ctx.resource_report);
+    let unexecuted_cells = ctx.unexecuted_cells;
     Ok(RenderToFileResult {
         input_path: input_path.to_path_buf(),
         output_path,
         resources_dir,
         render_output,
         resource_report,
+        unexecuted_cells,
     })
+}
+
+/// Resolver for formats whose written output is consumed relative to the
+/// *source* rather than served from the project output directory
+/// (docx, odt, epub, pptx, typst; epic P2-D1), when the output is not
+/// [`ProjectContext::output_in_place`](crate::project::ProjectContext::output_in_place).
+///
+/// `LinkRewriteTransform` rewrites every image target relative to the
+/// output page. With the stock resolver (`site_root = project.output_dir`,
+/// `page_output = <output file>`) that is only right when the page is
+/// flushed into the project output directory; a render into an
+/// arbitrary directory produces hrefs that climb out of that directory
+/// to a wrong place.
+///
+/// - Pandoc binary formats: `site_root = project.dir` and `page_output`
+///   mirrors the source path under the project, so every rewritten
+///   href is correct relative to the source (pandoc resolves it from
+///   `--resource-path <doc dir>`) whatever the project type.
+/// - typst: the `.typ` is compiled where it is written, so `page_output`
+///   stays the real output file and only `site_root` moves to `project.dir`:
+///   hrefs climb from the output directory to the source file.
+///
+/// `None` for every other format (html, revealjs, gfm, ...) and for
+/// in-place renders: their hrefs keep the stock resolver.
+#[cfg(not(target_arch = "wasm32"))]
+fn source_mirroring_resolver(
+    identifier: &crate::format::FormatIdentifier,
+    project: &crate::project::ProjectContext,
+    input_path: &Path,
+    output_path: &Path,
+    lib_dir: &str,
+    output_stem: &str,
+) -> Option<ResourceResolverContext> {
+    use crate::format::FormatIdentifier as F;
+    if project.output_in_place(input_path, output_path) {
+        return None;
+    }
+    match identifier {
+        F::Docx | F::Odt | F::Epub | F::Pptx => {
+            // Mirror the source under the project; `with_extension` keeps
+            // the stem so the page directory equals the source directory.
+            let mirror = input_path.with_extension("out");
+            Some(ResourceResolverContext::website(
+                &project.dir,
+                mirror,
+                lib_dir,
+                output_stem,
+            ))
+        }
+        F::Typst => Some(ResourceResolverContext::website(
+            &project.dir,
+            output_path,
+            lib_dir,
+            output_stem,
+        )),
+        _ => None,
+    }
 }
 
 /// When `options` has no explicit `output_path` / `output_dir`, fall
@@ -722,17 +874,42 @@ pub(crate) fn determine_output_paths_with_ext(
 
 /// The `output-ext` override for a typst render, `None` for every other
 /// format (LaTeX's `output-ext` is the latex epic's job) or when unset.
-fn typst_output_ext(input_bytes: &[u8], project: &ProjectContext, format: &str) -> Option<String> {
+///
+/// `target` (epic E8) overrides what the document asks for: `Pdf` always
+/// compiles; `Source` never compiles (an explicit `output-ext: pdf` also
+/// becomes `typ`, which would otherwise select the compile recipe).
+fn typst_output_ext(
+    input_bytes: &[u8],
+    project: &ProjectContext,
+    runtime: &dyn SystemRuntime,
+    input_path: &Path,
+    format: &str,
+    target: Option<TypstTarget>,
+) -> Option<String> {
     let render_format = Format::from_format_string(format).ok()?;
     if render_format.identifier != FormatIdentifier::Typst {
         return None;
     }
+    if target == Some(TypstTarget::Pdf) {
+        return Some(crate::output_ext::TYPST_COMPILE_EXT.to_string());
+    }
     let content = std::str::from_utf8(input_bytes).ok()?;
-    crate::output_ext::resolve_output_ext(
+    let ext = crate::output_ext::resolve_output_ext(
+        crate::output_ext::DocumentLocation {
+            project,
+            runtime,
+            path: input_path,
+        },
         content,
-        project.config.metadata.as_ref(),
         &render_format.target_format,
-    )
+    );
+    if target == Some(TypstTarget::Source) {
+        return Some(match ext {
+            Some(e) if !crate::output_ext::is_typst_compile_ext(Some(&e)) => e,
+            _ => "typ".to_string(),
+        });
+    }
+    ext
 }
 
 /// Convert a format name to a Format instance.

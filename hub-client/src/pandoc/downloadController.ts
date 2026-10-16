@@ -23,6 +23,7 @@ import type { FontListOutcome, TypstJob, TypstRunFailure, TypstRunOptions, Typst
 import { typstUiStateFor } from '../typst/typstRunner';
 import type { TypstFile } from '@quarto/typst-host';
 import { TYPST_PDF_KEY } from './formatKeys';
+import { requestedBookScope, type RenderMetadata } from './bookScope';
 
 /** One channel for both stages of a chain: pandoc's diagnostics (Rust or host) and typst's. */
 export type Diagnostic = PandocDiagnostic | TypstDiagnostic;
@@ -88,7 +89,7 @@ export interface RequestEnvelope {
   success: boolean;
   error?: string;
   diagnostics: unknown[];
-  stats?: { unexecuted_cells: number; book?: { scope: 'book' | 'chapter'; chapters: number } | null };
+  stats?: { unexecuted_cells: number; book?: { scope: 'book' | 'chapter' | 'none'; chapters: number } | null };
   request?: unknown;
 }
 
@@ -116,8 +117,8 @@ export interface TypstChainDeps {
 
 /** The sixth `buildRequest` argument, passed only when the click asked for a scope (a book chapter's menu items). */
 export interface BuildRequestExtra {
-  /** Absent for a chapter-alone request that only carries `captureGzJson`: the deps' default scope applies. */
-  scope?: 'auto' | 'chapter';
+  /** The click's runtime-layer metadata (`bookScopeMetadata`); absent for a chapter-alone request that only carries `captureGzJson`: the deps' defaults apply. */
+  metadata?: RenderMetadata;
   /** The open page's own capture, for a chapter-alone request. */
   captureGzJson?: Uint8Array;
   /** Capture blobs by chapter path (sidecar keys); only for a whole-book click. */
@@ -177,10 +178,13 @@ export interface StartOptions {
   /** The editor's current text; only the native executor uses it. */
   content?: string;
   /**
-   * A book chapter's request scope: `'auto'` is the whole book for typst, pdf and epub ("Download book
-   * as"), `'chapter'` the page alone ("This chapter only"). Absent: the controller's default (chapter).
+   * The request's runtime-layer metadata. Its `book-scope` is sent only for formats that consolidate a book
+   * (typst, pdf, epub): `'book'` is the whole book ("Download book as"), `'chapter'` the page alone ("This chapter
+   * only"). Absent: the user did not choose (and the deps' default, if any, applies). A `'book'` for a page that is
+   * not a chapter comes back as the page alone plus the `Q-5-41` notice. The controller reads the `book-scope` only
+   * to decide which captures to fetch; Rust decides the scope.
    */
-  scope?: 'auto' | 'chapter';
+  metadata?: RenderMetadata;
   /** For a whole-book click: chapter path (sidecar key) to capture doc id, for every chapter that has a capture. */
   captureDocIds?: Record<string, string>;
   /**
@@ -330,7 +334,7 @@ export class DownloadController {
 
     this.set({ phase: 'working', clickId: id, format, stage: this.deps.native ? 'native' : 'preparing' });
     try {
-      if (this.deps.native) await this.runNative(options, id, own, current, fail);
+      if (this.deps.native) await this.runNative(options, run, own, current, fail);
       else await this.runWasm(options, run, own, current, fail);
     } catch (e) {
       // The Rust request build and the worker hand-off run on this thread, so a memory
@@ -344,25 +348,48 @@ export class DownloadController {
   }
 
   private async runNative(
-    { path, format, content }: StartOptions,
-    id: number,
+    { path, format, content, metadata }: StartOptions,
+    run: Run,
     own: AbortController,
     current: () => boolean,
     fail: (state: FailureState, diagnostics: Diagnostic[], notices?: string[], message?: string) => void,
   ): Promise<void> {
-    const outcome = await this.deps.native!({ path, format: format.key, content: content ?? '' }, { signal: own.signal });
+    const id = run.seq;
+    const outcome = await this.deps.native!({ path, format: format.key, content: content ?? '', ...(metadata ? { metadata } : {}) }, { signal: own.signal });
     if (!current()) return;
+    // A newer request for the same document replaced this one: its result is the newer run's business.
+    if (outcome.kind === 'superseded') return;
+    if (outcome.kind === 'busy') return fail('native-error', [], [], download.serverBusy);
     if (outcome.kind === 'failed') return fail('native-failed', asDiagnostics(outcome.diagnostics as unknown[]), [], outcome.error);
     if (outcome.kind === 'error') return fail('native-error', [], [], outcome.message);
     const warnings = asDiagnostics(outcome.warnings as unknown[]);
     if (warnings.some(isError)) return fail('native-failed', warnings);
     const fileName = outcome.fileName || sanitizeDownloadName(path, format.extension);
+    const unexecutedCells = outcome.unexecutedCells;
+    const done: DownloadStatus = { phase: 'done', clickId: id, format, fileName, warnings, notices: [], unexecutedCells, book: outcome.book };
+    if (format.key === TYPST_PDF_KEY && this.deps.onPdf) {
+      const pdf = new Uint8Array(await outcome.blob.arrayBuffer());
+      if (!current()) return;
+      if (this.deps.overlap === true) {
+        // The preview: the same ordering rule as the wasm chain. The viewer gets each PDF at most once, and
+        // only the newest run settles the status. Nothing is saved.
+        if (!this.mayShow(run)) return;
+        this.deps.trace?.({ type: 'shown', seq: id });
+        this.deps.onPdf(pdf, { path, fileName, seq: id });
+        if (id === this.latestStarted) this.set(done);
+        return;
+      }
+      this.deps.save(outcome.blob, fileName);
+      this.deps.onPdf(pdf, { path, fileName, seq: id });
+      this.set(done);
+      return;
+    }
     this.deps.save(outcome.blob, fileName);
-    this.set({ phase: 'done', clickId: id, format, fileName, warnings, notices: [], unexecutedCells: 0 });
+    this.set(done);
   }
 
   private async runWasm(
-    { path, format, scope, captureDocIds, captureDocId, projectKey }: StartOptions,
+    { path, format, metadata, captureDocIds, captureDocId, projectKey }: StartOptions,
     run: Run,
     own: AbortController,
     current: () => boolean,
@@ -398,18 +425,19 @@ export class DownloadController {
       if (driving()) this.setStage('preparing');
     }
 
+    const scope = requestedBookScope(metadata);
     let extra: BuildRequestExtra | undefined;
     let captureNotices: string[] = [];
-    if (scope !== 'auto' && captureDocId && this.deps.fetchCaptures) {
+    if (scope !== 'book' && captureDocId && this.deps.fetchCaptures) {
       const got = await this.deps.fetchCaptures({ [path]: captureDocId }, own.signal);
       if (!current()) return;
       const bytes = got.byPath[path];
       if (bytes) extra = { captureGzJson: bytes };
       else captureNotices = [download.captureFetchFailed(got.failed.length)];
     }
-    if (scope) {
-      extra = { ...extra, scope };
-      if (scope === 'auto') {
+    if (metadata) {
+      extra = { ...extra, metadata };
+      if (scope === 'book') {
         const ids = captureDocIds ?? {};
         if (this.deps.fetchCaptures && Object.keys(ids).length > 0) {
           const got = await this.deps.fetchCaptures(ids, own.signal);

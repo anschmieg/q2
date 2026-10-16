@@ -70,7 +70,7 @@ end))
 ```{lmd}
 return pandoc.OrderedList(meta.authors:map(function(a)
   return pandoc.Plain({=[ `{lmd} a.name` ]=})
-end), pandoc.ListAttributes(1, "Decimal", "Period"))
+end))
 ```
 
 ## A section per item

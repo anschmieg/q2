@@ -18,6 +18,7 @@ import type {
   PandocFormatInfo,
   PandocRequestFile,
   PrepareImportResponse,
+  RenderPageForPreviewOptions,
   RenderPandocRequestOptions,
   RenderPandocRequestResponse,
   ResolvePandocFormatsResponse,
@@ -84,6 +85,7 @@ interface WasmModuleExtended {
     path: string,
     user_grammars?: unknown,
     capture_gz_json?: Uint8Array,
+    options?: RenderPageForPreviewOptions,
   ) => Promise<string>;
   // Attribution-aware sibling. When `attribution_json` is `undefined`,
   // behaviour is byte-identical to `render_page_in_project` (the
@@ -138,7 +140,7 @@ interface WasmModuleExtended {
     json_path: string,
   ) => string;
   get_pandoc_formats: () => string;
-  resolve_pandoc_formats: (path: string) => string;
+  resolve_pandoc_formats: (path: string, options?: ResolvePandocFormatsOptions) => string;
   // Document import (epic 2026-10-03-document-import-epic.md, interface 2)
   get_import_formats: () => string;
   prepare_import: (file_name: string, size: number, sha256_hex: string) => string;
@@ -642,16 +644,18 @@ export async function renderPageForPreview(
   path: string,
   userGrammars?: unknown,
   captureGzJson?: Uint8Array,
+  options?: RenderPageForPreviewOptions,
 ): Promise<RenderResponse> {
   const wasm = getWasm();
   return JSON.parse(
-    await wasm.render_page_for_preview(path, userGrammars, captureGzJson),
+    await wasm.render_page_for_preview(path, userGrammars, captureGzJson, options),
   );
 }
 
 // ---- pandoc-wasm epic (R2): the request exports --------------------------
 
 export type {
+  RenderPageForPreviewOptions,
   PandocFormatClass,
   PandocFormatInfo,
   PandocRequestFile,
@@ -666,7 +670,8 @@ export type {
  * (a `key` of {@link getPandocFormats}). `sourceDateEpoch` is seconds (the
  * click time in production). A document with errors comes back with no
  * `request`; the `diagnostics` say why. A book chapter requested as typst,
- * pdf or epub is the whole book unless `scope` is `'chapter'`. The request's
+ * pdf or epub is the chapter alone unless `metadata['book-scope']` is `'book'`; a
+ * page that is not a chapter comes back alone with the `Q-5-41` notice. The request's
  * bytes are copies the caller owns.
  */
 export async function renderPandocRequest(
@@ -678,14 +683,21 @@ export async function renderPandocRequest(
     typstAvailableFonts?: string[];
     /** Cancels the downloads of remote images (the click's signal). */
     signal?: AbortSignal;
-    /** `'auto'` (the default) renders a book chapter's whole book for typst, pdf and epub. */
-    scope?: 'auto' | 'chapter';
+    /**
+     * This call's runtime-layer metadata (a JSON object), overlaid on the
+     * process-wide runtime metadata. `{ 'book-scope': 'book' }` renders a book
+     * chapter's whole book for typst, pdf and epub; `'chapter'` or no
+     * `book-scope` the page alone.
+     */
+    metadata?: Record<string, unknown>;
     /** Capture blobs by chapter path (see `RenderPandocRequestOptions`). */
     capturesByPath?: Record<string, Uint8Array>;
     /** Called before each chapter of a book render, with a 1-based index. */
     onProgress?: (index: number, total: number, file: string) => void | Promise<void>;
     /** The active file's authorship, for comment and change authors (see `RenderPandocRequestOptions`). */
     attributionJson?: string;
+    /** The viewer's requested format; accepted for symmetry, the request names its own `format`. */
+    to?: string;
   } = {},
 ): Promise<RenderPandocRequestResponse> {
   const wasm = getWasm();
@@ -697,7 +709,8 @@ export async function renderPandocRequest(
     options.typstAvailableFonts,
     options.signal,
     {
-      scope: options.scope,
+      metadata: options.metadata,
+      to: options.to,
       capturesByPath: options.capturesByPath,
       onProgress: options.onProgress,
       attributionJson: options.attributionJson,
@@ -804,9 +817,26 @@ export function classifyImportFailure(
   return JSON.parse(getWasm().classify_import_failure(kind, status, stderr));
 }
 
-/** The document's own format(s): `format:` of the document, else `_quarto.yml`, else `html`. */
-export function resolvePandocFormats(path: string): ResolvePandocFormatsResponse {
-  return JSON.parse(getWasm().resolve_pandoc_formats(path));
+/** Options of {@link resolvePandocFormats}. */
+export interface ResolvePandocFormatsOptions {
+  /** The editor buffer: its front matter is read instead of the VFS copy of `path`. */
+  contentOverride?: string;
+  /**
+   * The requested format (`q2 preview --to`): wins over the document's own and the project's,
+   * for every page (FR2).
+   */
+  to?: string;
+  /** This call's runtime metadata layer (`-M`); a scalar `format` in it selects, a map never does. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * The document's own format(s), resolved in Rust for a chapter: `format:` of the document, else
+ * the `_metadata.yml` chain, else `_quarto.yml`, else `html`. The result's `key`/`class` are the
+ * document's own format; `formats` lists every declared key.
+ */
+export function resolvePandocFormats(path: string, options?: ResolvePandocFormatsOptions): ResolvePandocFormatsResponse {
+  return JSON.parse(getWasm().resolve_pandoc_formats(path, options));
 }
 
 /**

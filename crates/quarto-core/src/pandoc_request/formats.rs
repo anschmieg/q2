@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-use quarto_pandoc_types::ConfigValue;
 use quarto_system_runtime::SystemRuntime;
 use serde::Serialize;
 
@@ -167,62 +166,73 @@ pub struct BookResolution {
     pub chapter: bool,
 }
 
-/// The keys of a `format:` value: a string, or the keys of a map in order.
-fn keys_of_format_value(value: &ConfigValue) -> Vec<String> {
-    if let Some(entries) = value.as_map_entries() {
-        return entries.iter().map(|e| e.key.clone()).collect();
-    }
-    value.as_plain_text().into_iter().collect()
-}
-
-/// The `format:` keys of a QMD document's YAML front matter, in order, or
-/// `None` when the document names none (no front matter, no `format` key, an
-/// unparsable block).
-pub fn frontmatter_format_keys(content: &str) -> Option<Vec<String>> {
-    let trimmed = content.trim_start();
-    let after_first = trimmed.strip_prefix("---")?;
-    let end = after_first.find("\n---")?;
-    let docs = yaml_rust2::YamlLoader::load_from_str(&after_first[..end]).ok()?;
-    let doc = docs.first()?;
-    let keys: Vec<String> = match &doc["format"] {
-        yaml_rust2::Yaml::String(s) => vec![s.clone()],
-        yaml_rust2::Yaml::Hash(map) => map
-            .keys()
-            .filter_map(|k| k.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
-    };
-    (!keys.is_empty()).then_some(keys)
-}
-
-/// Pure resolution: the document's own `format:` wins; otherwise the
-/// project's; otherwise `html`.
+/// Pure resolution through [`crate::format_resolution`]: Quarto 1's key-list
+/// rule over the document's front matter, the `_metadata.yml` chain and the
+/// project's `format:`; `html` when none declares one. The selected format
+/// comes first, then the other declared keys in order.
 ///
-/// `project_metadata` is the whole project metadata map (its `format:` is
-/// the project's formats; `output-ext` is read from it too).
+/// `location` is the document's project and runtime, when it has them: the
+/// project's `format:` is the project's formats, `_metadata.yml` and the
+/// runtime layer (a scalar `format`) take part, and `output-ext` is read from
+/// every metadata layer. Without one only the document's own front matter is
+/// consulted. The request is for a chapter, the browser preview's scope.
+/// `requested` is the session's `--to` (the live viewer's): it wins over the
+/// document and the project (FR2), and is why the first key can name a format
+/// no layer declares.
 ///
 /// The `typst-pdf` key is the internal "typst compiled to PDF" artifact, never
 /// something a document may name: a `typst` document resolves to it (the
 /// default `output-ext`) or to the `typst`-source key with its literal
 /// extension (any other `output-ext`, as in Q1). A declared `pdf` is LaTeX,
 /// which is not in the table ([`FormatClass::Neither`]).
-pub fn resolve_formats(content: &str, project_metadata: Option<&ConfigValue>) -> ResolvedFormats {
-    let project_format = project_metadata.and_then(|m| m.get("format"));
-    let (source, keys) = if let Some(keys) = frontmatter_format_keys(content) {
-        (FormatSource::Document, keys)
-    } else if let Some(keys) = project_format
-        .map(keys_of_format_value)
-        .filter(|k| !k.is_empty())
-    {
-        (FormatSource::Project, keys)
-    } else {
-        (FormatSource::Default, vec!["html".to_string()])
+pub fn resolve_formats(
+    content: &str,
+    location: Option<crate::output_ext::DocumentLocation<'_>>,
+    requested: Option<&str>,
+) -> ResolvedFormats {
+    use crate::format_resolution::{
+        FormatInputs, FormatResolution, ScopeRequest, format_keys_of, resolve_document_format,
+        select_formats,
     };
+    use crate::metadata_layers::LayerKind;
+
+    let resolution: FormatResolution = match location {
+        Some(l) => resolve_document_format(
+            l.project,
+            l.path,
+            Some(content),
+            &ScopeRequest::chapter(),
+            requested,
+            l.runtime,
+        ),
+        None => {
+            let document_keys = crate::metadata_layers::document_layer_from_content(content)
+                .get("format")
+                .map(format_keys_of)
+                .unwrap_or_default();
+            select_formats(FormatInputs {
+                document_keys: &document_keys,
+                cli_to: requested,
+                ..Default::default()
+            })
+            .into()
+        }
+    };
+    let source = match resolution.source {
+        Some(LayerKind::Document | LayerKind::Directory) => FormatSource::Document,
+        Some(_) => FormatSource::Project,
+        None => FormatSource::Default,
+    };
+    let selected = resolution.key.clone();
+    let others = resolution.all_keys.iter().filter(|k| **k != selected);
+    let keys: Vec<String> = std::iter::once(selected.clone())
+        .chain(others.cloned())
+        .collect();
     ResolvedFormats {
         source,
         formats: keys
             .into_iter()
-            .map(|declared| resolve_declared(&declared, content, project_metadata))
+            .map(|declared| resolve_declared(&declared, content, location))
             .collect(),
         book: None,
     }
@@ -231,7 +241,7 @@ pub fn resolve_formats(content: &str, project_metadata: Option<&ConfigValue>) ->
 fn resolve_declared(
     declared: &str,
     content: &str,
-    project_metadata: Option<&ConfigValue>,
+    location: Option<crate::output_ext::DocumentLocation<'_>>,
 ) -> ResolvedFormat {
     // The artifact key is never a document's own format, and a declared `pdf` (LaTeX) is not in the table.
     if declared == TYPST_PDF_KEY {
@@ -242,7 +252,10 @@ fn resolve_declared(
         };
     }
     if declared == "typst" {
-        let ext = crate::output_ext::resolve_output_ext(content, project_metadata, "typst");
+        let ext = match location {
+            Some(location) => crate::output_ext::resolve_output_ext(location, content, "typst"),
+            None => crate::output_ext::resolve_document_output_ext(content, "typst"),
+        };
         return if crate::output_ext::is_typst_compile_ext(ext.as_deref()) {
             ResolvedFormat {
                 key: TYPST_PDF_KEY.to_string(),
@@ -275,11 +288,53 @@ pub fn resolve_document_formats(
         .map_err(|e| format!("Failed to read file: {e}"))?;
     let project = ProjectContext::discover(path, runtime)
         .map_err(|e| format!("Failed to discover project context: {e}"))?;
-    let mut resolved = resolve_formats(&content, project.config.metadata.as_ref());
+    Ok(resolve_document_formats_in(
+        &project, path, &content, runtime, None,
+    ))
+}
+
+/// [`resolve_document_formats`] over a project the caller already holds (a
+/// cached discovery) and the document text to read (an editor buffer, which
+/// wins over whatever the runtime holds for `path`).
+pub fn resolve_document_formats_in(
+    project: &ProjectContext,
+    path: &Path,
+    content: &str,
+    runtime: &dyn SystemRuntime,
+    requested: Option<&str>,
+) -> ResolvedFormats {
+    let mut resolved = resolve_formats(
+        content,
+        Some(crate::output_ext::DocumentLocation {
+            project,
+            runtime,
+            path,
+        }),
+        requested,
+    );
     if project.project_kind() == crate::project::ProjectKind::Book {
-        resolved.book = Some(book_resolution(&project, path, runtime));
+        // Membership compares against the project's absolute file list, and the hub client asks with the
+        // project-relative path it shows in its file tree.
+        let active = runtime
+            .canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf());
+        resolved.book = Some(book_resolution(project, &active, runtime));
     }
-    Ok(resolved)
+    resolved
+}
+
+/// The format the live preview renders `key` with, or `None` when the preview
+/// does not render it through the React pipeline (the full-DOM renderer, a
+/// download or nothing takes it): `html` previews as `q2-preview`, `revealjs`
+/// and the other `q2-*` pseudo-formats as themselves, `q2-html-render` is the
+/// explicit opt-out. The Rust half of the hub-client's former `getQ2Format`.
+pub fn preview_pseudo_format(key: &str) -> Option<String> {
+    match key {
+        "q2-html-render" => None,
+        "html" => Some("q2-preview".to_string()),
+        k if k.starts_with("q2-") || k == "revealjs" => Some(k.to_string()),
+        _ => None,
+    }
 }
 
 /// Computed without Pass 1 from the book's file list alone. A broken list
@@ -301,11 +356,9 @@ fn book_resolution(
         .iter()
         .map(|f| super::captures::sidecar_key(runtime, &project.dir.join(f)))
         .collect();
-    let active = super::captures::sidecar_key(runtime, path);
-    BookResolution {
-        chapter: chapters.contains(&active),
-        chapters,
-    }
+    let chapter = crate::project::book::book_membership(project, path, runtime)
+        .is_ok_and(|m| m.active_is_chapter);
+    BookResolution { chapter, chapters }
 }
 
 #[cfg(test)]
@@ -338,14 +391,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_preview_pseudo_format_follows_the_react_rule() {
+        assert_eq!(preview_pseudo_format("html").as_deref(), Some("q2-preview"));
+        assert_eq!(
+            preview_pseudo_format("revealjs").as_deref(),
+            Some("revealjs")
+        );
+        assert_eq!(
+            preview_pseudo_format("q2-slides").as_deref(),
+            Some("q2-slides")
+        );
+        assert_eq!(preview_pseudo_format("q2-html-render"), None);
+        for key in ["typst-pdf", "docx", "acm-html", "latex"] {
+            assert_eq!(preview_pseudo_format(key), None, "{key}");
+        }
+    }
+
     fn keys(r: &ResolvedFormats) -> Vec<&str> {
         r.formats.iter().map(|f| f.key.as_str()).collect()
+    }
+
+    /// F8: the requested format (`q2 preview --to`) wins over the document's
+    /// own `format:`, and over a document that names none.
+    #[test]
+    fn the_requested_format_wins_over_the_document() {
+        let r = resolve_formats("---\nformat: html\n---\n", None, Some("typst"));
+        assert_eq!(keys(&r)[0], "typst-pdf", "{r:?}");
+        let r = resolve_formats("# no front matter\n", None, Some("typst"));
+        assert_eq!(keys(&r)[0], "typst-pdf", "{r:?}");
+        let r = resolve_formats("# no front matter\n", None, Some("revealjs"));
+        assert_eq!(keys(&r)[0], "revealjs", "{r:?}");
+        // Not asked: unchanged.
+        let r = resolve_formats("---\nformat: html\n---\n", None, None);
+        assert_eq!(keys(&r)[0], "html");
     }
 
     #[test]
     fn the_first_key_of_a_format_map_comes_first() {
         let r = resolve_formats(
             "---\nformat:\n  docx: default\n  html: default\n---\n",
+            None,
             None,
         );
         assert_eq!(r.source, FormatSource::Document);
@@ -355,16 +441,16 @@ mod tests {
 
     #[test]
     fn a_string_format_and_no_format() {
-        let r = resolve_formats("---\nformat: pptx\n---\n", None);
+        let r = resolve_formats("---\nformat: pptx\n---\n", None, None);
         assert_eq!(keys(&r), ["pptx"]);
-        let r = resolve_formats("# no front matter\n", None);
+        let r = resolve_formats("# no front matter\n", None, None);
         assert_eq!(r.source, FormatSource::Default);
         assert_eq!(keys(&r), ["html"]);
     }
 
     #[test]
     fn an_unknown_format_is_neither() {
-        let r = resolve_formats("---\nformat: nonsense\n---\n", None);
+        let r = resolve_formats("---\nformat: nonsense\n---\n", None, None);
         assert_eq!(r.formats[0].class, FormatClass::Neither);
     }
 }
@@ -374,7 +460,7 @@ mod output_ext_tests {
     use super::*;
 
     fn first(content: &str) -> ResolvedFormat {
-        resolve_formats(content, None).formats.remove(0)
+        resolve_formats(content, None, None).formats.remove(0)
     }
 
     #[test]

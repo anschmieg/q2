@@ -244,7 +244,7 @@ end))
 ```{lmd}
 return pandoc.OrderedList(meta.authors:map(function(a)
   return pandoc.Plain({=[ `{lmd} a.name` ]=})
-end), pandoc.ListAttributes(1, "Decimal", "Period"))
+end))
 ```
 
 ## A section per item
@@ -262,7 +262,7 @@ return out
 ```
 ````
 
-A tight list from `pandoc.Plain` items, items with several blocks from block fragments, an ordered list, and a section per element from `:extend`. The ordered list spells out its `pandoc.ListAttributes`; see [Current limitations](#current-limitations). [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/03-lists)
+A tight list from `pandoc.Plain` items, items with several blocks from block fragments, an ordered list, and a section per element from `:extend`. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/03-lists)
 :::::
 
 ## Setup cells and shared state

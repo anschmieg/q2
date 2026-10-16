@@ -19,6 +19,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
+use quarto_core::overlay_runtime::RenderOverlay;
 use quarto_core::project::render_scripts::RenderHost;
 use quarto_core::{
     BinaryDependencies, DocumentInfo, Format, HtmlRenderConfig, ProjectConfig, ProjectContext,
@@ -55,6 +56,19 @@ fn get_runtime_arc() -> &'static Arc<WasmRuntime> {
         populate_vfs_with_embedded_resources(&runtime);
         Arc::new(runtime)
     })
+}
+
+/// The runtime for one render: the global VFS runtime wrapped in `overlay`
+/// when there is one (format-resolution epic FR12). Every wasm render entry
+/// that creates a render's runtime calls this once, before its first
+/// `ProjectContext::discover`, and hands the result down; nothing below an
+/// entry wraps again. `None` is the global runtime itself.
+fn render_runtime(overlay: Option<&Arc<RenderOverlay>>) -> Arc<dyn SystemRuntime> {
+    let base = Arc::clone(get_runtime_arc()) as Arc<dyn SystemRuntime>;
+    match overlay {
+        Some(overlay) => overlay.apply(base),
+        None => base,
+    }
 }
 
 /// Populate the VFS with embedded resources.
@@ -769,40 +783,42 @@ fn coerce_format_for_print(format_str: &str) -> &str {
     }
 }
 
-/// Detect the format string from QMD content's YAML frontmatter.
-/// Returns the format name (e.g., "q2-slides", "q2-debug", "html", "acm-html")
-/// or "html" as default when no format key is present.
-fn detect_format_from_content(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return "html".to_string();
-    }
-    let after_first = &trimmed[3..];
-    let end = after_first.find("\n---");
-    let yaml_str = match end {
-        Some(pos) => &after_first[..pos],
-        None => return "html".to_string(),
-    };
-    let docs = match yaml_rust2::YamlLoader::load_from_str(yaml_str) {
-        Ok(docs) => docs,
-        Err(_) => return "html".to_string(),
-    };
-    let doc = match docs.first() {
-        Some(doc) => doc,
-        None => return "html".to_string(),
-    };
-    match doc["format"] {
-        yaml_rust2::Yaml::String(ref s) => s.clone(),
-        yaml_rust2::Yaml::Hash(ref map) => {
-            // yaml-rust2 preserves insertion order (uses LinkedHashMap)
-            map.keys()
-                .next()
-                .and_then(|k| k.as_str())
-                .unwrap_or("html")
-                .to_string()
-        }
-        _ => "html".to_string(),
-    }
+/// The format a document names in its **own** front matter: the first `format:`
+/// key, else `html`. Only for entries that have no path (so no project to
+/// resolve against): `parse_qmd_to_ast*` and the path-less `render_qmd_content`'s
+/// synthetic project. Every path-bearing entry calls [`resolve_entry_format`].
+fn front_matter_format(content: &str) -> String {
+    use quarto_core::format_resolution::format_keys_of;
+    quarto_core::metadata_layers::document_layer_from_content(content)
+        .get("format")
+        .map(format_keys_of)
+        .and_then(|keys| keys.into_iter().next())
+        .unwrap_or_else(|| "html".to_string())
+}
+
+/// The format of the document at `path` for a render entry: the one resolver
+/// (`quarto_core::format_resolution`) over the document text, the
+/// `_metadata.yml` chain, the project and the runtime layer. The request is
+/// for a chapter, the browser preview's scope, so a chapter's own `format:`
+/// wins over the project's even in a book. `requested` is the call's `to` (the
+/// live viewer's `--to`), which wins over both (FR2); every entry but the
+/// viewer's passes `None`.
+fn resolve_entry_format(
+    project: &ProjectContext,
+    path: &Path,
+    content: &str,
+    requested: Option<&str>,
+    runtime: &dyn SystemRuntime,
+) -> String {
+    quarto_core::format_resolution::resolve_document_format(
+        project,
+        path,
+        Some(content),
+        &quarto_core::format_resolution::ScopeRequest::chapter(),
+        requested,
+        runtime,
+    )
+    .key
 }
 
 /// Parse QMD content to Pandoc AST JSON using the unified pipeline.
@@ -867,7 +883,7 @@ pub async fn parse_qmd_to_ast_with_attribution(
     let doc = DocumentInfo::from_path(path);
     let binaries = BinaryDependencies::new();
 
-    let format_str = detect_format_from_content(content);
+    let format_str = front_matter_format(content);
     let format = match Format::from_format_string(&format_str) {
         Ok(f) => f,
         Err(e) => {
@@ -1074,7 +1090,18 @@ pub async fn parse_qmd_to_ast_with_attribution(
 /// JSON: `{ "success": true, "html": "..." }` or `{ "success": false, "error": "...", "diagnostics": [...] }`
 #[wasm_bindgen]
 pub async fn render_qmd(path: &str, user_grammars: Option<JsUserGrammars>) -> String {
-    let runtime = get_runtime();
+    render_qmd_with_overlay(path, user_grammars, None).await
+}
+
+/// [`render_qmd`] with a per-render overlay (FR12); the exported entry passes
+/// `None`.
+async fn render_qmd_with_overlay(
+    path: &str,
+    user_grammars: Option<JsUserGrammars>,
+    overlay: Option<Arc<RenderOverlay>>,
+) -> String {
+    let runtime_arc = render_runtime(overlay.as_ref());
+    let runtime = runtime_arc.as_ref();
     let path = Path::new(path);
 
     // Read the file from VFS
@@ -1098,6 +1125,8 @@ pub async fn render_qmd(path: &str, user_grammars: Option<JsUserGrammars>) -> St
         Vec::new(),
         None,
         None,
+        None,
+        runtime_arc.clone(),
     )
     .await
 }
@@ -1125,7 +1154,17 @@ pub async fn render_qmd(path: &str, user_grammars: Option<JsUserGrammars>) -> St
 /// or `{ "success": false, "error": "...", "diagnostics": [...] }`.
 #[wasm_bindgen]
 pub async fn render_printable(path: &str, user_grammars: Option<JsUserGrammars>) -> String {
-    let runtime = get_runtime();
+    render_printable_with_overlay(path, user_grammars, None).await
+}
+
+/// [`render_printable`] with a per-render overlay (FR12).
+async fn render_printable_with_overlay(
+    path: &str,
+    user_grammars: Option<JsUserGrammars>,
+    overlay: Option<Arc<RenderOverlay>>,
+) -> String {
+    let runtime_arc = render_runtime(overlay.as_ref());
+    let runtime = runtime_arc.as_ref();
     let path = Path::new(path);
 
     let content = match runtime.file_read(path) {
@@ -1138,7 +1177,13 @@ pub async fn render_printable(path: &str, user_grammars: Option<JsUserGrammars>)
         Err(e) => return error_response(format!("Failed to discover project context: {}", e)),
     };
 
-    let detected = detect_format_from_content(std::str::from_utf8(&content).unwrap_or(""));
+    let detected = resolve_entry_format(
+        &project,
+        path,
+        std::str::from_utf8(&content).unwrap_or(""),
+        None,
+        runtime,
+    );
     let printable_format = coerce_format_for_print(&detected).to_string();
 
     render_single_doc_to_response(
@@ -1150,6 +1195,8 @@ pub async fn render_printable(path: &str, user_grammars: Option<JsUserGrammars>)
         Vec::new(),
         None,
         Some(&printable_format),
+        None,
+        runtime_arc.clone(),
     )
     .await
 }
@@ -1183,6 +1230,9 @@ pub async fn render_qmd_content(
         Vec::new(),
         None,
         None,
+        None,
+        // No overlay on the path-less render: it has no project to resolve.
+        render_runtime(None),
     )
     .await
 }
@@ -1284,8 +1334,30 @@ pub async fn render_page_in_project_with_attribution(
     // instead of relying on the ToInt32 coercion of `undefined`.
     prefer_preview_format: Option<bool>,
 ) -> String {
+    render_page_in_project_with_overlay(
+        path,
+        user_grammars,
+        attribution_json,
+        capture_gz_json,
+        prefer_preview_format,
+        None,
+    )
+    .await
+}
+
+/// [`render_page_in_project_with_attribution`] with a per-render overlay
+/// (FR12).
+async fn render_page_in_project_with_overlay(
+    path: &str,
+    user_grammars: Option<JsUserGrammars>,
+    attribution_json: Option<String>,
+    capture_gz_json: Option<Vec<u8>>,
+    prefer_preview_format: Option<bool>,
+    overlay: Option<Arc<RenderOverlay>>,
+) -> String {
     let prefer_preview_format = prefer_preview_format.unwrap_or(false);
-    let runtime = get_runtime();
+    let runtime_arc = render_runtime(overlay.as_ref());
+    let runtime = runtime_arc.as_ref();
     let path_buf = std::path::PathBuf::from(path);
     let path = path_buf.as_path();
 
@@ -1331,6 +1403,8 @@ pub async fn render_page_in_project_with_attribution(
             captures,
             attribution_json,
             None,
+            None,
+            runtime_arc.clone(),
         )
         .await;
     }
@@ -1356,13 +1430,15 @@ pub async fn render_page_in_project_with_attribution(
         RenderHost::HubClient,
         captures,
         attribution_json,
+        None,
+        runtime_arc.clone(),
     )
     .await
 }
 
 /// Like [`render_page_in_project`], but applies the `q2 preview`
 /// format-default substitution: a document with no explicit
-/// `format:` key (which `detect_format_from_content` reports as
+/// `format:` key (which the format resolver reports as
 /// `html`) renders through the q2-preview pipeline and returns
 /// `ast_json`. Explicit non-html formats are honoured as-is.
 ///
@@ -1381,13 +1457,47 @@ pub async fn render_page_in_project_with_attribution(
 /// stays on the default registry. The SPA reads the capture binary
 /// doc out of the IndexDocument's capture sidecar (V2 schema, C.3)
 /// and threads it through this argument.
+///
+/// `options` (optional, trailing) is `{ to?: string, metadata?: Record<string,
+/// unknown> }`: the live viewer's `--to` (the requested format, which wins over
+/// the document's and the project's) and `-M` (the render's runtime metadata
+/// layer). Absent, the render is what it always was.
 #[wasm_bindgen]
 pub async fn render_page_for_preview(
     path: &str,
     user_grammars: Option<JsUserGrammars>,
     capture_gz_json: Option<Vec<u8>>,
+    options: Option<JsValue>,
 ) -> String {
-    let runtime = get_runtime();
+    // The viewer's `to` / `metadata` (F8-D2): `metadata` is this call's
+    // runtime layer, like every other overlay (FR12); `to` is the requested
+    // format. Both are per call, so two renders cannot see each other's.
+    let options = match parse_preview_options(options) {
+        Ok(o) => o,
+        Err(e) => return error_response(e),
+    };
+    let overlay = overlay_with_metadata(None, options.metadata);
+    render_page_for_preview_with_overlay(
+        path,
+        user_grammars,
+        capture_gz_json,
+        overlay,
+        options.to.as_deref(),
+    )
+    .await
+}
+
+/// [`render_page_for_preview`] with a per-render overlay (FR12) and the
+/// requested format.
+async fn render_page_for_preview_with_overlay(
+    path: &str,
+    user_grammars: Option<JsUserGrammars>,
+    capture_gz_json: Option<Vec<u8>>,
+    overlay: Option<Arc<RenderOverlay>>,
+    requested_format: Option<&str>,
+) -> String {
+    let runtime_arc = render_runtime(overlay.as_ref());
+    let runtime = runtime_arc.as_ref();
     let path_buf = std::path::PathBuf::from(path);
     let path = path_buf.as_path();
 
@@ -1428,6 +1538,8 @@ pub async fn render_page_for_preview(
             captures,
             None,
             None,
+            requested_format,
+            runtime_arc.clone(),
         )
         .await;
     }
@@ -1447,6 +1559,8 @@ pub async fn render_page_for_preview(
         RenderHost::NativePreview,
         captures,
         None,
+        requested_format,
+        runtime_arc.clone(),
     )
     .await
 }
@@ -1561,6 +1675,7 @@ fn pandoc_request_envelope(
                 scope: match b.scope {
                     quarto_core::pandoc_request::render::ResolvedBookScope::Book => "book",
                     quarto_core::pandoc_request::render::ResolvedBookScope::Chapter => "chapter",
+                    quarto_core::pandoc_request::render::ResolvedBookScope::NoBook => "none",
                 },
                 chapters: b.chapters,
             }),
@@ -1597,12 +1712,15 @@ fn pandoc_request_envelope(
 /// `request`. A document inside a `_quarto.yml` project renders as the
 /// project's active page (R7): the request carries that page alone, with the
 /// project's metadata and `format:` layers applied. For a book chapter
-/// requested as typst, pdf or epub with `options.scope` `'auto'` (the
-/// default) the request is the whole book (R9); docx and pptx, a page that is
-/// not a chapter and `scope: 'chapter'` stay chapter-alone. `stats.book` is
-/// `{ scope: 'book' | 'chapter', chapters }` in a book project, else `null`.
+/// requested as typst, pdf or epub with `options.metadata` `{ 'book-scope': 'book' }` the request
+/// is the whole book (R9); with `'chapter'` or no `book-scope` (the active page
+/// is the target, so it defaults to the chapter) it is the chapter alone, as
+/// docx and pptx always are. A page that is not a chapter is delivered alone
+/// with the `Q-5-41` notice (`stats.book.scope` `'none'`), or, for `'book'`,
+/// the `Q-5-48` warning. `stats.book` is `{ scope: 'book' | 'chapter' | 'none', chapters }`
+/// in a book project, else `null`.
 ///
-/// `options` (optional, trailing) is `{ scope?: 'auto' | 'chapter',
+/// `options` (optional, trailing) is `{ metadata?: Record<string, unknown>,
 /// attributionJson?: string (the active file's authorship, stamped onto docx
 /// comments and tracked changes; ignored by a whole-book request),
 /// capturesByPath?: Record<string, Uint8Array>, onProgress?: (index, total,
@@ -1629,6 +1747,43 @@ pub async fn render_pandoc_request(
     abort_signal: Option<JsValue>,
     options: Option<JsValue>,
 ) -> JsValue {
+    render_pandoc_request_with_overlay(
+        path,
+        format,
+        source_date_epoch,
+        capture_gz_json,
+        typst_available_fonts,
+        abort_signal,
+        options,
+        None,
+    )
+    .await
+}
+
+/// [`render_pandoc_request`] with a per-render overlay (FR12); the request's
+/// `metadata` is merged into it.
+#[allow(clippy::too_many_arguments)]
+async fn render_pandoc_request_with_overlay(
+    path: &str,
+    format: &str,
+    source_date_epoch: Option<f64>,
+    capture_gz_json: Option<Vec<u8>>,
+    typst_available_fonts: Option<Vec<String>>,
+    abort_signal: Option<JsValue>,
+    options: Option<JsValue>,
+    overlay: Option<Arc<RenderOverlay>>,
+) -> JsValue {
+    let fail =
+        |message: String| pandoc_request_envelope(false, Some(message), Vec::new(), None, 0, None);
+    let mut options = match parse_request_options(options) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    // The request's `metadata` is this call's runtime layer (F4-D1). It rides
+    // in the overlay, never in process state, so two overlapping renders with
+    // different `metadata` cannot see each other's (F4-D5: the process-wide
+    // `vfs_set_runtime_metadata` stays underneath it).
+    let overlay = overlay_with_metadata(overlay, options.metadata.take());
     // Click-time snapshot: every read in this request, including the ones
     // after the first remote-image `await`, goes through this copy, so the
     // Automerge sync mutating the live VFS cannot change what the request
@@ -1640,14 +1795,14 @@ pub async fn render_pandoc_request(
             .snapshot()
             .with_abort_signal(abort_signal.clone().unwrap_or(JsValue::UNDEFINED)),
     );
-    let runtime = &*snapshot;
-    let path_buf = std::path::PathBuf::from(path);
-    let fail =
-        |message: String| pandoc_request_envelope(false, Some(message), Vec::new(), None, 0, None);
-    let options = match parse_request_options(options) {
-        Ok(o) => o,
-        Err(e) => return fail(e),
+    // The snapshot is this request's runtime; the overlay wraps it here, once,
+    // before the project is discovered.
+    let runtime_arc: Arc<dyn SystemRuntime> = match &overlay {
+        Some(overlay) => overlay.apply(Arc::clone(&snapshot) as Arc<dyn SystemRuntime>),
+        None => Arc::clone(&snapshot) as Arc<dyn SystemRuntime>,
     };
+    let runtime = runtime_arc.as_ref();
+    let path_buf = std::path::PathBuf::from(path);
 
     let content = match runtime.file_read(&path_buf) {
         Ok(bytes) => bytes,
@@ -1678,7 +1833,6 @@ pub async fn render_pandoc_request(
                 .map(|s| s as i64),
             captures,
             typst_available_fonts,
-            scope: options.scope,
             captures_by_path: options.captures_by_path,
             capture_error: None,
             hooks: Some(&hooks),
@@ -1692,7 +1846,7 @@ pub async fn render_pandoc_request(
                 )) as Arc<dyn quarto_core::attribution::AttributionSourceProvider>
             }),
         },
-        Arc::clone(&snapshot) as Arc<dyn SystemRuntime>,
+        runtime_arc.clone(),
     )
     .await;
 
@@ -1737,9 +1891,33 @@ pub async fn render_pandoc_request(
     )
 }
 
+/// `overlay` with the request's `metadata` merged on top of its own (objects
+/// recursively, the request wins).
+fn overlay_with_metadata(
+    overlay: Option<Arc<RenderOverlay>>,
+    metadata: Option<serde_json::Value>,
+) -> Option<Arc<RenderOverlay>> {
+    let Some(metadata) = metadata else {
+        return overlay;
+    };
+    let mut merged = overlay.as_deref().cloned().unwrap_or_default();
+    merged.metadata = quarto_core::overlay_runtime::merge_runtime_metadata(
+        merged.metadata.take(),
+        Some(&metadata),
+    );
+    Some(Arc::new(merged))
+}
+
 /// The unpacked `options` object of [`render_pandoc_request`].
 struct RequestOptions {
-    scope: quarto_core::pandoc_request::render::BookScope,
+    /// The call's runtime-layer metadata (a JSON object), e.g.
+    /// `{"book-scope": "chapter"}`.
+    metadata: Option<serde_json::Value>,
+    /// The viewer's requested format (`--to`), accepted beside `metadata`
+    /// so one options shape serves every entry. A pandoc request already
+    /// names its output format positionally, so nothing reads it here.
+    #[allow(dead_code)]
+    to: Option<String>,
     captures_by_path: std::collections::BTreeMap<String, Vec<u8>>,
     on_progress: Option<js_sys::Function>,
     /// The transport JSON of `parse_qmd_to_ast_with_attribution`, for the
@@ -1747,13 +1925,67 @@ struct RequestOptions {
     attribution_json: Option<String>,
 }
 
+/// A JS value as the JSON object it must be (`options.metadata`). It crosses
+/// through `JSON.stringify` (no `serde-wasm-bindgen` here), so only
+/// JSON-representable values survive, as on the native routes.
+fn metadata_object(value: &JsValue) -> Result<serde_json::Value, String> {
+    const MESSAGE: &str = "options.metadata must be a JSON object";
+    if !value.is_object() || js_sys::Array::is_array(value) {
+        return Err(MESSAGE.to_string());
+    }
+    let json = js_sys::JSON::stringify(value)
+        .ok()
+        .and_then(|s| s.as_string())
+        .ok_or_else(|| "options.metadata is not JSON-serialisable".to_string())?;
+    match serde_json::from_str::<serde_json::Value>(&json) {
+        Ok(object @ serde_json::Value::Object(_)) => Ok(object),
+        _ => Err(MESSAGE.to_string()),
+    }
+}
+
+/// `options.to`: the requested format, a non-empty string when present.
+fn get_to(options: &JsValue) -> Result<Option<String>, String> {
+    let to = js_sys::Reflect::get(options, &"to".into()).unwrap_or(JsValue::UNDEFINED);
+    if to.is_undefined() || to.is_null() {
+        return Ok(None);
+    }
+    match to.as_string() {
+        Some(s) if !s.is_empty() => Ok(Some(s)),
+        _ => Err("options.to must be a non-empty string".to_string()),
+    }
+}
+
+/// The `{ to?, metadata? }` options of [`render_page_for_preview`] and the
+/// metadata and format of [`resolve_pandoc_formats`].
+#[derive(Default)]
+struct PreviewOptions {
+    to: Option<String>,
+    metadata: Option<serde_json::Value>,
+}
+
+fn parse_preview_options(options: Option<JsValue>) -> Result<PreviewOptions, String> {
+    let mut out = PreviewOptions::default();
+    let Some(options) = options.filter(|o| !o.is_undefined() && !o.is_null()) else {
+        return Ok(out);
+    };
+    if !options.is_object() {
+        return Err("options must be an object".to_string());
+    }
+    out.to = get_to(&options)?;
+    let metadata = js_sys::Reflect::get(&options, &"metadata".into()).unwrap_or(JsValue::UNDEFINED);
+    if !metadata.is_undefined() && !metadata.is_null() {
+        out.metadata = Some(metadata_object(&metadata)?);
+    }
+    Ok(out)
+}
+
 /// Unpack by hand: `serde-wasm-bindgen` is not a dependency, and a
 /// `Uint8Array` is read with `Uint8Array::new` (an `instanceof` check can
 /// fail across realms).
 fn parse_request_options(options: Option<JsValue>) -> Result<RequestOptions, String> {
-    use quarto_core::pandoc_request::render::BookScope;
     let mut out = RequestOptions {
-        scope: BookScope::Auto,
+        metadata: None,
+        to: None,
         captures_by_path: Default::default(),
         on_progress: None,
         attribution_json: None,
@@ -1765,14 +1997,11 @@ fn parse_request_options(options: Option<JsValue>) -> Result<RequestOptions, Str
         return Err("options must be an object".to_string());
     }
     let get = |key: &str| js_sys::Reflect::get(&options, &key.into()).unwrap_or(JsValue::UNDEFINED);
-    let scope = get("scope");
-    if !scope.is_undefined() && !scope.is_null() {
-        out.scope = match scope.as_string().as_deref() {
-            Some("auto") => BookScope::Auto,
-            Some("chapter") => BookScope::Chapter,
-            _ => return Err("options.scope must be 'auto' or 'chapter'".to_string()),
-        };
+    let metadata = get("metadata");
+    if !metadata.is_undefined() && !metadata.is_null() {
+        out.metadata = Some(metadata_object(&metadata)?);
     }
+    out.to = get_to(&options)?;
     let captures = get("capturesByPath");
     if !captures.is_undefined() && !captures.is_null() {
         if !captures.is_object() {
@@ -2108,24 +2337,148 @@ pub fn classify_import_failure(kind: &str, status: Option<i32>, stderr: &str) ->
     serde_json::json!({ "diagnostics": import_diagnostics_json(&diagnostics) }).to_string()
 }
 
-/// The project-aware format resolver (D8.7): the document's own `format:`
-/// keys (the first is its format), else the surrounding `_quarto.yml`'s, else
-/// `html`. JSON `{ success, error?, source, formats: [{ key, class }] }` with
-/// `source` one of `document | project | default` and `class` one of
-/// `preview | download | neither`.
-#[wasm_bindgen]
-pub fn resolve_pandoc_formats(path: &str) -> String {
-    match quarto_core::pandoc_request::formats::resolve_document_formats(
-        Path::new(path),
-        get_runtime(),
-    ) {
-        Ok(resolved) => {
-            let mut value = serde_json::to_value(&resolved).unwrap();
-            value["success"] = serde_json::Value::Bool(true);
-            value.to_string()
-        }
-        Err(error) => serde_json::json!({ "success": false, "error": error }).to_string(),
+thread_local! {
+    /// Discovered projects, keyed by the directory the lookup started from and
+    /// valid for one VFS generation (`VirtualFileSystem::generation`). A
+    /// document's editor buffer is resolved on every keystroke; discovery
+    /// (reading and parsing `_quarto.yml`, listing the project) must not be.
+    static PROJECT_CACHE: RefCell<std::collections::HashMap<std::path::PathBuf, (u64, Rc<ProjectContext>)>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// (hits, misses) of [`PROJECT_CACHE`], for the wasm tests.
+    static PROJECT_CACHE_STATS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// The project around `path`, discovered once per VFS generation.
+fn cached_project(path: &Path) -> Result<Rc<ProjectContext>, String> {
+    let runtime = get_runtime();
+    let generation = runtime.vfs_generation();
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    if let Some(project) = PROJECT_CACHE.with(|c| {
+        c.borrow()
+            .get(&dir)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, p)| Rc::clone(p))
+    }) {
+        PROJECT_CACHE_STATS.with(|s| s.set((s.get().0 + 1, s.get().1)));
+        return Ok(project);
     }
+    // A buffer whose file is not in the VFS yet (a just-created document) is discovered from its
+    // directory: discovery from a file needs the file to exist.
+    let start = if runtime.is_file(path).unwrap_or(false) {
+        path
+    } else {
+        dir.as_path()
+    };
+    let project = Rc::new(
+        ProjectContext::discover(start, runtime)
+            .map_err(|e| format!("Failed to discover project context: {e}"))?,
+    );
+    PROJECT_CACHE_STATS.with(|s| s.set((s.get().0, s.get().1 + 1)));
+    PROJECT_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        // Entries of an older generation can never be used again.
+        c.retain(|_, (g, _)| *g == generation);
+        c.insert(dir, (generation, Rc::clone(&project)));
+    });
+    Ok(project)
+}
+
+/// `{ hits, misses }` of the resolver's project cache. Test support.
+#[wasm_bindgen]
+pub fn project_cache_stats() -> String {
+    let (hits, misses) = PROJECT_CACHE_STATS.with(|s| s.get());
+    serde_json::json!({ "hits": hits, "misses": misses }).to_string()
+}
+
+/// Options of [`resolve_pandoc_formats`]: the editor buffer, the requested
+/// format (`to`) and the call's runtime metadata (F8-D2).
+#[derive(Default)]
+struct ResolveFormatsOptions {
+    content_override: Option<String>,
+    to: Option<String>,
+    metadata: Option<serde_json::Value>,
+}
+
+fn parse_resolve_formats_options(
+    options: Option<JsValue>,
+) -> Result<ResolveFormatsOptions, String> {
+    let mut out = ResolveFormatsOptions::default();
+    let Some(options) = options.filter(|o| !o.is_undefined() && !o.is_null()) else {
+        return Ok(out);
+    };
+    if !options.is_object() {
+        return Err("options must be an object".to_string());
+    }
+    let content =
+        js_sys::Reflect::get(&options, &"contentOverride".into()).unwrap_or(JsValue::UNDEFINED);
+    if !content.is_undefined() && !content.is_null() {
+        out.content_override = Some(
+            content
+                .as_string()
+                .ok_or_else(|| "options.contentOverride must be a string".to_string())?,
+        );
+    }
+    let PreviewOptions { to, metadata } = parse_preview_options(Some(options))?;
+    out.to = to;
+    out.metadata = metadata;
+    Ok(out)
+}
+
+/// The project-aware format resolver (D8.7), the same resolver the render
+/// entries use: the document's own `format:` keys (the first is its format),
+/// else the `_metadata.yml` chain's, else the surrounding `_quarto.yml`'s, else
+/// `html`. The request is for a chapter (the preview's scope).
+///
+/// `options.contentOverride` is the editor buffer: when present its front
+/// matter is read instead of the VFS copy of `path`.
+///
+/// JSON `{ success, error?, source, key, class, pseudoFormat, scope, formats:
+/// [{ key, class }], book }` with `source` one of `document | project |
+/// default`, `class` one of `preview | download | neither`, and `key`/`class`
+/// the document's own resolved format (`formats[0]`; a `typst` document
+/// resolves to `typst-pdf`). `pseudoFormat` is the format the live preview
+/// renders `key` with, or `null`. `formats` keeps every declared key.
+#[wasm_bindgen]
+pub fn resolve_pandoc_formats(path: &str, options: Option<JsValue>) -> String {
+    let error = |error: String| serde_json::json!({ "success": false, "error": error }).to_string();
+    let options = match parse_resolve_formats_options(options) {
+        Ok(o) => o,
+        Err(e) => return error(e),
+    };
+    let path = Path::new(path);
+    // `metadata` is this call's runtime layer, in an overlay as everywhere
+    // (FR12), so it is never process state.
+    let overlay = overlay_with_metadata(None, options.metadata);
+    let runtime_arc = render_runtime(overlay.as_ref());
+    let runtime = runtime_arc.as_ref();
+    let content = match options.content_override {
+        Some(c) => c,
+        None => match runtime.file_read_string(path) {
+            Ok(c) => c,
+            Err(e) => return error(format!("Failed to read file: {e}")),
+        },
+    };
+    let project = match cached_project(path) {
+        Ok(p) => p,
+        Err(e) => return error(e),
+    };
+    let resolved = quarto_core::pandoc_request::formats::resolve_document_formats_in(
+        &project,
+        path,
+        &content,
+        runtime,
+        options.to.as_deref(),
+    );
+    let mut value = serde_json::to_value(&resolved).unwrap();
+    value["success"] = serde_json::Value::Bool(true);
+    if let Some(first) = resolved.formats.first() {
+        value["key"] = first.key.clone().into();
+        value["class"] = serde_json::to_value(first.class).unwrap();
+        value["pseudoFormat"] =
+            quarto_core::pandoc_request::formats::preview_pseudo_format(&first.key).into();
+    }
+    value["scope"] = "chapter".into();
+    value.to_string()
 }
 
 /// Single-doc render path — used by `render_qmd` directly and by
@@ -2164,6 +2517,12 @@ async fn render_single_doc_to_response(
     // pseudo-format to its HTML-output equivalent so the HTML branch
     // runs. `None` preserves the detect-and-maybe-map behavior.
     format_override: Option<&str>,
+    // The requested format (`to`; the live viewer's `--to`), which wins over
+    // the document's and the project's (FR2). `None` for every other entry.
+    requested_format: Option<&str>,
+    // The render's runtime, already wrapped in the request's overlay by the
+    // entry that created it (FR12); this function never wraps.
+    runtime_arc: Arc<dyn SystemRuntime>,
 ) -> String {
     let doc = DocumentInfo::from_path(path);
     let binaries = BinaryDependencies::new();
@@ -2172,7 +2531,13 @@ async fn render_single_doc_to_response(
     let format_str = if let Some(ov) = format_override {
         ov.to_string()
     } else {
-        let detected = detect_format_from_content(content_str);
+        let detected = resolve_entry_format(
+            project,
+            path,
+            content_str,
+            requested_format,
+            runtime_arc.as_ref(),
+        );
         if prefer_preview_format {
             map_format_for_preview(&detected).to_string()
         } else {
@@ -2207,9 +2572,6 @@ async fn render_single_doc_to_response(
     let resolver = ResourceResolverContext::vfs_root("/.quarto/project-artifacts");
     ctx.resource_resolver = Some(resolver.clone());
     let source_name = path.to_string_lossy();
-
-    let runtime_arc: Arc<dyn SystemRuntime> =
-        Arc::clone(get_runtime_arc()) as Arc<dyn SystemRuntime>;
 
     // Dispatch on `format.pipeline_kind`: q2-preview runs the
     // q2-preview entry point and returns AST JSON; everything else
@@ -2349,6 +2711,11 @@ async fn render_project_active_page_to_response(
     // branch ignores it.
     captures: Vec<quarto_trace::EngineCapture>,
     attribution_json: Option<String>,
+    // The requested format (`to`), as for `render_single_doc_to_response`.
+    requested_format: Option<&str>,
+    // The render's runtime, already wrapped in the request's overlay by the
+    // entry that created it (FR12); this function never wraps.
+    runtime_arc: Arc<dyn SystemRuntime>,
 ) -> String {
     use quarto_core::project::orchestrator::{ProjectPipeline, RenderMode, project_type_for};
     use quarto_core::project::pass2_renderer::{
@@ -2358,12 +2725,18 @@ async fn render_project_active_page_to_response(
     // Detect format from the *active* file's content. (Pass 1 in
     // the orchestrator re-reads each file's bytes — for the active
     // file, those bytes are the freshly-edited buffer in VFS.)
-    let active_bytes = match get_runtime().file_read(active_path) {
+    let active_bytes = match runtime_arc.file_read(active_path) {
         Ok(b) => b,
         Err(e) => return error_response(format!("Failed to read active file: {}", e)),
     };
     let content_str = std::str::from_utf8(&active_bytes).unwrap_or("");
-    let detected = detect_format_from_content(content_str);
+    let detected = resolve_entry_format(
+        &project,
+        active_path,
+        content_str,
+        requested_format,
+        runtime_arc.as_ref(),
+    );
     let format_str = if prefer_preview_format {
         map_format_for_preview(&detected).to_string()
     } else {
@@ -2387,12 +2760,9 @@ async fn render_project_active_page_to_response(
     // Canonicalize the active path so it matches the form
     // `project.files` was filled with (Pass-2's `RenderMode::ActivePage`
     // filter compares absolute-path equality against `DocumentInfo.input`).
-    let active_canonical = get_runtime()
+    let active_canonical = runtime_arc
         .canonicalize(active_path)
         .unwrap_or_else(|_| active_path.to_path_buf());
-
-    let runtime_arc: Arc<dyn SystemRuntime> =
-        Arc::clone(get_runtime_arc()) as Arc<dyn SystemRuntime>;
 
     // Dispatch on `format.pipeline_kind`. `pipeline_kind` is
     // `Option<&'static str>` (Copy), so reading it doesn't move

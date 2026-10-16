@@ -64,8 +64,9 @@ use crate::stage::{
 };
 
 /// Removes the temp JSON input on a successful render; leaves it on disk
-/// on failure, where a future debugging session may want to inspect the
-/// exact input pandoc choked on.
+/// on failure. The failure copy that outlives the render is made by
+/// [`retain_failed_json`], because the pipeline temp dir holding
+/// `json_path` is removed when the `StageContext` drops.
 ///
 /// A missing/already-removed file on the success path is not an error —
 /// `remove_file`'s result is deliberately discarded.
@@ -74,6 +75,24 @@ pub fn retain_temp_json_unless_success(success: bool, json_path: &Path) {
     if success {
         let _ = std::fs::remove_file(json_path);
     }
+}
+
+/// Copies the input JSON of a failed pandoc run out of the pipeline temp
+/// dir (removed when the render ends) to a stable file in the OS temp dir,
+/// so the `Q-20-3` "input JSON retained at <path>" message stays true and
+/// a developer can replay the failing pandoc input. One small file per
+/// failed render; `None` when the copy fails (the message then does not
+/// claim retention).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn retain_failed_json(json_path: &Path) -> Option<PathBuf> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let dest = std::env::temp_dir().join(format!(
+        "quarto-pandoc-failure-{}-{}.json",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::copy(json_path, &dest).ok().map(|_| dest)
 }
 
 /// Resolves the `pandoc` binary via `runtime.find_binary` (honouring
@@ -86,15 +105,17 @@ pub fn retain_temp_json_unless_success(success: bool, json_path: &Path) {
 /// so this fallback value is never actually reached in a caller that
 /// propagates the `?`).
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_and_gate_pandoc(
+pub fn resolve_and_gate_pandoc(
     stage_name: &str,
     runtime: &dyn quarto_system_runtime::SystemRuntime,
 ) -> Result<std::path::PathBuf, PipelineError> {
     let pandoc_path = runtime.find_binary("pandoc", "QUARTO_PANDOC");
 
-    let version_output = pandoc_path
-        .as_ref()
-        .and_then(|p| Command::new(p).arg("--version").output().ok());
+    let version_output = pandoc_path.as_ref().and_then(|p| {
+        let mut cmd = Command::new(p);
+        cmd.arg("--version");
+        crate::child_runner::run_probe(cmd)
+    });
     let version_str = version_output.map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
 
     version::gate(version_str.as_deref())
@@ -1289,6 +1310,11 @@ impl PandocWriteStage {
         );
         args.push(PandocArg::text("--resource-path"));
         args.push(PandocArg::Path(doc_dir_abs.clone()));
+        // Repeat the flag rather than joining with `:` (breaks on Windows).
+        if let Some(dir) = &ctx.capture_materialize_dir {
+            args.push(PandocArg::text("--resource-path"));
+            args.push(PandocArg::Path(dir.clone()));
+        }
         if let Some(n) = shift_heading_level_by {
             args.push(PandocArg::text("--shift-heading-level-by"));
             args.push(PandocArg::text(n.to_string()));
@@ -1379,6 +1405,22 @@ impl PandocWriteStage {
         request: &PandocRequest,
         pandoc_bin: &Path,
     ) -> Result<Vec<DiagnosticMessage>, PipelineError> {
+        self.execute_with(
+            request,
+            pandoc_bin,
+            crate::child_runner::ChildLimits::default(),
+        )
+    }
+
+    /// [`execute`](Self::execute) with a deadline and cancellation for the
+    /// pandoc child. A timeout or cancel is a distinct stage error.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn execute_with(
+        &self,
+        request: &PandocRequest,
+        pandoc_bin: &Path,
+        limits: crate::child_runner::ChildLimits,
+    ) -> Result<Vec<DiagnosticMessage>, PipelineError> {
         let name = self.name();
         for dir in &request.dirs {
             std::fs::create_dir_all(dir).map_err(|e| {
@@ -1434,27 +1476,43 @@ impl PandocWriteStage {
             };
             (k.clone(), v)
         });
-        let output = Command::new(pandoc_bin)
-            .args(request.argv.iter().skip(1).map(|a| native(a)))
-            .envs(env)
-            .output()
-            .map_err(|e| {
-                PipelineError::stage_error(name, format!("failed to execute pandoc: {e}"))
-            })?;
+        let mut cmd = Command::new(pandoc_bin);
+        cmd.args(request.argv.iter().skip(1).map(|a| native(a)))
+            .envs(env);
+        let output = crate::child_runner::run_child(cmd, limits)
+            .map_err(|e| crate::child_runner::stage_error(name, "pandoc", e))?;
 
         // T10.1/T10.5: stderr is classified unconditionally, regardless of
         // exit status — not only on failure. T10.3: the temp JSON is
-        // retained on failure (for debugging) and removed on success.
+        // retained on failure (for debugging; copied out of the pipeline
+        // temp dir, which is removed with the context) and removed on
+        // success.
         let stderr = String::from_utf8_lossy(&output.stderr);
         let status_desc = output.status.to_string();
         let json_path = Path::new(&request.json_path);
-        let warnings = classify_pandoc_completion(
-            &request.stage_name,
-            output.status.success(),
-            &status_desc,
-            &stderr,
-            json_path,
-        )?;
+        let success = output.status.success();
+        let retained = if success {
+            None
+        } else {
+            retain_failed_json(json_path)
+        };
+        let warnings = match &retained {
+            Some(kept) => classify_pandoc_completion(
+                &request.stage_name,
+                success,
+                &status_desc,
+                &stderr,
+                kept,
+            )?,
+            None => crate::pandoc_filters::diagnostics::classify_pandoc_completion_with(
+                &request.stage_name,
+                success,
+                &status_desc,
+                &stderr,
+                json_path,
+                false,
+            )?,
+        };
         retain_temp_json_unless_success(output.status.success(), json_path);
         Ok(warnings)
     }
@@ -1507,7 +1565,7 @@ impl PipelineStage for PandocWriteStage {
         let prepared = self.prepare(&mut doc, ctx, &opts, &typst)?;
         ctx.add_diagnostics(prepared.diagnostics);
 
-        let warnings = self.execute(&prepared.request, &pandoc_bin)?;
+        let warnings = self.execute_with(&prepared.request, &pandoc_bin, ctx.child_limits())?;
         ctx.add_diagnostics(warnings);
 
         // Q1's shortcode-unescape postprocessor (`format-markdown.ts:21`,

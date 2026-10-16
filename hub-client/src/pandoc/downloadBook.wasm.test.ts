@@ -82,6 +82,14 @@ describe('book download against the real wasm', () => {
     expect(resolveBook('notes.qmd')?.chapter).toBe(false);
   });
 
+  it('the resolver takes the project-relative path the file tree shows, as well as the absolute one', () => {
+    smallBook();
+    const relative = (rel: string) => bookInfoFrom(JSON.parse(wasm.resolve_pandoc_formats(rel)));
+    expect(relative('one.qmd')).toEqual(resolveBook('one.qmd'));
+    expect(relative('one.qmd')?.chapter).toBe(true);
+    expect(relative('notes.qmd')?.chapter).toBe(false);
+  });
+
   it('a project without a book has no book information', () => {
     wasm.vfs_add_file(`${ROOT}/solo.qmd`, '# Solo\n');
     expect(resolveBook('solo.qmd')).toBeNull();
@@ -93,7 +101,7 @@ describe('book download against the real wasm', () => {
     const { controller, saved } = controllerFor(seen);
     const book = resolveBook('one.qmd')!;
     const captures = Object.fromEntries(book.chapters.map((c) => [c, { captureDocId: `doc-${c}`, state: 'idle' as const }]));
-    await controller.start({ path: `${ROOT}/one.qmd`, format: EPUB, scope: 'auto', captureDocIds: captureDocIdsFor(book.chapters, captures as never) });
+    await controller.start({ path: `${ROOT}/one.qmd`, format: EPUB, metadata: { 'book-scope': 'book' }, captureDocIds: captureDocIdsFor(book.chapters, captures as never) });
     expect(Object.keys(seen.extra!.capturesByPath!)).toEqual(['index.qmd', 'one.qmd', 'two.qmd']);
     expect(seen.progress).toEqual(['1/3 index.qmd', '2/3 one.qmd', '3/3 two.qmd']);
     const done = controller.getSnapshot();
@@ -106,7 +114,7 @@ describe('book download against the real wasm', () => {
     smallBook();
     const seen = { progress: [] as string[] };
     const { controller, saved } = controllerFor(seen);
-    await controller.start({ path: `${ROOT}/one.qmd`, format: EPUB, scope: 'chapter' });
+    await controller.start({ path: `${ROOT}/one.qmd`, format: EPUB, metadata: { 'book-scope': 'chapter' } });
     expect(seen.progress).toEqual([]);
     expect(saved[0].name).toBe('one.epub');
     const s = controller.getSnapshot();
@@ -123,16 +131,16 @@ describe('book download against the real wasm', () => {
     const { controller, saved } = controllerFor(seen);
     const book = resolveBook('one.qmd')!;
     const captures = Object.fromEntries(book.chapters.map((c) => [c, { captureDocId: `doc-${c}`, state: 'idle' as const }]));
-    await controller.start({ path: `${ROOT}/one.qmd`, format: withOutputExt(row, resolved), scope: 'auto', captureDocIds: captureDocIdsFor(book.chapters, captures as never) });
+    await controller.start({ path: `${ROOT}/one.qmd`, format: withOutputExt(row, resolved), metadata: { 'book-scope': 'book' }, captureDocIds: captureDocIdsFor(book.chapters, captures as never) });
     expect(seen.progress).toEqual(['1/3 index.qmd', '2/3 one.qmd', '3/3 two.qmd']);
     expect(saved[0].name).toBe('Small-Book.typst');
   });
 
-  it('a page outside the book downloads alone even if asked for scope auto', async () => {
+  it('a page outside the book downloads alone even if asked for scope book', async () => {
     smallBook();
     const seen = { progress: [] as string[] };
     const { controller, saved } = controllerFor(seen);
-    await controller.start({ path: `${ROOT}/notes.qmd`, format: EPUB, scope: 'auto' });
+    await controller.start({ path: `${ROOT}/notes.qmd`, format: EPUB, metadata: { 'book-scope': 'book' } });
     expect(saved[0].name).toBe('notes.epub');
   });
 });

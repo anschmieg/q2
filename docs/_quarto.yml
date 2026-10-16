@@ -32,6 +32,7 @@ website:
             - guides/projects/create.qmd
             - guides/projects/book.qmd
             - guides/projects/preview.qmd
+            - guides/projects/render-options.qmd
             - guides/projects/paths.qmd
             - guides/projects/listings.qmd
             - guides/projects/listing-templates.qmd
@@ -332,6 +333,14 @@ website:
             - errors/project/Q-5-38.qmd
             - errors/project/Q-5-39.qmd
             - errors/project/Q-5-40.qmd
+            - errors/project/Q-5-41.qmd
+            - errors/project/Q-5-42.qmd
+            - errors/project/Q-5-43.qmd
+            - errors/project/Q-5-44.qmd
+            - errors/project/Q-5-45.qmd
+            - errors/project/Q-5-46.qmd
+            - errors/project/Q-5-47.qmd
+            - errors/project/Q-5-48.qmd
         - section: "include"
           contents:
             - errors/include/Q-17-1.qmd

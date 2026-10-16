@@ -69,6 +69,10 @@ import { BootLoadingScreen } from './components/BootLoadingScreen';
 import { ForceRefreshButton } from './components/ForceRefreshButton';
 import { PreviewDiagnosticsOverlay } from './components/PreviewDiagnosticsOverlay';
 import { StaleCaptureOverlay } from './components/StaleCaptureOverlay';
+import { PdfPane } from './components/PdfPane';
+import { nextNavState, readNavIndex, seedNavIndex } from './navIndex';
+import { isTypstPdf } from './pdfPage';
+import { fetchPreviewConfig, wasmRenderOptions, type RenderBlock } from './previewConfig';
 import { pickInitialPage } from './pickInitialPage';
 
 /**
@@ -218,6 +222,13 @@ interface PreviewAppState {
    * preview is the safe state.
    */
   allowEdit: boolean;
+  /**
+   * The session's `--to` / `-M` (F8-D2), from the `render` block of
+   * `GET /api/preview/config`; `undefined` for a session without those flags.
+   * Held for the session: every wasm render call, `isTypstPdf` and the PDF
+   * pane read it.
+   */
+  renderFlags: RenderBlock | undefined;
   /**
    * P3.2: nesting-cursor mode for nested blocks. Read once at boot from
    * `?nestingCursor=1` in the boot URL. When true the SPA passes
@@ -418,6 +429,7 @@ function buildInitialState(): PreviewAppState {
     customComponents: EMPTY_CUSTOM_COMPONENTS,
     captures: {},
     allowEdit: false,
+    renderFlags: undefined,
     nestingCursor: typeof window !== 'undefined'
       ? parseNestingCursorParam(window.location.search)
       : false,
@@ -567,24 +579,6 @@ async function fetchIndexDocId(loc: Location = window.location): Promise<string>
 }
 
 /**
- * Fetch the session's edit permission from `GET /api/preview/config`
- * (bd-ov4gqk3m). Mirrors the CLI's `--allow-edit` flag. Fails closed:
- * any network error, non-2xx status, or malformed body yields `false`
- * — a read-only preview is always the safe state, and the server
- * independently refuses disk write-back when the flag is off.
- */
-async function fetchAllowEdit(loc: Location = window.location): Promise<boolean> {
-  try {
-    const resp = await fetch(`${loc.protocol}//${loc.host}/api/preview/config`);
-    if (!resp.ok) return false;
-    const body = (await resp.json()) as { allowEdit?: unknown };
-    return body.allowEdit === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Derive the websocket URL from the page location. The CLI serves the
  * SPA on the same host:port that hosts the samod ws endpoint, so we
  * just swap the scheme.
@@ -600,6 +594,22 @@ export default function PreviewApp() {
   // set window.location before rendering (module-level INITIAL_STATE would be
   // evaluated at import time, before the test harness applies its overrides).
   const [state, setState] = useState<PreviewAppState>(buildInitialState);
+
+  // Position in the SPA's own navigation, mirrored from `history.state` (P11-D4) so the PDF
+  // pane's Back button knows whether Back stays inside the SPA.
+  const [navIndex, setNavIndex] = useState(readNavIndex);
+  useEffect(() => {
+    seedNavIndex();
+    setNavIndex(readNavIndex());
+  }, []);
+
+  // P11-D1: a `format: typst` page shows as a live PDF instead of going through the HTML render.
+  // Recomputed whenever the content changes, since an edit to `format:` flips the kind.
+  const pageKind: 'html' | 'pdf' = useMemo(
+    () => (state.boot === 'ready' && state.activeFile !== null && isTypstPdf(state.activeFile, state.renderFlags) ? 'pdf' : 'html'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.boot, state.activeFile, state.contentTick, state.files, state.renderFlags],
+  );
 
   // Force-refresh trigger (bd-b5hf): bumping `contentTick` re-fires
   // the render useEffect. Reuses the same channel `onFileContent`
@@ -703,9 +713,18 @@ export default function PreviewApp() {
     const newHash = anchor ? `#${anchor}` : '';
     if (window.location.search !== newSearch || window.location.hash !== newHash) {
       const newUrl = `${window.location.pathname}${newSearch}${newHash}`;
-      window.history.pushState(null, '', newUrl);
+      window.history.pushState(nextNavState(), '', newUrl);
+      setNavIndex(readNavIndex());
     }
   }, []);
+
+  // Back for the PDF pane: one step back while the SPA has history, else the project's first page.
+  const firstPage = pickInitialPage('', state.files);
+  const canGoBack = navIndex > 0 || (firstPage !== null && firstPage !== state.activeFile);
+  const handlePdfBack = useCallback(() => {
+    if (navIndex > 0) window.history.back();
+    else if (firstPage !== null) handleNavigate(firstPage, null);
+  }, [navIndex, firstPage, handleNavigate]);
 
   // Phase F.1 (bd-kw93.14): browser back/forward fires popstate; map
   // the restored URL back to (activeFile, pendingAnchor) using the
@@ -714,6 +733,7 @@ export default function PreviewApp() {
   // renamed mid-session) — `pickInitialPage` reverts to firstQmd.
   useEffect(() => {
     const onPopState = () => {
+      setNavIndex(readNavIndex());
       setState((s) => {
         if (s.boot !== 'ready' || s.files.length === 0) return s;
         const restored = pickInitialPage(window.location.search, s.files);
@@ -770,9 +790,11 @@ export default function PreviewApp() {
         // id itself is re-fetched per connect attempt below.
         await fetchIndexDocId();
         const wsUrl = deriveWsUrl();
-        // bd-ov4gqk3m: learn whether this session may edit documents.
-        // Fail-closed helper — never throws, defaults to read-only.
-        const allowEdit = await fetchAllowEdit();
+        // bd-ov4gqk3m + F8-D2: the session config. `allowEdit` fails closed
+        // (a 404 means an older server: read-only, no flags). A failure that
+        // could hide `--to` / `-M` is retried and then rejects into the
+        // error state below rather than rendering a flagged session as html.
+        const { allowEdit, render: renderFlags } = await fetchPreviewConfig();
 
         await initWasm();
 
@@ -927,6 +949,7 @@ export default function PreviewApp() {
           // requested," which the iframe ignores.
           pendingAnchorEpoch: initialHash ? 1 : 0,
           allowEdit,
+          renderFlags,
           boot: 'ready',
         }));
 
@@ -1144,6 +1167,8 @@ export default function PreviewApp() {
   // Render the active page whenever it (or its content) changes.
   useEffect(() => {
     if (!state.activeFile) return;
+    // A typst-pdf page is compiled server-side by <PdfPane>, not rendered here.
+    if (pageKind === 'pdf') return;
     let cancelled = false;
     void (async () => {
       try {
@@ -1172,6 +1197,7 @@ export default function PreviewApp() {
           state.activeFile!,
           undefined,
           captureGzJson,
+          wasmRenderOptions(state.renderFlags),
         );
         if (cancelled) return;
         // Phase D.3 (bd-kw93.9) + bd-0mji: a test-only render
@@ -1288,7 +1314,26 @@ export default function PreviewApp() {
     return () => {
       cancelled = true;
     };
-  }, [state.activeFile, state.contentTick, state.captures]);
+  }, [state.activeFile, state.contentTick, state.captures, pageKind, state.renderFlags]);
+
+  // Entering a PDF page drops the HTML page's render state, so that going back to HTML shows the
+  // boot spinner until a fresh render rather than the previous page's stale AST.
+  useEffect(() => {
+    if (pageKind !== 'pdf') return;
+    document.title = buildPreviewTabTitle(null);
+    setState((s) =>
+      s.astJson === null && s.untransformedAstJson === null && s.themeFingerprint === undefined && s.render === EMPTY_RENDER_STATUS
+        ? s
+        : {
+            ...s,
+            astJson: null,
+            untransformedAstJson: null,
+            renderedContent: '',
+            themeFingerprint: undefined,
+            render: EMPTY_RENDER_STATUS,
+          },
+    );
+  }, [pageKind, state.activeFile]);
 
   // bd-iuzmk: set the browser-tab title from the active AST's
   // `meta.title`. Runs after every successful render so a live-edited
@@ -1354,6 +1399,30 @@ export default function PreviewApp() {
         collapsed={false}
         severity="error"
       />
+    );
+  }
+
+  const connectionBanner = state.connection !== 'connected' && (
+    <div role="status" style={CONNECTION_BANNER_STYLE}>
+      {state.connection === 'reconnecting'
+        ? 'Reconnecting to the preview server…'
+        : 'Preview server stopped. Restart `q2 preview` — this page reconnects automatically.'}
+    </div>
+  );
+
+  // P11: the live PDF pane sits above the HTML render gates below, which all assume an AST.
+  if (pageKind === 'pdf' && state.activeFile) {
+    return (
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+        <PdfPane
+          key={state.activeFile}
+          path={state.activeFile}
+          contentTick={state.contentTick}
+          onBack={canGoBack ? handlePdfBack : null}
+          render={state.renderFlags}
+        />
+        {connectionBanner}
+      </div>
     );
   }
 
@@ -1463,13 +1532,7 @@ export default function PreviewApp() {
           content stays up underneath — a dropped connection is not a
           render failure. server-gone recovers automatically when
           /health answers again (same-port restart). */}
-      {state.connection !== 'connected' && (
-        <div role="status" style={CONNECTION_BANNER_STYLE}>
-          {state.connection === 'reconnecting'
-            ? 'Reconnecting to the preview server…'
-            : 'Preview server stopped. Restart `q2 preview` — this page reconnects automatically.'}
-        </div>
-      )}
+      {connectionBanner}
       <ForceRefreshButton onRefresh={handleRefresh} />
     </div>
   );

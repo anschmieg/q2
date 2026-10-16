@@ -3,6 +3,7 @@
 
 pub mod asset_manifest;
 pub mod asset_serving;
+pub mod book_downloads;
 pub mod boot;
 pub mod cache_hit;
 pub mod config_endpoint;
@@ -10,12 +11,19 @@ pub mod diagnostics_capture_failure;
 pub mod diagnostics_endpoint;
 pub mod eager_capture;
 pub mod editor_ui;
+pub mod embed_downloads;
+pub mod import_route;
 pub mod join_frontend;
 pub mod join_tunnel;
+pub mod pdfjs_serving;
+pub mod render_flags;
+pub mod render_routes_support;
 pub mod render_scripts_boot;
+pub mod runtime_factory_lint;
 pub mod share;
 pub mod smoke;
 pub mod staleness;
 pub mod static_mode;
+pub mod typst_pdf;
 
 fn main() {}
