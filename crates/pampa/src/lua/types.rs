@@ -2054,12 +2054,49 @@ pub(crate) fn unknown_field_error(field: &str, on: &str) -> Error {
     ))
 }
 
+/// Whether `val` is a Lua number or boolean: the scalars that read as
+/// text in inline positions (divergence D-numtext).
+pub(crate) fn is_text_scalar(val: &Value) -> bool {
+    matches!(
+        val,
+        Value::Integer(_) | Value::Number(_) | Value::Boolean(_)
+    )
+}
+
+/// Format a number or boolean the way Lua's `tostring` does: integers
+/// print plainly, floats through Lua's own `%.14g`-style conversion
+/// (`12.1`, `1e+15`, `3.0` for an integral float), booleans as `true` /
+/// `false`. This is what an author gets from writing `tostring(expr)` by
+/// hand, so the two spellings cannot drift.
+///
+/// Divergence D-numtext (`tests/lua-conformance/divergences.md`): pandoc
+/// rejects `pandoc.Strong(3)`, since its metadata never hands a filter a
+/// number. q2 metadata does (D-num), so every inline sink reads a number
+/// or boolean as its text. Block positions stay strict.
+pub(crate) fn text_scalar_to_string(lua: &Lua, val: &Value) -> Result<mlua::String> {
+    match val {
+        Value::Boolean(b) => lua.create_string(if *b { "true" } else { "false" }),
+        // `coerce_string` is `lua_tolstring`: Lua's number formatting.
+        _ => lua
+            .coerce_string(val.clone())?
+            .ok_or_else(|| Error::runtime("expected a number or boolean")),
+    }
+}
+
 /// 4. Otherwise → error
 pub fn peek_inline_fuzzy(lua: &Lua, val: Value) -> Result<Inline> {
     use crate::pandoc::Str;
     match val {
         Value::String(s) => {
             let text = s.to_str()?.to_string();
+            Ok(Inline::Str(Str {
+                text,
+                source_info: filter_source_info(lua),
+            }))
+        }
+        // D-numtext: a number or boolean is its `tostring`, as one `Str`.
+        Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+            let text = text_scalar_to_string(lua, &val)?.to_str()?.to_string();
             Ok(Inline::Str(Str {
                 text,
                 source_info: filter_source_info(lua),
@@ -2125,11 +2162,18 @@ pub(crate) fn is_tagged_list(
 /// 3. UserData → singleton via `peek_inline_fuzzy()` (which consults
 ///    the metamethod for foreign userdata)
 /// 4. Otherwise → error
+///
+/// q2 adds a step 0 (divergence D-numtext): a number or boolean reads
+/// as the string `tostring` would give, then follows step 1.
 pub fn peek_inlines_fuzzy(lua: &Lua, val: Value) -> Result<Vec<Inline>> {
     match val {
         Value::String(s) => {
             let text = s.to_str()?;
             Ok(split_string_to_inlines(&text))
+        }
+        Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+            let text = text_scalar_to_string(lua, &val)?;
+            Ok(split_string_to_inlines(&text.to_str()?))
         }
         Value::Table(ref table) => {
             if let Some(inline) = peek_inline_via_metamethod(lua, &val) {
@@ -2221,6 +2265,15 @@ pub fn peek_block_fuzzy(lua: &Lua, val: Value) -> Result<Block> {
             if let Some(block) = peek_block_via_metamethod(lua, &val) {
                 return Ok(block);
             }
+            // A number or boolean reads as text in inline positions
+            // (D-numtext) but not here: nothing sensible to wrap `3` in
+            // at block position, so it stays the error pandoc gives.
+            if is_text_scalar(&val) {
+                return Err(type_mismatch_error(
+                    "Block, list of Inlines, or string",
+                    &val,
+                ));
+            }
             // Try inlines coercion for strings, tables of inlines, etc.
             match peek_inlines_fuzzy(lua, val.clone()) {
                 Ok(inlines) => Ok(Block::Plain(Plain {
@@ -2293,6 +2346,14 @@ pub fn peek_blocks_fuzzy(lua: &Lua, val: Value) -> Result<Vec<Block>> {
             })])
         }
         _ => {
+            // Block positions stay strict for numbers and booleans; see
+            // `peek_block_fuzzy`.
+            if is_text_scalar(&val) {
+                return Err(type_mismatch_error(
+                    "Block, list of Blocks, or compatible element",
+                    &val,
+                ));
+            }
             // Try inlines coercion for strings
             match peek_inlines_fuzzy(lua, val.clone()) {
                 Ok(inlines) => Ok(vec![Block::Plain(Plain {
@@ -4795,11 +4856,35 @@ mod tests {
         assert_eq!(inlines_to_tags(&result), vec!["Str(solo)"]);
     }
 
+    /// D-numtext (bd-q4gnd5os): numbers and booleans read as the text
+    /// `tostring` gives them, alone and as list elements, in both inline
+    /// peekers.
     #[test]
-    fn test_peek_inlines_fuzzy_error_on_number() {
+    fn test_peek_inlines_fuzzy_numbers_and_booleans_read_as_text() {
         let lua = Lua::new();
-        let result = peek_inlines_fuzzy(&lua, Value::Integer(42));
-        assert!(result.is_err());
+        let result = peek_inlines_fuzzy(&lua, Value::Integer(42)).unwrap();
+        assert_eq!(inlines_to_tags(&result), vec!["Str(42)"]);
+        let result = peek_inlines_fuzzy(&lua, Value::Number(12.1)).unwrap();
+        assert_eq!(inlines_to_tags(&result), vec!["Str(12.1)"]);
+        let result = peek_inlines_fuzzy(&lua, Value::Number(1e15)).unwrap();
+        assert_eq!(inlines_to_tags(&result), vec!["Str(1e+15)"]);
+        let result = peek_inlines_fuzzy(&lua, Value::Boolean(true)).unwrap();
+        assert_eq!(inlines_to_tags(&result), vec!["Str(true)"]);
+
+        let table = lua.create_table().unwrap();
+        table.push("a").unwrap();
+        table.push(3).unwrap();
+        table.push(false).unwrap();
+        let result = peek_inlines_fuzzy(&lua, Value::Table(table)).unwrap();
+        assert_eq!(
+            inlines_to_tags(&result),
+            vec!["Str(a)", "Str(3)", "Str(false)"]
+        );
+
+        match peek_inline_fuzzy(&lua, Value::Number(3.0)).unwrap() {
+            Inline::Str(s) => assert_eq!(s.text, "3.0"),
+            other => panic!("expected Str, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4896,11 +4981,18 @@ mod tests {
         }
     }
 
+    /// Block positions do not take part in D-numtext: a bare number or
+    /// boolean, or one as a list element, is still an error.
     #[test]
     fn test_peek_blocks_fuzzy_error_on_number() {
         let lua = Lua::new();
-        let result = peek_blocks_fuzzy(&lua, Value::Integer(42));
-        assert!(result.is_err());
+        assert!(peek_blocks_fuzzy(&lua, Value::Integer(42)).is_err());
+        assert!(peek_blocks_fuzzy(&lua, Value::Boolean(true)).is_err());
+        assert!(peek_block_fuzzy(&lua, Value::Number(1.5)).is_err());
+        let table = lua.create_table().unwrap();
+        table.push(42).unwrap();
+        let err = peek_blocks_fuzzy(&lua, Value::Table(table)).unwrap_err();
+        assert!(err.to_string().contains("got number"), "{err}");
     }
 
     #[test]

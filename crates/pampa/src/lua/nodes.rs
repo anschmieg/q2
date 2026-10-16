@@ -36,6 +36,7 @@ use mlua::{Error, Lua, MetaMethod, Result, Table, UserData, UserDataMethods, Val
 
 use super::types::{
     LuaBlock, LuaInline, filter_source_info, lua_facing_type_name, split_string_to_inlines,
+    text_scalar_to_string,
 };
 use crate::pandoc::block::Plain;
 use crate::pandoc::inline::Str;
@@ -145,10 +146,16 @@ impl UserData for LuaNodes {
 /// (a `pandoc.Blocks`, a `pandoc.Inlines`, or a plain list) whose elements
 /// are blocks, inlines, strings, or `Nodes` of a matching shape. Strings
 /// inside a table become single `Str`s (element-wise, no word split), a
-/// bare string is word-split, matching the two `peek` conventions.
+/// bare string is word-split, matching the two `peek` conventions. A
+/// number or boolean reads as its `tostring` text, like a string
+/// (divergence D-numtext).
 pub fn build_nodes(lua: &Lua, value: Value) -> Result<LuaNodes> {
     let shape = match &value {
         Value::String(s) => NodesShape::Inlines(split_string_to_inlines(&s.to_str()?)),
+        Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+            let text = text_scalar_to_string(lua, &value)?;
+            NodesShape::Inlines(split_string_to_inlines(&text.to_str()?))
+        }
         Value::UserData(ud) => {
             if let Ok(block) = ud.borrow::<LuaBlock>() {
                 NodesShape::Blocks(vec![block.extract_flushed(lua)?])
@@ -170,6 +177,12 @@ pub fn build_nodes(lua: &Lua, value: Value) -> Result<LuaNodes> {
                         text: s.to_str()?.to_string(),
                         source_info: filter_source_info(lua),
                     })),
+                    Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+                        inlines.push(Inline::Str(Str {
+                            text: text_scalar_to_string(lua, &item)?.to_str()?.to_string(),
+                            source_info: filter_source_info(lua),
+                        }))
+                    }
                     Value::UserData(ud) => {
                         if let Ok(block) = ud.borrow::<LuaBlock>() {
                             blocks.push(block.extract_flushed(lua)?);
@@ -490,12 +503,12 @@ mod tests {
             err.contains("cannot hold blocks and inlines together"),
             "{err}"
         );
-        let err = eval_err(&lua, "pandoc.Nodes({42})");
+        let err = eval_err(&lua, "pandoc.Nodes({function() end})");
         assert!(err.contains("element 1 must be"), "{err}");
         let err = eval_err(&lua, "pandoc.Nodes(nil)");
         assert!(err.contains("got nil"), "{err}");
-        let err = eval_err(&lua, "pandoc.Nodes(42)");
-        assert!(err.contains("got number"), "{err}");
+        let err = eval_err(&lua, "pandoc.Nodes(function() end)");
+        assert!(err.contains("got function"), "{err}");
     }
 
     #[test]

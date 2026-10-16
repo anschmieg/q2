@@ -670,17 +670,19 @@ end
 
 #[tokio::test]
 async fn test_filter_return_error_is_q_coded() {
+    // A number is text since D-numtext (bd-q4gnd5os), so the
+    // non-coercible return here is a function.
     let filter_code = r#"
 function Str(elem)
-    return 5
+    return function() end
 end
 "#;
     let err = run_filter_expect_error(filter_code, simpletable_doc()).await;
     assert!(err.contains("Q-11-4"), "expected Q-11-4 in: {err}");
     assert!(err.contains("'Str'"), "expected filter fn name in: {err}");
-    assert!(err.contains("got number"), "expected got-type in: {err}");
+    assert!(err.contains("got function"), "expected got-type in: {err}");
     assert!(
-        !err.contains("got number, got number"),
+        !err.contains("got function, got function"),
         "got-type stated twice in: {err}"
     );
 }
