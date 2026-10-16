@@ -343,6 +343,57 @@ needs a longer fence than the one inside it. And an inline cell whose
 fragment holds a code span needs double-backtick delimiters, since single
 backticks pair up left to right.
 
+### A fragment as the argument
+
+When a function takes one fragment, the parentheses can go: `callout{=: … :=}`
+is a call with the fragment as its whole argument list, the way Lua already
+reads `f{…}` for a table and `f"…"` for a string. A component then reads
+like a tag around its body:
+
+````markdown
+```{lmd}
+local function note(body)
+  return pandoc.Div(body, pandoc.Attr("", {"callout-note"}))
+end
+return note{=:
+Anything the fragment holds, *as blocks*.
+:=}
+```
+````
+
+Both spellings are the same call; `note({=: … :=})` works too. A method
+call takes the form as well: `card:render{=[ title ]=}`.
+
+## Quoting fragment syntax
+
+Inside a fragment, every `{=` opens a nested fragment and every `=}` closes
+one, so a fragment that talks *about* fragments needs one of two things.
+
+For a literal here and there, escape the brace: `\{=` and `=\}`. Quarto
+markdown wants a lone brace written `\{` or `\}` in any case, and the
+backslash also tells lmd not to read the pair as a delimiter. Balanced
+fragment syntax inside a code span needs nothing: `` `{=: x :=}` `` opens
+and closes, so the fragment around it ends where it should.
+
+For a body with unbalanced delimiters, or a lot of them, raise the level
+of the fragment the way a Lua long string does: `{==: … :==}`, `{==[ … ]==}`,
+`{== … ==}`, with as many `=` as it takes. Nothing inside a leveled fragment
+is balanced or escaped; its content runs to the first closer of the same
+level. Inline lmd code inside it is still code, since that is the markdown
+reader's business, not the delimiter scanner's.
+
+````markdown
+```{lmd}
+return {==:
+The closer of an inline fragment is `]=}`; on its own it would end this
+fragment, so this one is written at level two.
+:==}
+```
+````
+
+(`{==}` stays the empty unmarked fragment: an opener followed directly by
+`}` is read at level one.)
+
 ## Reusable modules
 
 A function defined in a cell is visible to the later cells of the same
@@ -567,6 +618,11 @@ a cell inside a `markdown` fence with more backticks is displayed. In prose,
 `` `{lmd}` `` on its own is a mention and stays as code; a tag followed by
 an expression runs.
 
+A displayed or echoed `lmd` block is syntax-highlighted as lmd: the Lua
+with Lua's colours, the fragment delimiters and their markdown marked as a
+special string. A plain `` ```lmd `` fence gets the same treatment. In the
+Quarto Hub editor an `.lmd` module opens with Lua highlighting.
+
 ## The rules, in one place
 
 **What a cell may return.** A block cell returns a Block, a list of Blocks
@@ -586,6 +642,11 @@ pandoc does, and a number or boolean is written as `tostring` prints it.
 The two marked forms cover everything on this page. The unmarked form exists
 for a value that is passed to both kinds of position; `pandoc.Para({= x =})`
 and `pandoc.Div({= x =})` both work.
+
+**Delimiters.** `f{=: … :=}` is a call with the fragment as its argument.
+A literal `{=` or `=}` in a fragment is `\{=` or `=\}`. A fragment at a
+higher level, `{==: … :==}` and so on, is raw up to the closer of the same
+level; see [Quoting fragment syntax](#quoting-fragment-syntax).
 
 **When cells run.** After the engines, so a Python or R cell has already run
 and neither side sees the other's variables; before user filters,

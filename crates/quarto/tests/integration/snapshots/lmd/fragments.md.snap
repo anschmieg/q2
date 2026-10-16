@@ -57,6 +57,22 @@ A **string** read at run time.
 
 Inline too: *em* and **strong**.
 
+## A fragment as the argument
+
+::: {}
+> **Note**
+>
+> Called with the fragment as the whole argument list.
+:::
+
+Inline: **a strong call**.
+
+## Quoting fragment syntax
+
+Escaped: {= and =}, and balanced `{=: code :=}` in a span.
+
+Level two: `]=}` alone, `:=}` alone, and a whole `{=[ x ]=}` are text.
+
 [^1]: Defined *inside* the fragment.
 
 [^2]: Defined in the document body.

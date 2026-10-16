@@ -489,6 +489,12 @@ export default grammar({
     // expression is valid; `{[` would not be (`{[k] = v}`, `{[[s]]}`). The
     // content is raw text; the Rust side hands it to the qmd parser. The
     // `start` field's node kind (`{=`, `{=:`, `{=[`) tells the form apart.
+    //
+    // Two refinements live in the scanner, not the tree: a backslash
+    // makes the next character content (`\{=`, `\=}`), and more `=` in
+    // the opener raise the level (`{==: … :==}`), whose content is raw up
+    // to the closer of the same level, like a Lua long string. The node
+    // kinds are the same at every level.
     markdown_fragment: ($) =>
       choice(
         seq(
@@ -569,11 +575,16 @@ export default grammar({
         field('method', $.identifier)
       ),
     // args ::=  '(' [explist] ')' | tableconstructor | LiteralString
+    // lmd: | markdown_fragment, so `callout{=: … :=}` is a call with one
+    // fragment argument, the way `f{…}` and `f"…"` are in Lua (and Typst's
+    // trailing content block). The desugarer wraps the expansion in
+    // parentheses, since `f pandoc.Blocks({…})` is not a call.
     arguments: ($) =>
       choice(
         seq('(', optional(list_seq($.expression, ',')), ')'),
         $.table_constructor,
-        $.string
+        $.string,
+        $.markdown_fragment
       ),
 
     // '(' exp ')'

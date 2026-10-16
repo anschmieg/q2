@@ -208,3 +208,130 @@ local s = { [[long]] }
           (field
             value: (string
               content: (string_content))))))))
+
+================================================================================
+markdown_fragment ::: a backslash escapes an opener or closer [lmd]
+================================================================================
+
+return {=: write \{= and \=} for the delimiters, \:=} too :=}
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (return_statement
+    (expression_list
+      (markdown_fragment
+        (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: level two is raw up to its own closer [lmd]
+================================================================================
+
+return {==: a `{=: x :=}` and `{=[ y ]=}` and =} and :=} are content :==}
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (return_statement
+    (expression_list
+      (markdown_fragment
+        (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: level two, all three forms, and level three [lmd]
+================================================================================
+
+f({== a =} b ==}, {==[ c ]=} d ]==}, {===: e :==} f :===})
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (function_call
+    name: (identifier)
+    arguments: (arguments
+      (markdown_fragment
+        content: (markdown_content))
+      (markdown_fragment
+        content: (markdown_content))
+      (markdown_fragment
+        content: (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: a leveled closer must match exactly [lmd]
+================================================================================
+
+return {==: not :===} yet :==}
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (return_statement
+    (expression_list
+      (markdown_fragment
+        (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: empty leveled fragments [lmd]
+================================================================================
+
+f({==::==}, {==[]==}, {== ==})
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (function_call
+    name: (identifier)
+    arguments: (arguments
+      (markdown_fragment)
+      (markdown_fragment)
+      (markdown_fragment
+        content: (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: {==} is still the empty unmarked fragment [lmd]
+================================================================================
+
+return {==}, {===}
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (return_statement
+    (expression_list
+      (markdown_fragment)
+      (markdown_fragment
+        (markdown_content)))))
+
+================================================================================
+markdown_fragment ::: a fragment as the call's argument [lmd]
+================================================================================
+
+callout{=: body :=}
+card:render{=[ title ]=}
+local x = f{= a =}
+
+--------------------------------------------------------------------------------
+
+(chunk
+  (function_call
+    name: (identifier)
+    arguments: (arguments
+      (markdown_fragment
+        content: (markdown_content))))
+  (function_call
+    name: (method_index_expression
+      table: (identifier)
+      method: (identifier))
+    arguments: (arguments
+      (markdown_fragment
+        content: (markdown_content))))
+  local_declaration: (variable_declaration
+    (assignment_statement
+      (variable_list
+        name: (identifier))
+      (expression_list
+        value: (function_call
+          name: (identifier)
+          arguments: (arguments
+            (markdown_fragment
+              content: (markdown_content))))))))

@@ -17,6 +17,17 @@
 //! | `{=: … :=}` | [`BLOCKS_START`] | blocks |
 //! | `{=[ … ]=}` | [`INLINES_START`] | inlines |
 //!
+//! Three refinements, none of which changes the node kinds:
+//!
+//! - a fragment may be a call's argument list, `callout{=: … :=}`, as a
+//!   table constructor or a string may be in Lua;
+//! - inside a fragment a backslash makes the next character content, so
+//!   `\{=` and `\=}` neither open nor close (markdown then reads them as
+//!   the literal characters);
+//! - more `=` in the opener raise the level, `{==: … :==}`, whose content
+//!   is raw up to the closer of the same level, like a Lua long string
+//!   (`{==}` stays the empty level-1 fragment).
+//!
 //! The grammar is named `lmd` (not `lua`) so this crate can coexist with the
 //! upstream `tree-sitter-lua` crate that `quarto-highlight` links.
 //!
@@ -38,6 +49,11 @@ pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_lmd) 
 /// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers#static-node-types
 pub const NODE_TYPES: &str = include_str!("../grammar/src/node-types.json");
 
+/// The syntax-highlighting query (`queries/highlights.scm`): the upstream
+/// Lua captures plus the fragment delimiters and content, for
+/// `quarto-highlight` to register the `lmd` class from.
+pub const HIGHLIGHTS_QUERY: &str = include_str!("../grammar/queries/highlights.scm");
+
 /// Node kind of the fragment expression, all three forms.
 pub const MARKDOWN_FRAGMENT: &str = "markdown_fragment";
 
@@ -53,6 +69,10 @@ pub const INLINES_START: &str = "{=[";
 /// Node kind of the raw markdown text inside a [`MARKDOWN_FRAGMENT`]
 /// (absent when the fragment is empty, `{==}`).
 pub const MARKDOWN_CONTENT: &str = "markdown_content";
+
+/// Node kind of a call's argument list. A [`MARKDOWN_FRAGMENT`] whose
+/// parent is one is the call's whole argument, `callout{=: … :=}`.
+pub const ARGUMENTS: &str = "arguments";
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ pub(crate) mod html;
 pub(crate) mod javascript;
 pub(crate) mod json;
 pub(crate) mod julia;
+pub(crate) mod lmd;
 pub(crate) mod lua;
 pub(crate) mod python;
 pub(crate) mod r;

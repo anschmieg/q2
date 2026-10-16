@@ -67,3 +67,28 @@ return quarto.markdown(text)
 ```
 
 Inline too: `{lmd} quarto.markdown("*em* and **strong**")`.
+
+## A fragment as the argument
+
+```{lmd}
+local function note(body)
+  return pandoc.Div(body, pandoc.Attr("", {"callout-note"}))
+end
+return note{=:
+Called with the fragment as the whole argument list.
+:=}
+```
+
+Inline: `{lmd} pandoc.Strong{=[ a strong call ]=}`.
+
+## Quoting fragment syntax
+
+```{lmd}
+return {=: Escaped: \{= and =\}, and balanced `{=: code :=}` in a span. :=}
+```
+
+```{lmd}
+return {==:
+Level two: `]=}` alone, `:=}` alone, and a whole `{=[ x ]=}` are text.
+:==}
+```
