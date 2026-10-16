@@ -2,7 +2,7 @@
 title: 'A structural desugaring contract for AST that does not come from the qmd reader (bd-7gqr148v, GH #846)'
 date: 2026-10-15
 description: 'list-table and definition-list divs built from AST nodes in an lmd cell never become Table / DefinitionList, and a list-table written inside a fragment hits an emitter gap. Diagnosis, the set of markdown desugaring steps every pandoc.read()-like entry point is promised to get, where that set is applied today and where it is missing, and a phased fix.'
-status: draft  # awaiting review; no implementation yet
+status: draft  # decisions D1–D4 settled 2026-10-16; awaiting go-ahead to implement
 braid:
   strand: bd-7gqr148v
 ---
@@ -90,12 +90,27 @@ So the bug is a missing call at two entry points plus one emitter gap, and the r
 
 The three members are the complete list of shapes in `postprocess()` that (a) can be built from pampa's Lua constructors and (b) change the *kind* of a block. Everything else in postprocess fails (a) or is a text-level fix-up.
 
-### Decisions to make (flagged for review)
+### Decisions (reviewed 2026-10-16)
 
-- **D1. Is item 3 (implicit figure) in the set?** Recommendation: **yes.** The rule for membership is "what the reader would have produced from the equivalent markdown", and `![caption](img){#fig-x}` is the next thing a component author builds after a table. The cost is one divergence from pandoc's filter semantics for the json entry points: pandoc JSON that carries `Para [Image]` with alt text would become a `Figure` on the way in. pandoc itself only emits that shape when `implicit_figures` is off, so in practice this changes nothing for pandoc-produced JSON and only helps hand-written JSON. If the answer is no, the set is the two div transforms and `transform_divs` stays the only function; Phase 2 shrinks accordingly.
-- **D2. Where does a Q-2-35 from a cell-built div point?** A Lua-built node's `source_info` is `SourceInfo::generated(By::filter(chunk, line))` (`lua/types.rs::filter_source_info`). For an lmd cell the chunk is the document path with line padding (`ChunkIdentity`), so the line *is* a document line. Recommendation: the lmd stage re-locates any diagnostic whose location is `generated` onto the cell's span, the way `failure_diagnostic` already does for runtime errors, and adds a detail "built by this lmd cell". Precise-line relocation through `ChunkIdentity::locate` is a nice-to-have; the whole-cell underline is the honest resolution available without a column map (same call spike 7 made).
-- **D3. Fragment list-tables: emit `Table`, or parse fragments without the div sugar and let the per-cell pass do it?** Recommendation: **emit `Table`.** The second option makes one code path serve both forms, but it needs a reader knob to skip `transform_divs`, loses the reader's precise Q-2-35 location, and leaves *pipe tables* in fragments unsupported, which is a separate real gap (bd-76ogq4ew phase 2). Printing a `Table` is mechanical: pampa already has `pandoc.Table(caption, colspecs, head, bodies, foot, attr)`, `pandoc.Caption`, `pandoc.Row`, `pandoc.Cell`, `pandoc.TableHead/Body/Foot`, and colspecs are `{ {align, width}, … }` tables (`constructors.rs::parse_colspecs`).
-- **D4. Should user filters get the pass after all (a desugar after `user-filters-pre`)?** Recommendation: **no**, keep Quarto 1 parity and pandoc filter semantics; document the boundary. Revisit if a real filter asks for it. (Cheap to add later: it is the same function over `doc.ast.blocks`, but it would double-warn Q-2-35 on a div the reader already rejected unless the pass is per-returned-value.)
+- **D1. Is item 3 (implicit figure) in the set? Yes, applied anywhere a `Paragraph` appears.** The membership rule is "what the reader would have produced from the equivalent markdown", which raised the question of whether the figure transform is uniform like the two div transforms or top-level-only. Checked against pandoc 3.11 (`pandoc -t native`) and q2's reader (`q2 render --to native`, `main` @ `e308835bd`) on 2026-10-16:
+
+  | single-image paragraph with alt text, placed… | pandoc 3.11 | q2 reader |
+  |---|---|---|
+  | at top level | `Figure` | `Figure` |
+  | in a loose bullet / ordered list item (`Para`) | `Figure` | `Figure` |
+  | in a tight list item | `Figure` (pandoc's `para` parser converts before the item is compacted to `Plain`) | `Plain [Image]` (tree-sitter yields `Plain` directly; the handler only matches `Paragraph`) |
+  | inside a `::: {.wrapper}` div | `Figure` | `Figure` |
+  | inside a blockquote | `Figure` | `Figure` |
+  | in a pipe-table cell (`Plain`) | `Plain [Image]` | `Plain [Image]` |
+  | with empty alt (`![](h.png)`) | `Para [Image]` | `Para [Image]` |
+  | with surrounding text | `Para` | `Para` |
+
+  So neither implementation restricts the transform to the top level: pandoc applies it wherever it parses a paragraph, and q2's `.with_paragraph` handler already runs over every `Paragraph` in the tree. The set's rule is the reader's rule: `Paragraph` whose only inline is an `Image` with non-empty alt, at any depth. The tight-list divergence is a reader-representation difference (`Plain` vs `Para`), unrelated to this contract and left as is (noted under § Out of scope). bd-31lk's split of the two div transforms only was not a judgment that the figure transform is scoped differently; it was the narrowest change for pampa's `--from json`.
+
+  Side effect accepted: pandoc JSON carrying `Para [Image]` with alt text becomes a `Figure` on the json entry points. pandoc only emits that shape with `implicit_figures` disabled, so pandoc-produced JSON is unaffected in practice.
+- **D2. Where does a Q-2-35 from a cell-built div point? Relocate onto the cell.** A Lua-built node's `source_info` is `SourceInfo::generated(By::filter(chunk, line))` (`lua/types.rs::filter_source_info`); for an lmd cell the chunk is the document path with line padding (`ChunkIdentity`), so the line *is* a document line. The lmd stage re-locates any diagnostic whose location is `generated` onto the cell's span, the way `failure_diagnostic` already does for runtime errors, and adds a detail "built by this lmd cell". Precise-line relocation through `ChunkIdentity::locate` is a nice-to-have; the whole-cell underline is the honest resolution available without a column map (same call spike 7 made). **Deliverable:** Phase 3 ends with a rendered example of the diagnostic in this plan for review of the overall look.
+- **D3. Fragment list-tables: emit `Table`.** The alternative (parse fragments without the div sugar and let the per-cell pass do it) would make one code path serve both forms, but it needs a reader knob to skip `transform_divs`, loses the reader's precise Q-2-35 location, and leaves *pipe tables* in fragments unsupported, which is a separate real gap (bd-76ogq4ew phase 2). Printing a `Table` is mechanical: pampa already has `pandoc.Table(caption, colspecs, head, bodies, foot, attr)`, `pandoc.Caption`, `pandoc.Row`, `pandoc.Cell`, `pandoc.TableHead/Body/Foot`, and colspecs are `{ {align, width}, … }` tables (`constructors.rs::parse_colspecs`).
+- **D4. User filters do not get the pass.** Regular Lua filters have always been expected to return real `pandoc.Table` and friends, in pandoc and in Quarto 1 (whose list-table filter runs in `normalize`, before user filters). A filter that uses lmd internally gets the desugaring through its lmd blocks. The boundary is documented, not changed.
 
 ## Design
 
@@ -172,6 +187,7 @@ using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LineP
 ### Phase 3: lmd cell results (quarto-core)
 
 - [ ] `execute_lmd_cells` runs the set per cell result; diagnostics relocated per D2 (issue sections 2 and 4, probes B and C pass).
+- [ ] Paste the rendered Q-2-35 diagnostic for probe C (ANSI-stripped `q2 render` stderr) into this plan under a "Diagnostic example" heading, for review before the PR.
 
 ### Phase 4: tables in fragments (quarto-core emitter)
 
@@ -186,6 +202,7 @@ using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LineP
 ## Out of scope (recorded so they are not re-discovered)
 
 - **User-filter return values** (probe F): Quarto 1 parity; see D4.
+- **Images in tight list items**: pandoc makes a `Figure`, q2's reader makes `Plain [Image]` (D1 table). A reader-level divergence with its own consequences (crossref, `fig-` ids in tight lists); not part of this contract.
 - **Footnotes in fragments** (`NoteReference` / `NoteDefinitionPara` unsupported by the emitter): bd-76ogq4ew phase 2.
 - **Column-exact relocation of Q-2-35 inside a cell**: waits for `CodeBlock.text_source` (bd-f6tt2exg).
 - **Numbers in inline splices, string-typed grammar positions**: bd-0o82ly9c.
