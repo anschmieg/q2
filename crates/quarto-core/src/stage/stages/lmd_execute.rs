@@ -827,6 +827,63 @@ mod tests {
         );
     }
 
+    // ---- fragment gaps (bd-76ogq4ew, phase 2) ----
+
+    /// A footnote defined inside a fragment runs end to end: the cell's
+    /// blocks hold an inline `Note`, which the document's footnote
+    /// transforms number later like any other note.
+    #[test]
+    fn a_footnote_defined_in_a_fragment_is_an_inline_note_in_the_cells_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (blocks, diags, _) = render_at(
+            "```{lmd}\nreturn {=:\nThe claim.[^src]\n\n[^src]: The *source*.\n:=}\n```\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        let note = p
+            .content
+            .iter()
+            .find_map(|i| match i {
+                Inline::Note(n) => Some(n),
+                _ => None,
+            })
+            .expect("a Note inline");
+        let Block::Paragraph(inner) = &note.content[0] else {
+            panic!("{:?}", note.content)
+        };
+        assert_eq!(inlines_text(&inner.content), "The *source*.");
+    }
+
+    /// `quarto.markdown(str)` in a cell: a string becomes `Nodes`, which a
+    /// block cell takes as blocks and an inline cell as inlines.
+    #[test]
+    fn quarto_markdown_turns_a_string_into_nodes_for_either_kind_of_cell() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (blocks, diags, _) = render_at(
+            "```{lmd}\nreturn quarto.markdown(\"One *em*.\\n\\nTwo.\")\n```\n\nAnd `{lmd} quarto.markdown(\"**bold** inline\")` here.\n",
+            &tmp.path().join("doc.qmd"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        assert!(
+            matches!(&blocks[0], Block::Paragraph(p) if p.content.iter().any(|i| matches!(i, Inline::Emph(_)))),
+            "{blocks:?}"
+        );
+        assert!(matches!(&blocks[1], Block::Paragraph(_)), "{blocks:?}");
+        let Block::Paragraph(p) = &blocks[2] else {
+            panic!("{blocks:?}")
+        };
+        assert!(
+            p.content.iter().any(|i| matches!(i, Inline::Strong(_))),
+            "{:?}",
+            p.content
+        );
+        assert_eq!(inlines_text(&p.content), "And **bold** inline here.");
+    }
+
     /// The text a diagnostic's location resolves to in the test file.
     fn located_text<'a>(diag: &DiagnosticMessage, sources: &'a SourceContext) -> &'a str {
         let loc = diag.location.as_ref().expect("diagnostic is located");

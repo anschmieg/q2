@@ -3,18 +3,18 @@ source: crates/quarto/tests/integration/lmd_snapshots.rs
 expression: stderr
 ---
 Warning: [Q-26-1] Lua syntax error in an lmd cell
-   ╭─[ <dir>/errors.qmd:9:1 ]
-   │
- 9 │ return {= a =} +
-   │ ────────┬───────
-   │         ╰───────── lmd: Lua syntax error at line 2, column 17
-───╯
+    ╭─[ <dir>/errors.qmd:10:1 ]
+    │
+ 10 │ return {= a =} +
+    │ ────────┬───────
+    │         ╰───────── lmd: Lua syntax error at line 2, column 17
+────╯
 ℹ The cell is left as written and will not run.
 
 Error: [Q-2-10] Closed Quote Without Matching Open Quote
-    ╭─[ <dir>/errors.qmd:15:42 ]
+    ╭─[ <dir>/errors.qmd:16:42 ]
     │
- 15 │ return {=: This line mentions the groups' Unique IDs. :=}
+ 16 │ return {=: This line mentions the groups' Unique IDs. :=}
     │                                         ┬┬
     │                                         ╰─── No opening quote was found before this mark. If you meant an apostrophe, escape it with a backslash.
     │                                          │
@@ -23,12 +23,13 @@ Error: [Q-2-10] Closed Quote Without Matching Open Quote
 ℹ Inside an lmd markdown fragment; the cell is left as written and will not run.
 
 Warning: [Q-26-2] Unsupported markdown inside an lmd fragment
-    ╭─[ <dir>/errors.qmd:24:1 ]
+    ╭─[ <dir>/errors.qmd:24:9 ]
     │
- 24 │ [^1]: The note.
-    │ ────────┬───────
-    │         ╰───────── lmd: `NoteDefinitionPara` nodes are not supported inside markdown fragments yet
+ 24 │ Version {{< meta version >}} is read with `meta.version` instead.
+    │         ──────────┬─────────
+    │                   ╰─────────── lmd: `Shortcode` nodes are not supported inside markdown fragments yet
 ────╯
+ℹ Read the value in Lua instead: `{lmd} meta.key` in place of `{{< meta key >}}`.
 ℹ The cell is left as written and will not run.
 
 Error: [Q-26-4] lmd cell failed

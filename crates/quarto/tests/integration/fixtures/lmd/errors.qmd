@@ -1,5 +1,6 @@
 ---
 title: errors
+version: 2
 ---
 
 A Lua syntax error (left as written):
@@ -15,13 +16,12 @@ A markdown error inside a fragment (left as written):
 return {=: This line mentions the groups' Unique IDs. :=}
 ```
 
-An unsupported node inside a fragment (left as written):
+An unsupported node inside a fragment (left as written; the shortcode is
+underlined, bd-onsqz7sv):
 
 ```{lmd}
 return {=:
-A footnote reference[^1] is resolved later in the pipeline.
-
-[^1]: The note.
+Version {{< meta version >}} is read with `meta.version` instead.
 :=}
 ```
 

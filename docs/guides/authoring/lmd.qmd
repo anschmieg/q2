@@ -113,6 +113,14 @@ Two things to know, both visible above:
   when the formatting should survive: `` `{lmd} meta.title` `` renders a
   title's emphasis and code as written.
 
+A value that holds *markdown* as a plain string (a `!str` metadata field, a
+description read from a data file, a listing item's `description`) is read
+with `quarto.markdown(str)`, which parses the string and returns a `Nodes`
+value: blocks where blocks go, inlines where a one-paragraph string lands
+inline. `return quarto.markdown(item.description)` is the run-time twin of a
+`{= … =}` fragment, and a footnote the string defines is paired with its
+reference just as in a fragment.
+
 @demo-metadata puts the two halves together with a nested key and a
 fallback for a key that is not there:
 
@@ -590,15 +598,19 @@ run, and are unique across the document. An explicit `{#id}` is kept.
 
 **What a cell can use.** The `pandoc` and `quarto` tables a Lua filter gets
 (constructors, `pandoc.utils`, `quarto.doc.is_format`, `quarto.utils`),
-`meta` and `quarto.metadata.get`, `FORMAT`, and `require` for a `.lua` or
-`.lmd` module next to the document (see [Reusable modules](#reusable-modules)).
+`meta` and `quarto.metadata.get`, `quarto.markdown` for markdown held in a
+string, `FORMAT`, and `require` for a `.lua` or `.lmd` module next to the
+document (see [Reusable modules](#reusable-modules)).
+
+**Footnotes.** A note defined inside a fragment is paired with the
+fragment's references; a reference to a note defined in the document body
+is resolved with the document's notes. Both are numbered with the rest of
+the page.
 
 ## Current limitations
 
-- **Footnotes inside a fragment** fail the cell
-  ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)). Put the note in the document
-  body.
-- **Shortcodes inside a fragment** fail the cell. Read the value in Lua
+- **Shortcodes inside a fragment** fail the cell
+  ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)). Read the value in Lua
   instead: `` `{lmd} meta.key` `` rather than `{{{< meta key >}}}`.
 - **Inline cells in attribute values** (a fenced div's `data-x="…"`, a link
   title) are not evaluated.

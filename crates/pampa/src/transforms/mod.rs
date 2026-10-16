@@ -14,7 +14,9 @@
 //! ## Available Transforms
 //!
 //! - [`sectionize`] - Wrap headers in section Divs (analogous to Pandoc's `--section-divs`)
+//! - [`fragment`] - Finish markdown parsed on its own (lmd fragments, `quarto.markdown`): local footnotes, derived heading ids
 
+pub mod fragment;
 pub mod sectionize;
 
 pub use sectionize::sectionize_blocks;
