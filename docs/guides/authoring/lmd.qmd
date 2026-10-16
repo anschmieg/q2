@@ -89,22 +89,25 @@ The `{{{< meta version >}}}` shortcode inserts a value. A cell can also
 *compute* on it. Live, from this page's front matter:
 
 ````markdown
-The team has `{lmd} tostring(#meta.team)` members:
+The team has `{lmd} #meta.team` members:
 `{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
 The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`,
-and this is version `{lmd} tostring(meta.version)`.
+and this is version `{lmd} meta.version`.
 ````
 
-> The team has `{lmd} tostring(#meta.team)` members:
+> The team has `{lmd} #meta.team` members:
 > `{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
 > The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`,
-> and this is version `{lmd} tostring(meta.version)`.
+> and this is version `{lmd} meta.version`.
 
 Two things to know, both visible above:
 
-- A **number** must go through `tostring()` in an inline cell. An inline cell
-  may produce an Inline, a list of Inlines, a string, or `nil`, and a bare
-  `` `{lmd} meta.version` `` is an error ([`Q-26-6`](../../errors/lmd/Q-26-6.qmd)).
+- A **number or boolean** reads the way `tostring` prints it: `12.1`, `3`,
+  `true`. That courtesy is the inline cell's own. A `pandoc` constructor
+  takes Inlines and strings, as in pandoc, so `pandoc.Strong(meta.version)`
+  wants `tostring()`, and so does an inline cell *inside a fragment*, which
+  is spliced into the constructor call the fragment becomes (the
+  [lists](#repeating-markdown-over-a-list) below show one).
 - Metadata **strings are `Inlines`**, not Lua strings, so `table.concat` and
   `:upper()` need `pandoc.utils.stringify` first. Leave the `Inlines` alone
   when the formatting should survive: `` `{lmd} meta.title` `` renders a
@@ -124,19 +127,19 @@ author:
   affil: Analytical Engines
 ---
 
-The team has `{lmd} tostring(#meta.team)` members:
+The team has `{lmd} #meta.team` members:
 `{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
 The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`.
 
-This is version `{lmd} tostring(meta.version)` (a number in the front
-matter, so it goes through `tostring`).
+This is version `{lmd} meta.version` (a number in the front matter; an
+inline cell writes it the way `tostring` would).
 
 `{lmd} meta.author.name` works at `{lmd} quarto.metadata.get("author.affil")`.
 A key that may be absent is read with `quarto.metadata.get`, which returns
 `nil` instead of raising: `{lmd} quarto.metadata.get("author.phone") or "no phone on file"`.
 ````
 
-Reading and computing on metadata: a count, a joined list, a string method, a number through `tostring`, a nested key through `meta` and through `quarto.metadata.get`, and a fallback for an absent key. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/02-metadata)
+Reading and computing on metadata: a count, a joined list, a string method, a number written as `tostring` would print it, a nested key through `meta` and through `quarto.metadata.get`, and a fallback for an absent key. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/02-metadata)
 :::::
 
 ## Repeating markdown over a list
@@ -181,7 +184,9 @@ return out
 
 Headings built this way get their ids from their final text, unique across
 the document, so they are linkable and show up in the table of contents like
-any other heading.
+any other heading. The `tostring(i)` is needed here: an inline cell inside
+a fragment is spliced into the `pandoc.Para` call the paragraph becomes,
+and constructors take Inlines and strings, not numbers.
 
 **Two fragments.** `a .. b` concatenates two `Blocks` values, for the case
 where a loop is more than you need.
@@ -486,9 +491,9 @@ return frag:walk({ Str = function(s) return pandoc.Str(s.text:upper()) end })
 `walk` with a `Str` handler over a fragment: a one-off filter on one piece of markdown. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/07-walk)
 :::::
 
-Every `pandoc.*` constructor is available too, for whatever markdown does not
-express conveniently (`pandoc.Table`, for instance). The Lua filters page
-describes the API.
+Every `pandoc.*` constructor is available too, for whatever is easier to
+build from data than to write out (a `pandoc.Span` with computed attributes,
+for instance). The Lua filters page describes the API.
 
 ## Seeing what ran, and when a cell fails
 
@@ -534,7 +539,7 @@ stack traceback:
 
 The failures, each with a reference page: the Lua does not parse
 ([`Q-26-1`](../../errors/lmd/Q-26-1.qmd)); a fragment holds markdown that
-cannot be built, such as a table or a footnote
+cannot be built, such as a footnote or a shortcode
 ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)); an inline fragment parses to more
 than one block ([`Q-26-3`](../../errors/lmd/Q-26-3.qmd)); the Lua raises at
 run time ([`Q-26-4`](../../errors/lmd/Q-26-4.qmd)); a block cell returns
@@ -558,8 +563,9 @@ an expression runs.
 
 **What a cell may return.** A block cell returns a Block, a list of Blocks
 (a `pandoc.Blocks`, a plain table of blocks, or a list of such lists), or
-`nil`. An inline cell evaluates to an Inline, a list of Inlines, a string,
-or `nil`; a string is split into words and spaces as pandoc does.
+`nil`. An inline cell evaluates to an Inline, a list of Inlines, a string, a
+number, a boolean, or `nil`; a string is split into words and spaces as
+pandoc does, and a number or boolean is written as `tostring` prints it.
 
 **The three fragment forms.**
 
@@ -589,16 +595,17 @@ run, and are unique across the document. An explicit `{#id}` is kept.
 
 ## Current limitations
 
-- **Tables inside a fragment** (pipe tables, grid tables, `.list-table` divs)
-  fail the cell ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)). Build the table
-  with `pandoc.Table` and splice it in beside the fragment.
-- **Footnotes inside a fragment** fail the cell. Put the note in the document
+- **Footnotes inside a fragment** fail the cell
+  ([`Q-26-2`](../../errors/lmd/Q-26-2.qmd)). Put the note in the document
   body.
 - **Shortcodes inside a fragment** fail the cell. Read the value in Lua
   instead: `` `{lmd} meta.key` `` rather than `{{{< meta key >}}}`.
 - **Inline cells in attribute values** (a fenced div's `data-x="…"`, a link
   title) are not evaluated.
-- **Numbers** need `tostring()` in inline cells.
+- **Numbers inside a fragment.** A top-level inline cell writes a number or
+  boolean as `tostring` would. One inside a fragment is spliced into a
+  `pandoc` constructor argument, which takes only Inlines and strings, so
+  there it is still `` `{lmd} tostring(i)` ``.
 - **`pandoc.OrderedList`** needs explicit `pandoc.ListAttributes` for output
   formats other than HTML.
 - **Modules resolve next to the document.** `require` looks beside the

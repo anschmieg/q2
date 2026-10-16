@@ -23,8 +23,8 @@ below produces one bold paragraph per item:
 
 The team has 3 members: ada, grace, linus. The lead is ADA.
 
-This is version 12.1 (a number in the front matter, so it goes through
-`tostring`).
+This is version 12.1 (a number in the front matter; an inline cell
+writes it the way `tostring` would).
 
 Ada works at Analytical Engines. A key that may be absent is read with
 `quarto.metadata.get`, which returns `nil` instead of raising: no phone

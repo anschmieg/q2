@@ -315,7 +315,7 @@ fn failure_diagnostic(
             "Q-26-6",
             "Inline lmd cell did not produce inlines",
             Some(
-                "An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
+                "An inline cell's expression must be an Inline, a list of Inlines, a string, a number, a boolean, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
             ),
         ),
     };
@@ -1020,6 +1020,20 @@ mod tests {
         let texts: Vec<String> = div.content.iter().map(para_text).collect();
         assert_eq!(texts, vec!["**a**", "**b**", "**c**", "**d**"]);
         assert_eq!(para_text(&blocks[1]), "Also d and 4.");
+    }
+
+    /// bd-iqd6niat: metadata numbers and booleans are Lua numbers and
+    /// booleans (divergence D-num), and an inline cell renders them as
+    /// `tostring` would, so `version: 12.1` needs no `tostring()`.
+    #[test]
+    fn inline_cells_render_metadata_numbers_and_booleans() {
+        let qmd = "---\nversion: 12.1\ncount: 3\nflag: true\n---\n\nVersion `{lmd} meta.version`, count `{lmd} meta.count`, twice `{lmd} meta.count * 2`, flag `{lmd} meta.flag`, pair `{lmd} {meta.count, ' of ', meta.version}`.\n";
+        let (blocks, diags) = render(qmd);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            para_text(&blocks[0]),
+            "Version 12.1, count 3, twice 6, flag true, pair 3 of 12.1."
+        );
     }
 
     #[test]

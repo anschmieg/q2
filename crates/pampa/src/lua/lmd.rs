@@ -28,9 +28,16 @@
 //! An *inline* cell (`` `{lmd} expr` `` in a paragraph) is an expression
 //! evaluated in the same state, with the mirror-image contract
 //! ([`LmdRuntime::run_inline_cell`]): `nil` (vanishes), an `Inline`,
-//! `Inlines` or a plain table of `Inline`s and strings, or a string, which
-//! pandoc's own coercion splits into `Str` / `Space` runs. Blocks are an
-//! error.
+//! `Inlines` or a plain table of `Inline`s, strings, numbers and booleans,
+//! or a string, which pandoc's own coercion splits into `Str` / `Space`
+//! runs. A number or a boolean is formatted the way Lua's `tostring` does
+//! it (`3`, `12.1`, `1e+15`, `true`) and then read as a string: q2
+//! metadata hands cells real numbers (divergence D-num, see
+//! `tests/lua-conformance/divergences.md`), and `` `{lmd} meta.version` ``
+//! should read as `tostring(meta.version)` would without the author
+//! spelling it (bd-iqd6niat). This leniency is the cell boundary's only;
+//! `pandoc.Strong(3)` inside a cell still errors, as it does in pandoc.
+//! Blocks are an error.
 //!
 //! One [`LmdRuntime`] serves a whole document, so globals set by one cell
 //! are visible to the cells after it, like a notebook.
@@ -96,7 +103,7 @@ impl std::fmt::Display for LmdCellError {
             ),
             LmdCellError::NotInlines { got } => write!(
                 f,
-                "an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to {got}"
+                "an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, a number, a boolean, or nil; this one evaluated to {got}"
             ),
         }
     }
@@ -283,6 +290,11 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
             let inlines = peek_inlines_fuzzy(lua, value).map_err(LmdCellError::Lua)?;
             Ok(LmdInlineValue::Inlines(inlines))
         }
+        Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+            let text = scalar_text(lua, value).map_err(LmdCellError::Lua)?;
+            let inlines = peek_inlines_fuzzy(lua, text).map_err(LmdCellError::Lua)?;
+            Ok(LmdInlineValue::Inlines(inlines))
+        }
         Value::UserData(ud) => {
             if let Ok(inline) = ud.borrow::<LuaInline>() {
                 let inline = inline.extract_flushed(lua).map_err(LmdCellError::Lua)?;
@@ -320,6 +332,10 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
                     Value::String(_) => {
                         inlines.extend(peek_inlines_fuzzy(lua, item).map_err(LmdCellError::Lua)?);
                     }
+                    Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
+                        let text = scalar_text(lua, item).map_err(LmdCellError::Lua)?;
+                        inlines.extend(peek_inlines_fuzzy(lua, text).map_err(LmdCellError::Lua)?);
+                    }
                     Value::UserData(ud) if ud.borrow::<LuaNodes>().is_ok() => {
                         let nodes = ud.borrow::<LuaNodes>().expect("checked above");
                         inlines.extend(nodes.to_inlines().map_err(LmdCellError::Lua)?);
@@ -347,6 +363,22 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
         }
         other => not_inlines(describe(other).to_string()),
     }
+}
+
+/// Format a number or boolean the way Lua's `tostring` does, as a Lua
+/// string value: integers print plainly, floats through Lua's own
+/// `%.14g`-style conversion (`12.1`, `1e+15`, `3.0` for an integral
+/// float), booleans as `true` / `false`. This is what an author gets from
+/// writing `tostring(expr)` by hand, so the two spellings cannot drift.
+fn scalar_text(lua: &Lua, value: Value) -> mlua::Result<Value> {
+    let text = match &value {
+        Value::Boolean(b) => lua.create_string(if *b { "true" } else { "false" })?,
+        // `coerce_string` is `lua_tolstring`: Lua's number formatting.
+        _ => lua
+            .coerce_string(value.clone())?
+            .ok_or_else(|| mlua::Error::runtime("expected a number"))?,
+    };
+    Ok(Value::String(text))
 }
 
 fn describe(value: &Value) -> &'static str {
@@ -494,14 +526,50 @@ mod tests {
         assert_eq!(mixed.len(), 3, "{mixed:?}");
     }
 
+    /// bd-iqd6niat: numbers and booleans read as `tostring` would print
+    /// them, alone and inside a list, so `` `{lmd} meta.version` `` works
+    /// without the author writing `tostring(meta.version)`.
+    #[tokio::test]
+    async fn inline_cells_format_numbers_and_booleans_like_tostring() {
+        for (expr, expect) in [
+            ("42", vec!["Str(42)"]),
+            ("12.1", vec!["Str(12.1)"]),
+            ("3.0", vec!["Str(3.0)"]),
+            ("1e15", vec!["Str(1e+15)"]),
+            ("-7", vec!["Str(-7)"]),
+            ("true", vec!["Str(true)"]),
+            ("false", vec!["Str(false)"]),
+            ("6 * 7", vec!["Str(42)"]),
+            (
+                "{ 'v', 12.1, true }",
+                vec!["Str(v)", "Str(12.1)", "Str(true)"],
+            ),
+        ] {
+            let got = inlines(run_inline(expr).await.unwrap());
+            let tags: Vec<String> = got
+                .iter()
+                .map(|i| match i {
+                    Inline::Str(s) => format!("Str({})", s.text),
+                    Inline::Space(_) => "Space".to_string(),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(tags, expect, "{expr}");
+        }
+        // The hand-written spelling and the bare one agree.
+        let bare = inlines(run_inline("1e15").await.unwrap());
+        let spelled = inlines(run_inline("tostring(1e15)").await.unwrap());
+        assert_eq!(format!("{bare:?}"), format!("{spelled:?}"));
+    }
+
     #[tokio::test]
     async fn inline_cells_reject_blocks_and_other_values() {
         for (expr, expect) in [
             ("pandoc.Para({pandoc.Str('a')})", "a Block"),
             ("pandoc.Blocks({pandoc.Para({pandoc.Str('a')})})", "Blocks"),
             ("{ pandoc.Para({pandoc.Str('a')}) }", "element 1 is a Block"),
-            ("42", "a number"),
             ("function() end", "a function"),
+            ("{ 'a', function() end }", "element 2 is a function"),
         ] {
             let err = run_inline(expr).await.unwrap_err();
             let msg = err.to_string();

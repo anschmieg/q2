@@ -68,9 +68,9 @@ Error: [Q-26-6] Inline lmd cell did not produce inlines
     │
  41 │ An inline runtime error `{lmd} nope()` and a wrong shape `{lmd} pandoc.Para({})` here.
     │                                                                 ───────┬───────
-    │                                                                        ╰───────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a Block
+    │                                                                        ╰───────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, a number, a boolean, or nil; this one evaluated to a Block
 ────╯
-ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, a number, a boolean, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
 
 Error: [Q-26-4] lmd cell failed
     ╭─[ <dir>/errors.qmd:45:1 ]

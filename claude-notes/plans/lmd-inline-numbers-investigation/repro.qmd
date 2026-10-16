@@ -1,0 +1,22 @@
+---
+title: lmd inline number repro
+version: 12.1
+count: 3
+flag: true
+---
+
+# Heading {{< meta version >}} and {{< meta count >}}
+
+Version via inline cell: `{lmd} meta.version`
+
+Count via inline cell: `{lmd} meta.count`
+
+Flag via inline cell: `{lmd} meta.flag`
+
+Workaround: `{lmd} tostring(meta.version)`
+
+Literal number: `{lmd} 42`
+
+Arithmetic: `{lmd} meta.count * 2`
+
+In a list with a string: `{lmd} {"v", meta.version}`

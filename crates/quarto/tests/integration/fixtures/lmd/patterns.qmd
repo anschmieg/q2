@@ -27,12 +27,12 @@ return meta.stuff:map(function(v) return {=: **`{lmd} v`** :=} end)
 ```
 
 # 02-metadata
-The team has `{lmd} tostring(#meta.team)` members:
+The team has `{lmd} #meta.team` members:
 `{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
 The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`.
 
-This is version `{lmd} tostring(meta.version)` (a number in the front
-matter, so it goes through `tostring`).
+This is version `{lmd} meta.version` (a number in the front matter; an
+inline cell writes it the way `tostring` would).
 
 `{lmd} meta.author.name` works at `{lmd} quarto.metadata.get("author.affil")`.
 A key that may be absent is read with `quarto.metadata.get`, which returns

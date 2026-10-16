@@ -2144,7 +2144,7 @@
   "Q-26-2": {
     "subsystem": "lmd",
     "title": "Unsupported markdown inside an lmd fragment",
-    "message_template": "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for (a table, a footnote definition, a shortcode, CriticMarkup, or a custom node). The cell is left as written and does not run.",
+    "message_template": "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for (a footnote definition, a shortcode, CriticMarkup, or a custom node). The cell is left as written and does not run.",
     "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-2",
     "since_version": "99.9.9"
   },
@@ -2172,7 +2172,7 @@
   "Q-26-6": {
     "subsystem": "lmd",
     "title": "Inline lmd cell did not produce inlines",
-    "message_template": "An inline lmd cell evaluated to a value that is not an Inline, a list of Inlines, a string, or nil. The code span is left displayed and produces no output.",
+    "message_template": "An inline lmd cell evaluated to a value that is not an Inline, a list of Inlines, a string, a number, a boolean, or nil. The code span is left displayed and produces no output.",
     "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-6",
     "since_version": "99.9.9"
   },

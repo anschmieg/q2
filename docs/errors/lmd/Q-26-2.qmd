@@ -1,6 +1,6 @@
 ---
 title: "Unsupported markdown inside an lmd fragment"
-description: "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a table, a footnote definition or a shortcode. The cell is left as written and does not run."
+description: "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a footnote definition or a shortcode. The cell is left as written and does not run."
 code: Q-26-2
 subsystem: lmd
 status: stub
@@ -11,7 +11,7 @@ categories:
 
 # `Q-26-2` — Unsupported markdown inside an lmd fragment
 
-> A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a table, a footnote definition or a shortcode. The cell is left as written and does not run.
+> A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a footnote definition or a shortcode. The cell is left as written and does not run.
 
 ## What this means
 
@@ -25,7 +25,6 @@ and underlines the offending markdown inside the fragment.
 
 The fragment contains one of:
 
-- a **table** (a pipe table, a grid table, or a `.list-table` div);
 - a **footnote** (`[^1]` with its `[^1]: …` definition);
 - a **shortcode** (`{{{< meta key >}}}` and friends);
 - CriticMarkup insertions, deletions or comments;
@@ -39,8 +38,6 @@ with constructors instead:
 - For a value from metadata, read it in Lua rather than through a
   shortcode: `meta.key` or `quarto.metadata.get("key")` inside the
   fragment as `` `{lmd} meta.key` ``.
-- For a table, build it with `pandoc.Table` (or `pandoc.SimpleTable`)
-  and splice it in next to the fragment.
 - For a footnote, place the note in the document body rather than in the
   cell.
 
