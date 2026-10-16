@@ -201,23 +201,35 @@ impl PipelineStage for LmdDesugarStage {
         for failure in errors {
             trace_event!(ctx, EventLevel::Warn, "{}", failure.error);
             // A fragment's markdown errors are the reader's own, already
-            // rerooted into the document; report them as they are, under
-            // the cell when one of them has no location.
-            if let LmdError::MarkdownParse { diagnostics, .. } = failure.error {
-                for mut diag in diagnostics {
-                    if diag.location.is_none() {
-                        diag.location = Some(failure.location.clone());
+            // rerooted into the document and carrying the reader's codes;
+            // report them as they are, under the cell when one of them has
+            // no location. Every other failure gets an lmd code of its own.
+            let (code, title) = match &failure.error {
+                LmdError::MarkdownParse { .. } => {
+                    let LmdError::MarkdownParse { diagnostics, .. } = failure.error else {
+                        unreachable!()
+                    };
+                    for mut diag in diagnostics {
+                        if diag.location.is_none() {
+                            diag.location = Some(failure.location.clone());
+                        }
+                        diag.hints.push(quarto_error_reporting::MessageContent::Markdown(
+                            "Inside an lmd markdown fragment; the cell is left as written and will not run."
+                                .to_string(),
+                        ));
+                        ctx.diagnostics.push(diag);
                     }
-                    diag.hints.push(quarto_error_reporting::MessageContent::Markdown(
-                        "Inside an lmd markdown fragment; the cell is left as written and will not run."
-                            .to_string(),
-                    ));
-                    ctx.diagnostics.push(diag);
+                    continue;
                 }
-                continue;
-            }
+                LmdError::LuaParse { .. } => ("Q-26-1", "Lua syntax error in an lmd cell"),
+                LmdError::Unsupported { .. } => {
+                    ("Q-26-2", "Unsupported markdown inside an lmd fragment")
+                }
+                LmdError::NotInlines(_) => ("Q-26-3", "Inline fragment holds more than one block"),
+            };
             ctx.diagnostics.push(
-                DiagnosticMessageBuilder::warning("lmd cell could not be desugared")
+                DiagnosticMessageBuilder::warning(title)
+                    .with_code(code)
                     .with_location(failure.location)
                     .problem(failure.error.to_string())
                     .add_hint("The cell is left as written and will not run.")

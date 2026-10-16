@@ -193,12 +193,14 @@ fn displayed_inline_cell(expr: &str, source_info: &SourceInfo) -> Inline {
 }
 
 fn cell_error(
+    code: &str,
     title: &str,
     location: SourceInfo,
     problem: String,
     hint: Option<&str>,
 ) -> DiagnosticMessage {
     let mut builder = DiagnosticMessageBuilder::error(title)
+        .with_code(code)
         .with_location(location)
         .problem(problem);
     if let Some(hint) = hint {
@@ -265,23 +267,25 @@ fn failure_diagnostic(
     err: &LmdCellError,
     location: Option<SourceInfo>,
 ) -> DiagnosticMessage {
-    let (title, hint) = match err {
-        LmdCellError::Lua(_) => ("lmd cell failed", None),
+    let (code, title, hint) = match err {
+        LmdCellError::Lua(_) => ("Q-26-4", "lmd cell failed", None),
         LmdCellError::NotBlocks { .. } => (
+            "Q-26-5",
             "lmd cell did not return blocks",
             Some(
                 "Return a Block, a list of Blocks, or nil. Write `{=: … :=}` for a markdown fragment that is blocks.",
             ),
         ),
         LmdCellError::NotInlines { .. } => (
-            "inline lmd cell did not produce inlines",
+            "Q-26-6",
+            "Inline lmd cell did not produce inlines",
             Some(
                 "An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
             ),
         ),
     };
     let location = location.unwrap_or_else(|| cell.anchor.span.clone());
-    cell_error(title, location, err.to_string(), hint)
+    cell_error(code, title, location, err.to_string(), hint)
 }
 
 /// Split a block cell's text into its code, the `echo` option, and the
@@ -316,7 +320,8 @@ fn block_cell_code_and_echo(
                 .cloned()
                 .unwrap_or_else(|| cell.anchor.span.clone());
             diagnostics.push(cell_error(
-                "lmd cell options are not valid",
+                "Q-26-7",
+                "Invalid lmd cell options",
                 location,
                 err.to_string(),
                 None,
@@ -962,7 +967,7 @@ mod tests {
         let (_blocks, diags, sources) = render_with_sources(qmd);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(
-            diags[0].title.contains("options are not valid"),
+            diags[0].title.contains("Invalid lmd cell options"),
             "{:?}",
             diags[0]
         );

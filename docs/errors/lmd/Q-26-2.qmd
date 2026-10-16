@@ -1,0 +1,67 @@
+---
+title: "Unsupported markdown inside an lmd fragment"
+description: "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a table, a footnote definition or a shortcode. The cell is left as written and does not run."
+code: Q-26-2
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-2` — Unsupported markdown inside an lmd fragment
+
+> A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a table, a footnote definition or a shortcode. The cell is left as written and does not run.
+## What this means
+
+A markdown fragment inside an lmd cell is parsed as markdown and rewritten
+into `pandoc.*` constructor calls. The fragment contained a kind of node
+that this rewriting does not support yet, so the cell was not run and stays
+in the document as a plain code block. The warning names the node kind
+and underlines the offending markdown inside the fragment.
+
+## Why this happens
+
+The fragment contains one of:
+
+- a **table** (a pipe table, a grid table, or a `.list-table` div);
+- a **footnote** (`[^1]` with its `[^1]: …` definition);
+- a **shortcode** (`{{{< meta key >}}}` and friends);
+- CriticMarkup insertions, deletions or comments;
+- a custom node produced by an extension.
+
+## How to fix
+
+Move the unsupported markdown out of the fragment, or build that part
+with constructors instead:
+
+- For a value from metadata, read it in Lua rather than through a
+  shortcode: `meta.key` or `quarto.metadata.get("key")` inside the
+  fragment as `` `{lmd} meta.key` ``.
+- For a table, build it with `pandoc.Table` (or `pandoc.SimpleTable`)
+  and splice it in next to the fragment.
+- For a footnote, place the note in the document body rather than in the
+  cell.
+
+````markdown
+```{lmd}
+return {=: Version {{{< meta version >}}} here. :=}
+```
+````
+
+becomes
+
+````markdown
+```{lmd}
+return {=: Version `{lmd} tostring(meta.version)` here. :=}
+```
+````
+
+## Related errors
+
+- A markdown *syntax* error inside a fragment is reported with the
+  markdown reader's own code (for example
+  [`Q-2-10`](../markdown/Q-2-10.qmd)), with a note that the error sits
+  inside an lmd fragment.
+- [`Q-26-3`](Q-26-3.qmd): the inline form `{=[ … ]=}` was given more than
+  one block.
