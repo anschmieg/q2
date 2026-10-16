@@ -16,9 +16,9 @@ github:
 
 - [x] Phase 0a — reader-level test `crates/pampa/tests/integration/test_trace_buffer_silence.rs` (3 tests; all fail on the unfixed tree with the predicted `-`, `pipe_table_align_*`, `![` trace lines)
 - [x] Phase 0b — e2e test `crates/quarto/tests/integration/pandoc_read_stderr_e2e.rs` (fails on the unfixed tree with the issue's six lines)
-- [ ] Phase 1 — `lua/readwrite.rs`: trace buffer → `VerboseOutput::Sink`
-- [ ] Phase 2 — `treesitter.rs`: explicit arms for `-`, `pipe_table_align_left`, `pipe_table_align_right`, `![`
-- [ ] Both tests green; `pampa -v` on `probe.qmd` prints no catch-all lines
+- [x] Phase 1 — `lua/readwrite.rs`: trace buffer → `VerboseOutput::Sink` (e2e test green with this alone)
+- [x] Phase 2 — `treesitter.rs`: explicit arms for `-`, `pipe_table_align_left`, `pipe_table_align_right`, `![` (reader-level tests green)
+- [x] Both tests green; `pampa -v` on `probe.qmd` prints no catch-all lines. Also checked on the unfixed tree that hyphen-heavy text (`foo-bar`, `a - b`, `[a-b](c-d "t-u")`, `<http://a-b.c/d-e>`, `` `x-y` ``, `$a-b$`) emits no bare `-` trace line, so the new `-` arm only ever sees delimiter-row dashes (`hyphens.qmd` in the investigation dir).
 - [ ] `cargo xtask verify --skip-hub-build` green on the branch
 - [ ] Phase 3 — PR (`Fixes #847`), strand closed
 
