@@ -203,12 +203,14 @@ fn displayed_inline_cell(expr: &str, source_info: &SourceInfo) -> Inline {
 }
 
 fn cell_error(
+    code: &str,
     title: &str,
     location: SourceInfo,
     problem: String,
     hint: Option<&str>,
 ) -> DiagnosticMessage {
     let mut builder = DiagnosticMessageBuilder::error(title)
+        .with_code(code)
         .with_location(location)
         .problem(problem);
     if let Some(hint) = hint {
@@ -275,23 +277,25 @@ fn failure_diagnostic(
     err: &LmdCellError,
     location: Option<SourceInfo>,
 ) -> DiagnosticMessage {
-    let (title, hint) = match err {
-        LmdCellError::Lua(_) => ("lmd cell failed", None),
+    let (code, title, hint) = match err {
+        LmdCellError::Lua(_) => ("Q-26-4", "lmd cell failed", None),
         LmdCellError::NotBlocks { .. } => (
+            "Q-26-5",
             "lmd cell did not return blocks",
             Some(
                 "Return a Block, a list of Blocks, or nil. Write `{=: … :=}` for a markdown fragment that is blocks.",
             ),
         ),
         LmdCellError::NotInlines { .. } => (
-            "inline lmd cell did not produce inlines",
+            "Q-26-6",
+            "Inline lmd cell did not produce inlines",
             Some(
                 "An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.",
             ),
         ),
     };
     let location = location.unwrap_or_else(|| cell.anchor.span.clone());
-    cell_error(title, location, err.to_string(), hint)
+    cell_error(code, title, location, err.to_string(), hint)
 }
 
 /// The structural desugaring set over a block cell's result, with any
@@ -374,10 +378,22 @@ fn block_cell_code_and_echo(
                     .map(options_to_config)
                     .is_some_and(|(config, option_diags)| {
                         diagnostics.extend(option_diags);
-                        config
-                            .get("echo")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
+                        match config.get("echo") {
+                            None => false,
+                            Some(value) => value.as_bool().unwrap_or_else(|| {
+                                // A wrongly typed option is reported, not
+                                // silently taken as `false`: a typo such as
+                                // `echo: yes please` would otherwise vanish.
+                                diagnostics.push(cell_error(
+                                    "Q-26-7",
+                                    "Invalid lmd cell options",
+                                    value.source_info.clone(),
+                                    "`echo` must be `true` or `false`".to_string(),
+                                    None,
+                                ));
+                                false
+                            }),
+                        }
                     });
             let option_lines = cell.text[..partitioned.options_len].matches('\n').count();
             (partitioned.code, echo, option_lines)
@@ -388,7 +404,8 @@ fn block_cell_code_and_echo(
                 .cloned()
                 .unwrap_or_else(|| cell.anchor.span.clone());
             diagnostics.push(cell_error(
-                "lmd cell options are not valid",
+                "Q-26-7",
+                "Invalid lmd cell options",
                 location,
                 err.to_string(),
                 None,
@@ -1146,12 +1163,30 @@ mod tests {
     }
 
     #[test]
+    fn a_wrongly_typed_echo_option_is_reported_on_its_value() {
+        let qmd = "```{lmd}\n--| echo: yes please\nreturn nil\n```\n";
+        let (blocks, diags, sources) = render_with_sources(qmd);
+        assert!(blocks.is_empty(), "the cell still runs: {blocks:?}");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-26-7"), "{:?}", diags[0]);
+        // The value's span is composed through the YAML parse; map its start
+        // and check it lands on `yes please` (row 1, after `--| echo: `).
+        let loc = diags[0].location.as_ref().expect("located");
+        let mapped = loc.map_offset(0, &sources).expect("maps");
+        assert_eq!(
+            (mapped.location.row, mapped.location.column),
+            (1, 10),
+            "{mapped:?}"
+        );
+    }
+
+    #[test]
     fn cell_option_errors_are_located_on_the_option_line() {
         let qmd = "```{lmd}\n--| echo: [\nreturn nil\n```\n";
         let (_blocks, diags, sources) = render_with_sources(qmd);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(
-            diags[0].title.contains("options are not valid"),
+            diags[0].title.contains("Invalid lmd cell options"),
             "{:?}",
             diags[0]
         );

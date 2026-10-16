@@ -17,6 +17,11 @@
 //! every failing cell is left displayed. Lua abbreviates chunk names over
 //! 60 bytes to `...` plus a tail, so the tail is normalized too.
 //!
+//! `patterns.qmd` mirrors the example projects under `examples/lmd/`
+//! (the documents the lmd docs page embeds), with their front matters
+//! merged, so CI pins what the page shows; keep the three in step
+//! (bd-lmd-docs-41adv2nx).
+//!
 //! Update with `INSTA_UPDATE=always cargo nextest run -p quarto -E
 //! 'test(lmd_snapshots)'` and review the `.snap` diff.
 
@@ -27,7 +32,7 @@ use super::coalesced_diagnostics::strip_ansi;
 
 const Q2_BIN: &str = env!("CARGO_BIN_EXE_q2");
 
-const FIXTURES: &[&str] = &["fragments", "cells", "nodes-and-ids", "errors"];
+const FIXTURES: &[&str] = &["fragments", "cells", "nodes-and-ids", "errors", "patterns"];
 
 /// Fixtures rendered to HTML through the native pipeline (not the pandoc
 /// leg) and snapshotted as the page's `<main>`. `--to markdown` runs

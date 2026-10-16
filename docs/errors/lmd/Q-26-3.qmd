@@ -1,0 +1,50 @@
+---
+title: "Inline fragment holds more than one block"
+description: "An inline markdown fragment, `{=[ … ]=}`, parsed to more than one block. An inline fragment must be a single paragraph or empty. The cell is left as written and does not run."
+code: Q-26-3
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-3` — Inline fragment holds more than one block
+
+> An inline markdown fragment, `{=[ … ]=}`, parsed to more than one block. An inline fragment must be a single paragraph or empty. The cell is left as written and does not run.
+
+## What this means
+
+The `{=[ … ]=}` form of a markdown fragment asks for *inlines*: the words,
+emphasis, links and code of a single paragraph. The markdown between the
+delimiters parsed to more than one block, so there is no single run of
+inlines to hand back. The cell was not run and stays in the document as a
+plain code block.
+
+## Why this happens
+
+- A blank line inside the fragment splits it into two paragraphs.
+- The fragment starts a list, a heading, a fenced div or a code block,
+  which are blocks, not inlines.
+
+## How to fix
+
+If you meant inlines, remove the blank line or the block-level markup.
+If you meant blocks, write the fragment with the block form, `{=: … :=}`,
+which can hold any number of blocks:
+
+````markdown
+```{lmd}
+local inlines = {=[ one *word* and another ]=}
+local blocks = {=:
+A first paragraph.
+
+A second paragraph.
+:=}
+```
+````
+
+## Related errors
+
+- [`Q-26-6`](Q-26-6.qmd): an inline *cell* produced something that is not
+  inlines.

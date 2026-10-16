@@ -52,4 +52,11 @@ Invalid cell options:
 return nil
 ```
 
+An option of the wrong type:
+
+```{lmd}
+--| echo: yes please
+return nil
+```
+
 After everything.

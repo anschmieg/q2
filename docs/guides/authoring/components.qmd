@@ -112,7 +112,7 @@ they are for your editor.
 
 ## Building the element from Lua
 
-A Lua filter or an lmd cell builds a bound element with
+A Lua filter or an [lmd cell](lmd.qmd) builds a bound element with
 `quarto.component(name, props, content)`: a Div with the content and the
 props attached, or a Span when the content is inline. Props are encoded by
 `pandoc.json.encode`, which turns inlines and blocks into their text and a

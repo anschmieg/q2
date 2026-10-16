@@ -1,0 +1,60 @@
+---
+title: "Lua syntax error in an lmd cell"
+description: "The Lua in an lmd cell does not parse, so the cell cannot be desugared. The cell is left as written and does not run."
+code: Q-26-1
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-1` — Lua syntax error in an lmd cell
+
+> The Lua in an lmd cell does not parse, so the cell cannot be desugared. The cell is left as written and does not run.
+
+## What this means
+
+Before an lmd cell runs, Quarto *desugars* it: it parses the cell as Lua,
+finds every markdown fragment (`{=: … :=}`, `{=[ … ]=}`, `{= … =}`) and
+rewrites each one into `pandoc.*` constructor calls. That parse found a
+Lua syntax error, so nothing in the cell could be rewritten and the cell
+was not run. It stays in the rendered document as a plain code block, so
+you can see what was written.
+
+The warning points at the line and column of the error, counted inside
+the cell.
+
+## Why this happens
+
+- An ordinary Lua typo: a missing `end`, an unbalanced parenthesis, a
+  stray operator at the end of a line.
+- A fragment that was never closed. `{=:` must end with `:=}`, `{=[` with
+  `]=}`, and `{=` with `=}`; a fragment closed with the wrong delimiter
+  swallows the rest of the cell and the Lua after it no longer parses.
+- A fragment written where Lua does not allow an expression, for
+  example as a statement on its own line. A fragment is a value; assign
+  it, return it, or pass it to a function.
+
+## How to fix
+
+Read the position in the warning, correct the Lua, and render again. If
+the position is right after a fragment, check the fragment's closing
+delimiter first.
+
+````markdown
+```{lmd}
+local x = 1
+return {= a =} +
+```
+````
+
+The trailing `+` has no right operand. Delete it, or finish the
+expression.
+
+## Related errors
+
+- [`Q-26-2`](Q-26-2.qmd): the Lua parsed, but a fragment contains
+  markdown the cell cannot build.
+- [`Q-26-4`](Q-26-4.qmd): the cell parsed and ran, and the Lua raised an
+  error at run time.

@@ -1,0 +1,18 @@
+---
+title: "Setup cells and shared state"
+---
+
+A cell with no `return` leaves nothing behind. Everything it defines is
+visible to the cells after it:
+
+```{lmd}
+greeting = "Hello"
+function badge(text)
+  return {=[ [`{lmd} text`]{.badge .text-bg-secondary} ]=}
+end
+```
+
+## `{lmd} greeting`, world
+
+A `{lmd} badge("new")` feature and a `{lmd} badge("beta")` one. The heading
+above got its id from its final text.

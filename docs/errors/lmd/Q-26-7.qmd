@@ -1,0 +1,48 @@
+---
+title: "Invalid lmd cell options"
+description: "The `--|` option lines at the top of an lmd cell are not valid YAML, or name an option with the wrong type. The cell runs as if it had no options."
+code: Q-26-7
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-7` — Invalid lmd cell options
+
+> The `--|` option lines at the top of an lmd cell are not valid YAML, or name an option with the wrong type. The cell runs as if it had no options.
+
+## What this means
+
+An lmd cell takes options in Lua comment syntax at the top of the cell,
+one per line, `--| key: value`, the way a Python cell takes `#| key:
+value`. The option lines did not parse as YAML, or an option had a value
+of the wrong type. The cell still runs, with no options applied. The
+error is located on the offending option line.
+
+## Why this happens
+
+- Unbalanced YAML on an option line: `--| echo: [`.
+- A value of the wrong type: `--| echo: yes please` where `echo` takes
+  `true` or `false`.
+- An option line that is not at the top of the cell. Option lines must
+  come before the first line of Lua; a `--|` comment further down is an
+  ordinary Lua comment and is ignored.
+
+## How to fix
+
+Correct the YAML. The only option an lmd cell understands today is
+`echo`, a boolean that keeps the desugared Lua visible above the result;
+other keys are accepted and ignored:
+
+````markdown
+```{lmd}
+--| echo: true
+return {=: Shown with its Lua. :=}
+```
+````
+
+## Related errors
+
+- [`Q-26-4`](Q-26-4.qmd): the cell's Lua itself failed.

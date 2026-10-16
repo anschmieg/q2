@@ -2133,5 +2133,54 @@
     "message_template": "A component's TypeScript or JSX module (or one it imports) failed to transpile, could not be read, or has an import that names no file. The component was not shipped; its element keeps the static content.",
     "docs_url": "https://quarto.org/docs/errors/components/Q-25-9",
     "since_version": "99.9.9"
+  },
+  "Q-26-1": {
+    "subsystem": "lmd",
+    "title": "Lua syntax error in an lmd cell",
+    "message_template": "The Lua in an lmd cell does not parse, so the cell cannot be desugared. The cell is left as written and does not run.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-1",
+    "since_version": "99.9.9"
+  },
+  "Q-26-2": {
+    "subsystem": "lmd",
+    "title": "Unsupported markdown inside an lmd fragment",
+    "message_template": "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for (a table, a footnote definition, a shortcode, CriticMarkup, or a custom node). The cell is left as written and does not run.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-2",
+    "since_version": "99.9.9"
+  },
+  "Q-26-3": {
+    "subsystem": "lmd",
+    "title": "Inline fragment holds more than one block",
+    "message_template": "An inline markdown fragment, `{=[ … ]=}`, parsed to more than one block. An inline fragment must be a single paragraph or empty. The cell is left as written and does not run.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-3",
+    "since_version": "99.9.9"
+  },
+  "Q-26-4": {
+    "subsystem": "lmd",
+    "title": "lmd cell failed",
+    "message_template": "The Lua in an lmd cell raised an error while compiling or running. The cell is left displayed in the document and produces no output.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-4",
+    "since_version": "99.9.9"
+  },
+  "Q-26-5": {
+    "subsystem": "lmd",
+    "title": "lmd cell did not return blocks",
+    "message_template": "An lmd cell returned a value that is not a Block, a list of Blocks, or nil. The cell is left displayed in the document and produces no output.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-5",
+    "since_version": "99.9.9"
+  },
+  "Q-26-6": {
+    "subsystem": "lmd",
+    "title": "Inline lmd cell did not produce inlines",
+    "message_template": "An inline lmd cell evaluated to a value that is not an Inline, a list of Inlines, a string, or nil. The code span is left displayed and produces no output.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-6",
+    "since_version": "99.9.9"
+  },
+  "Q-26-7": {
+    "subsystem": "lmd",
+    "title": "Invalid lmd cell options",
+    "message_template": "The `--|` option lines at the top of an lmd cell are not valid YAML, or name an option with the wrong type. The cell runs as if it had no options.",
+    "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-7",
+    "since_version": "99.9.9"
   }
 }

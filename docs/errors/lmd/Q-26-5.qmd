@@ -1,0 +1,63 @@
+---
+title: "lmd cell did not return blocks"
+description: "An lmd cell returned a value that is not a Block, a list of Blocks, or nil. The cell is left displayed in the document and produces no output."
+code: Q-26-5
+subsystem: lmd
+status: stub
+since: "99.9.9"
+categories:
+  - lmd
+---
+
+# `Q-26-5` — lmd cell did not return blocks
+
+> An lmd cell returned a value that is not a Block, a list of Blocks, or nil. The cell is left displayed in the document and produces no output.
+
+## What this means
+
+A block lmd cell (a fenced ```` ```{lmd} ```` block) replaces itself with
+what it returns, and the thing it returns has to fit where a fenced block
+sits: a Block, a list of Blocks (a `pandoc.Blocks`, a plain table of
+blocks, or a list of such lists), or `nil`, which makes the cell vanish.
+The cell returned something else. The message names what came back. The
+cell stays displayed and produces no output.
+
+## Why this happens
+
+- The cell returned an inline fragment, `{=[ … ]=}`, or a single
+  `pandoc.Str`, `pandoc.Strong`, or other Inline.
+- The cell returned a string. Strings are accepted in *inline* cells, not
+  block cells.
+- The cell returned a number, a boolean, or a function, for example a
+  computation whose result was meant to go into a fragment.
+
+## How to fix
+
+Return blocks. Wrap inlines in a paragraph, or write the fragment in the
+block form:
+
+````markdown
+```{lmd}
+return {=[ inlines are not blocks ]=}
+```
+````
+
+becomes either
+
+````markdown
+```{lmd}
+return pandoc.Para({=[ inlines are now a paragraph ]=})
+```
+````
+
+or
+
+````markdown
+```{lmd}
+return {=: a block fragment is a paragraph already :=}
+```
+````
+
+## Related errors
+
+- [`Q-26-6`](Q-26-6.qmd): the mirror image, for inline cells.
