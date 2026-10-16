@@ -1814,20 +1814,9 @@ fn read_list_attributes(value: &Value) -> Result<ListAttributes> {
         .get("t")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonReadError::MissingField("t in number style".to_string()))?;
-    let number_style = match number_style_t {
-        "Decimal" => ListNumberStyle::Decimal,
-        "LowerAlpha" => ListNumberStyle::LowerAlpha,
-        "UpperAlpha" => ListNumberStyle::UpperAlpha,
-        "LowerRoman" => ListNumberStyle::LowerRoman,
-        "UpperRoman" => ListNumberStyle::UpperRoman,
-        "DefaultStyle" => ListNumberStyle::Default,
-        _ => {
-            return Err(JsonReadError::UnsupportedVariant(format!(
-                "ListNumberStyle: {}",
-                number_style_t
-            )));
-        }
-    };
+    let number_style = ListNumberStyle::from_pandoc_name(number_style_t).ok_or_else(|| {
+        JsonReadError::UnsupportedVariant(format!("ListNumberStyle: {}", number_style_t))
+    })?;
 
     let number_delimiter_obj = arr[2].as_object().ok_or_else(|| {
         JsonReadError::InvalidType("ListAttributes number delimiter must be object".to_string())
@@ -1836,18 +1825,10 @@ fn read_list_attributes(value: &Value) -> Result<ListAttributes> {
         .get("t")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonReadError::MissingField("t in number delimiter".to_string()))?;
-    let number_delimiter = match number_delimiter_t {
-        "Period" => ListNumberDelim::Period,
-        "OneParen" => ListNumberDelim::OneParen,
-        "TwoParens" => ListNumberDelim::TwoParens,
-        "DefaultDelim" => ListNumberDelim::Default,
-        _ => {
-            return Err(JsonReadError::UnsupportedVariant(format!(
-                "ListNumberDelim: {}",
-                number_delimiter_t
-            )));
-        }
-    };
+    let number_delimiter =
+        ListNumberDelim::from_pandoc_name(number_delimiter_t).ok_or_else(|| {
+            JsonReadError::UnsupportedVariant(format!("ListNumberDelim: {}", number_delimiter_t))
+        })?;
 
     Ok((start_num, number_style, number_delimiter))
 }

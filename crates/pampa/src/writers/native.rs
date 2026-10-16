@@ -4,9 +4,7 @@
  */
 
 use crate::pandoc::shortcode::shortcode_to_span;
-use crate::pandoc::{
-    Attr, Block, Citation, CitationMode, Inline, ListNumberDelim, MathType, Pandoc, QuoteType,
-};
+use crate::pandoc::{Attr, Block, Citation, CitationMode, Inline, MathType, Pandoc, QuoteType};
 
 fn write_safe_string<T: std::io::Write>(text: &str, buf: &mut T) -> std::io::Result<()> {
     write!(buf, "\"")?;
@@ -503,27 +501,17 @@ fn write_list_number_delim<T: std::io::Write>(
     delim: &crate::pandoc::ListNumberDelim,
     buf: &mut T,
 ) -> std::io::Result<()> {
-    match delim {
-        ListNumberDelim::Period => write!(buf, "Period"),
-        ListNumberDelim::OneParen => write!(buf, "OneParen"),
-        ListNumberDelim::TwoParens => write!(buf, "TwoParens"),
-        ListNumberDelim::Default => write!(buf, "Period"), // Is this supposed to be the default?
-    }
+    // Pandoc's constructor names; `Default` is `DefaultDelim`, as pandoc
+    // itself prints a list built with default attributes.
+    write!(buf, "{}", delim.pandoc_name())
 }
 
 fn write_list_number_style<T: std::io::Write>(
     style: &crate::pandoc::ListNumberStyle,
     buf: &mut T,
 ) -> std::io::Result<()> {
-    match style {
-        crate::pandoc::ListNumberStyle::Decimal => write!(buf, "Decimal"),
-        crate::pandoc::ListNumberStyle::LowerAlpha => write!(buf, "LowerAlpha"),
-        crate::pandoc::ListNumberStyle::UpperAlpha => write!(buf, "UpperAlpha"),
-        crate::pandoc::ListNumberStyle::LowerRoman => write!(buf, "LowerRoman"),
-        crate::pandoc::ListNumberStyle::UpperRoman => write!(buf, "UpperRoman"),
-        crate::pandoc::ListNumberStyle::Example => write!(buf, "Example"),
-        crate::pandoc::ListNumberStyle::Default => write!(buf, "Decimal"), // Is this supposed to be the default?
-    }
+    // Pandoc's constructor names; `Default` is `DefaultStyle`.
+    write!(buf, "{}", style.pandoc_name())
 }
 
 fn write_short_caption<T: std::io::Write>(

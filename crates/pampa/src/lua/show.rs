@@ -121,24 +121,11 @@ fn show_col_width(w: &ColWidth) -> String {
 }
 
 fn show_list_number_style(s: &ListNumberStyle) -> &'static str {
-    match s {
-        ListNumberStyle::Default => "DefaultStyle",
-        ListNumberStyle::Example => "Example",
-        ListNumberStyle::Decimal => "Decimal",
-        ListNumberStyle::LowerRoman => "LowerRoman",
-        ListNumberStyle::UpperRoman => "UpperRoman",
-        ListNumberStyle::LowerAlpha => "LowerAlpha",
-        ListNumberStyle::UpperAlpha => "UpperAlpha",
-    }
+    s.pandoc_name()
 }
 
 fn show_list_number_delim(d: &ListNumberDelim) -> &'static str {
-    match d {
-        ListNumberDelim::Default => "DefaultDelim",
-        ListNumberDelim::Period => "Period",
-        ListNumberDelim::OneParen => "OneParen",
-        ListNumberDelim::TwoParens => "TwoParens",
-    }
+    d.pandoc_name()
 }
 
 /// `(3,Decimal,Period)`

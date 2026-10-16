@@ -561,24 +561,11 @@ fn lua_number(n: f64) -> String {
 }
 
 fn list_number_style(style: &ListNumberStyle) -> &'static str {
-    match style {
-        ListNumberStyle::Default => "DefaultStyle",
-        ListNumberStyle::Example => "Example",
-        ListNumberStyle::Decimal => "Decimal",
-        ListNumberStyle::LowerRoman => "LowerRoman",
-        ListNumberStyle::UpperRoman => "UpperRoman",
-        ListNumberStyle::LowerAlpha => "LowerAlpha",
-        ListNumberStyle::UpperAlpha => "UpperAlpha",
-    }
+    style.pandoc_name()
 }
 
 fn list_number_delim(delim: &ListNumberDelim) -> &'static str {
-    match delim {
-        ListNumberDelim::Default => "DefaultDelim",
-        ListNumberDelim::Period => "Period",
-        ListNumberDelim::OneParen => "OneParen",
-        ListNumberDelim::TwoParens => "TwoParens",
-    }
+    delim.pandoc_name()
 }
 
 /// A double-quoted Lua string literal for `s`.

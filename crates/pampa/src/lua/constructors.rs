@@ -836,57 +836,33 @@ fn cells_to_lua_list(lua: &Lua, cells: &[Cell]) -> Result<Value> {
 /// not one of Pandoc's constructor names (Pandoc's `peekRead` errors
 /// with `Could not read: <value>`).
 pub(crate) fn parse_list_number_style(s: &str) -> Result<ListNumberStyle> {
-    match s {
-        "DefaultStyle" => Ok(ListNumberStyle::Default),
-        "Example" => Ok(ListNumberStyle::Example),
-        "Decimal" => Ok(ListNumberStyle::Decimal),
-        "LowerRoman" => Ok(ListNumberStyle::LowerRoman),
-        "UpperRoman" => Ok(ListNumberStyle::UpperRoman),
-        "LowerAlpha" => Ok(ListNumberStyle::LowerAlpha),
-        "UpperAlpha" => Ok(ListNumberStyle::UpperAlpha),
-        other => Err(invalid_value_error(
+    ListNumberStyle::from_pandoc_name(s).ok_or_else(|| {
+        invalid_value_error(
             "list number style",
-            other,
+            s,
             "DefaultStyle, Example, Decimal, LowerRoman, UpperRoman, LowerAlpha, or UpperAlpha",
-        )),
-    }
+        )
+    })
 }
 
 pub(crate) fn list_number_style_name(style: &ListNumberStyle) -> &'static str {
-    match style {
-        ListNumberStyle::Default => "DefaultStyle",
-        ListNumberStyle::Example => "Example",
-        ListNumberStyle::Decimal => "Decimal",
-        ListNumberStyle::LowerRoman => "LowerRoman",
-        ListNumberStyle::UpperRoman => "UpperRoman",
-        ListNumberStyle::LowerAlpha => "LowerAlpha",
-        ListNumberStyle::UpperAlpha => "UpperAlpha",
-    }
+    style.pandoc_name()
 }
 
 /// Parse a ListNumberDelim name; loud error on garbage (see
 /// [`parse_list_number_style`]).
 pub(crate) fn parse_list_number_delim(s: &str) -> Result<ListNumberDelim> {
-    match s {
-        "DefaultDelim" => Ok(ListNumberDelim::Default),
-        "Period" => Ok(ListNumberDelim::Period),
-        "OneParen" => Ok(ListNumberDelim::OneParen),
-        "TwoParens" => Ok(ListNumberDelim::TwoParens),
-        other => Err(invalid_value_error(
+    ListNumberDelim::from_pandoc_name(s).ok_or_else(|| {
+        invalid_value_error(
             "list number delimiter",
-            other,
+            s,
             "DefaultDelim, Period, OneParen, or TwoParens",
-        )),
-    }
+        )
+    })
 }
 
 pub(crate) fn list_number_delim_name(delim: &ListNumberDelim) -> &'static str {
-    match delim {
-        ListNumberDelim::Default => "DefaultDelim",
-        ListNumberDelim::Period => "Period",
-        ListNumberDelim::OneParen => "OneParen",
-        ListNumberDelim::TwoParens => "TwoParens",
-    }
+    delim.pandoc_name()
 }
 
 /// Wrapper for a Pandoc `ListAttributes` triple as typed Lua userdata,
