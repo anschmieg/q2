@@ -35,6 +35,9 @@ tree-sitter-json = "0.24"
 tree-sitter-yaml = "0.7"
 tree-sitter-julia = "0.23"
 tree-sitter-lua = "0.5"
+# lmd: Lua plus `{= markdown =}` fragments (bd-76ogq4ew); the vendored
+# grammar in this workspace.
+tree-sitter-lmd.workspace = true
 tree-sitter-rust = "0.24"
 
 # Native-only: wasmtime-backed user-grammar loader. The `wasm` feature on

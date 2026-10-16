@@ -156,6 +156,7 @@ static BUILTIN_ALIASES: &[(&str, &[&str])] = &[
     ("javascript", &["js", "jsx"]),
     ("json", &[]),
     ("julia", &["jl"]),
+    ("lmd", &[]),
     ("lua", &[]),
     ("python", &["py"]),
     ("r", &[]),
@@ -178,6 +179,7 @@ static BUILTIN_BUILDERS: &[(
     ("javascript", crate::langs::javascript::build),
     ("json", crate::langs::json::build),
     ("julia", crate::langs::julia::build),
+    ("lmd", crate::langs::lmd::build),
     ("lua", crate::langs::lua::build),
     ("python", crate::langs::python::build),
     ("r", crate::langs::r::build),
@@ -209,6 +211,37 @@ mod tests {
         for s in &spans {
             assert!(s.end > s.start && s.end <= source.len());
             assert!(source.get(s.start..s.end).is_some());
+        }
+    }
+
+    /// lmd (bd-76ogq4ew): Lua's captures, plus the fragment's delimiters
+    /// and content, so an echoed cell shows where the markdown is.
+    #[test]
+    fn highlight_captures_for_lmd() {
+        let source = "local x = {=: **hi** :=}\nreturn x";
+        let spans = highlight_captures("lmd", source)
+            .expect("lmd highlight succeeds")
+            .expect("lmd is registered");
+        assert!(
+            spans.iter().any(|s| s.capture == "keyword.return"),
+            "expected `return` to be captured, got {spans:?}"
+        );
+        let open = source.find("{=:").unwrap();
+        assert!(
+            spans.iter().any(|s| s.start == open
+                && s.end == open + 3
+                && s.capture == "punctuation.special"),
+            "expected the opener to be punctuation, got {spans:?}"
+        );
+        let content = source.find(" **hi** ").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.start == content && s.capture == "string.special"),
+            "expected the fragment content to be captured, got {spans:?}"
+        );
+        for s in &spans {
+            assert!(s.end > s.start && s.end <= source.len());
         }
     }
 

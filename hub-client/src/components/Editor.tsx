@@ -165,6 +165,11 @@ function getLanguageForFile(filePath: string): string {
     case 'yaml':
     case 'yml':
       return 'yaml';
+    case 'lmd':
+      // An lmd module (Lua plus `{= markdown =}` fragments; bd-76ogq4ew)
+      // highlights as Lua: Monaco has no lmd grammar, and Lua's gets the
+      // code right while leaving the fragments plain.
+      return 'lua';
     case 'qmd':
     case 'md':
       // .md is a renderable source file parsed with the qmd grammar

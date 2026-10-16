@@ -43,3 +43,52 @@ local para = {=: Plain text, "quoted", and a line
 break. :=}
 return pandoc.Blocks({ heading, list, para })
 ```
+
+## Footnotes
+
+A note defined in the fragment is paired with its reference there; one
+defined in the document body is resolved with the document's notes.
+
+```{lmd}
+return {=:
+Local[^local] and from the body[^body].
+
+[^local]: Defined *inside* the fragment.
+:=}
+```
+
+[^body]: Defined in the document body.
+
+## Markdown from a string
+
+```{lmd}
+local text = "A **string** read at run time.\n\n- with a list\n- of two"
+return quarto.markdown(text)
+```
+
+Inline too: `{lmd} quarto.markdown("*em* and **strong**")`.
+
+## A fragment as the argument
+
+```{lmd}
+local function note(body)
+  return pandoc.Div(body, pandoc.Attr("", {"callout-note"}))
+end
+return note{=:
+Called with the fragment as the whole argument list.
+:=}
+```
+
+Inline: `{lmd} pandoc.Strong{=[ a strong call ]=}`.
+
+## Quoting fragment syntax
+
+```{lmd}
+return {=: Escaped: \{= and =\}, and balanced `{=: code :=}` in a span. :=}
+```
+
+```{lmd}
+return {==:
+Level two: `]=}` alone, `:=}` alone, and a whole `{=[ x ]=}` are text.
+:==}
+```

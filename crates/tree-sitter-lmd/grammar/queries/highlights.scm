@@ -202,3 +202,18 @@
 (string) @string
 
 (escape_sequence) @string.escape
+
+; lmd: markdown fragments. The delimiters are punctuation; the content is
+; markdown, which the highlighter has no grammar for here, so it reads as
+; an embedded string.
+(markdown_fragment
+  [
+    "{="
+    "{=:"
+    "{=["
+    "=}"
+    ":=}"
+    "]=}"
+  ] @punctuation.special)
+
+(markdown_content) @string.special

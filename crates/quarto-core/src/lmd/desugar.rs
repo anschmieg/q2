@@ -222,6 +222,13 @@ fn desugar_inner(
         let column = base + pos.column.saturating_sub(shift);
         let mut emitted =
             emit_fragment(markdown, column, FragmentKind::of(fragment), parent, opts)?;
+        // `callout{=: … :=}`: the fragment is the call's whole argument
+        // list (as `f{…}` and `f"…"` are in Lua), so the expansion needs
+        // the parentheses Lua wants around an expression argument.
+        if is_call_argument(fragment) {
+            emitted.insert(0, '(');
+            emitted.push(')');
+        }
         if opts.mode == EmitMode::LinePreserving {
             pad_to_source_lines(&mut emitted, fragment.end_position().row - pos.row);
         }
@@ -284,6 +291,12 @@ fn emit_fragment(
 /// node span and every parse diagnostic into it (the same path front-matter
 /// markdown uses); without it, diagnostics are stripped of their locations,
 /// which would otherwise point into a private, meaningless file.
+///
+/// The blocks are then finished as a fragment
+/// (`pampa::transforms::fragment`): footnotes defined in the fragment are
+/// paired with its references into `Note`s, and the ids the reader derived
+/// for headings are dropped so the document derives them from the final
+/// text.
 fn parse_markdown(markdown: &str, parent: Option<SourceInfo>) -> Result<Vec<Block>, LmdError> {
     if markdown.is_empty() {
         return Ok(vec![]);
@@ -298,11 +311,9 @@ fn parse_markdown(markdown: &str, parent: Option<SourceInfo>) -> Result<Vec<Bloc
         true,
         parent,
     ) {
-        Ok((pandoc, _ctx, _warnings)) => {
-            let mut blocks = pandoc.blocks;
-            strip_derived_heading_ids(&mut blocks);
-            Ok(blocks)
-        }
+        Ok((pandoc, _ctx, _warnings)) => Ok(pampa::transforms::fragment::prepare_fragment_blocks(
+            pandoc.blocks,
+        )),
         Err(mut diags) => {
             if !anchored {
                 for d in &mut diags {
@@ -324,25 +335,14 @@ fn parse_markdown(markdown: &str, parent: Option<SourceInfo>) -> Result<Vec<Bloc
     }
 }
 
-/// Drop the ids the reader derived for a fragment's headings.
-///
-/// A fragment is parsed on its own, so its derived ids are made from
-/// placeholder text (`### `{lmd} title`` gives `lmd-title`) and are
-/// de-duplicated only within the fragment; a fragment reused as a component
-/// would emit the same id every time. Emitting the heading with no id lets
-/// the `heading-id` transform derive one from the final text, unique across
-/// the whole document. Author-written ids (`{#x}`, which carry a source
-/// location) are kept.
-fn strip_derived_heading_ids(blocks: &mut Vec<Block>) {
-    crate::ast_walk::for_each_block_list_mut(blocks, &mut |list| {
-        for block in list.iter_mut() {
-            if let Block::Header(h) = block
-                && h.attr_source.id.is_none()
-            {
-                h.attr.0.clear();
-            }
-        }
-    });
+/// Whether `fragment` stands as a call's whole argument list, `f{= … =}`.
+/// Inside `f({= … =})` the fragment's parent is the same `arguments` node,
+/// but its first child is the `(`.
+fn is_call_argument(fragment: tree_sitter::Node<'_>) -> bool {
+    fragment.parent().is_some_and(|p| {
+        p.kind() == tree_sitter_lmd::ARGUMENTS
+            && p.child(0).is_some_and(|first| first.id() == fragment.id())
+    })
 }
 
 /// Every `markdown_fragment` node under `root`, in source order. The walk
@@ -519,6 +519,71 @@ mod tests {
         );
     }
 
+    /// `callout{=: … :=}`: a fragment as a call's argument list becomes a
+    /// parenthesized argument, so the result is the call Lua expects.
+    #[test]
+    fn a_fragment_as_the_calls_argument_is_parenthesized() {
+        let out = desugar_lua("return callout{=: body :=}").unwrap();
+        assert!(out.starts_with("return callout(pandoc.Blocks({\n"), "{out}");
+        assert!(out.ends_with("}))"), "{out}");
+        let out = desugar_lua("return card:render{=[ title ]=}").unwrap();
+        assert!(
+            out.starts_with("return card:render(pandoc.Inlines({\n"),
+            "{out}"
+        );
+        let out = desugar_lua("local x = f{= a =}\nreturn x").unwrap();
+        assert!(out.starts_with("local x = f(pandoc.Nodes({\n"), "{out}");
+        // An ordinary argument position is unchanged: no doubled parens.
+        let out = desugar_lua("return f({= a =})").unwrap();
+        assert!(out.starts_with("return f(pandoc.Nodes({\n"), "{out}");
+        assert!(!out.contains("(("), "{out}");
+    }
+
+    #[test]
+    fn a_call_argument_fragment_keeps_its_lines_when_line_preserving() {
+        let src = "return callout{=:\nOne.\n\nTwo.\n:=}\n";
+        let out = line_preserving(src).unwrap();
+        assert_eq!(out.lines().count(), src.lines().count(), "{out}");
+        assert!(
+            out.starts_with("return callout(\n\n\n\npandoc.Blocks("),
+            "{out}"
+        );
+        assert!(out.ends_with("}))\n"), "{out}");
+    }
+
+    /// A backslash makes the next character content to the scanner, so
+    /// `\{=` does not open; and since Quarto markdown wants a literal brace
+    /// escaped anyway (`\{`, `\}`), the spellings that read as the literal
+    /// delimiters are `\{=` and `=\}`.
+    #[test]
+    fn a_backslash_escapes_the_delimiters() {
+        let out = desugar_lua("return {=: write \\{= and =\\} :=}").unwrap();
+        assert!(out.contains("pandoc.Str(\"{=\")"), "{out}");
+        assert!(out.contains("pandoc.Str(\"=}\")"), "{out}");
+        assert!(!out.contains('\\'), "{out}");
+    }
+
+    /// `{==: … :==}`: the content is raw up to the closer of the same
+    /// level, so fragment syntax inside is text; inline lmd code inside
+    /// is still code, since that is the markdown reader's business.
+    #[test]
+    fn a_leveled_fragment_quotes_fragment_syntax() {
+        let out =
+            desugar_lua("return {==: Write `{=: x :=}` or `{=[ y ]=}`, see `=}` :==}").unwrap();
+        assert!(out.contains("pandoc.Code(\"{=: x :=}\")"), "{out}");
+        assert!(out.contains("pandoc.Code(\"{=[ y ]=}\")"), "{out}");
+        assert!(out.contains("pandoc.Code(\"=}\")"), "{out}");
+        let out = desugar_lua("return {==[ **b** `{lmd} v` ]==}").unwrap();
+        assert!(out.starts_with("return pandoc.Inlines({\n"), "{out}");
+        assert!(out.contains("  v,\n"), "{out}");
+        let out = desugar_lua("return {== a ==}").unwrap();
+        assert!(out.starts_with("return pandoc.Nodes({\n"), "{out}");
+        assert_eq!(
+            desugar_lua("return {==::==}").unwrap(),
+            "return pandoc.Blocks({})"
+        );
+    }
+
     #[test]
     fn several_fragments_in_one_chunk() {
         let out = desugar_lua("local a = {= x =}\nlocal b = {=[ y ]=}").unwrap();
@@ -536,21 +601,49 @@ mod tests {
 
     #[test]
     fn unsupported_node_is_an_error_without_a_location_when_unanchored() {
-        // A footnote: the reader's `NoteDefinitionPara` (and the matching
-        // `NoteReference`) are resolved later in the pipeline and have no
-        // constructor.
-        let src = "return {=: text[^1]\n\n[^1]: the note :=}";
+        // A shortcode: resolved later in the pipeline, no constructor
+        // (bd-onsqz7sv).
+        let src = "return {=: Version {{< meta version >}} here. :=}";
         let err = desugar_lua(src).unwrap_err();
         assert!(
             matches!(
                 err,
                 LmdError::Unsupported {
-                    kind: "NoteDefinitionPara",
+                    kind: "Shortcode",
                     location: None
                 }
             ),
             "{err}"
         );
+    }
+
+    /// A footnote defined in the fragment is paired with its reference at
+    /// parse time and printed as an inline `pandoc.Note`, since the
+    /// reader's definition block has no constructor.
+    #[test]
+    fn a_footnote_defined_in_the_fragment_becomes_a_note() {
+        let out = desugar_lua("return {=: text[^1]\n\n[^1]: the *note* :=}").unwrap();
+        assert!(out.contains("pandoc.Note({\n"), "{out}");
+        assert!(out.contains("pandoc.Emph({"), "{out}");
+        assert!(!out.contains("quarto-note-reference"), "{out}");
+        assert!(!out.contains("NoteDefinition"), "{out}");
+        let fenced = desugar_lua("return {=:\ntext[^a]\n\n::: ^a\nOne.\n\nTwo.\n:::\n:=}").unwrap();
+        assert_eq!(fenced.matches("pandoc.Note(").count(), 1, "{fenced}");
+        assert_eq!(fenced.matches("pandoc.Para(").count(), 3, "{fenced}");
+    }
+
+    /// A reference whose definition lives in the document body stays the
+    /// reader's reference span; the document's footnote transform resolves
+    /// it after the cell has run.
+    #[test]
+    fn a_footnote_reference_defined_outside_the_fragment_stays_a_reference() {
+        let out = desugar_lua("return {=[ see[^doc] ]=}").unwrap();
+        assert!(
+            out.contains("pandoc.Span({}, pandoc.Attr(\"\", {\n"),
+            "{out}"
+        );
+        assert!(out.contains("\"quarto-note-reference\""), "{out}");
+        assert!(out.contains("{\"reference-id\", \"doc\"}"), "{out}");
     }
 
     /// bd-7gqr148v: tables are printed, pipe tables and list-tables alike

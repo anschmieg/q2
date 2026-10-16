@@ -2,7 +2,7 @@
 title: 'lmd infrastructure: `require` of `.lmd` modules, component call sites, and an ecosystem survey (bd-76ogq4ew)'
 date: 2026-10-15
 description: 'Survey of the JSX/MDX, Hugo/templating, Typst and Lua-dialect ecosystems for quality-of-life features worth borrowing into lmd, a design for loading `.lmd` modules through `require`, and a phased plan for the reusability work that follows the landed lmd feature.'
-status: in-progress  # survey done 2026-10-15; decisions recorded and go-ahead given 2026-10-16; Phase 1 implemented, merged with origin/main (post #855) and `cargo xtask verify` green (2026-10-16); Phase 1 PR open, Phases 2-3 to follow
+status: in-progress  # survey done 2026-10-15; decisions and go-ahead 2026-10-16; Phase 1 on PR #856; Phase 2 implemented on braid/bd-76ogq4ew-lmd-phase2-fragment-gaps (stacked on Phase 1) with `cargo xtask verify` green (2026-10-16), PR pending the user's go-ahead to push; Phase 3 to follow
 braid:
   strand: bd-76ogq4ew
   priority: P2
@@ -331,12 +331,44 @@ Tests first, per the TDD rule; each bullet names its pin.
 
 ### Phase 2: documentation and fragment gaps
 
-- [ ] Guide updates for each item below as it lands (the page exists from #855; each fix removes a line from "Current limitations").
-- [ ] Footnotes inside fragments (resolve note definitions in the fragment parse, or run the fragment through the same early transforms the document gets); `Table` is done in PR #850. Fix the diagnostic location for shortcodes inside fragments (bd-onsqz7sv) on the way, and take bd-iqd6niat (numbers in inline cells) and bd-3h6iasmz (`OrderedList` attributes) if they are still open.
-- [ ] Escaping: a literal `{=` or `=}` inside fragment markdown, and a fragment form that is not scanned for nested lmd code. Grammar and desugarer tests, corpus tests.
-- [ ] `quarto.markdown(str)` returning a `Nodes`.
-- [ ] Grammar: a fragment as a trailing call argument (`callout{=: … :=}`), with corpus tests and desugarer support; alternate delimiters decided together with the escaping item above.
-- [ ] Highlighting for `lmd` blocks in output and in the hub client, or an explicit decision to highlight as `lua`.
+Started 2026-10-16 on `braid/bd-76ogq4ew-lmd-phase2-fragment-gaps`, stacked
+on the Phase 1 branch (PR #856). Design notes for each item sit under the
+checklist.
+
+- [x] Guide updates for each item below as it lands (the page exists from #855; each fix removes a line from "Current limitations"). Phase 2 removed the footnotes line and added "A fragment as the argument", "Quoting fragment syntax", `quarto.markdown` under metadata, a delimiters rule, and the highlighting note.
+- [x] Footnotes inside fragments: resolve a fragment's own `[^id]` definitions against its references at parse time, so the emitter prints `pandoc.Note`; a reference whose definition lives in the document body stays the reader's `quarto-note-reference` span and the document's `footnotes` transform resolves it later (that already works today). bd-iqd6niat landed in #852 (numbers in inline cells); bd-3h6iasmz (`OrderedList` attributes) is in progress on another branch and is not taken here.
+- [x] bd-onsqz7sv: the shortcode's span inside a fragment is rerooted like every other node's (the reader built it with `SourceInfo::from_range` against the file id, which skipped the fragment's parent span). A shortcode inside a fragment stays unsupported, with a hint that names the Lua spelling; see the decision below.
+- [x] Escaping: a backslashed character is content to the scanner, so `\{=` does not open; Quarto markdown wants a lone brace escaped anyway, so the literal delimiters are spelled `\{=` and `=\}`. Grammar and desugarer tests, corpus tests.
+- [x] Leveled delimiters, after Lua's long brackets: `{==: … :==}`, `{==[ … ]==}`, `{== … ==}` (and more `=`), whose content is raw up to the closer of the same level, with no nesting scan. Corpus and desugarer tests.
+- [x] `quarto.markdown(str)` returning a `Nodes`: the qmd reader over the string, then the same fragment preparation as a `{= … =}` fragment (local footnotes resolved, derived heading ids dropped).
+- [x] Grammar: a fragment as a trailing call argument (`callout{=: … :=}`), with corpus tests; the desugarer wraps the emitted expression in parentheses so the result is a Lua call.
+- [x] Highlighting: `lmd` registered in `quarto-highlight` from the vendored grammar (Lua captures plus the fragment delimiters and content), so echoed and failed cells highlight in the rendered page; the hub-client editor opens `.lmd` files as Lua (Monaco has no lmd grammar; this is the explicit "highlight as `lua`" fallback for the editor).
+
+**Footnotes, the rule.** A fragment is parsed on its own, so a note defined
+in the fragment is paired with references in the same fragment, exactly as
+pandoc pairs them within one document; the pairing becomes an inline
+`pandoc.Note`, which the document's footnote transforms then number along
+with every other note. A reference with no definition in the fragment is
+left as the reader's reference span for the document to resolve, so
+"define the note in the document body" keeps working. A definition with no
+reference in the fragment is dropped, as pandoc drops an unreferenced
+definition. The pairing lives in pampa (`transforms::fragment`) so the
+desugarer and `quarto.markdown` share it; `pandoc.read` is left as it is.
+
+**Shortcodes in fragments stay an error.** Resolving one later would need
+a Lua-side constructor for the reader's `Shortcode` inline, which pandoc's
+API does not have, and `meta.key` in Lua already says the same thing more
+directly. The location is fixed and the hint names the spelling. Revisit
+if a component library needs `{{{< include >}}}` or `{{{< var >}}}` inside
+fragments.
+
+**Escaping and levels, together.** One-off literals use the backslash,
+which markdown would need anyway for a literal `{` or `=` in most
+positions; a body that quotes fragment syntax at length uses a higher
+level, and inside it nothing is balanced or escaped, like a Lua long
+string. The marked forms keep their marker: `{==:` … `:==}`. Inline lmd
+code inside a leveled fragment is still code (the markdown reader finds
+it, as for any fragment); only the scanner's view of the body changes.
 
 ### Phase 3: project-level and extension modules {#phase-3}
 

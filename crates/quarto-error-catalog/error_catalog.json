@@ -2200,7 +2200,7 @@
   "Q-26-2": {
     "subsystem": "lmd",
     "title": "Unsupported markdown inside an lmd fragment",
-    "message_template": "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for (a footnote definition, a shortcode, CriticMarkup, or a custom node). The cell is left as written and does not run.",
+    "message_template": "A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for (a shortcode, CriticMarkup, or a custom node). The cell is left as written and does not run. A footnote defined in the fragment is not one: it is paired with the fragment's references.",
     "docs_url": "https://quarto.org/docs/errors/lmd/Q-26-2",
     "since_version": "99.9.9"
   },

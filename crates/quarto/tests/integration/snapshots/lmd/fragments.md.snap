@@ -40,3 +40,39 @@ Some *body* text.
 
 Plain text, "quoted", and a line\
 break.
+
+## Footnotes
+
+A note defined in the fragment is paired with its reference there; one
+defined in the document body is resolved with the document's notes.
+
+Local[^1] and from the body[^2].
+
+## Markdown from a string
+
+A **string** read at run time.
+
+- with a list
+- of two
+
+Inline too: *em* and **strong**.
+
+## A fragment as the argument
+
+::: {}
+> **Note**
+>
+> Called with the fragment as the whole argument list.
+:::
+
+Inline: **a strong call**.
+
+## Quoting fragment syntax
+
+Escaped: {= and =}, and balanced `{=: code :=}` in a span.
+
+Level two: `]=}` alone, `:=}` alone, and a whole `{=[ x ]=}` are text.
+
+[^1]: Defined *inside* the fragment.
+
+[^2]: Defined in the document body.

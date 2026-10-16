@@ -28,8 +28,61 @@ pub fn register_quarto_api(lua: &Lua) -> Result<()> {
     register_quarto_log(lua, &quarto)?;
     register_quarto_utils(lua, &quarto)?;
     register_quarto_component(lua, &quarto)?;
+    register_quarto_markdown(lua, &quarto)?;
 
     Ok(())
+}
+
+/// `quarto.markdown(str)`: read `str` as Quarto markdown and return a
+/// `pandoc.Nodes` holding its blocks, for markdown that arrives as a string
+/// at run time (a metadata value, a data file, a listing item's
+/// description), where an lmd `{= … =}` fragment cannot be written
+/// (bd-76ogq4ew).
+///
+/// The string is finished as a fragment, like a `{= … =}` fragment is at
+/// desugar time (`crate::transforms::fragment`): footnotes it defines are
+/// paired with its references into `Note`s, and the ids the reader derived
+/// for its headings are dropped so the document derives them from the
+/// final text. Being `Nodes`, the value adapts to where it lands: a
+/// one-paragraph string unwraps to inlines in inline context. A parse
+/// error raises, naming the reader's diagnostics.
+fn register_quarto_markdown(lua: &Lua, quarto: &Table) -> Result<()> {
+    quarto.set(
+        "markdown",
+        lua.create_function(|lua, source: mlua::String| {
+            // The reader's output stream is its verbose trace, not a
+            // diagnostic channel (see `pandoc.read`).
+            let mut trace = crate::utils::output::VerboseOutput::Sink(std::io::sink());
+            let bytes = source.as_bytes();
+            match crate::readers::qmd::read(
+                &bytes,
+                false,
+                "<quarto.markdown>",
+                &mut trace,
+                true,
+                None,
+            ) {
+                Ok((pandoc, _context, _warnings)) => {
+                    let blocks =
+                        crate::transforms::fragment::prepare_fragment_blocks(pandoc.blocks);
+                    let shape = if blocks.is_empty() {
+                        super::nodes::NodesShape::Empty
+                    } else {
+                        super::nodes::NodesShape::Blocks(blocks)
+                    };
+                    lua.create_userdata(super::nodes::LuaNodes { shape })
+                }
+                Err(diagnostics) => {
+                    let messages: Vec<String> =
+                        diagnostics.iter().map(|d| d.title.clone()).collect();
+                    Err(mlua::Error::runtime(format!(
+                        "quarto.markdown: {}",
+                        messages.join("; ")
+                    )))
+                }
+            }
+        })?,
+    )
 }
 
 /// `quarto.component(name, props, content)` — an element bound to a
@@ -908,6 +961,97 @@ mod tests {
         register_pandoc_namespace(&lua, runtime, create_shared_mediabag()).unwrap();
         register_quarto_api(&lua).unwrap();
         lua
+    }
+
+    // =========================================================================
+    // quarto.markdown tests (bd-76ogq4ew)
+    // =========================================================================
+
+    fn markdown_nodes(lua: &Lua, code: &str) -> crate::lua::nodes::LuaNodes {
+        let v: Value = lua.load(code).eval().unwrap();
+        match v {
+            Value::UserData(ud) => ud.borrow::<crate::lua::nodes::LuaNodes>().unwrap().clone(),
+            other => panic!("expected a Nodes userdata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quarto_markdown_reads_a_string_into_nodes() {
+        let lua = create_test_lua();
+        let nodes = markdown_nodes(
+            &lua,
+            r#"return quarto.markdown("Hello *there*\n\nSecond.")"#,
+        );
+        let crate::lua::nodes::NodesShape::Blocks(blocks) = &nodes.shape else {
+            panic!("{nodes:?}")
+        };
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            matches!(&blocks[0], crate::pandoc::Block::Paragraph(p) if p.content.iter().any(|i| matches!(i, crate::pandoc::Inline::Emph(_))))
+        );
+        // Nodes: a one-paragraph string unwraps where inlines go.
+        let text: String = lua
+            .load(r#"return pandoc.utils.stringify(pandoc.Strong(quarto.markdown("a *b*")))"#)
+            .eval()
+            .unwrap();
+        assert_eq!(text, "a b");
+        // And an empty string is empty Nodes.
+        let empty = markdown_nodes(&lua, r#"return quarto.markdown("")"#);
+        assert!(
+            matches!(empty.shape, crate::lua::nodes::NodesShape::Empty),
+            "{empty:?}"
+        );
+    }
+
+    #[test]
+    fn quarto_markdown_finishes_the_string_as_a_fragment() {
+        let lua = create_test_lua();
+        let nodes = markdown_nodes(
+            &lua,
+            r"return quarto.markdown('## Title\n\ntext[^1]\n\n[^1]: the note')",
+        );
+        let crate::lua::nodes::NodesShape::Blocks(blocks) = &nodes.shape else {
+            panic!("{nodes:?}")
+        };
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        let crate::pandoc::Block::Header(h) = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(h.attr.0, "", "derived id dropped");
+        let crate::pandoc::Block::Paragraph(p) = &blocks[1] else {
+            panic!("{blocks:?}")
+        };
+        assert!(
+            p.content
+                .iter()
+                .any(|i| matches!(i, crate::pandoc::Inline::Note(_))),
+            "{:?}",
+            p.content
+        );
+    }
+
+    #[test]
+    fn quarto_markdown_reports_a_parse_error() {
+        let lua = create_test_lua();
+        let err = lua
+            .load(r#"return quarto.markdown("the groups' Unique IDs")"#)
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("quarto.markdown:"), "{err}");
+        // A number coerces to its string, as Lua does everywhere; a table
+        // does not.
+        let nodes = markdown_nodes(&lua, "return quarto.markdown(42)");
+        assert!(
+            matches!(nodes.shape, crate::lua::nodes::NodesShape::Blocks(_)),
+            "{nodes:?}"
+        );
+        let err = lua
+            .load("return quarto.markdown({})")
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("string"), "{err}");
     }
 
     // =========================================================================

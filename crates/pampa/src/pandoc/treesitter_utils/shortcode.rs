@@ -10,7 +10,6 @@ use crate::pandoc::ast_context::ASTContext;
 use crate::pandoc::location::node_source_info_with_context;
 use crate::pandoc::{Inline, Shortcode, ShortcodeArg, Space};
 use hashlink::LinkedHashMap;
-use quarto_source_map::SourceInfo;
 
 use super::pandocnativeintermediate::PandocNativeIntermediate;
 use super::text_helpers::extract_quoted_text;
@@ -108,7 +107,12 @@ pub fn process_shortcode(
                 column: node.end_position().column,
             },
         };
-        SourceInfo::from_range(context.current_file_id(), shortcode_range)
+        // Through the context, so that under a re-parse of an embedded
+        // string (an lmd fragment, `!md` metadata) the span reroots into
+        // the parent span like every other node's does. `from_range`
+        // against the file id put a fragment's shortcode in the front
+        // matter of the document (bd-onsqz7sv).
+        crate::pandoc::location::range_to_source_info_with_context(&shortcode_range, context)
     } else {
         node_source_info_with_context(node, context)
     };
@@ -173,7 +177,10 @@ pub fn process_shortcode(
         };
         PandocNativeIntermediate::IntermediateInlines(vec![
             Inline::Space(Space {
-                source_info: SourceInfo::from_range(context.current_file_id(), space_range),
+                source_info: crate::pandoc::location::range_to_source_info_with_context(
+                    &space_range,
+                    context,
+                ),
             }),
             shortcode,
         ])
