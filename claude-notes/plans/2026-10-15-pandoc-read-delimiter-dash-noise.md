@@ -2,7 +2,7 @@
 title: 'pandoc.read from Lua leaks "[TOP-LEVEL MISSING NODE]" lines for pipe-table delimiter dashes (bd-okfxemnj)'
 date: 2026-10-15
 description: 'The Lua pandoc.read binding wires the qmd reader''s verbose trace buffer to stderr, so marker tokens that hit the tree-sitter dispatch catch-all print one line each; route the buffer to a sink and give the tokens explicit arms.'
-status: draft  # Design decisions recorded 2026-10-16; awaiting the user's go-ahead to implement
+status: in-progress  # Go-ahead given 2026-10-16; see Progress checklist
 braid:
   strand: bd-okfxemnj
 github:
@@ -10,7 +10,17 @@ github:
 ---
 
 **Branch:** `braid/bd-okfxemnj-pandoc-read-delimiter-dash-noise` in the main checkout (topic branch, no worktree), based on `main` @ `e308835bd`
-**Do not start implementation until the user gives the go-ahead.**
+**Go-ahead given 2026-10-16.** Progress is tracked in the checklist below.
+
+## Progress checklist
+
+- [x] Phase 0a — reader-level test `crates/pampa/tests/integration/test_trace_buffer_silence.rs` (3 tests; all fail on the unfixed tree with the predicted `-`, `pipe_table_align_*`, `![` trace lines)
+- [x] Phase 0b — e2e test `crates/quarto/tests/integration/pandoc_read_stderr_e2e.rs` (fails on the unfixed tree with the issue's six lines)
+- [ ] Phase 1 — `lua/readwrite.rs`: trace buffer → `VerboseOutput::Sink`
+- [ ] Phase 2 — `treesitter.rs`: explicit arms for `-`, `pipe_table_align_left`, `pipe_table_align_right`, `![`
+- [ ] Both tests green; `pampa -v` on `probe.qmd` prints no catch-all lines
+- [ ] `cargo xtask verify --skip-hub-build` green on the branch
+- [ ] Phase 3 — PR (`Fixes #847`), strand closed
 
 ## Triage verdict
 
