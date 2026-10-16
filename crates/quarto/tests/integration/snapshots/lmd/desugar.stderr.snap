@@ -1,0 +1,27 @@
+---
+source: crates/quarto/tests/integration/lmd_snapshots.rs
+expression: stderr
+---
+Warning: lmd cell could not be desugared
+    ╭─[ <dir>/desugar.qmd:55:1 ]
+    │
+ 55 │ ╭─▶ ::: {.list-table}
+    ┆ ┆
+ 60 │ ├─▶ :::
+    │ │
+    │ ╰───────── lmd: `Table` nodes are not supported inside markdown fragments yet
+────╯
+ℹ The cell is left as written and will not run.
+
+Warning: lmd cell could not be desugared
+    ╭─[ <dir>/desugar.qmd:68:1 ]
+    │
+ 68 │ ╭─▶ | Key | Value |
+    ┆ ┆
+ 70 │ ├─▶ | `d` | four  |
+    │ │
+    │ ╰───────────────────── lmd: `Table` nodes are not supported inside markdown fragments yet
+────╯
+ℹ The cell is left as written and will not run.
+
+2 warnings

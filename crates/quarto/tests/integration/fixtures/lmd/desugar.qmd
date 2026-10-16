@@ -1,0 +1,131 @@
+---
+title: desugar
+---
+
+The structural desugaring contract (bd-7gqr148v, GH #846): what the qmd
+reader turns into a `Table`, `DefinitionList` or `Figure` must come out
+the same when an lmd cell builds the shape from nodes, writes it inside
+a fragment, or reads it back from JSON.
+
+## 1. Literal list-table (control)
+
+::: {.list-table}
+* - Key
+  - Value
+* - `a`
+  - one
+:::
+
+## 2. list-table div built from AST nodes in a cell
+
+```{lmd}
+local function row(cells)
+  local items = {}
+  for _, c in ipairs(cells) do table.insert(items, { pandoc.Plain(c) }) end
+  return { pandoc.BulletList(items) }
+end
+local rows = {
+  row({ {pandoc.Str("Key")}, {pandoc.Str("Value")} }),
+  row({ {pandoc.Code("b")}, {pandoc.Str("two")} }),
+}
+return pandoc.Div({ pandoc.BulletList(rows) }, pandoc.Attr("", {"list-table"}))
+```
+
+## 3. Literal definition-list (control)
+
+::: {.definition-list}
+* Term
+  * A definition.
+:::
+
+## 4. definition-list div built from AST nodes in a cell
+
+```{lmd}
+local item = {
+  pandoc.Plain({ pandoc.Str("Term") }),
+  pandoc.BulletList({ { pandoc.Plain({ pandoc.Str("A definition.") }) } }),
+}
+return pandoc.Div({ pandoc.BulletList({ item }) }, pandoc.Attr("", {"definition-list"}))
+```
+
+## 5. list-table inside a fragment
+
+```{lmd}
+return {=:
+::: {.list-table}
+* - Key
+  - Value
+* - `c`
+  - three
+:::
+:=}
+```
+
+## 6. Pipe table inside a fragment
+
+```{lmd}
+return {=:
+| Key | Value |
+|-----|------:|
+| `d` | four  |
+:=}
+```
+
+## 7. definition-list inside a fragment
+
+```{lmd}
+return {=:
+::: {.definition-list}
+* Term
+  * A definition.
+:::
+:=}
+```
+
+## 8. Single-image paragraph built from nodes
+
+```{lmd}
+return pandoc.Para({ pandoc.Image({ pandoc.Str("A pixel") }, "pixel.png", "", pandoc.Attr("fig-pixel")) })
+```
+
+## 9. Invalid list-table built from nodes (no rows list)
+
+```{lmd}
+return pandoc.Div({ pandoc.Para({ pandoc.Str("not a list") }) }, pandoc.Attr("", {"list-table"}))
+```
+
+## 10. pandoc.read of list-table markdown
+
+```{lmd}
+return pandoc.read("::: {.list-table}\n* - Key\n  - Value\n* - `e`\n  - five\n:::\n", "markdown").blocks
+```
+
+## 11. pandoc.read of JSON holding a list-table div
+
+```{lmd}
+local function cell(s) return { pandoc.Plain({ pandoc.Str(s) }) } end
+local rows = pandoc.BulletList({
+  { pandoc.BulletList({ cell("Key"), cell("Value") }) },
+  { pandoc.BulletList({ cell("f"), cell("six") }) },
+})
+local doc = pandoc.Pandoc({ pandoc.Div({ rows }, pandoc.Attr("", {"list-table"})) })
+return pandoc.read(pandoc.write(doc, "json"), "json").blocks
+```
+
+## 12. Inline cell whose footnote holds a list-table div
+
+A note`{lmd} pandoc.Note({ pandoc.Div({ pandoc.BulletList({ { pandoc.BulletList({ { pandoc.Plain({ pandoc.Str("g") }) }, { pandoc.Plain({ pandoc.Str("seven") }) } }) } }) }, pandoc.Attr("", {"list-table"})) })` here.
+
+## 13. Block cell nested in a fragment
+
+````{lmd}
+return {=:
+Before the nested cell.
+
+```{lmd}
+return pandoc.Div({ pandoc.BulletList({ { pandoc.BulletList({ { pandoc.Plain({ pandoc.Str("h") }) }, { pandoc.Plain({ pandoc.Str("eight") }) } }) } }) }, pandoc.Attr("", {"list-table"}))
+```
+
+After the nested cell.
+:=}
+````

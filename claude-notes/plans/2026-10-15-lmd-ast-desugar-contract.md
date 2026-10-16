@@ -170,28 +170,29 @@ using the existing `call`/`list`/`attr_arg` helpers, in both `Pretty` and `LineP
 
 ## Work items (TDD: tests first in every phase)
 
-### Phase 1: pin the current behavior
+### Phase 1: pin the current behavior (done 2026-10-16)
 
-- [ ] `crates/quarto/tests/integration/fixtures/lmd/desugar.qmd`: the issue's four sections plus probes A, B (with a fixture image), C, D, E, and a pipe table inside a fragment. Register in `FIXTURES` in `lmd_snapshots.rs`; snapshot markdown + stderr. The first snapshot documents the bug (divs, the `Table` warning); each later phase updates it.
-- [ ] `crates/pampa/tests/integration/test_json_div_transforms.rs`: add the implicit-figure case (fails until Phase 2, or is dropped if D1 = no).
-- [ ] `lmd_execute.rs` unit tests (same harness as `a_cell_is_replaced_by_the_blocks_it_returns`): `a_cell_built_list_table_div_becomes_a_table`, `a_cell_built_definition_list_div_becomes_a_definition_list`, `a_cell_built_single_image_para_becomes_a_figure`, `an_invalid_cell_built_list_table_warns_at_the_cell` (asserts Q-2-35 and that the location is the cell span), `an_inline_cell_note_holding_a_list_table_is_desugared`, `a_cell_nested_in_a_fragment_is_covered_by_the_parent_pass`.
-- [ ] `lmd/desugar.rs` unit tests: `table_in_a_fragment_is_emitted` (pipe table and list-table; assert `pandoc.Table(` and that the Lua runs), `line_preserving_table_stays_on_its_lines`; switch `unsupported_node_is_an_error_without_a_location_when_unanchored` to a footnote definition.
-- [ ] A pampa Lua test for `pandoc.read(json, "json")` with a list-table div → `Table` (next to the existing readwrite tests).
+- [x] `crates/quarto/tests/integration/fixtures/lmd/desugar.qmd`: the issue's four sections plus the probes (fragment list-table, fragment pipe table, fragment definition-list, node-built figure with `pixel.png`, invalid node-built list-table, `pandoc.read` markdown and json, an inline cell whose `Note` holds a list-table, a block cell nested in a fragment). Snapshotted as `desugar.main.html` + `desugar.stderr`; the first snapshot documents the bug.
+  - **Finding:** the fixture had to be pinned through the native HTML pipeline, not `--to markdown` like the other lmd fixtures. The markdown leg hands the AST to pandoc with Quarto 1's Lua filters, whose own `astpipeline-process-list-tables` converts the cell-built divs and hides the bug; it also emits a `Q-11-1` warning carrying an unnormalized temp path. `lmd_snapshots.rs` gained `HTML_FIXTURES` / `render_html` / `render_to`, and `render_to` copies non-`.qmd` files from the fixtures directory so images resolve.
+- [x] Unit-level failing tests are written at the start of the phase that fixes them (Phases 2–4 below) rather than all in Phase 1, so that each phase boundary commit is green: the plan's TDD rule (tests before implementation) and the commit rule (full suite green at a boundary) both hold.
 
 ### Phase 2: the set, named (pampa)
 
+- [ ] Tests first: `test_json_div_transforms.rs` gains the implicit-figure case and a nested (div-inside-blockquote) list-table case; a `readwrite.rs` test for `pandoc.read(json, "json")` with a list-table div → `Table`.
 - [ ] `desugar_filter` / `desugar_blocks` / `desugar_inlines`; `transform_divs` delegates. Figure construction shared with `postprocess()` (D1).
 - [ ] Registry comment at the top of `postprocess.rs` updated.
-- [ ] `main.rs` and `import/mod.rs` call the renamed entry point; `readwrite.rs` json arm calls it (probe E passes).
+- [ ] `main.rs` and `import/mod.rs` call the renamed entry point; `readwrite.rs` json arm calls it (fixture section 11 passes).
 
 ### Phase 3: lmd cell results (quarto-core)
 
-- [ ] `execute_lmd_cells` runs the set per cell result; diagnostics relocated per D2 (issue sections 2 and 4, probes B and C pass).
-- [ ] Paste the rendered Q-2-35 diagnostic for probe C (ANSI-stripped `q2 render` stderr) into this plan under a "Diagnostic example" heading, for review before the PR.
+- [ ] Tests first, in `lmd_execute.rs` (same harness as `a_cell_is_replaced_by_the_blocks_it_returns`): `a_cell_built_list_table_div_becomes_a_table`, `a_cell_built_definition_list_div_becomes_a_definition_list`, `a_cell_built_single_image_para_becomes_a_figure`, `an_invalid_cell_built_list_table_warns_at_the_cell` (asserts Q-2-35 and that the location is the cell span), `an_inline_cell_note_holding_a_list_table_is_desugared`, `a_cell_nested_in_a_fragment_is_covered_by_the_parent_pass`.
+- [ ] `execute_lmd_cells` runs the set per cell result; diagnostics relocated per D2 (fixture sections 2, 4, 8, 9, 12, 13 pass).
+- [ ] Paste the rendered Q-2-35 diagnostic for fixture section 9 (ANSI-stripped `q2 render` stderr) into this plan under a "Diagnostic example" heading, for review before the PR.
 
 ### Phase 4: tables in fragments (quarto-core emitter)
 
-- [ ] `Block::Table` arm in `emit.rs`, both modes; `Unsupported("Table")` removed; fixture and unit tests updated (issue section 5 and the pipe-table probe pass).
+- [ ] Tests first, in `lmd/desugar.rs`: `table_in_a_fragment_is_emitted` (pipe table and list-table; assert `pandoc.Table(` and that the Lua runs), `line_preserving_table_stays_on_its_lines`; switch `unsupported_node_is_an_error_without_a_location_when_unanchored` to a footnote definition.
+- [ ] `Block::Table` arm in `emit.rs`, both modes; `Unsupported("Table")` removed; `errors.qmd` fixture's unsupported example switched to a footnote definition; snapshots updated (fixture sections 5 and 6 pass).
 
 ### Phase 5: docs and bookkeeping
 
