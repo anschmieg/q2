@@ -39,6 +39,8 @@ mod utils;
 mod walk;
 
 #[allow(unused_imports)]
+pub use crate::dialect::ModuleCompileError;
+#[allow(unused_imports)]
 pub use dialect::{DialectError, SourceDialect, register_source_dialect};
 #[allow(unused_imports)]
 pub use filter::FilterOutput;

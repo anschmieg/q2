@@ -1,0 +1,56 @@
+---
+title: lmd modules
+---
+
+A module written in lmd, required from a cell:
+
+```{lmd}
+local cards = require("modules/cards")
+return cards.card("Hello", {=[ from a *module* ]=})
+```
+
+The same module, used over a list:
+
+```{lmd}
+local cards = require("modules/cards")
+return cards.deck(pandoc.List({
+  { title = "One", body = "first" },
+  { title = "Two", body = "second" },
+}))
+```
+
+`require` caches per document, so the module ran once:
+
+```{lmd}
+local a = require("modules/cards")
+local b = require("modules/cards")
+return {=: Same table: `{lmd} tostring(a == b)` :=}
+```
+
+An `.lmd` module wins over a `.lua` file of the same name, with a warning:
+
+```{lmd}
+return {=: Loaded the `{lmd} require("modules/shadowed").which` one. :=}
+```
+
+The compiler is reachable from Lua:
+
+```{lmd}
+local src = quarto.lmd.compile("return {=: compiled *at run time* :=}", "inline.lmd")
+return load(src)()
+```
+
+A module that does not compile fails the requiring cell at the `require`:
+
+```{lmd}
+local m = require("modules/broken")
+return m.go()
+```
+
+A module that raises names its own file and line:
+
+```{lmd}
+local m = require("modules/boom")
+local r = m.go()
+return r
+```

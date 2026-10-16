@@ -277,6 +277,31 @@ fn failure_diagnostic(
     err: &LmdCellError,
     location: Option<SourceInfo>,
 ) -> DiagnosticMessage {
+    // A module the cell required that did not compile is its own failure
+    // (bd-76ogq4ew): the fix is in the module file, not in the cell, and
+    // the dialect's own diagnostics name where.
+    if let LmdCellError::Lua(lua_err) = err
+        && let Some(module_err) = pampa::dialect::ModuleCompileError::find_in(lua_err)
+    {
+        let location = location.unwrap_or_else(|| cell.anchor.span.clone());
+        let mut builder = DiagnosticMessageBuilder::error("lmd module did not compile")
+            .with_code("Q-26-8")
+            .with_location(location)
+            .problem(module_err.to_string());
+        // The dialect's own diagnostics, when they say more than the
+        // message already does (the lmd desugarer's summary is the first
+        // reader diagnostic's title, so a lone one adds nothing).
+        let message = module_err.to_string();
+        for inner in &module_err.error.diagnostics {
+            if !message.contains(&inner.title) {
+                builder =
+                    builder.add_hint(format!("{}: {}", module_err.path.display(), inner.title));
+            }
+        }
+        return builder
+            .add_hint("Fix the module file; the cell that requires it is left as written.")
+            .build();
+    }
     let (code, title, hint) = match err {
         LmdCellError::Lua(_) => ("Q-26-4", "lmd cell failed", None),
         LmdCellError::NotBlocks { .. } => (
@@ -737,11 +762,16 @@ mod tests {
             &tmp.path().join("doc.qmd"),
         );
         assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-26-8"), "{diags:?}");
         let problem = problem_text(&diags[0]);
         assert!(
             problem.contains("module 'bad' could not be compiled from lmd"),
             "{problem}"
         );
+        // The reader's own title is in the message; the hint is the fix.
+        assert!(problem.contains("Quote"), "{problem}");
+        let hints = format!("{:?}", diags[0].hints);
+        assert!(hints.contains("Fix the module file"), "{hints}");
         assert!(problem.contains("bad.lmd"), "{problem}");
         assert!(
             problem.contains("markdown fragment failed to parse"),

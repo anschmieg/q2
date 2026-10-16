@@ -1,0 +1,28 @@
+---
+source: crates/quarto/tests/integration/lmd_snapshots.rs
+expression: stderr
+---
+Error: [Q-26-8] lmd module did not compile
+    ╭─[ <dir>/modules.qmd:46:1 ]
+    │
+ 46 │ local m = require("modules/broken")
+    │ ─────────────────┬─────────────────
+    │                  ╰─────────────────── module 'modules/broken' could not be compiled from lmd (<dir>/modules/broken.lmd): lmd: markdown fragment failed to parse: Unclosed Single Quote
+────╯
+ℹ Fix the module file; the cell that requires it is left as written.
+
+Error: [Q-26-4] lmd cell failed
+    ╭─[ <dir>/modules.qmd:54:1 ]
+    │
+ 54 │ local r = m.go()
+    │ ────────┬───────
+    │         ╰───────── runtime error: <dir>/modules/boom.lmd:4: boom from the module
+stack traceback:
+	[C]: in function 'error'
+	<dir>/modules/boom.lmd:4: in field 'go'
+	<dir>/modules.qmd:54: in main chunk
+────╯
+
+Warning [Q-11-1]: `<dir>/modules/shadowed.lmd` is loaded and `<dir>/modules/shadowed.lua` beside it is ignored: a `.lmd` module takes precedence over a `.lua` file of the same name. Delete the `.lua` file if it is a stale compiled copy.
+
+2 errors, 1 warning

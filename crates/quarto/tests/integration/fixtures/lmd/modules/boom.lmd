@@ -1,0 +1,7 @@
+local M = {}
+
+function M.go()
+  error("boom from the module")
+end
+
+return M

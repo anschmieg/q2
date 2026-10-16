@@ -11,8 +11,9 @@
 //! [`SourceDialect`] object. Modules are compiled in the line-preserving
 //! emit mode under no anchor, so a module's Lua line numbers are the
 //! file's own and Lua's `path:line:` positions need no mapping. A
-//! desugar failure becomes the `require` call's error, with the module
-//! path and the position inside it in the message.
+//! desugar failure becomes the `require` call's error; the loader names
+//! the module and its path, the dialect's message gives the position inside
+//! the file and what went wrong.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -44,8 +45,11 @@ impl SourceDialect for LmdDialect {
                 LmdError::MarkdownParse { diagnostics, .. } => diagnostics.clone(),
                 _ => Vec::new(),
             };
+            // The loader (and `quarto.lmd.compile`) prefix the module path
+            // and name; the message carries the position inside the file.
+            let _ = path;
             DialectError {
-                message: format!("{}: {err}", path.display()),
+                message: err.to_string(),
                 diagnostics,
             }
         })
@@ -75,7 +79,7 @@ mod tests {
         let err = LmdDialect
             .compile("local = 1\n", Path::new("bad.lmd"))
             .unwrap_err();
-        assert!(err.message.starts_with("bad.lmd: "), "{}", err.message);
+        assert!(err.message.contains("Lua syntax error"), "{}", err.message);
         assert!(err.message.contains("line 1"), "{}", err.message);
     }
 
@@ -90,6 +94,99 @@ mod tests {
             err.message
         );
         assert!(!err.diagnostics.is_empty());
+    }
+
+    const CARDS_LMD: &str = "local M = {}\nfunction M.card(title, body)\n  return {=:\n::: {.card}\n### `{lmd} title`\n\n`{lmd} body`\n:::\n:=}\nend\nreturn M\n";
+
+    fn write(dir: &Path, name: &str, content: &str) {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn one_paragraph_doc() -> pampa::pandoc::Pandoc {
+        use pampa::pandoc::{Block, Inline, Pandoc, Paragraph, Str};
+        Pandoc {
+            meta: quarto_pandoc_types::ConfigValue::default(),
+            blocks: vec![Block::Paragraph(Paragraph {
+                content: vec![Inline::Str(Str {
+                    text: "hello".to_string(),
+                    source_info: quarto_source_map::SourceInfo::for_test(),
+                })],
+                source_info: quarto_source_map::SourceInfo::for_test(),
+            })],
+        }
+    }
+
+    /// A Lua *filter* (not a cell) can `require` an `.lmd` module when the
+    /// filter pipeline is given q2's dialects, which is how
+    /// `UserFiltersStage` calls it.
+    #[test]
+    fn a_lua_filter_can_require_an_lmd_module() {
+        use pampa::pandoc::Block;
+        use pampa::unified_filter::{FilterSpec, apply_filters_with};
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(tmp.path(), "components/cards.lmd", CARDS_LMD);
+        write(
+            tmp.path(),
+            "filter.lua",
+            "local cards = require(\"components/cards\")\nfunction Para(p)\n  return cards.card(\"From a filter\", p.content)\nend\n",
+        );
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let output = pollster::block_on(apply_filters_with(
+            one_paragraph_doc(),
+            pampa::pandoc::ASTContext::new(),
+            &[FilterSpec::Lua(tmp.path().join("filter.lua"))],
+            "html",
+            runtime,
+            None,
+            tmp.path(),
+            &dialects(),
+        ))
+        .expect("filter runs");
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let Block::Div(div) = &output.pandoc.blocks[0] else {
+            panic!("expected the card div, got {:?}", output.pandoc.blocks[0]);
+        };
+        assert_eq!(div.attr.1, vec!["card".to_string()]);
+    }
+
+    /// A shortcode handler script can `require` an `.lmd` module when the
+    /// engine is built with q2's dialects, as `ShortcodeResolveTransform`
+    /// builds it.
+    #[test]
+    fn a_shortcode_handler_can_require_an_lmd_module() {
+        use pampa::lua::{
+            LuaShortcodeEngine, LuaShortcodeResult, ShortcodeArgs, ShortcodeCallContext,
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(tmp.path(), "components/cards.lmd", CARDS_LMD);
+        write(
+            tmp.path(),
+            "cards-shortcode.lua",
+            "local cards = require(\"components/cards\")\nreturn {\n  card = function(args, kwargs, meta, raw_args, context)\n    return cards.card(args[1], args[2])\n  end\n}\n",
+        );
+        let runtime: Arc<dyn quarto_system_runtime::SystemRuntime> =
+            Arc::new(quarto_system_runtime::NativeRuntime::new());
+        let mut engine = LuaShortcodeEngine::new_with("html", runtime, &dialects()).unwrap();
+        pollster::block_on(engine.load_script(&tmp.path().join("cards-shortcode.lua"))).unwrap();
+        let args = ShortcodeArgs {
+            positional: vec!["Title".to_string(), "body".to_string()],
+            keyword: vec![],
+            metadata: quarto_pandoc_types::ConfigValue::default(),
+        };
+        let result = pollster::block_on(engine.call("card", &args, ShortcodeCallContext::Block))
+            .expect("handler registered");
+        match result {
+            LuaShortcodeResult::Blocks(blocks) => {
+                assert!(
+                    matches!(blocks[0], pampa::pandoc::Block::Div(_)),
+                    "{blocks:?}"
+                );
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
     }
 
     #[test]

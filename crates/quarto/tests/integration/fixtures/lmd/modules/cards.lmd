@@ -1,0 +1,19 @@
+-- An lmd module: Lua with markdown fragments, returning a table of
+-- functions. `require("modules/cards")` from a cell loads it.
+local M = {}
+
+function M.card(title, body)
+  return {=:
+::: {.card}
+### `{lmd} title`
+
+`{lmd} body`
+:::
+:=}
+end
+
+function M.deck(items)
+  return items:map(function(it) return M.card(it.title, it.body) end)
+end
+
+return M

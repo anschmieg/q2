@@ -448,13 +448,13 @@ pub fn register_scoped_require(
                     }
                     dialect
                         .compile(&source, &candidate.path)
-                        .map_err(|err| {
-                            mlua::Error::RuntimeError(format!(
-                                "module '{name}' could not be compiled from {} ({}): {}",
-                                dialect.name(),
-                                candidate.path.display(),
-                                err.message
-                            ))
+                        .map_err(|error| {
+                            mlua::Error::external(crate::dialect::ModuleCompileError {
+                                module: name.clone(),
+                                path: candidate.path.clone(),
+                                dialect: dialect.name().to_string(),
+                                error,
+                            })
                         })?
                 }
             };

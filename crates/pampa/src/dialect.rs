@@ -8,7 +8,7 @@
 //! of dialects; the Lua-side registration that makes the scoped `require`
 //! load them is `lua::dialect`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quarto_error_reporting::DiagnosticMessage;
 
@@ -55,3 +55,58 @@ impl std::fmt::Display for DialectError {
 }
 
 impl std::error::Error for DialectError {}
+
+/// A module the scoped `require` found as dialect source but could not
+/// compile. The loader raises it as the `require` call's error (through
+/// `mlua::Error::external`), so a host that catches the cell's or
+/// filter's failure can recognise it in the error chain and report it
+/// under its own code, with the dialect's diagnostics attached.
+#[derive(Debug)]
+pub struct ModuleCompileError {
+    /// The name as written in `require`.
+    pub module: String,
+    /// The file that was found.
+    pub path: PathBuf,
+    /// The dialect's name (`lmd`).
+    pub dialect: String,
+    pub error: DialectError,
+}
+
+impl std::fmt::Display for ModuleCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "module '{}' could not be compiled from {} ({}): {}",
+            self.module,
+            self.dialect,
+            self.path.display(),
+            self.error.message
+        )
+    }
+}
+
+impl std::error::Error for ModuleCompileError {}
+
+impl ModuleCompileError {
+    /// Find a `ModuleCompileError` in an mlua error, however many callback
+    /// and context layers Lua's unwinding wrapped around it.
+    pub fn find_in(err: &mlua_error::Error) -> Option<&ModuleCompileError> {
+        mlua_error::find_module_compile_error(err)
+    }
+}
+
+/// The mlua-dependent half of [`ModuleCompileError::find_in`], kept behind
+/// the Lua feature so the type itself stays feature-independent.
+#[cfg(feature = "lua-filter")]
+mod mlua_error {
+    pub use mlua::Error;
+
+    pub fn find_module_compile_error(err: &Error) -> Option<&super::ModuleCompileError> {
+        match err {
+            Error::ExternalError(e) => e.downcast_ref::<super::ModuleCompileError>(),
+            Error::CallbackError { cause, .. } => find_module_compile_error(cause),
+            Error::WithContext { cause, .. } => find_module_compile_error(cause),
+            _ => None,
+        }
+    }
+}
