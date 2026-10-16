@@ -106,9 +106,9 @@ Two things to know, both visible above:
   may produce an Inline, a list of Inlines, a string, or `nil`, and a bare
   `` `{lmd} meta.version` `` is an error ([`Q-26-6`](../../errors/lmd/Q-26-6.qmd)).
 - Metadata **strings are `Inlines`**, not Lua strings, so `table.concat` and
-  `:upper()` need `pandoc.utils.stringify` first. Keep the `Inlines` when
-  you want the formatting kept: `` `{lmd} meta.title` `` renders a title's
-  emphasis and code as written.
+  `:upper()` need `pandoc.utils.stringify` first. Leave the `Inlines` alone
+  when the formatting should survive: `` `{lmd} meta.title` `` renders a
+  title's emphasis and code as written.
 
 @demo-metadata puts the two halves together with a nested key and a
 fallback for a key that is not there:
@@ -157,11 +157,10 @@ end))
 ```
 ````
 
-Two shapes that look right and are not: an inline fragment passed *bare* as
-an item (`return {=[ … ]=}` inside the `:map`) is coerced one inline at a
-time, so the item renders one word per line; and returning one
-`{=: - item :=}` fragment per element gives a list of one-item lists, which
-render as separate lists.
+Two shapes look right and are not. An inline fragment passed *bare* as an
+item, `return {=[ … ]=}` inside the `:map`, is coerced one inline at a time,
+and the item renders one word per line. And one `{=: - item :=}` fragment
+per element gives a list of one-item lists, rendered as separate lists.
 
 **A section per element.** Accumulate into a `pandoc.Blocks` with `:extend`,
 and return it:
@@ -285,9 +284,10 @@ above got its id from its final text.
 A setup cell defines `greeting` and `badge`; the heading and the paragraph after it use them. The heading's id is `hello-world`, derived from its final text. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/04-shared-state)
 :::::
 
-Document order is pre-order: a cell inside a fenced div runs before a
-top-level cell that follows the div, and an inline cell in the paragraph
-*above* a setup cell sees `nil` for what that cell defines.
+Document order runs top to bottom through nested blocks: a cell inside a
+fenced div runs before a top-level cell that follows the div, and an inline
+cell in the paragraph *above* a setup cell sees `nil` for what that cell
+defines.
 
 ## Fragments as functions
 
@@ -369,9 +369,9 @@ return {=: You are not reading the HTML version. :=}
 A callout that appears only because `draft: true` is in the front matter, and a branch on `quarto.doc.is_format`. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/06-conditional)
 :::::
 
-The callout is a callout: whatever a cell returns is processed as if typed,
-so fenced divs with classes, cross-reference labels and callouts inside a
-fragment all work.
+The callout renders as a callout because whatever a cell returns is
+processed as if typed: fenced divs with classes, cross-reference labels and
+callouts inside a fragment all work.
 
 ## A filter on a piece of markdown
 
@@ -425,9 +425,9 @@ return {=: A paragraph with *emphasis*, built from a fragment. :=}
 The desugared Lua above the result. `--|` is the option syntax for lmd cells, as `#|` is for Python and R cells. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/08-echo)
 :::::
 
-A cell that fails produces an error located at the line, with the cell left
-displayed as a code block so the page still renders and the failing code can
-be read:
+A cell that fails produces an error located at the failing line, with the
+cell left displayed as a code block so the page still renders and the code
+can be read:
 
 ```
 Error: [Q-26-4] lmd cell failed

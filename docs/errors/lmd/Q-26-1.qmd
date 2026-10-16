@@ -12,6 +12,7 @@ categories:
 # `Q-26-1` — Lua syntax error in an lmd cell
 
 > The Lua in an lmd cell does not parse, so the cell cannot be desugared. The cell is left as written and does not run.
+
 ## What this means
 
 Before an lmd cell runs, Quarto *desugars* it: it parses the cell as Lua,

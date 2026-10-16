@@ -12,6 +12,7 @@ categories:
 # `Q-26-2` — Unsupported markdown inside an lmd fragment
 
 > A markdown fragment in an lmd cell contains a node the fragment emitter has no constructor for, such as a table, a footnote definition or a shortcode. The cell is left as written and does not run.
+
 ## What this means
 
 A markdown fragment inside an lmd cell is parsed as markdown and rewritten

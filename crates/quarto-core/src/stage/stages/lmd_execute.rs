@@ -306,10 +306,22 @@ fn block_cell_code_and_echo(
                     .map(options_to_config)
                     .is_some_and(|(config, option_diags)| {
                         diagnostics.extend(option_diags);
-                        config
-                            .get("echo")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
+                        match config.get("echo") {
+                            None => false,
+                            Some(value) => value.as_bool().unwrap_or_else(|| {
+                                // A wrongly typed option is reported, not
+                                // silently taken as `false`: a typo such as
+                                // `echo: yes please` would otherwise vanish.
+                                diagnostics.push(cell_error(
+                                    "Q-26-7",
+                                    "Invalid lmd cell options",
+                                    value.source_info.clone(),
+                                    "`echo` must be `true` or `false`".to_string(),
+                                    None,
+                                ));
+                                false
+                            }),
+                        }
                     });
             let option_lines = cell.text[..partitioned.options_len].matches('\n').count();
             (partitioned.code, echo, option_lines)
@@ -959,6 +971,24 @@ mod tests {
             diags[0]
         );
         assert_eq!(located_text(&diags[0], &sources), "> error('quoted')");
+    }
+
+    #[test]
+    fn a_wrongly_typed_echo_option_is_reported_on_its_value() {
+        let qmd = "```{lmd}\n--| echo: yes please\nreturn nil\n```\n";
+        let (blocks, diags, sources) = render_with_sources(qmd);
+        assert!(blocks.is_empty(), "the cell still runs: {blocks:?}");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code.as_deref(), Some("Q-26-7"), "{:?}", diags[0]);
+        // The value's span is composed through the YAML parse; map its start
+        // and check it lands on `yes please` (row 1, after `--| echo: `).
+        let loc = diags[0].location.as_ref().expect("located");
+        let mapped = loc.map_offset(0, &sources).expect("maps");
+        assert_eq!(
+            (mapped.location.row, mapped.location.column),
+            (1, 10),
+            "{mapped:?}"
+        );
     }
 
     #[test]

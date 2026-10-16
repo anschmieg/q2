@@ -12,6 +12,7 @@ categories:
 # `Q-26-7` — Invalid lmd cell options
 
 > The `--|` option lines at the top of an lmd cell are not valid YAML, or name an option with the wrong type. The cell runs as if it had no options.
+
 ## What this means
 
 An lmd cell takes options in Lua comment syntax at the top of the cell,
@@ -32,7 +33,8 @@ error is located on the offending option line.
 ## How to fix
 
 Correct the YAML. The only option an lmd cell understands today is
-`echo`, which keeps the desugared Lua visible above the result:
+`echo`, a boolean that keeps the desugared Lua visible above the result;
+other keys are accepted and ignored:
 
 ````markdown
 ```{lmd}

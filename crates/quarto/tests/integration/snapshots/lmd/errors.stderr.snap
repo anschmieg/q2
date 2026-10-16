@@ -93,4 +93,12 @@ Error: [Q-26-7] Invalid lmd cell options
     │            ╰─ cell options are not valid YAML: Parse error: while parsing a node, did not find expected node content
 ────╯
 
-7 errors, 2 warnings
+Error: [Q-26-7] Invalid lmd cell options
+    ╭─[ <dir>/errors.qmd:58:11 ]
+    │
+ 58 │ --| echo: yes please
+    │           ─────┬────
+    │                ╰────── `echo` must be `true` or `false`
+────╯
+
+8 errors, 2 warnings
