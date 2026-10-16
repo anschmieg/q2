@@ -236,7 +236,7 @@ end))
 ```{lmd}
 return pandoc.OrderedList(meta.authors:map(function(a)
   return pandoc.Plain({=[ `{lmd} a.name` ]=})
-end), pandoc.ListAttributes(1, "Decimal", "Period"))
+end))
 ```
 
 ## A section per item
@@ -254,7 +254,7 @@ return out
 ```
 ````
 
-A tight list from `pandoc.Plain` items, items with several blocks from block fragments, an ordered list, and a section per element from `:extend`. The ordered list spells out its `pandoc.ListAttributes`; see [Current limitations](#current-limitations). [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/03-lists)
+A tight list from `pandoc.Plain` items, items with several blocks from block fragments, an ordered list, and a section per element from `:extend`. [View source](https://github.com/quarto-dev/q2/tree/main/examples/lmd/03-lists)
 :::::
 
 ## Setup cells and shared state
@@ -516,8 +516,6 @@ next to the document.
   boolean as `tostring` would. One inside a fragment is spliced into a
   `pandoc` constructor argument, which takes only Inlines and strings, so
   there it is still `` `{lmd} tostring(i)` ``.
-- **`pandoc.OrderedList`** needs explicit `pandoc.ListAttributes` for output
-  formats other than HTML.
 - **Modules.** `require` of a `.lua` file next to the document works; a
   module written in lmd (a `.lmd` file with fragments) does not load yet.
   Reusable lmd modules are coming.
