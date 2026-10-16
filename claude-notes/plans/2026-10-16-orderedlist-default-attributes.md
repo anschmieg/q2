@@ -2,7 +2,7 @@
 title: 'pandoc.OrderedList with default ListAttributes serializes as "Default"; pandoc rejects the JSON (bd-3h6iasmz)'
 date: 2026-10-16
 description: 'Spell ListNumberStyle::Default and ListNumberDelim::Default the way pandoc does (DefaultStyle, DefaultDelim) everywhere pampa writes them, from one canonical helper on the enums.'
-status: in-progress  # PR #857 open 2026-10-16, awaiting CI and review
+status: done  # PR #857 merged 2026-10-16
 braid:
   strand: bd-3h6iasmz
 ---
@@ -63,4 +63,4 @@ attributes.
 - [x] docs: drop the explicit `ListAttributes` from `examples/lmd/03-lists`, the patterns fixture and the lmd page; drop the limitation bullet; regenerate `patterns.md.snap` (which goes through pandoc, so it pins the fix end to end)
 - [x] pampa (5242), quarto-pandoc-types, quarto-core lmd (72) and quarto lmd snapshot tests green; clippy, fmt, `cargo xtask lint` clean; the repro renders `1.  a` / `2.  b` to markdown
 - [x] PR against `main`: [#857](https://github.com/quarto-dev/q2/pull/857), opened 2026-10-16
-- [ ] merged; plan status `done`, strand closed
+- [x] merged (#857, 2026-10-16); plan status `done`, strand closed
