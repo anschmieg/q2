@@ -1228,7 +1228,11 @@ impl AstTransform for ShortcodeResolveTransform {
             && let Some(runtime) = self.runtime.as_ref()
         {
             let runtime = runtime.clone();
-            match pampa::lua::LuaShortcodeEngine::new(&self.target_format, runtime) {
+            match pampa::lua::LuaShortcodeEngine::new_with(
+                &self.target_format,
+                runtime,
+                &crate::lmd::dialects(),
+            ) {
                 Ok(mut engine) => {
                     // Load scripts from metadata-specified paths. These load
                     // before extension scripts, so a same-named extension

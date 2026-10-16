@@ -87,6 +87,16 @@ impl LuaShortcodeEngine {
         target_format: &str,
         runtime: Arc<dyn SystemRuntime>,
     ) -> std::result::Result<Self, LuaShortcodeError> {
+        Self::new_with(target_format, runtime, &[])
+    }
+
+    /// [`new`](Self::new) with source dialects registered, so handler
+    /// scripts can `require` modules written in them (bd-76ogq4ew).
+    pub fn new_with(
+        target_format: &str,
+        runtime: Arc<dyn SystemRuntime>,
+        dialects: &[Arc<dyn crate::dialect::SourceDialect>],
+    ) -> std::result::Result<Self, LuaShortcodeError> {
         #[cfg(target_arch = "wasm32")]
         let lua = {
             use mlua::StdLib;
@@ -116,6 +126,10 @@ impl LuaShortcodeEngine {
         // modules (Q1 parity).
         super::quarto_api::register_scoped_require(&lua, runtime.clone())
             .map_err(LuaShortcodeError::LuaError)?;
+        for dialect in dialects {
+            super::dialect::register_source_dialect(&lua, dialect.clone())
+                .map_err(LuaShortcodeError::LuaError)?;
+        }
 
         // Register quarto.doc namespace (is_format, add_html_dependency, etc.)
         super::quarto_doc::register_quarto_doc(&lua).map_err(LuaShortcodeError::LuaError)?;
