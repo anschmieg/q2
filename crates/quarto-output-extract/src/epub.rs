@@ -49,7 +49,10 @@ pub fn extract_epub(bytes: &[u8]) -> Result<EpubExtraction> {
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|e| ExtractError::NotAZip(e.to_string()))?
+            .to_string();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)
             .map_err(|e| ExtractError::NotAZip(e.to_string()))?;

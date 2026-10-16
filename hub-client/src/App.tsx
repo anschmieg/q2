@@ -356,9 +356,8 @@ function App() {
   // Track if we've done the initial URL-based navigation
   const initialLoadRef = useRef(false);
 
-  // UI exploration (explore/projects-collections-ui): choose between the new
-  // collections-based projects home and the classic modal selector. Persisted so
-  // UX testing can flip back and forth across reloads.
+  // Choose between the collections-based projects home and the classic modal
+  // selector. Persisted so the choice survives reloads.
   const [uiVariant, setUiVariant] = useState<'collections' | 'classic'>(() =>
     localStorage.getItem('qh-ui-variant') === 'classic' ? 'classic' : 'collections',
   );
@@ -1189,7 +1188,7 @@ function App() {
             <button
               className="ui-variant-toggle"
               onClick={() => switchUiVariant('collections')}
-              title="Collections-based projects home (UI exploration)"
+              title="Collections-based projects home"
             >
               Try the new projects home
             </button>

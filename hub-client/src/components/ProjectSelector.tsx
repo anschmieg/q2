@@ -987,6 +987,7 @@ export default function ProjectSelector({
           isOpen={showLinkDialog}
           shareableUrl={projectSetLinkUrl}
           onClose={() => setShowLinkDialog(false)}
+          variant="projectSet"
         />
 
         <div className="version-info">

@@ -41,6 +41,25 @@ describe('ShareDialog accessibility', () => {
   });
 });
 
+describe('ShareDialog variants', () => {
+  it('uses project wording by default', () => {
+    render(<ShareDialog {...defaultProps} />);
+    expect(screen.getByText('Share project')).toBeDefined();
+    expect(
+      screen.getByText(/access and edit this project permanently/)
+    ).toBeDefined();
+  });
+
+  it('uses project-set wording for the link-another-browser variant', () => {
+    render(<ShareDialog {...defaultProps} variant="projectSet" />);
+    expect(screen.getByText('Link another browser')).toBeDefined();
+    expect(
+      screen.getByText(/access and edit every project in your project list permanently/)
+    ).toBeDefined();
+    expect(screen.queryByText('Share project')).toBeNull();
+  });
+});
+
 describe('ShareDialog Enter handling (GH #635 hardening)', () => {
   // Same contract as NewFileDialog (see ModalDialog's onKeyDown docs):
   // prevent Enter's default-action click, and leave button keydowns to

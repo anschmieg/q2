@@ -1,6 +1,6 @@
 /* Minimal app styles - component-specific styles in their own CSS files */
 
-/* Floating switch back to the collections UI exploration (explore/projects-collections-ui) */
+/* Floating toggle to the collections-based projects home */
 .ui-variant-toggle {
   position: fixed;
   inset-block-end: 16px;

@@ -16,7 +16,7 @@ tar = "0.4"
 # AES decryption, lzma/xz, zstd, bzip2, and ppmd out of the dependency
 # graph — none are needed to read a GitHub archive, and each is
 # attack surface reachable from an untrusted file.
-zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 thiserror.workspace = true
 # Sync HTTP inside a sync command, matching quarto-publish's native
 # host: at most three requests, versus pulling tokio + reqwest in.
@@ -31,7 +31,7 @@ tempfile = "3"
 # archive crates the library reads with.
 flate2.workspace = true
 tar = "0.4"
-zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [lints]
 workspace = true

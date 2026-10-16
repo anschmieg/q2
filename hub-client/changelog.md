@@ -23,6 +23,11 @@ WASM rebuild is needed for a changelog-only edit.
 
 -->
 
+### 2026-10-15
+
+- [`9ee269ea0`](https://github.com/quarto-dev/q2/commits/9ee269ea0): The "Link another browser" dialog now says what it actually shares — its warning reads "access and edit every project in your project list" instead of the single-project wording, since the link carries the whole project list.
+- [`fb4daf6b7`](https://github.com/quarto-dev/q2/commits/fb4daf6b7): Remove the stale "collections UI exploration" label shown next to the build hash in the projects home footer.
+
 ### 2026-10-07
 
 - [`75eb053bc`](https://github.com/quarto-dev/q2/commits/75eb053bc): Share links produced by the Quarto Hub MCP server (for example by create_project) now always carry the sync server, file, and project name the app requires, so opening one shows the invite page instead of the "This share link is incomplete" error.
