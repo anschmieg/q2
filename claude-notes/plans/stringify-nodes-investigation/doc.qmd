@@ -1,0 +1,5 @@
+---
+title: stringify-nodes repro
+---
+
+Body.
