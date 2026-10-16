@@ -17,7 +17,9 @@ expression: md
 ## Shared state, setup cells, and inline cells
 
 Hello, Ada of Analytical, with 4 things and *emphasised* inline
-markdown. A missing key is nothing, and vanishes.
+markdown. A missing key is nothing, and vanishes. Metadata numbers and
+booleans need no `tostring`: version 12.1, 8 things, flag true, pair 4
+of 12.1.
 
 ## Nothing
 

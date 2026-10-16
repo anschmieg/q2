@@ -1,0 +1,70 @@
+$ q2 render repro.qmd --to html --output <abs>/out.html   (q2 main @ e308835bd; fixture copied outside the claude-notes project, which excludes it)
+
+--- stderr ---
+Rendering single file: repro.qmd
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:10:33 ]
+    │
+ 10 │ Version via inline cell: `{lmd} meta.version`
+    │                                 ──────┬─────  
+    │                                       ╰─────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a number
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:12:31 ]
+    │
+ 12 │ Count via inline cell: `{lmd} meta.count`
+    │                               ─────┬────  
+    │                                    ╰────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a number
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:14:30 ]
+    │
+ 14 │ Flag via inline cell: `{lmd} meta.flag`
+    │                              ────┬────  
+    │                                  ╰────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a boolean
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:18:24 ]
+    │
+ 18 │ Literal number: `{lmd} 42`
+    │                        ─┬  
+    │                         ╰── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a number
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:20:20 ]
+    │
+ 20 │ Arithmetic: `{lmd} meta.count * 2`
+    │                    ───────┬──────  
+    │                           ╰──────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a number
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+Error: inline lmd cell did not produce inlines
+    ╭─[ repro.qmd:22:33 ]
+    │
+ 22 │ In a list with a string: `{lmd} {"v", meta.version}`
+    │                                 ─────────┬─────────  
+    │                                          ╰─────────── an inline lmd cell must evaluate to an Inline, a list of Inlines, a string, or nil; this one evaluated to a list whose element 2 is a number
+────╯
+ℹ An inline cell's expression must be an Inline, a list of Inlines, a string, or nil. Write `{=[ … ]=}` for a markdown fragment that is inlines.
+
+6 errors
+
+--- rendered body (h1 / p lines of out.html) ---
+<h1 class="title">lmd inline number repro</h1>
+<h1>Heading  and 3</h1>
+<p>Version via inline cell: <code class="lmd">meta.version</code></p>
+<p>Count via inline cell: <code class="lmd">meta.count</code></p>
+<p>Flag via inline cell: <code class="lmd">meta.flag</code></p>
+<p>Workaround: 12.1</p>
+<p>Literal number: <code class="lmd">42</code></p>
+<p>Arithmetic: <code class="lmd">meta.count * 2</code></p>
+<p>In a list with a string: <code class="lmd">{&quot;v&quot;, meta.version}</code></p>
