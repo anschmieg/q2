@@ -2,7 +2,7 @@
 title: 'lmd/pampa: numbers and booleans read as text in inline positions (bd-q4gnd5os)'
 date: 2026-10-16
 description: 'Option (a) of bd-iqd6niat: extend the fuzzy inline peekers so every inline sink of the pandoc API accepts a Lua number or boolean as its tostring text, registered as divergence D-numtext. Block positions stay strict.'
-status: in-progress
+status: in-progress  # PR #859 open 2026-10-16, awaiting CI and review
 braid:
   strand: bd-q4gnd5os
 ---
@@ -59,4 +59,5 @@ out of bd-iqd6niat; applied here as written:
 - [x] divergence registry entry D-numtext
 - [x] docs: lmd page (metadata gotcha, the `tostring(i)` sentence, the limitation bullet), `Q-26-2` / `Q-26-6` examples, `lua-filters.qmd` D-num bullet; examples 03 and 06 and the patterns fixture drop `tostring()`
 - [x] pampa suite (5084, Lua conformance included; four tests that pinned the old rejection flipped to functions or to the new text), quarto-core lmd (83), quarto lmd snapshots (unchanged output); clippy, fmt, `cargo xtask lint` clean; the lmd page, `Q-26-6`, `lua-filters.qmd` and this plan render under `--strict`; examples 03 and 06 render `Member number 1` and `version 0.4` from bare cells
-- [ ] PR against `main`
+- [x] PR against `main`: [#859](https://github.com/quarto-dev/q2/pull/859), opened 2026-10-16
+- [ ] merged; plan status `done`, strand closed
