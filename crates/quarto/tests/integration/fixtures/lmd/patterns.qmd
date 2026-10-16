@@ -1,0 +1,163 @@
+---
+title: patterns
+stuff: [a, b, c, d]
+version: 12.1
+team: [ada, grace, linus]
+author:
+  name: Ada
+  affil: Analytical Engines
+authors:
+  - name: Ada
+    role: lead
+  - name: Grace
+    role: reviewer
+draft: true
+---
+
+<!-- Mirrors examples/lmd/01..08 (the documents behind docs/guides/authoring/lmd.qmd),
+     with their front matters merged. Keep the three in step. -->
+
+# 01-first-cell
+The front matter of this document has `stuff: [a, b, c, d]`. The cell below
+produces one bold paragraph per item:
+
+```{lmd}
+return meta.stuff:map(function(v) return {=: **`{lmd} v`** :=} end)
+```
+
+# 02-metadata
+The team has `{lmd} tostring(#meta.team)` members:
+`{lmd} table.concat(meta.team:map(pandoc.utils.stringify), ", ")`.
+The lead is `{lmd} pandoc.utils.stringify(meta.team[1]):upper()`.
+
+This is version `{lmd} tostring(meta.version)` (a number in the front
+matter, so it goes through `tostring`).
+
+`{lmd} meta.author.name` works at `{lmd} quarto.metadata.get("author.affil")`.
+A key that may be absent is read with `quarto.metadata.get`, which returns
+`nil` instead of raising: `{lmd} quarto.metadata.get("author.phone") or "no phone on file"`.
+
+# 03-lists
+## A tight list
+
+Each item of a bullet list is a list of blocks, so an inline fragment is
+wrapped in `pandoc.Plain`:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` (`{lmd} a.role`) ]=})
+end))
+```
+
+## Items with several blocks
+
+A block fragment can hold any number of blocks, so an item can be more
+than one paragraph:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return {=:
+`{lmd} a.name` is the `{lmd} a.role`.
+
+A second paragraph about `{lmd} a.name`.
+:=}
+end))
+```
+
+## An ordered list
+
+```{lmd}
+return pandoc.OrderedList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` ]=})
+end), pandoc.ListAttributes(1, "Decimal", "Period"))
+```
+
+## A section per item
+
+```{lmd}
+local out = pandoc.Blocks({})
+for i, t in ipairs(meta.team) do
+  out:extend({=:
+### `{lmd} t`
+
+Member number `{lmd} tostring(i)`.
+:=})
+end
+return out
+```
+
+# 04-shared-state
+A cell with no `return` leaves nothing behind. Everything it defines is
+visible to the cells after it:
+
+```{lmd}
+greeting = "Hello"
+function badge(text)
+  return {=[ [`{lmd} text`]{.badge .text-bg-secondary} ]=}
+end
+```
+
+## `{lmd} greeting`, world
+
+A `{lmd} badge("new")` feature and a `{lmd} badge("beta")` one. The heading
+above got its id from its final text.
+
+# 05-fragment-functions
+A function that returns a fragment is a reusable piece of markup. The
+fragment here contains a block cell of its own, which splices `body` in,
+so the outer cell needs a four-backtick fence:
+
+````{lmd}
+local function card(title, body)
+  return {=:
+::: {.card .p-3 .mb-3}
+### `{lmd} title`
+
+```{lmd}
+return body
+```
+:::
+:=}
+end
+return card("Hello", {=: Some *body* text. :=}) .. card("Bye", {=: More. :=})
+````
+
+# 06-conditional
+A cell that returns `nil` vanishes, so a condition around `return` is all
+it takes:
+
+```{lmd}
+if meta.draft then
+  return {=:
+::: {.callout-warning}
+This is a draft of version `{lmd} tostring(meta.version)`.
+:::
+:=}
+end
+```
+
+The same works per format:
+
+```{lmd}
+if quarto.doc.is_format("html") then
+  return {=: You are reading the HTML version. :=}
+end
+return {=: You are not reading the HTML version. :=}
+```
+
+# 07-walk
+A fragment is a `pandoc.Blocks` value, so it has `walk`:
+
+```{lmd}
+local frag = {=: Some *text* to shout. :=}
+return frag:walk({ Str = function(s) return pandoc.Str(s.text:upper()) end })
+```
+
+# 08-echo
+With `--| echo: true` the cell shows the Lua it ran, fragments rewritten
+into `pandoc` constructor calls, above its result:
+
+```{lmd}
+--| echo: true
+return {=: A paragraph with *emphasis*, built from a fragment. :=}
+```

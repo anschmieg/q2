@@ -1,0 +1,57 @@
+---
+title: "Repeating markdown over a list"
+team: [ada, grace, linus]
+authors:
+  - name: Ada
+    role: lead
+  - name: Grace
+    role: reviewer
+---
+
+## A tight list
+
+Each item of a bullet list is a list of blocks, so an inline fragment is
+wrapped in `pandoc.Plain`:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` (`{lmd} a.role`) ]=})
+end))
+```
+
+## Items with several blocks
+
+A block fragment can hold any number of blocks, so an item can be more
+than one paragraph:
+
+```{lmd}
+return pandoc.BulletList(meta.authors:map(function(a)
+  return {=:
+`{lmd} a.name` is the `{lmd} a.role`.
+
+A second paragraph about `{lmd} a.name`.
+:=}
+end))
+```
+
+## An ordered list
+
+```{lmd}
+return pandoc.OrderedList(meta.authors:map(function(a)
+  return pandoc.Plain({=[ `{lmd} a.name` ]=})
+end), pandoc.ListAttributes(1, "Decimal", "Period"))
+```
+
+## A section per item
+
+```{lmd}
+local out = pandoc.Blocks({})
+for i, t in ipairs(meta.team) do
+  out:extend({=:
+### `{lmd} t`
+
+Member number `{lmd} tostring(i)`.
+:=})
+end
+return out
+```

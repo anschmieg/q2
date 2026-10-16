@@ -1,0 +1,11 @@
+---
+title: "Seeing what ran"
+---
+
+With `--| echo: true` the cell shows the Lua it ran, fragments rewritten
+into `pandoc` constructor calls, above its result:
+
+```{lmd}
+--| echo: true
+return {=: A paragraph with *emphasis*, built from a fragment. :=}
+```

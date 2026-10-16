@@ -66,6 +66,25 @@ Hephaestus plot documents (`.hep`) rendered at render time
 |---|---|
 | `plots/01-hephaestus-basic` | A `.hep` as a captioned figure, at an explicit size, and the fail-soft path for a missing file |
 
+## lmd examples
+
+Minimal `type: default` projects, one per pattern of use of lmd (Lua
+cells and markdown fragments; bd-lmd-exploration-jqv2nbl4, PR #823),
+under [`lmd/`](lmd/). Each has a single `document.qmd`. They back the lmd
+page of the documentation (`docs/guides/authoring/lmd.qmd`), which embeds
+their rendered output.
+
+| Example | Demonstrates |
+|---|---|
+| [`lmd/01-first-cell`](lmd/01-first-cell/) | One cell mapping a front-matter list to a markdown fragment per item |
+| [`lmd/02-metadata`](lmd/02-metadata/) | `meta` and `quarto.metadata.get`; counting, joining and string methods on metadata values |
+| [`lmd/03-lists`](lmd/03-lists/) | A tight bullet list, items with several blocks, an ordered list, and a section per item |
+| [`lmd/04-shared-state`](lmd/04-shared-state/) | A setup cell whose variable and function are used by later inline cells, one in a heading |
+| [`lmd/05-fragment-functions`](lmd/05-fragment-functions/) | A `card(title, body)` function with a block cell nested inside its fragment |
+| [`lmd/06-conditional`](lmd/06-conditional/) | A callout returned only when a front-matter flag is set; `quarto.doc.is_format` |
+| [`lmd/07-walk`](lmd/07-walk/) | `Blocks:walk` on a fragment |
+| [`lmd/08-echo`](lmd/08-echo/) | `--| echo: true`, showing the desugared Lua above the result |
+
 ## Other example categories
 
 Future categories (books, manuscripts) will get their own

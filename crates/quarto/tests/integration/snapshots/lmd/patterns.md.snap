@@ -1,0 +1,133 @@
+---
+source: crates/quarto/tests/integration/lmd_snapshots.rs
+expression: md
+---
+<!-- Mirrors examples/lmd/01..08 (the documents behind docs/guides/authoring/lmd.qmd),
+     with their front matters merged. Keep the three in step. -->
+
+# 01-first-cell
+
+The front matter of this document has `stuff: [a, b, c, d]`. The cell
+below produces one bold paragraph per item:
+
+**a**
+
+**b**
+
+**c**
+
+**d**
+
+# 02-metadata
+
+The team has 3 members: ada, grace, linus. The lead is ADA.
+
+This is version 12.1 (a number in the front matter, so it goes through
+`tostring`).
+
+Ada works at Analytical Engines. A key that may be absent is read with
+`quarto.metadata.get`, which returns `nil` instead of raising: no phone
+on file.
+
+# 03-lists
+
+## A tight list
+
+Each item of a bullet list is a list of blocks, so an inline fragment is
+wrapped in `pandoc.Plain`:
+
+- Ada (lead)
+- Grace (reviewer)
+
+## Items with several blocks
+
+A block fragment can hold any number of blocks, so an item can be more
+than one paragraph:
+
+- Ada is the lead.
+
+  A second paragraph about Ada.
+
+- Grace is the reviewer.
+
+  A second paragraph about Grace.
+
+## An ordered list
+
+1.  Ada
+2.  Grace
+
+## A section per item
+
+### ada
+
+Member number 1.
+
+### grace
+
+Member number 2.
+
+### linus
+
+Member number 3.
+
+# 04-shared-state
+
+A cell with no `return` leaves nothing behind. Everything it defines is
+visible to the cells after it:
+
+## Hello, world
+
+A [new]{.badge .text-bg-secondary} feature and a [beta]{.badge
+.text-bg-secondary} one. The heading above got its id from its final
+text.
+
+# 05-fragment-functions
+
+A function that returns a fragment is a reusable piece of markup. The
+fragment here contains a block cell of its own, which splices `body` in,
+so the outer cell needs a four-backtick fence:
+
+::: {.card .p-3 .mb-3}
+### Hello
+
+Some *body* text.
+:::
+
+::: {.card .p-3 .mb-3}
+### Bye
+
+More.
+:::
+
+# 06-conditional
+
+A cell that returns `nil` vanishes, so a condition around `return` is
+all it takes:
+
+::: {}
+> **Warning**
+>
+> This is a draft of version 12.1.
+:::
+
+The same works per format:
+
+You are not reading the HTML version.
+
+# 07-walk
+
+A fragment is a `pandoc.Blocks` value, so it has `walk`:
+
+SOME *TEXT* TO SHOUT.
+
+# 08-echo
+
+With `--| echo: true` the cell shows the Lua it ran, fragments rewritten
+into `pandoc` constructor calls, above its result:
+
+``` {.lmd .code-with-copy}
+return pandoc.Blocks({pandoc.Para({pandoc.Str("A"), pandoc.Space(), pandoc.Str("paragraph"), pandoc.Space(), pandoc.Str("with"), pandoc.Space(), pandoc.Emph({pandoc.Str("emphasis")}), pandoc.Str(","), pandoc.Space(), pandoc.Str("built"), pandoc.Space(), pandoc.Str("from"), pandoc.Space(), pandoc.Str("a"), pandoc.Space(), pandoc.Str("fragment.")})})
+```
+
+A paragraph with *emphasis*, built from a fragment.
