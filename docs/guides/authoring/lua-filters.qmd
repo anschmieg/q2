@@ -167,7 +167,10 @@ Quarto deliberately diverges from Pandoc in a few places, in favor of
 its richer configuration model:
 
 - **Numbers stay numbers.** `count: 3` reads as the Lua number `3`
-  (Pandoc renders it as the string `'3'`).
+  (Pandoc renders it as the string `'3'`). In return, a number or boolean
+  is accepted wherever an Inline is expected and reads as `tostring`
+  would print it: `pandoc.Strong(meta.count)` works, where Pandoc would
+  reject `pandoc.Strong(3)`. Block positions stay strict.
 - **Null reads as `nil`.** A key with an explicit YAML `~` looks absent
   from Lua; deleting a metadata key is `meta.key = nil`, and writing an
   explicit null is `quarto.config.null()`.

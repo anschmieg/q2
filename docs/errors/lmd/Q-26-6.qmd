@@ -38,10 +38,9 @@ Written `{lmd} {=[ *in italics* ]=}`.
 ````
 
 A number needs nothing here: `` `{lmd} meta.version` `` with
-`version: 12.1` in the front matter reads as `12.1`. That is the inline
-cell's own courtesy, though. A `pandoc` constructor inside a cell takes
-Inlines and strings, as in pandoc, so `pandoc.Strong(meta.version)` and
-an inline cell spliced inside a fragment still want `tostring()`.
+`version: 12.1` in the front matter reads as `12.1`, and so does
+`pandoc.Strong(meta.version)`. Wherever an Inline is expected, a number
+or boolean reads as `tostring` would print it.
 
 If the value really is a block, move it out of the paragraph into a block
 cell.

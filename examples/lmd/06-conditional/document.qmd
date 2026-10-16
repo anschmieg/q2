@@ -11,7 +11,7 @@ it takes:
 if meta.draft then
   return {=:
 ::: {.callout-warning}
-This is a draft of version `{lmd} tostring(meta.version)`.
+This is a draft of version `{lmd} meta.version`.
 :::
 :=}
 end

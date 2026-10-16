@@ -35,9 +35,10 @@
 //! metadata hands cells real numbers (divergence D-num, see
 //! `tests/lua-conformance/divergences.md`), and `` `{lmd} meta.version` ``
 //! should read as `tostring(meta.version)` would without the author
-//! spelling it (bd-iqd6niat). This leniency is the cell boundary's only;
-//! `pandoc.Strong(3)` inside a cell still errors, as it does in pandoc.
-//! Blocks are an error.
+//! spelling it (bd-iqd6niat). The same rule holds in every inline position
+//! of the `pandoc` API, `pandoc.Strong(meta.version)` included (divergence
+//! D-numtext, bd-q4gnd5os), so the cell boundary simply reuses the fuzzy
+//! inline peeker. Blocks are an error.
 //!
 //! One [`LmdRuntime`] serves a whole document, so globals set by one cell
 //! are visible to the cells after it, like a notebook.
@@ -286,13 +287,10 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
     let not_inlines = |got: String| Err(LmdCellError::NotInlines { got });
     match &value {
         Value::Nil => Ok(LmdInlineValue::Nothing),
-        Value::String(_) => {
+        // A string is word-split; a number or boolean is its `tostring`
+        // (D-numtext, in the peeker).
+        Value::String(_) | Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
             let inlines = peek_inlines_fuzzy(lua, value).map_err(LmdCellError::Lua)?;
-            Ok(LmdInlineValue::Inlines(inlines))
-        }
-        Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
-            let text = scalar_text(lua, value).map_err(LmdCellError::Lua)?;
-            let inlines = peek_inlines_fuzzy(lua, text).map_err(LmdCellError::Lua)?;
             Ok(LmdInlineValue::Inlines(inlines))
         }
         Value::UserData(ud) => {
@@ -329,12 +327,8 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
                             .map_err(LmdCellError::Lua)?;
                         inlines.push(inline);
                     }
-                    Value::String(_) => {
+                    Value::String(_) | Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
                         inlines.extend(peek_inlines_fuzzy(lua, item).map_err(LmdCellError::Lua)?);
-                    }
-                    Value::Integer(_) | Value::Number(_) | Value::Boolean(_) => {
-                        let text = scalar_text(lua, item).map_err(LmdCellError::Lua)?;
-                        inlines.extend(peek_inlines_fuzzy(lua, text).map_err(LmdCellError::Lua)?);
                     }
                     Value::UserData(ud) if ud.borrow::<LuaNodes>().is_ok() => {
                         let nodes = ud.borrow::<LuaNodes>().expect("checked above");
@@ -363,22 +357,6 @@ fn classify_inline_value(lua: &Lua, value: Value) -> Result<LmdInlineValue, LmdC
         }
         other => not_inlines(describe(other).to_string()),
     }
-}
-
-/// Format a number or boolean the way Lua's `tostring` does, as a Lua
-/// string value: integers print plainly, floats through Lua's own
-/// `%.14g`-style conversion (`12.1`, `1e+15`, `3.0` for an integral
-/// float), booleans as `true` / `false`. This is what an author gets from
-/// writing `tostring(expr)` by hand, so the two spellings cannot drift.
-fn scalar_text(lua: &Lua, value: Value) -> mlua::Result<Value> {
-    let text = match &value {
-        Value::Boolean(b) => lua.create_string(if *b { "true" } else { "false" })?,
-        // `coerce_string` is `lua_tolstring`: Lua's number formatting.
-        _ => lua
-            .coerce_string(value.clone())?
-            .ok_or_else(|| mlua::Error::runtime("expected a number"))?,
-    };
-    Ok(Value::String(text))
 }
 
 fn describe(value: &Value) -> &'static str {

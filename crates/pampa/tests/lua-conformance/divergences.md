@@ -72,6 +72,40 @@ which conformance cases are permanently xfailed.
 - **Code**: `crates/pampa/src/lua/config_value.rs`
   (`push_yaml_scalar`, `build_config_value`).
 
+## Numbers and booleans read as text in inline positions (D-numtext)
+
+- **Decision**: Carlos, 2026-10-16, strand bd-q4gnd5os (option (a) of
+  bd-iqd6niat). Plan:
+  `claude-notes/plans/2026-10-16-lmd-numtext-inline-coercion.md`.
+- **What**: wherever the fuzzy inline peekers accept a string, a Lua
+  number or boolean is accepted too and reads as the string
+  `tostring` would give (`3`, `12.1`, `1e+15`, `true`), then follows
+  the string rule (word-split as a whole argument, one `Str` as a list
+  element). This covers constructor content arguments
+  (`pandoc.Strong(meta.count)`), `pandoc.Inlines({'a', 3})`,
+  `pandoc.Nodes`, filter return values in inline positions, and the lmd
+  inline-cell boundary, which delegates to the same peeker. **Block
+  positions stay strict**: `pandoc.Div(3)` and `pandoc.Blocks({3})`
+  error as they do in pandoc; there is nothing sensible to wrap a bare
+  number in at block position.
+- **Why**: a consequence of D-num. Pandoc never hands a filter a Lua
+  number from metadata, so its strictness (`pandoc.Strong(3)` errors;
+  only `pandoc.Str(3)` coerces, through hslua's `peekText`) costs
+  nothing there. In q2, `meta.count` *is* a number, and requiring
+  `tostring()` at every inline sink made the most common metadata
+  pattern fail with a type error. One rule, applied in the peeker, so
+  the lmd boundary and the constructors cannot drift.
+- **User-visible behavior**: `pandoc.Strong(meta.version)` renders
+  `12.1` in bold; `pandoc.Para({'v', meta.version})` holds `Str "v"`,
+  `Str "12.1"`; a `Str` handler may `return 5`. The formatting is
+  `lua_tolstring`, so `tostring(x)` and bare `x` agree exactly.
+- **Permanent xfails**: none (no upstream conformance case asserts the
+  rejection of a number in an inline position).
+- **Code**: `crates/pampa/src/lua/types.rs` (`text_scalar_to_string`,
+  `peek_inline_fuzzy`, `peek_inlines_fuzzy`, the guards in
+  `peek_block_fuzzy` / `peek_blocks_fuzzy`), `crates/pampa/src/lua/nodes.rs`
+  (`build_nodes`), `crates/pampa/src/lua/lmd.rs` (`classify_inline_value`).
+
 ## Meta null reads as nil (D-null)
 
 - **Decision**: same review as D-num (Carlos, 2026-07-20).
