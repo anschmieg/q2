@@ -8186,6 +8186,23 @@ return nil
     );
 }
 
+/// D-numtext (bd-q4gnd5os): an inline handler may return a number or a
+/// boolean; it reads as the text `tostring` would give.
+#[tokio::test]
+async fn test_inline_handler_may_return_a_number() {
+    let out = filter_str(
+        r#"
+function Str(el)
+  if el.text == "MARKER" then return 12.1 end
+end
+"#,
+        "MARKER",
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "12.1");
+}
+
 #[tokio::test]
 async fn test_non_table_return_is_an_error() {
     let result = filter_str(

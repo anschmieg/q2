@@ -1710,7 +1710,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_handle_inline_return_number_errors() {
+    fn test_handle_inline_return_number_is_text() {
         let lua = Lua::new();
         use crate::pandoc::Inline;
         use crate::pandoc::inline::Str;
@@ -1720,10 +1720,16 @@ mod unit_tests {
             text: "original".to_string(),
             source_info: SourceInfo::for_test(),
         });
-        // Pandoc errors on non-coercible returns; so do we, loudly.
-        let err = handle_inline_return(&lua, Value::Integer(42), &original, "Str").unwrap_err();
+        // D-numtext (bd-q4gnd5os): a number reads as its `tostring` text,
+        // where pandoc would error. A function is still an error, loudly.
+        let result = handle_inline_return(&lua, Value::Integer(42), &original, "Str").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], Inline::Str(s) if s.text == "42"));
+
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let err = handle_inline_return(&lua, Value::Function(f), &original, "Str").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("number"), "should name the got-type: {msg}");
+        assert!(msg.contains("function"), "should name the got-type: {msg}");
         assert!(
             msg.contains("'Str'"),
             "should name the filter function: {msg}"
@@ -1731,7 +1737,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_handle_inline_return_boolean_errors() {
+    fn test_handle_inline_return_boolean_is_text() {
         let lua = Lua::new();
         use crate::pandoc::Inline;
         use crate::pandoc::inline::Str;
@@ -1741,13 +1747,10 @@ mod unit_tests {
             text: "original".to_string(),
             source_info: SourceInfo::for_test(),
         });
-        let err = handle_inline_return(&lua, Value::Boolean(true), &original, "Str").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("boolean"), "should name the got-type: {msg}");
-        assert!(
-            msg.contains("'Str'"),
-            "should name the filter function: {msg}"
-        );
+        // D-numtext: a boolean reads as `true` / `false`.
+        let result = handle_inline_return(&lua, Value::Boolean(true), &original, "Str").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], Inline::Str(s) if s.text == "true"));
     }
 
     #[test]
@@ -2179,7 +2182,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_handle_inlines_return_with_control_number_errors() {
+    fn test_handle_inlines_return_with_control_number_is_text() {
         let lua = Lua::new();
         use crate::pandoc::Inline;
         use crate::pandoc::inline::Str;
@@ -2189,12 +2192,22 @@ mod unit_tests {
             text: "original".to_string(),
             source_info: SourceInfo::for_test(),
         })];
+        // D-numtext: a number is text; a function is not coercible.
         let mut values = MultiValue::new();
-        values.push_front(Value::Integer(42)); // Not coercible to Inlines
+        values.push_front(Value::Integer(42));
+        let (elements, _) =
+            handle_inlines_return_with_control(&lua, values, &original, "Inlines").unwrap();
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(&elements[0], Inline::Str(s) if s.text == "42"));
+
+        let mut values = MultiValue::new();
+        values.push_front(Value::Function(
+            lua.create_function(|_, ()| Ok(())).unwrap(),
+        ));
         let err =
             handle_inlines_return_with_control(&lua, values, &original, "Inlines").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("number"), "should name the got-type: {msg}");
+        assert!(msg.contains("function"), "should name the got-type: {msg}");
     }
 
     #[test]
