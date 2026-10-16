@@ -95,7 +95,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
 
       # build-wasm.js verifies wasm-bindgen CLI matches the version
       # pinned in Cargo.lock; install that exact version.

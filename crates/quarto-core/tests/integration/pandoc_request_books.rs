@@ -349,7 +349,11 @@ fn epub_text_entries(bytes: &[u8]) -> std::collections::BTreeMap<String, String>
     )
     .unwrap();
     let stamp = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z").unwrap();
-    let names: Vec<String> = zip.file_names().map(String::from).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
+        .map(String::from)
+        .collect();
     let mut out = std::collections::BTreeMap::new();
     for n in names {
         let textual = [".xhtml", ".opf", ".ncx"].iter().any(|e| n.ends_with(e));

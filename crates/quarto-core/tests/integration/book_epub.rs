@@ -125,6 +125,7 @@ fn render_epub(extra_book_keys: &str, with_cover: bool) -> (TempDir, Vec<u8>) {
 /// not a chapter.
 fn chapter_xhtml_names(zip: &mut ZipArchive<impl Read + Seek>) -> Vec<String> {
     zip.file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .filter(|n| n.ends_with(".xhtml") && n.contains("text") && !n.contains("title_page"))
         .map(|n| n.to_string())
         .collect()
@@ -320,6 +321,7 @@ fn book_cover_image_derives_epub_cover_image_opf_property() {
 
     let opf_name = zip
         .file_names()
+        .map(|n| n.expect("zip entry name should decode"))
         .find(|n| n.ends_with("content.opf"))
         .map(|n| n.to_string())
         .expect("epub should contain an OPF package document");

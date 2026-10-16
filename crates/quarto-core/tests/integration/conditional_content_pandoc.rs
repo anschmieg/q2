@@ -208,7 +208,7 @@ fn resolved_conditional_content_renders_correctly_to_pptx() {
     let cursor = std::io::Cursor::new(&bytes);
     let mut zip = zip::ZipArchive::new(cursor).expect("pptx output should be a valid ZIP archive");
     let slide_names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
         .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
         .collect();
     assert!(
