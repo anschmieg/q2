@@ -2,7 +2,7 @@
 title: 'lmd infrastructure: `require` of `.lmd` modules, component call sites, and an ecosystem survey (bd-76ogq4ew)'
 date: 2026-10-15
 description: 'Survey of the JSX/MDX, Hugo/templating, Typst and Lua-dialect ecosystems for quality-of-life features worth borrowing into lmd, a design for loading `.lmd` modules through `require`, and a phased plan for the reusability work that follows the landed lmd feature.'
-status: in-progress  # survey done 2026-10-15; decisions recorded and go-ahead given 2026-10-16; Phase 1 implemented, merged with origin/main (post #855) and `cargo xtask verify` green (2026-10-16); Phase 1 PR open, Phases 2-3 to follow
+status: in-progress  # survey done 2026-10-15; decisions and go-ahead 2026-10-16; Phase 1 on PR #856; Phase 2 implemented on braid/bd-76ogq4ew-lmd-phase2-fragment-gaps (stacked on Phase 1), verify pending (2026-10-16); Phase 3 to follow
 braid:
   strand: bd-76ogq4ew
   priority: P2
@@ -335,7 +335,7 @@ Started 2026-10-16 on `braid/bd-76ogq4ew-lmd-phase2-fragment-gaps`, stacked
 on the Phase 1 branch (PR #856). Design notes for each item sit under the
 checklist.
 
-- [ ] Guide updates for each item below as it lands (the page exists from #855; each fix removes a line from "Current limitations").
+- [x] Guide updates for each item below as it lands (the page exists from #855; each fix removes a line from "Current limitations"). Phase 2 removed the footnotes line and added "A fragment as the argument", "Quoting fragment syntax", `quarto.markdown` under metadata, a delimiters rule, and the highlighting note.
 - [x] Footnotes inside fragments: resolve a fragment's own `[^id]` definitions against its references at parse time, so the emitter prints `pandoc.Note`; a reference whose definition lives in the document body stays the reader's `quarto-note-reference` span and the document's `footnotes` transform resolves it later (that already works today). bd-iqd6niat landed in #852 (numbers in inline cells); bd-3h6iasmz (`OrderedList` attributes) is in progress on another branch and is not taken here.
 - [x] bd-onsqz7sv: the shortcode's span inside a fragment is rerooted like every other node's (the reader built it with `SourceInfo::from_range` against the file id, which skipped the fragment's parent span). A shortcode inside a fragment stays unsupported, with a hint that names the Lua spelling; see the decision below.
 - [x] Escaping: a backslashed character is content to the scanner, so `\{=` does not open; Quarto markdown wants a lone brace escaped anyway, so the literal delimiters are spelled `\{=` and `=\}`. Grammar and desugarer tests, corpus tests.
