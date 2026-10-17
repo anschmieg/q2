@@ -280,6 +280,22 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_source_links_match_rendered_href_keys() {
+        assert_eq!(
+            source_path_from_href("/docs/about.qmd#intro?ref=sidebar"),
+            Some(PathBuf::from("docs/about.qmd"))
+        );
+        assert_eq!(
+            source_path_from_href("docs/about.qmd?ref=x#intro"),
+            Some(PathBuf::from("docs/about.qmd"))
+        );
+        assert_eq!(source_path_from_href("#intro"), None);
+        assert_eq!(source_path_from_href("https://example.com/a.qmd"), None);
+        assert_eq!(source_path_from_href("//example.com/a.qmd"), None);
+        assert_eq!(source_path_from_href("?ref=x"), None);
+    }
+
+    #[test]
     fn multi_sidebar_keeps_ids() {
         // website.sidebar: [{id: docs, contents: [a.qmd]}, {id: blog, contents: [b.qmd]}]
         let mut meta = ConfigValue::default();

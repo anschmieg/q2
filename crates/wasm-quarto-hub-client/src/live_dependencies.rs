@@ -236,6 +236,104 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_engines_filters_and_invalid_listing_profiles_fail_open() {
+        use quarto_core::glob::GlobPattern;
+        use quarto_pandoc_types::ConfigMapEntry;
+        use quarto_source_map::SourceInfo;
+
+        let mut active = profile("index.qmd", &[]);
+        active.engine_resolution = None;
+        let index = ProjectIndex::new(vec![active.clone()]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+                None,
+            ),
+            None,
+            "unknown execution ownership must not suppress an edit",
+        );
+
+        active.engine_resolution = Some(ProfileEngineResolution {
+            sequence: vec!["jupyter".to_string()],
+            ownership: vec![("python".to_string(), "jupyter".to_string())],
+        });
+        let index = ProjectIndex::new(vec![active.clone()]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+                None,
+            ),
+            None,
+        );
+
+        active.engine_resolution = Some(ProfileEngineResolution {
+            sequence: Vec::new(),
+            ownership: Vec::new(),
+        });
+        let mut meta = ConfigValue::default();
+        meta.insert_path(
+            &["filters"],
+            ConfigValue::new_array(
+                vec![ConfigValue::new_string("dynamic.lua", SourceInfo::for_test())],
+                SourceInfo::for_test(),
+            ),
+        );
+        let index = ProjectIndex::new(vec![active.clone()]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &meta,
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+                None,
+            ),
+            None,
+        );
+
+        active.listing_content_globs = vec![GlobPattern::positive("posts/[broken")];
+        let index = ProjectIndex::new(vec![active.clone()]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &ConfigValue::default(),
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+                None,
+            ),
+            None,
+            "an invalid cached listing pattern must invalidate the entire snapshot",
+        );
+        let mut meta = ConfigValue::default();
+        meta.insert_path(
+            &["navigation", "sidebar"],
+            ConfigValue::new_map(
+                vec![ConfigMapEntry {
+                    key: "contents".to_string(),
+                    key_source: SourceInfo::for_test(),
+                    value: ConfigValue::new_array(Vec::new(), SourceInfo::for_test()),
+                }],
+                SourceInfo::for_test(),
+            ),
+        );
+        assert_eq!(
+            render_input_paths(
+                &ProjectIndex::new(vec![profile("index.qmd", &[])]),
+                &meta,
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+                None,
+            ),
+            None,
+        );
+    }
+
+    #[test]
     fn profile_edges_are_included_for_active_page() {
         let mut root = profile("index.qmd", &[]);
         root.body_link_targets = vec![PathBuf::from("about.qmd")];

@@ -42,6 +42,30 @@ async function ticks(page: Page): Promise<number> {
   );
 }
 
+function observedUrl(url: string): string {
+  const target = new URL(url);
+  target.searchParams.set('__q2_test_sync', '1');
+  return target.toString();
+}
+
+async function observedUpdates(page: Page, file: string): Promise<number> {
+  return page.evaluate((name) =>
+    (window as unknown as { __q2SyncEvents?: Record<string, number> })
+      .__q2SyncEvents?.[name] ?? 0,
+  file);
+}
+
+async function waitForObservedUpdate(page: Page, file: string, prior: number): Promise<void> {
+  await page.waitForFunction(
+    ({ name, previous }) => (
+      (window as unknown as { __q2SyncEvents?: Record<string, number> })
+        .__q2SyncEvents?.[name] ?? 0
+    ) > previous,
+    { name: file, previous: prior },
+    { timeout: 15_000 },
+  );
+}
+
 let server: PreviewServerHandle;
 
 test.beforeEach(async () => {
@@ -61,7 +85,7 @@ test.afterEach(async () => {
 });
 
 test('nested leaf edit refreshes the active page; unrelated sibling edit does not', async ({ page }) => {
-  await page.goto(server.url);
+  await page.goto(observedUrl(server.url));
   await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
   await page.waitForTimeout(200); // commit the initial deps result to SPA state
 
@@ -73,13 +97,15 @@ test('nested leaf edit refreshes the active page; unrelated sibling edit does no
   await page.waitForTimeout(200);
 
   const settledTicks = await ticks(page);
+  const observedBefore = await observedUpdates(page, 'sibling.qmd');
   await writeFile(path.join(server.projectDir, 'sibling.qmd'), '# Changed but unrelated\n');
-  await page.waitForTimeout(2500);
+  await waitForObservedUpdate(page, 'sibling.qmd', observedBefore);
+  await page.waitForTimeout(800);
   expect(await ticks(page)).toBe(settledTicks);
 });
 
 test('removing and reintroducing a nested include updates selective invalidation', async ({ page }) => {
-  await page.goto(server.url);
+  await page.goto(observedUrl(server.url));
   await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
   await page.waitForTimeout(200);
 
@@ -89,8 +115,10 @@ test('removing and reintroducing a nested include updates selective invalidation
   await page.waitForTimeout(200);
 
   const settledTicks = await ticks(page);
+  const observedBefore = await observedUpdates(page, 'leaf.qmd');
   await writeFile(path.join(server.projectDir, 'leaf.qmd'), 'LEAF-SENTINEL-INERT\n');
-  await page.waitForTimeout(2500);
+  await waitForObservedUpdate(page, 'leaf.qmd', observedBefore);
+  await page.waitForTimeout(800);
   expect(await ticks(page)).toBe(settledTicks);
 
   await writeFile(path.join(server.projectDir, 'outer.qmd'), OUTER);
@@ -109,7 +137,7 @@ test('changed sidebar member re-renders active page through core document edges'
       { path: 'unrelated.md', content: '# Unrelated note\n' },
     ],
   });
-  await page.goto(server.url);
+  await page.goto(observedUrl(server.url));
   await waitForInnerText(page, 'Home content');
   await page.waitForTimeout(300);
   const before = await ticks(page);
@@ -133,7 +161,7 @@ test('single-file preview tracks nested included source changes', async ({ page 
       { path: 'sibling.qmd', content: SIBLING },
     ],
   });
-  await page.goto(server.url);
+  await page.goto(observedUrl(server.url));
   await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
   await page.waitForTimeout(200);
 
@@ -143,10 +171,12 @@ test('single-file preview tracks nested included source changes', async ({ page 
   expect(await ticks(page)).toBeGreaterThan(before);
   await page.waitForTimeout(200);
 
-  const settled = await ticks(page);
-  await writeFile(path.join(server.projectDir, 'sibling.qmd'), '# Still unrelated\n');
-  await page.waitForTimeout(2500);
-  expect(await ticks(page)).toBe(settled);
+  // In single-file mode the native watcher intentionally excludes siblings.
+  // The project-mode test above, not this case, tests *delivered* negatives.
+  const observedBefore = await observedUpdates(page, 'leaf.qmd');
+  await writeFile(path.join(server.projectDir, 'leaf.qmd'), 'LEAF-SENTINEL-SINGLE-FILE-SECOND\n');
+  await waitForObservedUpdate(page, 'leaf.qmd', observedBefore);
+  await waitForInnerText(page, 'LEAF-SENTINEL-SINGLE-FILE-SECOND');
 });
 
 test('records informational cold-load and warm-edit latency for project preview', async ({ page }) => {
@@ -154,7 +184,7 @@ test('records informational cold-load and warm-edit latency for project preview'
   // Timing is informational: CI machines differ and elapsed-time
   // thresholds are not regression assertions.
   const coldStart = performance.now();
-  await page.goto(server.url);
+  await page.goto(observedUrl(server.url));
   await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
   const coldLoadMs = Math.round(performance.now() - coldStart);
   const editMs: number[] = [];
@@ -168,5 +198,59 @@ test('records informational cold-load and warm-edit latency for project preview'
   editMs.sort((a, b) => a - b);
   console.log(
     `q2_m1_browser_perf scenario=project_nested_include cold_load_ms=${coldLoadMs} warm_edit_ms_p50=${editMs[1]} warm_edit_ms_range=${editMs[0]}..${editMs[2]}`,
+  );
+});
+
+// Site-root hrefs with URL fragments must map to the same sync identity
+// that the sidebar actually renders, rather than a literal "about.qmd#hash".
+test('site-root sidebar href with fragment invalidates on target edit', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    fixtureFiles: [
+      { path: '_quarto.yml', content: 'project:\n  type: website\nwebsite:\n  sidebar:\n    contents: [index.qmd, "/about.qmd#intro"]\n' },
+      { path: 'index.qmd', content: '# Home sentinel\n' },
+      { path: 'about.qmd', content: '---\ntitle: Before sidebar target\n---\n\n# Intro\n' },
+    ],
+  });
+  await page.goto(observedUrl(server.url));
+  await waitForInnerText(page, 'Home sentinel');
+  await page.waitForTimeout(300);
+  const beforeTicks = await ticks(page);
+  const beforeEvents = await observedUpdates(page, 'about.qmd');
+  await writeFile(path.join(server.projectDir, 'about.qmd'), '---\ntitle: After sidebar target\n---\n\n# Intro\n');
+  await waitForObservedUpdate(page, 'about.qmd', beforeEvents);
+  await page.waitForFunction(
+    (count) => ((window as unknown as { __renderTicks?: number }).__renderTicks ?? 0) > count,
+    beforeTicks,
+    { timeout: 15_000 },
+  );
+});
+
+test('frontmatter sidebar href resolves against its declaring document', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    fixtureFiles: [
+      { path: '_quarto.yml', content: 'project:\n  type: website\n' },
+      {
+        path: 'docs/index.qmd',
+        content: '---\nwebsite:\n  sidebar:\n    contents: [index.qmd, "about.qmd#intro"]\n---\n\n# Nested sidebar home\n',
+      },
+      { path: 'docs/about.qmd', content: '---\ntitle: Before nested target\n---\n\n# Intro\n' },
+      { path: 'other.qmd', content: '# Other\n' },
+    ],
+  });
+  const target = new URL(observedUrl(server.url));
+  target.searchParams.set('page', 'docs/index.qmd');
+  await page.goto(target.toString());
+  await waitForInnerText(page, 'Nested sidebar home');
+  await page.waitForTimeout(300);
+  const baseline = await ticks(page);
+  const observedBefore = await observedUpdates(page, 'docs/about.qmd');
+  await writeFile(path.join(server.projectDir, 'docs/about.qmd'), '---\ntitle: Updated nested target\n---\n\n# Intro\n');
+  await waitForObservedUpdate(page, 'docs/about.qmd', observedBefore);
+  await page.waitForFunction(
+    (count) => ((window as unknown as { __renderTicks?: number }).__renderTicks ?? 0) > count,
+    baseline,
+    { timeout: 15_000 },
   );
 });

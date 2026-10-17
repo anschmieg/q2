@@ -807,6 +807,14 @@ export default function PreviewApp() {
           },
           onFileContent: (path: string) => {
             if (cancelled) return;
+            // E2E-only observable sync event. The producer has already
+            // written to VFS, so this proves the watcher/sync delivered an
+            // update independently of whether React chose to render it.
+            if (new URLSearchParams(window.location.search).has('__q2_test_sync')) {
+              const observed = window as unknown as { __q2SyncEvents?: Record<string, number> };
+              const events = observed.__q2SyncEvents ??= {};
+              events[path] = (events[path] ?? 0) + 1;
+            }
             // Phase D.6 filter: read `activeFile` + `deps` via the
             // setState callback so the filter sees the *latest*
             // values (the closure was set up at boot time and would
