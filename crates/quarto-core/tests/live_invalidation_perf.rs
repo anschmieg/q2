@@ -52,7 +52,10 @@ fn baseline(label: &str, index: &ProjectIndex, meta: &ConfigValue, expected_inpu
             Path::new("active.qmd"),
         );
         single_page_queries.push(start.elapsed().as_micros());
-        assert!(lazy_diagnostics.is_empty(), "{label}: incomplete single-page graph");
+        assert!(
+            lazy_diagnostics.is_empty(),
+            "{label}: incomplete single-page graph"
+        );
         assert_eq!(single_page, inputs, "{label}: materialized vs lazy inputs");
 
         estimated_bytes = inputs.iter().map(|p| p.to_string_lossy().len() + 3).sum();

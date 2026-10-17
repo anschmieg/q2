@@ -1573,7 +1573,10 @@ mod tests {
         ]);
         let first = config_map(vec![
             ("id", s("one")),
-            ("contents", arr(vec![s("a.qmd"), s("b.qmd"), s("missing.qmd")])),
+            (
+                "contents",
+                arr(vec![s("a.qmd"), s("b.qmd"), s("missing.qmd")]),
+            ),
         ]);
         let second = config_map(vec![
             ("id", s("two")),
@@ -1584,8 +1587,7 @@ mod tests {
 
         for source in ["a.qmd", "b.qmd", "c.qmd", "d.qmd", "e.qmd", "unrelated.qmd"] {
             let mut full_diagnostics = Vec::new();
-            let materialized =
-                ProjectDependencyGraph::build(&index, &meta, &mut full_diagnostics);
+            let materialized = ProjectDependencyGraph::build(&index, &meta, &mut full_diagnostics);
             let mut lazy_diagnostics = Vec::new();
             let lazy = ProjectDependencyGraph::render_inputs_for_active(
                 &index,
