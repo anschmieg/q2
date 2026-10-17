@@ -34,10 +34,10 @@ pub(crate) fn render_input_paths(
             engines.sequence.iter().any(|engine| engine != "markdown")
         })
         || project_metadata.get("filters").is_some()
-        || project_metadata.get_path(&["navigation", "sidebar"]).is_some()
     {
-        // An external engine, unknown engine resolution, arbitrary Lua filter,
-        // or post-Pass-1 navigation override may read untracked sources.
+        // An external engine, unknown engine resolution, or arbitrary Lua
+        // filter may read untracked sources. Normal rendering itself creates
+        // navigation.sidebar, so that field must not disable the filter.
         return None;
     }
 
@@ -238,7 +238,6 @@ mod tests {
     #[test]
     fn dynamic_engines_filters_and_invalid_listing_profiles_fail_open() {
         use quarto_core::glob::GlobPattern;
-        use quarto_pandoc_types::ConfigMapEntry;
         use quarto_source_map::SourceInfo;
 
         let mut active = profile("index.qmd", &[]);
@@ -309,27 +308,21 @@ mod tests {
             None,
             "an invalid cached listing pattern must invalidate the entire snapshot",
         );
-        let mut meta = ConfigValue::default();
-        meta.insert_path(
+        let mut generated_navigation = ConfigValue::default();
+        generated_navigation.insert_path(
             &["navigation", "sidebar"],
-            ConfigValue::new_map(
-                vec![ConfigMapEntry {
-                    key: "contents".to_string(),
-                    key_source: SourceInfo::for_test(),
-                    value: ConfigValue::new_array(Vec::new(), SourceInfo::for_test()),
-                }],
-                SourceInfo::for_test(),
-            ),
+            ConfigValue::new_map(Vec::new(), SourceInfo::for_test()),
         );
         assert_eq!(
             render_input_paths(
                 &ProjectIndex::new(vec![profile("index.qmd", &[])]),
-                &meta,
+                &generated_navigation,
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
                 None,
             ),
-            None,
+            Some(vec!["index.qmd".to_string()]),
+            "renderer-generated navigation state cannot disable selective invalidation",
         );
     }
 
