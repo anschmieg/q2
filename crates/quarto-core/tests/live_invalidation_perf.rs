@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use quarto_core::document_profile::{DocumentProfile, IncludeEntry};
+use quarto_core::glob::GlobPattern;
 use quarto_core::project::dependency_graph::ProjectDependencyGraph;
 use quarto_core::project::index::ProjectIndex;
 use quarto_pandoc_types::{ConfigMapEntry, ConfigValue};
@@ -91,7 +92,10 @@ fn baseline_large_sidebars() {
             .collect();
         let index = ProjectIndex::new(names.iter().map(|name| profile(name, 0)).collect());
         let contents = ConfigValue::new_array(
-            names.iter().map(|name| ConfigValue::new_string(name, SourceInfo::for_test())).collect(),
+            names
+                .iter()
+                .map(|name| ConfigValue::new_string(name.as_str(), SourceInfo::for_test()))
+                .collect(),
             SourceInfo::for_test(),
         );
         let sidebar = ConfigValue::new_map(
@@ -115,9 +119,9 @@ fn baseline_listing_pattern_expansion() {
         active.listing_content_globs = (0..globs)
             .map(|i| {
                 if globs == 1 {
-                    "posts/*/*.qmd".to_string()
+                    GlobPattern::positive("posts/*/*.qmd")
                 } else {
-                    format!("posts/section-{i:02}/*.qmd")
+                    GlobPattern::positive(format!("posts/section-{i:02}/*.qmd"))
                 }
             })
             .collect();
