@@ -11,14 +11,26 @@
  */
 import { test, expect } from '@playwright/test';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 
 test('optimized browser WASM sidebar query scales without clique materialization', async ({ page }) => {
   test.skip(process.env.Q2_M1_BENCH !== '1', 'requires optimized CI WASM benchmark export');
 
-  const pkgDir = path.resolve(import.meta.dirname, '..', '..', 'crates', 'wasm-quarto-hub-client', 'pkg');
+  // Playwright may transpile ESM tests into a cache directory; unlike
+  // import.meta.dirname, cwd is the configured q2-preview-spa project root.
+  // Validate both artifacts up front rather than masking an ENOENT as a
+  // generic browser-side "Failed to fetch dynamically imported module".
+  const pkgDir = path.resolve(process.cwd(), '..', 'crates', 'wasm-quarto-hub-client', 'pkg');
+  const jsName = 'wasm_quarto_hub_client.js';
+  const wasmName = 'wasm_quarto_hub_client_bg.wasm';
+  const [jsSource, wasmStat] = await Promise.all([
+    readFile(path.join(pkgDir, jsName)),
+    stat(path.join(pkgDir, wasmName)),
+  ]);
+  expect(jsSource.length).toBeGreaterThan(0);
+  expect(wasmStat.size).toBeGreaterThan(0);
   const server = createServer(async (request, response) => {
     const file = new URL(request.url ?? '/', 'http://localhost').pathname;
     if (file === '/') {
@@ -39,14 +51,24 @@ test('optimized browser WASM sidebar query scales without clique materialization
       const bytes = await readFile(path.join(pkgDir, name));
       response.setHeader('Content-Type', name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript');
       response.end(bytes);
-    } catch {
-      response.writeHead(404).end();
+    } catch (error) {
+      console.error('Optimized WASM benchmark fixture read failed', { pkgDir, file, error });
+      response.writeHead(500, { 'Content-Type': 'text/plain' }).end(String(error));
     }
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   try {
     await page.goto(`http://127.0.0.1:${address.port}/`);
+    // Make module/wasm serving a separate and actionable assertion.
+    const [moduleResponse, wasmResponse] = await Promise.all([
+      page.request.get(`http://127.0.0.1:${address.port}/${jsName}`),
+      page.request.get(`http://127.0.0.1:${address.port}/${wasmName}`),
+    ]);
+    expect(moduleResponse.status()).toBe(200);
+    expect(wasmResponse.status()).toBe(200);
+    expect(moduleResponse.headers()['content-type']).toContain('javascript');
+    expect(wasmResponse.headers()['content-type']).toContain('wasm');
     const rows = await page.evaluate(async () => {
       // This is loaded from the produced (wasm-opt -Oz) pkg, not mocks.
       const wasm = await import('/wasm_quarto_hub_client.js');

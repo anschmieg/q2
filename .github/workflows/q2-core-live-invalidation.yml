@@ -52,6 +52,8 @@ jobs:
         # Host-test the actual pure Rust adapter source, not the wasm32-only
         # client crate (WasmRuntime / async Sass cannot link natively).
         run: cargo test -p quarto-core --test wasm_live_dependencies -- --nocapture
+      - name: Verify narrow single-file dependency enrollment on the native hub
+        run: cargo test -p quarto-hub --lib preview_dependency_enrollment_is_narrow_and_idempotent -- --nocapture
       - name: Record informational M1.1 graph performance baseline
         run: cargo test -p quarto-core --test live_invalidation_perf -- --nocapture
 
