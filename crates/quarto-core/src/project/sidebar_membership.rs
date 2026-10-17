@@ -205,6 +205,32 @@ mod tests {
     }
 
     #[test]
+    fn repeated_nested_members_keep_first_appearance_order() {
+        let nested = config_map(vec![
+            ("section", s("Nested")),
+            ("contents", arr(vec![s("a.qmd"), s("c.qmd"), s("a.qmd")])),
+        ]);
+        let sidebar = config_map(vec![(
+            "contents",
+            arr(vec![s("a.qmd"), nested, s("b.qmd"), s("a.qmd")]),
+        )]);
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], sidebar);
+        let index = make_index_with(&["a.qmd", "b.qmd", "c.qmd"]);
+        let mut diagnostics = Vec::new();
+        let sidebars = resolve_sidebar_membership(&meta, &index, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            sidebars[0].members,
+            vec![
+                PathBuf::from("a.qmd"),
+                PathBuf::from("c.qmd"),
+                PathBuf::from("b.qmd"),
+            ],
+        );
+    }
+
+    #[test]
     fn multi_sidebar_keeps_ids() {
         // website.sidebar: [{id: docs, contents: [a.qmd]}, {id: blog, contents: [b.qmd]}]
         let mut meta = ConfigValue::default();

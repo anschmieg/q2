@@ -122,6 +122,47 @@ mod tests {
     }
 
     #[test]
+    fn sidebars_expand_without_extra_navigation_graph_materialization() {
+        use quarto_pandoc_types::ConfigMapEntry;
+        use quarto_source_map::SourceInfo;
+
+        let sidebar = ConfigValue::new_map(
+            vec![ConfigMapEntry {
+                key: "contents".to_string(),
+                key_source: SourceInfo::for_test(),
+                value: ConfigValue::new_array(
+                    vec![
+                        ConfigValue::new_string("index.qmd", SourceInfo::for_test()),
+                        ConfigValue::new_string("about.qmd", SourceInfo::for_test()),
+                    ],
+                    SourceInfo::for_test(),
+                ),
+            }],
+            SourceInfo::for_test(),
+        );
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], sidebar);
+        let index = ProjectIndex::new(vec![
+            profile("index.qmd", &[]),
+            profile("about.qmd", &["/project/partials/leaf.qmd"]),
+            profile("unrelated.qmd", &[]),
+        ]);
+        assert_eq!(
+            render_input_paths(
+                &index,
+                &meta,
+                Path::new("/project"),
+                Path::new("/project/index.qmd"),
+            ),
+            Some(vec![
+                "about.qmd".to_string(),
+                "index.qmd".to_string(),
+                "partials/leaf.qmd".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
     fn unknown_or_unrepresentable_dependency_must_fail_open() {
         let index = ProjectIndex::new(vec![profile("index.qmd", &["/elsewhere/secret.qmd"])]);
         assert_eq!(

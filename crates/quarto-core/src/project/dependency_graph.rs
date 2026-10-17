@@ -1556,6 +1556,107 @@ mod tests {
     }
 
     #[test]
+    fn lazy_active_inputs_match_materialized_graph_with_overlapping_sidebars() {
+        let mut b = with_includes("b.qmd", &["/project/partials/b-leaf.qmd"]);
+        b.body_link_targets = vec![PathBuf::from("e.qmd")];
+        let mut c = with_includes("c.qmd", &[]);
+        c.nav_dependencies = vec![PathBuf::from("d.qmd")];
+        let mut d = with_includes("d.qmd", &["/project/partials/d-leaf.qmd"]);
+        d.nav_dependencies = vec![PathBuf::from("a.qmd")]; // cycle
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &["/project/partials/a-leaf.qmd"]),
+            b,
+            c,
+            d,
+            with_includes("e.qmd", &["/project/partials/e-leaf.qmd"]),
+            with_includes("unrelated.qmd", &["/project/partials/unrelated.qmd"]),
+        ]);
+        let first = config_map(vec![
+            ("id", s("one")),
+            ("contents", arr(vec![s("a.qmd"), s("b.qmd"), s("missing.qmd")])),
+        ]);
+        let second = config_map(vec![
+            ("id", s("two")),
+            ("contents", arr(vec![s("b.qmd"), s("c.qmd")])),
+        ]);
+        let mut meta = ConfigValue::default();
+        add_sidebar(&mut meta, &[]);
+        meta.insert_path(&["website", "sidebar"], arr(vec![first, second]));
+
+        for source in ["a.qmd", "b.qmd", "c.qmd", "d.qmd", "e.qmd", "unrelated.qmd"] {
+            let mut full_diagnostics = Vec::new();
+            let materialized =
+                ProjectDependencyGraph::build(&index, &meta, &mut full_diagnostics);
+            let mut lazy_diagnostics = Vec::new();
+            let lazy = ProjectDependencyGraph::render_inputs_for_active(
+                &index,
+                &meta,
+                &mut lazy_diagnostics,
+                Path::new(source),
+            );
+            assert_eq!(lazy_diagnostics.len(), full_diagnostics.len());
+            assert_eq!(
+                lazy,
+                materialized.render_inputs_for(Path::new(source)),
+                "sidebar closure mismatch for {source}",
+            );
+        }
+
+        let mut diagnostics = Vec::new();
+        let active = ProjectDependencyGraph::render_inputs_for_active(
+            &index,
+            &meta,
+            &mut diagnostics,
+            Path::new("a.qmd"),
+        );
+        assert!(active.contains(Path::new("missing.qmd")));
+        assert!(active.contains(Path::new("e.qmd")));
+        assert!(active.contains(Path::new("/project/partials/d-leaf.qmd")));
+        assert!(!active.contains(Path::new("unrelated.qmd")));
+        assert!(!active.contains(Path::new("/project/partials/unrelated.qmd")));
+
+        let (without_cliques, sidebars) =
+            ProjectDependencyGraph::build_with_sidebar_mode(&index, &meta, &mut Vec::new(), false);
+        assert_eq!(sidebars.len(), 2);
+        assert!(
+            !without_cliques
+                .edges
+                .get(Path::new("a.qmd"))
+                .is_some_and(|deps| deps.contains(Path::new("b.qmd"))),
+            "single-page view must not materialize sidebar pair edges",
+        );
+    }
+
+    #[test]
+    fn lazy_active_inputs_match_auto_sidebar_expansion() {
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &[]),
+            with_includes("b.qmd", &["/project/deep-leaf.qmd"]),
+            with_includes("c.qmd", &[]),
+        ]);
+        let auto = config_map(vec![(
+            "auto",
+            ConfigValue::new_bool(true, SourceInfo::for_test()),
+        )]);
+        let sidebar = config_map(vec![("contents", arr(vec![auto]))]);
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], sidebar);
+        let mut diags = Vec::new();
+        let full = ProjectDependencyGraph::build(&index, &meta, &mut diags);
+        let mut lazy_diags = Vec::new();
+        let live = ProjectDependencyGraph::render_inputs_for_active(
+            &index,
+            &meta,
+            &mut lazy_diags,
+            Path::new("a.qmd"),
+        );
+        assert!(diags.is_empty());
+        assert!(lazy_diags.is_empty());
+        assert_eq!(live, full.render_inputs_for(Path::new("a.qmd")));
+        assert!(live.contains(Path::new("/project/deep-leaf.qmd")));
+    }
+
+    #[test]
     fn many_unrelated_documents_do_not_create_include_edges() {
         let mut profiles = (0..3000)
             .map(|i| with_includes(&format!("unrelated-{i:04}.qmd"), &[]))
