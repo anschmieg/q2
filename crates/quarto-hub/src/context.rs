@@ -3,7 +3,7 @@
 //! Contains the automerge repo and storage manager.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use automerge::{Automerge, ObjType, ROOT, transaction::Transactable};
@@ -539,6 +539,43 @@ impl HubContext {
             self.disk_write_policy,
         )
         .await
+    }
+
+    /// Enroll newly discovered single-file preview dependencies into the
+    /// existing Automerge index. Only render-derived closure files are eligible:
+    /// no directory discovery, no unrelated siblings, no path escape.
+    ///
+    /// Reuses startup reconciliation. The sync-state lock serializes this with
+    /// filesystem sync, preventing duplicate file enrollment under concurrent
+    /// refreshes. Existing Automerge documents remain unchanged.
+    pub async fn enroll_preview_dependencies(
+        &self,
+        text_files: &[PathBuf],
+        binary_files: &[PathBuf],
+    ) -> Result<usize> {
+        let Some(project_root) = self.storage.project_root() else {
+            return Ok(0);
+        };
+        let Some(ref sync_state_mutex) = self.sync_state else {
+            return Ok(0);
+        };
+        let canonical_root = project_root.canonicalize().map_err(|e| {
+            Error::Sync(format!("cannot resolve preview project root: {e}"))
+        })?;
+        let permitted = |relative: &PathBuf| {
+            !relative.as_os_str().is_empty()
+                && relative.components().all(|c| matches!(c, Component::Normal(_)))
+                && project_root
+                    .join(relative)
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|p| p.starts_with(&canonical_root) && p.is_file())
+        };
+        let files = ProjectFiles::default()
+            .with_text_deps(text_files.iter().filter(|p| permitted(p)).cloned().collect())
+            .with_binary_files(binary_files.iter().filter(|p| permitted(p)).cloned().collect());
+        let _sync_guard = sync_state_mutex.lock().await;
+        reconcile_files_with_index(&self.repo, &self.index, &files, project_root).await
     }
 
     /// Get the auth configuration, if auth is enabled.

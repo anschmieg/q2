@@ -254,3 +254,50 @@ test('frontmatter sidebar href resolves against its declaring document', async (
     { timeout: 15_000 },
   );
 });
+
+test('single-file preview enrolls an include added after boot and follows later edits', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    targetFile: 'index.qmd',
+    fixtureFiles: [
+      { path: 'index.qmd', content: '# Dynamic include home\n' },
+      { path: 'added.qmd', content: 'DYNAMIC-ADDED-INITIAL\n' },
+      { path: 'unrelated.qmd', content: '# Unrelated sibling\n' },
+    ],
+  });
+  await page.goto(observedUrl(server.url));
+  await waitForInnerText(page, 'Dynamic include home');
+  await writeFile(
+    path.join(server.projectDir, 'index.qmd'),
+    '# Dynamic include home\n\n{{< include added.qmd >}}\n',
+  );
+  await waitForInnerText(page, 'DYNAMIC-ADDED-INITIAL');
+
+  const observed = await observedUpdates(page, 'added.qmd');
+  await writeFile(path.join(server.projectDir, 'added.qmd'), 'DYNAMIC-ADDED-EDITED\n');
+  await waitForObservedUpdate(page, 'added.qmd', observed);
+  await waitForInnerText(page, 'DYNAMIC-ADDED-EDITED');
+
+  const unrelatedBefore = await observedUpdates(page, 'unrelated.qmd');
+  await writeFile(path.join(server.projectDir, 'unrelated.qmd'), '# Still unrelated\n');
+  await page.waitForTimeout(2500);
+  expect(await observedUpdates(page, 'unrelated.qmd')).toBe(unrelatedBefore);
+});
+
+test('single-file preview recovers when a missing include is created later', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    targetFile: 'index.qmd',
+    fixtureFiles: [
+      { path: 'index.qmd', content: '# Recover missing include\n\n{{< include later.qmd >}}\n' },
+    ],
+  });
+  await page.goto(observedUrl(server.url));
+  await page.waitForFunction(
+    () => ((window as unknown as { __renderTicks?: number }).__renderTicks ?? 0) > 0,
+    null,
+    { timeout: 30_000 },
+  );
+  await writeFile(path.join(server.projectDir, 'later.qmd'), 'DYNAMIC-MISSING-RECOVERED\n');
+  await waitForInnerText(page, 'DYNAMIC-MISSING-RECOVERED');
+});
