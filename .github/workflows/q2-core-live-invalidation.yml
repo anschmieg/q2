@@ -46,6 +46,8 @@ jobs:
         run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
       - name: Test ordered sidebar membership and auto expansion
         run: cargo test -p quarto-core --lib project::sidebar_membership::tests -- --nocapture
+      - name: Verify optional WASM microbenchmark Rust formatting
+        run: rustfmt --edition 2021 --check crates/wasm-quarto-hub-client/src/m1_benchmark.rs
       - name: Test WASM adapter core graph snapshots
         # Host-test the actual pure Rust adapter source, not the wasm32-only
         # client crate (WasmRuntime / async Sass cannot link natively).
@@ -120,6 +122,10 @@ jobs:
           wasm-bindgen --version
       - name: Build browser WASM from current Rust
         working-directory: hub-client
+        env:
+          # Adds only a test export to the actual -Oz optimized WASM used
+          # by the browser. Production builds never enable this feature.
+          Q2_M1_BENCH: "1"
         run: npm run build:wasm
       - name: Build trace viewer
         working-directory: trace-viewer
@@ -134,7 +140,9 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run real Chromium core-graph live preview and existing regression tests
         working-directory: q2-preview-spa
-        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts --project=chromium --retries=0
+        env:
+          Q2_M1_BENCH: "1"
+        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0
       - name: Archive Chromium test evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -9,6 +9,10 @@ description = "WASM client for quarto-hub web frontend"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# CI-only microbenchmark export; absent from ordinary production WASM builds.
+m1-benchmark = []
+
 [dependencies]
 pampa = { path = "../pampa", default-features = false, features = ["lua-filter"] }
 wasm-c-shim = { path = "../wasm-c-shim" }

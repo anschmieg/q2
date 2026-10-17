@@ -34,6 +34,7 @@ pub mod join_frontend;
 pub mod re_execute;
 pub mod render_download;
 pub mod share;
+mod single_file_dep_refresh;
 pub mod static_mode;
 
 pub use asset_manifest::{
@@ -393,6 +394,11 @@ where
     // preset's relay wait never delays the host's own preview, and the
     // join banner prints after the boot URL in every UI mode.
     let (share_ready_tx, share_ready_rx) = tokio::sync::watch::channel(false);
+    // The existing single-file watcher observes only the initial closure.
+    // Refresh render-derived dependencies without widening its watch scope.
+    let (dependency_refresh_stop_tx, dependency_refresh_stop_rx) =
+        tokio::sync::watch::channel(false);
+    let single_file_refresh = config.project_root.clone().zip(config.single_file.clone());
 
     let registry_for_on_ready = engine_registry.clone();
     let cache_dir_for_on_ready = cache_dir.clone();
@@ -424,6 +430,14 @@ where
                 tracing::warn!(error = %e, "eager capture driver failed");
             }
         });
+        if let Some((root, deck)) = single_file_refresh {
+            tokio::spawn(single_file_dep_refresh::run(
+                ctx.clone(),
+                root,
+                deck,
+                dependency_refresh_stop_rx,
+            ));
+        }
         // Fire the extra hook after the driver is enqueued so callers
         // can rely on it being either in-flight or already done.
         extra_on_ready(ctx);
@@ -511,6 +525,9 @@ where
         Some(on_file_changed),
     )
     .await;
+    // The refresh loop owns a HubContext clone. Stop it explicitly so no
+    // polling survives a preview server's graceful shutdown.
+    let _ = dependency_refresh_stop_tx.send(true);
 
     // bd-jhvkwosw: tunnel teardown joins the graceful-shutdown path —
     // after the server (and its final filesystem sync) exits, before

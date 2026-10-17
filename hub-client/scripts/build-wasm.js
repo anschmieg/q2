@@ -157,11 +157,15 @@ async function buildWasm() {
   env.CFLAGS_wasm32_unknown_unknown = `-isystem ${wasmSysroot}`;
 
   // Step 1: cargo build (uses .cargo/config.toml for -Zbuild-std and rustflags)
+  const benchFeature = process.env.Q2_M1_BENCH === '1'
+    ? ['--features', 'm1-benchmark']
+    : [];
   console.log('Step 1/3: cargo build --target wasm32-unknown-unknown --release');
   await run('cargo', [
     'build',
     '--target', 'wasm32-unknown-unknown',
     '--release',
+    ...benchFeature,
   ], { cwd: wasmCrate, env });
 
   // Step 2: wasm-bindgen to generate JS glue
