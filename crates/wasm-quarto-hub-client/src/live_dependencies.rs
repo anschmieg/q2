@@ -68,7 +68,10 @@ fn path_for_sync(input: &Path, root: &Path) -> Option<String> {
     let path = relative.to_str()?.replace('\\', "/");
     // Even a lexically in-tree path can spell a different sync identity.
     // Never turn ambiguous aliases into a supposedly complete snapshot.
-    if path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
         return None;
     }
     Some(path)
