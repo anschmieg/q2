@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use crate::access_policy::AuditAccessPolicy;
 use crate::auth::{self, AuthConfig, AuthState, OidcClaims};
 use crate::discovery::ProjectFiles;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::index::{IndexDocument, load_or_create_index};
 use crate::peer::spawn_peer_connection;
 use crate::resource::{create_binary_document, detect_mime_type};
