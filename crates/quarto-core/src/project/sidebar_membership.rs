@@ -31,7 +31,7 @@ use quarto_navigation::{Sidebar, SidebarEntry};
 use quarto_pandoc_types::ConfigValue;
 use quarto_source_map::SourceContext;
 
-use crate::transforms::sidebar_generate::resolve_hrefs;
+use crate::transforms::resolve_hrefs;
 
 use crate::project::index::ProjectIndex;
 use crate::transforms::sidebar_auto::expand_auto;

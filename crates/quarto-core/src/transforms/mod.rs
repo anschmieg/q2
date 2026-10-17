@@ -202,6 +202,7 @@ pub use sectionize::SectionizeTransform;
 pub(crate) use shortcode_resolve::code_shortcode_opt_out;
 pub use shortcode_resolve::{ShortcodeResolveTransform, extract_shortcode_paths};
 pub(crate) use shortcode_text::{TextSegment, parse_text_shortcodes};
+pub(crate) use sidebar_generate::resolve_hrefs;
 pub use sidebar_generate::SidebarGenerateTransform;
 pub use sidebar_render::SidebarRenderTransform;
 pub use table_bootstrap_class::TableBootstrapClassTransform;
