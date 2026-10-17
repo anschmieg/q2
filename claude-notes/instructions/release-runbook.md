@@ -184,6 +184,49 @@ byproducts.
 
 ### 5. If a leg fails: fix, merge, re-tag
 
+First decide which kind of failure it is. This applies to a red check on
+the bump PR, a red Release run, and a red dry run alike.
+
+- **Flake or runner infrastructure.** Examples: a timing assertion that
+  missed by a millisecond, or a runner-setup step that errored before any
+  of our code ran. Confirm the failure is unrelated to the release's
+  changes. Check whether `main` or recent nightlies have shown it before,
+  and file a strand for it (with run id and log excerpt) so it gets fixed
+  eventually. Then retry with `gh run rerun <id> --failed` and carry on.
+  Examples from v0.34.0: bd-7kp7kjdq (test timing) and bd-x8ihp4qu
+  (Defender step on `windows-11-arm`).
+- **A substantive defect.** The code on `main` is wrong: a compile error,
+  a real test failure, a broken artifact. Stop the release and **change
+  gears**:
+  1. **Diagnose** until you can state the cause. That means the failing
+     step, the offending commit, a reproducer that runs locally if one
+     exists, and *why per-PR CI didn't catch it*. A failure that only the
+     release pipeline sees almost always means a CI gap, and the gap is
+     often the more important defect.
+  2. **File a self-contained braid strand.** Someone who has never seen
+     the session should be able to act on it. Include the symptom (run id
+     and log excerpt), the root cause, the reproducer, the proposed fix
+     and why it is the right one, the CI gap, and the release status
+     (what is tagged where, and that nothing was published). Link it
+     `discovered-from` the strand whose work introduced the defect.
+  3. **Work it through the normal workflow, not as a release-side
+     patch.** Use `/investigate-beads`: reproduce, write the plan file,
+     and iterate on the plan with the user. Then fix it on its own branch
+     and PR, with a test. An obvious one-line fix still goes through a
+     reviewed PR. Ask the user before folding the CI-gap fix into the
+     same PR. Keeping the release fix minimal is usually right; the CI
+     gap can follow in its own PR.
+  4. **Resume the release** once the fix is merged. Usually that means
+     moving the tag (below). Before re-tagging, prove the pipeline step
+     that failed now passes. If per-PR CI could not have caught the
+     defect, per-PR green proves nothing. Run a non-publishing dry run of
+     the fix branch (`gh workflow run nightly.yml --ref <branch> -f
+     force=true -f publish=false`) and check that the failed step passed.
+
+  First case: v0.34.0, bd-yt3x1gwk. pampa did not compile without
+  `lua-filter`. The parser-tier CI step silently skipped on the build
+  failure, so only the release's `web-payloads` job caught it.
+
 The tag is just a pointer. To iterate:
 
 ```bash
