@@ -62,6 +62,20 @@ async function getRenderTicks(page: Page): Promise<number> {
   });
 }
 
+async function getObservedEvents(page: Page, file: string): Promise<number> {
+  return page.evaluate((path) =>
+    (window as unknown as { __q2SyncEvents?: Record<string, number> })
+      .__q2SyncEvents?.[path] ?? 0,
+    file,
+  );
+}
+
+function withSyncObservation(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set('__q2_test_sync', '1');
+  return u.toString();
+}
+
 let server: PreviewServerHandle;
 
 test.beforeEach(async () => {
@@ -78,7 +92,7 @@ test.afterEach(async () => {
 });
 
 test('editing an unrelated sibling .qmd does NOT trigger a re-render', async ({ page }) => {
-  await page.goto(server.url);
+  await page.goto(withSyncObservation(server.url));
 
   // Wait for the initial render. The first non-zero tick confirms
   // the boot path completed; we then wait an extra moment to let
@@ -97,11 +111,20 @@ test('editing an unrelated sibling .qmd does NOT trigger a re-render', async ({ 
   await page.waitForTimeout(1000);
 
   const baseline = await getRenderTicks(page);
+  const observedBefore = await getObservedEvents(page, 'sibling.qmd');
 
   // Edit the unrelated sibling. The watcher fires, samod syncs the
   // new text, `onFileContent('sibling.qmd', …)` fires in the SPA,
   // and the D.6 filter should drop it.
   await writeFile(path.join(server.projectDir, 'sibling.qmd'), SIBLING_EDITED);
+  await page.waitForFunction(
+    (count) => (
+      (window as unknown as { __q2SyncEvents?: Record<string, number> })
+        .__q2SyncEvents?.['sibling.qmd'] ?? 0
+    ) > count,
+    observedBefore,
+    { timeout: 15_000 },
+  );
 
   // Wait 2 seconds. If the filter is working, no tick should fire.
   // 2 s is the same budget the basic-preview re-render test uses;
@@ -113,7 +136,7 @@ test('editing an unrelated sibling .qmd does NOT trigger a re-render', async ({ 
 });
 
 test('editing the active .qmd itself DOES trigger a re-render', async ({ page }) => {
-  await page.goto(server.url);
+  await page.goto(withSyncObservation(server.url));
 
   await page.waitForFunction(
     () => {

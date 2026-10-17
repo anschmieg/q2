@@ -70,7 +70,9 @@ use quarto_pandoc_types::ConfigValue;
 
 use crate::glob::{GlobOptions, PatternSet};
 use crate::project::index::ProjectIndex;
-use crate::project::sidebar_membership::resolve_sidebar_membership;
+use crate::project::sidebar_membership::{
+    ResolvedSidebar, resolve_sidebar_membership, resolve_sidebar_membership_for_render,
+};
 
 /// Directed dependency graph plus its reverse index and a set of
 /// always-render pages.
@@ -123,6 +125,20 @@ impl ProjectDependencyGraph {
         meta: &ConfigValue,
         diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
     ) -> Self {
+        Self::build_with_sidebar_mode(index, meta, diagnostics, true, None).0
+    }
+
+    /// Share all profile, listing, and include edge collection between the
+    /// full project graph and the single-page live-preview query. Only the
+    /// complete sidebar clique is optional; its resolved memberships are
+    /// always available to the caller.
+    fn build_with_sidebar_mode(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        materialize_sidebar_edges: bool,
+        source: Option<(&quarto_source_map::SourceContext, &Path)>,
+    ) -> (Self, Vec<ResolvedSidebar>) {
         let mut edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut force_render: BTreeSet<PathBuf> = BTreeSet::new();
@@ -147,22 +163,24 @@ impl ProjectDependencyGraph {
         };
 
         // === Sidebar co-membership + prev/next ===
-        let sidebars = resolve_sidebar_membership(meta, index, diagnostics);
-        for sidebar in &sidebars {
-            // Co-membership: every member depends on every other.
-            // O(N²) edges per sidebar; sidebars are tens of entries
-            // in practice, so this is fine.
-            for a in &sidebar.members {
-                for b in &sidebar.members {
-                    if a != b {
-                        add_edge(a, b);
+        let sidebars = if let Some((context, root)) = source {
+            resolve_sidebar_membership_for_render(meta, index, diagnostics, context, root)
+        } else {
+            resolve_sidebar_membership(meta, index, diagnostics)
+        };
+        if materialize_sidebar_edges {
+            // The full graph retains its established Mode-B semantics and
+            // public edge representation. Live invalidation traverses these
+            // same memberships lazily rather than allocating O(N²) edges.
+            for sidebar in &sidebars {
+                for a in &sidebar.members {
+                    for b in &sidebar.members {
+                        if a != b {
+                            add_edge(a, b);
+                        }
                     }
                 }
             }
-            // Prev/next neighbors are already a subset of the
-            // co-membership set above, so they don't add new edges.
-            // Keeping the conceptual channel separate in case we
-            // ever want different behavior (e.g. weighting).
         }
 
         // === Per-profile contributions ===
@@ -252,6 +270,13 @@ impl ProjectDependencyGraph {
                 let Ok(patterns) =
                     PatternSet::compile(&profile.listing_content_globs, &GlobOptions::LISTING)
                 else {
+                    if !materialize_sidebar_edges {
+                        // A stale profile's invalid listing glob means our
+                        // negative dependency filtering cannot be trusted.
+                        diagnostics.push(quarto_error_reporting::DiagnosticMessage::warning(
+                            "Live dependency snapshot has an invalid listing pattern",
+                        ));
+                    }
                     continue;
                 };
 
@@ -266,13 +291,104 @@ impl ProjectDependencyGraph {
             }
         }
 
-        Self {
-            edges,
-            reverse_edges,
-            force_render,
-            include_edges,
-            include_reverse_edges,
+        (
+            Self {
+                edges,
+                reverse_edges,
+                force_render,
+                include_edges,
+                include_reverse_edges,
+            },
+            sidebars,
+        )
+    }
+
+    /// Compute one active page's complete render inputs without allocating
+    /// a complete graph clique for every sidebar. Sidebar co-membership is
+    /// a hyperedge: expanding any member visits all its sidebar members.
+    /// Each sidebar expands at most once, including when sidebars overlap,
+    /// or when navigation/listing edges lead into another sidebar.
+    ///
+    /// Uses the same profile and sidebar resolution as `build`, preserving
+    /// cross-document, transitive include, and diagnostic semantics. Like
+    /// `build`, this accepts only an already-completed Pass-1 snapshot;
+    /// callers must fail open if any relevant profile is incomplete.
+    pub fn render_inputs_for_active(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+    ) -> BTreeSet<PathBuf> {
+        Self::render_inputs_for_active_inner(index, meta, diagnostics, active, None)
+    }
+
+    /// Resolve the active document's exact rendered sidebar metadata and
+    /// authored href provenance, not merely the project-level defaults.
+    pub fn render_inputs_for_active_with_context(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+        source_context: &quarto_source_map::SourceContext,
+        project_root: &Path,
+    ) -> BTreeSet<PathBuf> {
+        Self::render_inputs_for_active_inner(
+            index,
+            meta,
+            diagnostics,
+            active,
+            Some((source_context, project_root)),
+        )
+    }
+
+    fn render_inputs_for_active_inner(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+        source: Option<(&quarto_source_map::SourceContext, &Path)>,
+    ) -> BTreeSet<PathBuf> {
+        let (graph, sidebars) =
+            Self::build_with_sidebar_mode(index, meta, diagnostics, false, source);
+
+        // Indexed membership lookup is linear in total sidebar entries.
+        // A page may belong to several overlapping sidebars.
+        let mut memberships: HashMap<&Path, Vec<usize>> = HashMap::new();
+        for (sidebar_id, sidebar) in sidebars.iter().enumerate() {
+            for member in &sidebar.members {
+                memberships
+                    .entry(member.as_path())
+                    .or_default()
+                    .push(sidebar_id);
+            }
         }
+
+        let mut expanded = vec![false; sidebars.len()];
+        let mut documents = BTreeSet::from([active.to_path_buf()]);
+        let mut frontier = vec![active.to_path_buf()];
+        while let Some(document) = frontier.pop() {
+            if let Some(dependencies) = graph.edges.get(&document) {
+                for dependency in dependencies {
+                    if documents.insert(dependency.clone()) {
+                        frontier.push(dependency.clone());
+                    }
+                }
+            }
+            if let Some(sidebar_ids) = memberships.get(document.as_path()) {
+                for &sidebar_id in sidebar_ids {
+                    if expanded[sidebar_id] {
+                        continue;
+                    }
+                    expanded[sidebar_id] = true;
+                    for member in &sidebars[sidebar_id].members {
+                        if documents.insert(member.clone()) {
+                            frontier.push(member.clone());
+                        }
+                    }
+                }
+            }
+        }
+        graph.include_inputs_for_documents(documents)
     }
 
     /// Return source documents whose (transitive) include closure contains
@@ -296,6 +412,37 @@ impl ProjectDependencyGraph {
             }
         }
         out
+    }
+
+    /// The complete known input-file closure for a document-level render.
+    ///
+    /// Traverses both channels: navigation/profile dependencies of the
+    /// requested document (and their transitive dependencies), then file
+    /// includes recorded by each reached document. This is the snapshot
+    /// live-render schedulers can use to decide whether an input-file edit
+    /// affects their active page. It does not schedule or perform rendering.
+    ///
+    /// The document itself is always included. This is a snapshot of
+    /// successfully collected profiles, NOT a claim that a missing or stale
+    /// profile has no dependencies. Callers MUST fall back to broad
+    /// invalidation if their project index is incomplete or out of date.
+    ///
+    /// Future element-level renderers can narrow this result to their own
+    /// render-unit keys without changing the file-dependency index.
+    pub fn render_inputs_for(&self, document: &Path) -> BTreeSet<PathBuf> {
+        self.include_inputs_for_documents(self.forward_closure([document]))
+    }
+
+    /// The common include-file projection shared by materialized and lazy
+    /// document closure queries.
+    fn include_inputs_for_documents(&self, documents: BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+        let mut inputs = documents.clone();
+        for doc in documents {
+            if let Some(files) = self.include_edges.get(&doc) {
+                inputs.extend(files.iter().cloned());
+            }
+        }
+        inputs
     }
 
     /// Atomically replace one document's recorded transitive include set
@@ -1390,6 +1537,173 @@ mod tests {
             graph.include_dependents([Path::new(absent)]),
             BTreeSet::from([PathBuf::from("index.qmd")]),
         );
+    }
+
+    #[test]
+    fn render_inputs_include_active_sibling_profiles_and_their_nested_files() {
+        let mut profiles = vec![
+            with_includes(
+                "index.qmd",
+                &["/project/includes/outer.qmd", "/project/includes/leaf.qmd"],
+            ),
+            with_includes("about.qmd", &["/project/includes/about-note.qmd"]),
+            with_includes("unrelated.qmd", &["/project/includes/irrelevant.qmd"]),
+        ];
+        // A page link contributes a profile dependency via the existing
+        // navigation graph. An included file of the linked page can also
+        // affect the active page's output.
+        profiles[0].body_link_targets = vec![PathBuf::from("about.qmd")];
+        let index = ProjectIndex::new(profiles);
+        let graph = ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        assert_eq!(
+            graph.render_inputs_for(Path::new("index.qmd")),
+            BTreeSet::from([
+                PathBuf::from("index.qmd"),
+                PathBuf::from("about.qmd"),
+                PathBuf::from("/project/includes/outer.qmd"),
+                PathBuf::from("/project/includes/leaf.qmd"),
+                PathBuf::from("/project/includes/about-note.qmd"),
+            ]),
+        );
+        assert!(
+            !graph
+                .render_inputs_for(Path::new("index.qmd"))
+                .contains(Path::new("unrelated.qmd"))
+        );
+    }
+
+    #[test]
+    fn render_input_closure_tracks_replacement_without_nav_graph_mutation() {
+        let index = ProjectIndex::new(vec![
+            with_includes("index.qmd", &["/project/old.qmd"]),
+            with_includes("other.qmd", &[]),
+        ]);
+        let mut graph =
+            ProjectDependencyGraph::build(&index, &ConfigValue::default(), &mut Vec::new());
+        graph.replace_include_dependencies(Path::new("index.qmd"), [Path::new("/project/new.qmd")]);
+        assert_eq!(
+            graph.render_inputs_for(Path::new("index.qmd")),
+            BTreeSet::from([
+                PathBuf::from("index.qmd"),
+                PathBuf::from("/project/new.qmd")
+            ]),
+        );
+        assert!(
+            !graph
+                .render_inputs_for(Path::new("index.qmd"))
+                .contains(Path::new("/project/old.qmd"))
+        );
+        assert_eq!(
+            graph.render_inputs_for(Path::new("other.qmd")),
+            BTreeSet::from([PathBuf::from("other.qmd")])
+        );
+    }
+
+    #[test]
+    fn lazy_active_inputs_match_materialized_graph_with_overlapping_sidebars() {
+        let mut b = with_includes("b.qmd", &["/project/partials/b-leaf.qmd"]);
+        b.body_link_targets = vec![PathBuf::from("e.qmd")];
+        let mut c = with_includes("c.qmd", &[]);
+        c.nav_dependencies = vec![PathBuf::from("d.qmd")];
+        let mut d = with_includes("d.qmd", &["/project/partials/d-leaf.qmd"]);
+        d.nav_dependencies = vec![PathBuf::from("a.qmd")]; // cycle
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &["/project/partials/a-leaf.qmd"]),
+            b,
+            c,
+            d,
+            with_includes("e.qmd", &["/project/partials/e-leaf.qmd"]),
+            with_includes("unrelated.qmd", &["/project/partials/unrelated.qmd"]),
+        ]);
+        let first = config_map(vec![
+            ("id", s("one")),
+            (
+                "contents",
+                arr(vec![s("a.qmd"), s("b.qmd"), s("missing.qmd")]),
+            ),
+        ]);
+        let second = config_map(vec![
+            ("id", s("two")),
+            ("contents", arr(vec![s("b.qmd"), s("c.qmd")])),
+        ]);
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], arr(vec![first, second]));
+
+        for source in ["a.qmd", "b.qmd", "c.qmd", "d.qmd", "e.qmd", "unrelated.qmd"] {
+            let mut full_diagnostics = Vec::new();
+            let materialized = ProjectDependencyGraph::build(&index, &meta, &mut full_diagnostics);
+            let mut lazy_diagnostics = Vec::new();
+            let lazy = ProjectDependencyGraph::render_inputs_for_active(
+                &index,
+                &meta,
+                &mut lazy_diagnostics,
+                Path::new(source),
+            );
+            assert_eq!(lazy_diagnostics.len(), full_diagnostics.len());
+            assert_eq!(
+                lazy,
+                materialized.render_inputs_for(Path::new(source)),
+                "sidebar closure mismatch for {source}",
+            );
+        }
+
+        let mut diagnostics = Vec::new();
+        let active = ProjectDependencyGraph::render_inputs_for_active(
+            &index,
+            &meta,
+            &mut diagnostics,
+            Path::new("a.qmd"),
+        );
+        assert!(active.contains(Path::new("missing.qmd")));
+        assert!(active.contains(Path::new("e.qmd")));
+        assert!(active.contains(Path::new("/project/partials/d-leaf.qmd")));
+        assert!(!active.contains(Path::new("unrelated.qmd")));
+        assert!(!active.contains(Path::new("/project/partials/unrelated.qmd")));
+
+        let (without_cliques, sidebars) = ProjectDependencyGraph::build_with_sidebar_mode(
+            &index,
+            &meta,
+            &mut Vec::new(),
+            false,
+            None,
+        );
+        assert_eq!(sidebars.len(), 2);
+        assert!(
+            !without_cliques
+                .edges
+                .get(Path::new("a.qmd"))
+                .is_some_and(|deps| deps.contains(Path::new("b.qmd"))),
+            "single-page view must not materialize sidebar pair edges",
+        );
+    }
+
+    #[test]
+    fn lazy_active_inputs_match_auto_sidebar_expansion() {
+        let index = ProjectIndex::new(vec![
+            with_includes("a.qmd", &[]),
+            with_includes("b.qmd", &["/project/deep-leaf.qmd"]),
+            with_includes("c.qmd", &[]),
+        ]);
+        let auto = config_map(vec![(
+            "auto",
+            ConfigValue::new_bool(true, SourceInfo::for_test()),
+        )]);
+        let sidebar = config_map(vec![("contents", arr(vec![auto]))]);
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], sidebar);
+        let mut diags = Vec::new();
+        let full = ProjectDependencyGraph::build(&index, &meta, &mut diags);
+        let mut lazy_diags = Vec::new();
+        let live = ProjectDependencyGraph::render_inputs_for_active(
+            &index,
+            &meta,
+            &mut lazy_diags,
+            Path::new("a.qmd"),
+        );
+        assert!(diags.is_empty());
+        assert!(lazy_diags.is_empty());
+        assert_eq!(live, full.render_inputs_for(Path::new("a.qmd")));
+        assert!(live.contains(Path::new("/project/deep-leaf.qmd")));
     }
 
     #[test]
