@@ -38,27 +38,46 @@ test('optimized browser WASM sidebar query scales without clique materialization
       response.end('<!doctype html><title>Optimized WASM M1 benchmark</title>');
       return;
     }
-    const allowed = new Map([
-      ['/wasm_quarto_hub_client.js', 'wasm_quarto_hub_client.js'],
-      ['/wasm_quarto_hub_client_bg.wasm', 'wasm_quarto_hub_client_bg.wasm'],
-    ]);
-    const name = allowed.get(file);
-    if (!name) {
+    // wasm-bindgen web targets may emit ESM snippet imports alongside the
+    // top-level glue and binary. Restrict serving to generated JS/WASM under
+    // pkg/, but do not assume the module is self-contained.
+    let relative: string;
+    try {
+      relative = decodeURIComponent(file.slice(1));
+    } catch {
+      response.writeHead(400).end();
+      return;
+    }
+    if (!relative || relative.split('/').some((part) => !part || part === '.' || part === '..')
+        || !/\.(?:js|mjs|wasm)$/.test(relative)) {
       response.writeHead(404).end();
       return;
     }
+    const absolute = path.resolve(pkgDir, relative);
+    if (path.relative(pkgDir, absolute).startsWith('..')) {
+      response.writeHead(403).end();
+      return;
+    }
     try {
-      const bytes = await readFile(path.join(pkgDir, name));
-      response.setHeader('Content-Type', name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript');
+      const bytes = await readFile(absolute);
+      response.setHeader('Content-Type', relative.endsWith('.wasm') ? 'application/wasm' : 'text/javascript');
       response.end(bytes);
     } catch (error) {
-      console.error('Optimized WASM benchmark fixture read failed', { pkgDir, file, error });
-      response.writeHead(500, { 'Content-Type': 'text/plain' }).end(String(error));
+      console.error('Optimized WASM fixture asset unavailable', { relative, absolute, error });
+      response.writeHead(404, { 'Content-Type': 'text/plain' }).end(String(error));
     }
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   try {
+    const browserErrors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') browserErrors.push(message.text());
+    });
+    page.on('pageerror', (error) => browserErrors.push(error.message));
+    page.on('response', (response) => {
+      if (!response.ok()) browserErrors.push(`HTTP ${response.status()} ${response.url()}`);
+    });
     await page.goto(`http://127.0.0.1:${address.port}/`);
     // Make module/wasm serving a separate and actionable assertion.
     const [moduleResponse, wasmResponse] = await Promise.all([
@@ -69,19 +88,31 @@ test('optimized browser WASM sidebar query scales without clique materialization
     expect(wasmResponse.status()).toBe(200);
     expect(moduleResponse.headers()['content-type']).toContain('javascript');
     expect(wasmResponse.headers()['content-type']).toContain('wasm');
-    const rows = await page.evaluate(async () => {
-      // This is loaded from the produced (wasm-opt -Oz) pkg, not mocks.
-      const wasm = await import('/wasm_quarto_hub_client.js');
-      await wasm.default('/wasm_quarto_hub_client_bg.wasm');
-      return [128, 512, 1000].map((pages) =>
-        JSON.parse(wasm.benchmark_live_sidebar_query(pages, 21)) as {
-          pages: number;
-          inputs: number;
-          iterations: number;
-          optimized_wasm_ms_p50: number;
-        },
-      );
-    });
+    let rows: Array<{
+      pages: number;
+      inputs: number;
+      iterations: number;
+      optimized_wasm_ms_p50: number;
+    }>;
+    try {
+      rows = await page.evaluate(async () => {
+        // Actual wasm-bindgen ESM with the wasm-opt -Oz binary; no mocks.
+        const wasm = await import('/wasm_quarto_hub_client.js');
+        await wasm.default('/wasm_quarto_hub_client_bg.wasm');
+        return [128, 512, 1000].map((pages) =>
+          JSON.parse(wasm.benchmark_live_sidebar_query(pages, 21)) as {
+            pages: number;
+            inputs: number;
+            iterations: number;
+            optimized_wasm_ms_p50: number;
+          },
+        );
+      });
+    } catch (error) {
+      // Include browser network/MIME/ESM diagnostics; a generic dynamic
+      // import TypeError gives almost no actionable information in CI.
+      throw new Error(`Optimized WASM import/benchmark failed: ${String(error)}. Browser errors: ${browserErrors.join(' | ') || '(none)'}`);
+    }
     for (const row of rows) {
       expect(row.inputs).toBe(row.pages);
       expect(row.iterations).toBe(21);
