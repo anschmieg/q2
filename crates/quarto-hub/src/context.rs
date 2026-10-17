@@ -559,12 +559,14 @@ impl HubContext {
         let Some(ref sync_state_mutex) = self.sync_state else {
             return Ok(0);
         };
-        let canonical_root = project_root.canonicalize().map_err(|e| {
-            Error::Sync(format!("cannot resolve preview project root: {e}"))
-        })?;
+        let canonical_root = project_root
+            .canonicalize()
+            .map_err(|e| Error::Sync(format!("cannot resolve preview project root: {e}")))?;
         let permitted = |relative: &PathBuf| {
             !relative.as_os_str().is_empty()
-                && relative.components().all(|c| matches!(c, Component::Normal(_)))
+                && relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
                 && project_root
                     .join(relative)
                     .canonicalize()
@@ -572,8 +574,20 @@ impl HubContext {
                     .is_some_and(|p| p.starts_with(&canonical_root) && p.is_file())
         };
         let files = ProjectFiles::default()
-            .with_text_deps(text_files.iter().filter(|p| permitted(p)).cloned().collect())
-            .with_binary_files(binary_files.iter().filter(|p| permitted(p)).cloned().collect());
+            .with_text_deps(
+                text_files
+                    .iter()
+                    .filter(|p| permitted(p))
+                    .cloned()
+                    .collect(),
+            )
+            .with_binary_files(
+                binary_files
+                    .iter()
+                    .filter(|p| permitted(p))
+                    .cloned()
+                    .collect(),
+            );
         let _sync_guard = sync_state_mutex.lock().await;
         reconcile_files_with_index(&self.repo, &self.index, &files, project_root).await
     }

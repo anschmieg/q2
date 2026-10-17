@@ -46,6 +46,8 @@ jobs:
         run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
       - name: Test ordered sidebar membership and auto expansion
         run: cargo test -p quarto-core --lib project::sidebar_membership::tests -- --nocapture
+      - name: Verify optional WASM microbenchmark Rust formatting
+        run: rustfmt --edition 2021 --check crates/wasm-quarto-hub-client/src/m1_benchmark.rs
       - name: Test WASM adapter core graph snapshots
         # Host-test the actual pure Rust adapter source, not the wasm32-only
         # client crate (WasmRuntime / async Sass cannot link natively).
