@@ -1282,7 +1282,11 @@ mod tests {
             .unwrap();
         assert_eq!(added, 3);
         let files = ctx.index().get_all_files();
-        assert_eq!(files.len(), 4, "only the deck and three resolved dependencies");
+        assert_eq!(
+            files.len(),
+            4,
+            "only the deck and three resolved dependencies"
+        );
         for expected in ["main.qmd", "later.qmd", "nested/second.qmd", "image.png"] {
             assert!(files.contains_key(expected), "missing {expected}");
         }
@@ -1297,7 +1301,10 @@ mod tests {
 
         assert_eq!(
             ctx.enroll_preview_dependencies(
-                &[PathBuf::from("later.qmd"), PathBuf::from("nested/second.qmd")],
+                &[
+                    PathBuf::from("later.qmd"),
+                    PathBuf::from("nested/second.qmd")
+                ],
                 &[PathBuf::from("image.png")],
             )
             .await
@@ -1305,7 +1312,12 @@ mod tests {
             0,
             "re-running discovery must reuse existing Automerge identities",
         );
-        assert!(ctx.sync_file(&project.join("later.qmd")).await.unwrap().is_some());
+        assert!(
+            ctx.sync_file(&project.join("later.qmd"))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Build an automerge text document with the given content.
