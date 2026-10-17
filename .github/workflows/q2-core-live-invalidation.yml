@@ -48,6 +48,8 @@ jobs:
         # Host-test the actual pure Rust adapter source, not the wasm32-only
         # client crate (WasmRuntime / async Sass cannot link natively).
         run: cargo test -p quarto-core --test wasm_live_dependencies -- --nocapture
+      - name: Record informational M1.1 graph performance baseline
+        run: cargo test -p quarto-core --test live_invalidation_perf -- --nocapture
 
   spa-deps:
     runs-on: ubuntu-latest
