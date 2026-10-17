@@ -1583,12 +1583,16 @@ describe('core WASM render-input snapshots', () => {
 
   it('fails open on render failure and restores filtering on recovery', async () => {
     const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
-    let calls = 0;
-    (renderPageForPreview as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      calls++;
-      if (calls === 2) return { success: false, error: 'synthetic error' };
-      return { success: true, ast_json: '{"blocks":[]}', render_inputs: ['index.qmd'] };
-    });
+    runtimeMockState.renderResult = {
+      success: true,
+      ast_json: '{"blocks":[]}',
+      render_inputs: ['index.qmd'],
+    };
+    // One-off failure only; retain the default mock for subsequent tests.
+    (renderPageForPreview as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => runtimeMockState.renderResult)
+      .mockImplementationOnce(async () => ({ success: false, error: 'synthetic error' }))
+      .mockImplementationOnce(async () => runtimeMockState.renderResult);
     render(<PreviewApp />);
     await waitFor(() => {
       expect(capturedIframeProps.at(-1)?.astJson).toBe('{"blocks":[]}');
