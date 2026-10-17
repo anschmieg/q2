@@ -30,9 +30,10 @@ pub(crate) fn render_input_paths(
     let active_relative = active_file.strip_prefix(root).ok()?;
     let profile = index.lookup_by_source(active_relative)?;
     if profile.always_render
-        || profile.engine_resolution.as_ref().is_none_or(|engines| {
-            engines.sequence.iter().any(|engine| engine != "markdown")
-        })
+        || profile
+            .engine_resolution
+            .as_ref()
+            .is_none_or(|engines| engines.sequence.iter().any(|engine| engine != "markdown"))
         || project_metadata.get("filters").is_some()
     {
         // An external engine, unknown engine resolution, or arbitrary Lua
@@ -279,7 +280,10 @@ mod tests {
         meta.insert_path(
             &["filters"],
             ConfigValue::new_array(
-                vec![ConfigValue::new_string("dynamic.lua", SourceInfo::for_test())],
+                vec![ConfigValue::new_string(
+                    "dynamic.lua",
+                    SourceInfo::for_test(),
+                )],
                 SourceInfo::for_test(),
             ),
         );

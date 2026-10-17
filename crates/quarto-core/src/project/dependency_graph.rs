@@ -273,11 +273,9 @@ impl ProjectDependencyGraph {
                     if !materialize_sidebar_edges {
                         // A stale profile's invalid listing glob means our
                         // negative dependency filtering cannot be trusted.
-                        diagnostics.push(
-                            quarto_error_reporting::DiagnosticMessage::warning(
-                                "Live dependency snapshot has an invalid listing pattern",
-                            ),
-                        );
+                        diagnostics.push(quarto_error_reporting::DiagnosticMessage::warning(
+                            "Live dependency snapshot has an invalid listing pattern",
+                        ));
                     }
                     continue;
                 };
@@ -1662,8 +1660,13 @@ mod tests {
         assert!(!active.contains(Path::new("unrelated.qmd")));
         assert!(!active.contains(Path::new("/project/partials/unrelated.qmd")));
 
-        let (without_cliques, sidebars) =
-            ProjectDependencyGraph::build_with_sidebar_mode(&index, &meta, &mut Vec::new(), false, None);
+        let (without_cliques, sidebars) = ProjectDependencyGraph::build_with_sidebar_mode(
+            &index,
+            &meta,
+            &mut Vec::new(),
+            false,
+            None,
+        );
         assert_eq!(sidebars.len(), 2);
         assert!(
             !without_cliques
