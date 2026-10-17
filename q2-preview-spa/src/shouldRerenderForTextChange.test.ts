@@ -73,6 +73,8 @@ describe('core render-input snapshot validation', () => {
       undefined, null, [], ['other.qmd'], ['index.qmd', 1],
       ['index.qmd', '/project/outside.qmd'],
       ['index.qmd', 'a/../b.qmd'],
+      ['index.qmd', './partials/leaf.qmd'],
+      ['index.qmd', 'partials//leaf.qmd'],
       ['index.qmd', 'sub\\\\alias.qmd'],
     ]) {
       const deps = decodeRenderInputs(invalid, 'index.qmd');

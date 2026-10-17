@@ -471,7 +471,7 @@ export function decodeRenderInputs(input: unknown, activeFile: string): Set<stri
     value.length > 0 &&
     !value.startsWith('/') &&
     !value.includes('\\') &&
-    !value.split('/').includes('..')
+    value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..')
   )) return null;
   const deps = new Set<string>(input);
   return deps.has(activeFile) ? deps : null;

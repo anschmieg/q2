@@ -65,8 +65,10 @@ fn path_for_sync(input: &Path, root: &Path) -> Option<String> {
     {
         return None;
     }
-    let path = relative.to_string_lossy().replace('\\', "/");
-    if path.is_empty() || path.starts_with('/') {
+    let path = relative.to_str()?.replace('\\', "/");
+    // Even a lexically in-tree path can spell a different sync identity.
+    // Never turn ambiguous aliases into a supposedly complete snapshot.
+    if path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
         return None;
     }
     Some(path)
@@ -127,6 +129,14 @@ mod tests {
         );
         assert_eq!(
             path_for_sync(Path::new("a/../b.qmd"), Path::new("/project")),
+            None
+        );
+        assert_eq!(
+            path_for_sync(Path::new("./sub/leaf.qmd"), Path::new("/project")),
+            None
+        );
+        assert_eq!(
+            path_for_sync(Path::new("sub//leaf.qmd"), Path::new("/project")),
             None
         );
         assert_eq!(
