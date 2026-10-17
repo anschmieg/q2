@@ -19,10 +19,7 @@ fn profile(name: &str, includes: usize) -> DocumentProfile {
         format_id: "html".to_string(),
         includes: (0..includes)
             .map(|i| {
-                IncludeEntry::new(
-                    PathBuf::from(format!("/project/partials/{i:04}.qmd")),
-                    b"x",
-                )
+                IncludeEntry::new(PathBuf::from(format!("/project/partials/{i:04}.qmd")), b"x")
             })
             .collect(),
         ..DocumentProfile::default()
@@ -44,10 +41,7 @@ fn baseline(label: &str, index: &ProjectIndex, meta: &ConfigValue, expected_inpu
         let inputs = graph.render_inputs_for(Path::new("active.qmd"));
         queries.push(start.elapsed().as_micros());
         assert_eq!(inputs.len(), expected_inputs, "{label}: graph closure");
-        estimated_bytes = inputs
-            .iter()
-            .map(|p| p.to_string_lossy().len() + 3)
-            .sum();
+        estimated_bytes = inputs.iter().map(|p| p.to_string_lossy().len() + 3).sum();
     }
     builds.sort_unstable();
     queries.sort_unstable();
