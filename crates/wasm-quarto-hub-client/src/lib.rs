@@ -2227,7 +2227,7 @@ async fn render_single_doc_to_response(
     // (RenderContext + resolver) and tail (VFS artifact flush +
     // RenderResponse construction with `skip_serializing_if = None`
     // on the unused payload field).
-    let (html, ast_json, untransformed_ast_json, diagnostics, source_context) = match format
+    let (html, ast_json, untransformed_ast_json, diagnostics, source_context, render_metadata) = match format
         .pipeline_kind
     {
         Some("preview") => {
@@ -2247,6 +2247,7 @@ async fn render_single_doc_to_response(
                     out.untransformed_ast_json,
                     out.diagnostics,
                     out.source_context,
+                    Some(out.render_metadata),
                 ),
                 Err(e) => return render_error_response(e),
             }
@@ -2263,6 +2264,7 @@ async fn render_single_doc_to_response(
                     None,
                     out.diagnostics,
                     out.source_context,
+                    None,
                 ),
                 Err(e) => return render_error_response(e),
             }
@@ -2303,9 +2305,10 @@ async fn render_single_doc_to_response(
         let index = quarto_core::project::index::ProjectIndex::new(vec![profile.clone()]);
         live_dependencies::render_input_paths(
             &index,
-            &project.config.metadata.clone().unwrap_or_default(),
+            render_metadata.as_ref()?,
             &project.dir,
             &active_canonical,
+            Some(&source_context),
         )
     });
     serde_json::to_string(&RenderResponse {
@@ -2487,23 +2490,6 @@ async fn render_project_active_page_to_response(
         }
     };
 
-    // Use the SAME Pass-1 snapshot consumed by the render pipeline.
-    // No extra filesystem walk, shortcode parse, or separate preview-only
-    // dependency collector is necessary. If another project page could not
-    // be profiled, we cannot safely suppress any change: fail open.
-    let render_inputs = if summary.pass1_failures.is_empty() {
-        pass1_index.as_ref().and_then(|index| {
-            live_dependencies::render_input_paths(
-                index,
-                &project.config.metadata.clone().unwrap_or_default(),
-                &project.dir,
-                &active_canonical,
-            )
-        })
-    } else {
-        None
-    };
-
     // Locate the active page's output. With `RenderMode::ActivePage`
     // the orchestrator emits exactly one entry — the active page.
     let active_output = match summary.outputs.into_iter().next() {
@@ -2537,6 +2523,24 @@ async fn render_project_active_page_to_response(
             }
             return error_response("Project render produced no output for the active page");
         }
+    };
+
+    // Compute the complete dependency snapshot using the SAME Pass-1 index
+    // and the active Pass-2 AST metadata/source context. This is crucial:
+    // project defaults alone miss page-local sidebars and source-relative
+    // authored links. Unknown metadata or failed sibling profiles fail open.
+    let render_inputs = if summary.pass1_failures.is_empty() {
+        pass1_index.as_ref().and_then(|index| {
+            live_dependencies::render_input_paths(
+                index,
+                active_output.render_metadata.as_ref()?,
+                &project.dir,
+                &active_canonical,
+                Some(&active_output.source_context),
+            )
+        })
+    } else {
+        None
     };
 
     // Populate VFS with the active page's Page-scoped artifacts.

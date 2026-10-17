@@ -12,6 +12,7 @@ use std::path::{Component, Path};
 use quarto_core::project::dependency_graph::ProjectDependencyGraph;
 use quarto_core::project::index::ProjectIndex;
 use quarto_pandoc_types::ConfigValue;
+use quarto_source_map::SourceContext;
 
 /// Complete project-relative paths that may affect the rendered page.
 ///
@@ -24,21 +25,42 @@ pub(crate) fn render_input_paths(
     project_metadata: &ConfigValue,
     root: &Path,
     active_file: &Path,
+    source_context: Option<&SourceContext>,
 ) -> Option<Vec<String>> {
     let active_relative = active_file.strip_prefix(root).ok()?;
-    if index.lookup_by_source(active_relative).is_none() {
+    let profile = index.lookup_by_source(active_relative)?;
+    if profile.always_render
+        || profile.engine_resolution.as_ref().is_none_or(|engines| {
+            engines.sequence.iter().any(|engine| engine != "markdown")
+        })
+        || project_metadata.get("filters").is_some()
+        || project_metadata.get_path(&["navigation", "sidebar"]).is_some()
+    {
+        // An external engine, unknown engine resolution, arbitrary Lua filter,
+        // or post-Pass-1 navigation override may read untracked sources.
         return None;
     }
 
     // Query core's shared profile/sidebars directly, without materializing
     // quadratic sidebar cliques. An incomplete graph still fails open.
     let mut diagnostics = Vec::new();
-    let inputs = ProjectDependencyGraph::render_inputs_for_active(
-        index,
-        project_metadata,
-        &mut diagnostics,
-        active_relative,
-    );
+    let inputs = if let Some(context) = source_context {
+        ProjectDependencyGraph::render_inputs_for_active_with_context(
+            index,
+            project_metadata,
+            &mut diagnostics,
+            active_relative,
+            context,
+            root,
+        )
+    } else {
+        ProjectDependencyGraph::render_inputs_for_active(
+            index,
+            project_metadata,
+            &mut diagnostics,
+            active_relative,
+        )
+    };
     if !diagnostics.is_empty() {
         return None; // incomplete sidebar/config resolution: don't filter
     }
@@ -85,7 +107,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use quarto_core::document_profile::{DocumentProfile, IncludeEntry};
+    use quarto_core::document_profile::{DocumentProfile, IncludeEntry, ProfileEngineResolution};
 
     fn profile(name: &str, files: &[&str]) -> DocumentProfile {
         DocumentProfile {
@@ -96,6 +118,10 @@ mod tests {
                 .iter()
                 .map(|file| IncludeEntry::new(PathBuf::from(file), b"x"))
                 .collect(),
+            engine_resolution: Some(ProfileEngineResolution {
+                sequence: Vec::new(),
+                ownership: Vec::new(),
+            }),
             ..Default::default()
         }
     }
@@ -112,6 +138,7 @@ mod tests {
                 &ConfigValue::default(),
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
+                None,
             ),
             Some(vec![
                 "index.qmd".to_string(),
@@ -153,6 +180,7 @@ mod tests {
                 &meta,
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
+                None,
             ),
             Some(vec![
                 "about.qmd".to_string(),
@@ -171,6 +199,7 @@ mod tests {
                 &ConfigValue::default(),
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
+                None,
             ),
             None,
         );
@@ -200,6 +229,7 @@ mod tests {
                 &ConfigValue::default(),
                 Path::new("/project"),
                 Path::new("/project/not-indexed.qmd"),
+                None,
             ),
             None,
         );
@@ -220,6 +250,7 @@ mod tests {
                 &ConfigValue::default(),
                 Path::new("/project"),
                 Path::new("/project/index.qmd"),
+                None,
             ),
             Some(vec![
                 "about.qmd".to_string(),

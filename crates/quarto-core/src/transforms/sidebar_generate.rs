@@ -227,7 +227,7 @@ fn sidebar_index_of(sidebars: &[Sidebar], picked: &Sidebar) -> usize {
 /// / `SidebarEntry::from_config_value`). After this pass, `href`
 /// strings are project-root-relative — the shape the existing
 /// `ProjectIndex::lookup_by_source` expects.
-fn resolve_hrefs(
+pub(crate) fn resolve_hrefs(
     entries: &mut [quarto_navigation::SidebarEntry],
     source_context: &quarto_source_map::SourceContext,
     project_root: &std::path::Path,

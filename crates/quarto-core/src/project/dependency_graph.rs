@@ -70,7 +70,9 @@ use quarto_pandoc_types::ConfigValue;
 
 use crate::glob::{GlobOptions, PatternSet};
 use crate::project::index::ProjectIndex;
-use crate::project::sidebar_membership::{ResolvedSidebar, resolve_sidebar_membership};
+use crate::project::sidebar_membership::{
+    ResolvedSidebar, resolve_sidebar_membership, resolve_sidebar_membership_for_render,
+};
 
 /// Directed dependency graph plus its reverse index and a set of
 /// always-render pages.
@@ -123,7 +125,7 @@ impl ProjectDependencyGraph {
         meta: &ConfigValue,
         diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
     ) -> Self {
-        Self::build_with_sidebar_mode(index, meta, diagnostics, true).0
+        Self::build_with_sidebar_mode(index, meta, diagnostics, true, None).0
     }
 
     /// Share all profile, listing, and include edge collection between the
@@ -135,6 +137,7 @@ impl ProjectDependencyGraph {
         meta: &ConfigValue,
         diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
         materialize_sidebar_edges: bool,
+        source: Option<(&quarto_source_map::SourceContext, &Path)>,
     ) -> (Self, Vec<ResolvedSidebar>) {
         let mut edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
@@ -160,7 +163,11 @@ impl ProjectDependencyGraph {
         };
 
         // === Sidebar co-membership + prev/next ===
-        let sidebars = resolve_sidebar_membership(meta, index, diagnostics);
+        let sidebars = if let Some((context, root)) = source {
+            resolve_sidebar_membership_for_render(meta, index, diagnostics, context, root)
+        } else {
+            resolve_sidebar_membership(meta, index, diagnostics)
+        };
         if materialize_sidebar_edges {
             // The full graph retains its established Mode-B semantics and
             // public edge representation. Live invalidation traverses these
@@ -263,6 +270,15 @@ impl ProjectDependencyGraph {
                 let Ok(patterns) =
                     PatternSet::compile(&profile.listing_content_globs, &GlobOptions::LISTING)
                 else {
+                    if !materialize_sidebar_edges {
+                        // A stale profile's invalid listing glob means our
+                        // negative dependency filtering cannot be trusted.
+                        diagnostics.push(
+                            quarto_error_reporting::DiagnosticMessage::warning(
+                                "Live dependency snapshot has an invalid listing pattern",
+                            ),
+                        );
+                    }
                     continue;
                 };
 
@@ -305,7 +321,37 @@ impl ProjectDependencyGraph {
         diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
         active: &Path,
     ) -> BTreeSet<PathBuf> {
-        let (graph, sidebars) = Self::build_with_sidebar_mode(index, meta, diagnostics, false);
+        Self::render_inputs_for_active_inner(index, meta, diagnostics, active, None)
+    }
+
+    /// Resolve the active document's exact rendered sidebar metadata and
+    /// authored href provenance, not merely the project-level defaults.
+    pub fn render_inputs_for_active_with_context(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+        source_context: &quarto_source_map::SourceContext,
+        project_root: &Path,
+    ) -> BTreeSet<PathBuf> {
+        Self::render_inputs_for_active_inner(
+            index,
+            meta,
+            diagnostics,
+            active,
+            Some((source_context, project_root)),
+        )
+    }
+
+    fn render_inputs_for_active_inner(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+        source: Option<(&quarto_source_map::SourceContext, &Path)>,
+    ) -> BTreeSet<PathBuf> {
+        let (graph, sidebars) =
+            Self::build_with_sidebar_mode(index, meta, diagnostics, false, source);
 
         // Indexed membership lookup is linear in total sidebar entries.
         // A page may belong to several overlapping sidebars.
@@ -1617,7 +1663,7 @@ mod tests {
         assert!(!active.contains(Path::new("/project/partials/unrelated.qmd")));
 
         let (without_cliques, sidebars) =
-            ProjectDependencyGraph::build_with_sidebar_mode(&index, &meta, &mut Vec::new(), false);
+            ProjectDependencyGraph::build_with_sidebar_mode(&index, &meta, &mut Vec::new(), false, None);
         assert_eq!(sidebars.len(), 2);
         assert!(
             !without_cliques

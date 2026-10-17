@@ -709,6 +709,9 @@ impl Pass2Payload {
 /// can construct fixtures.
 #[derive(Debug)]
 pub struct WasmPassTwoOutput {
+    /// Exact merged preview metadata; unavailable for HTML-only renders,
+    /// which must not claim a complete selective-invalidation snapshot.
+    pub render_metadata: Option<quarto_pandoc_types::ConfigValue>,
     /// Source `.qmd` path (as the orchestrator received it).
     pub source_path: std::path::PathBuf,
     /// The rendered payload — HTML for `RenderToHtmlRenderer`,
@@ -1005,6 +1008,7 @@ impl Pass2Renderer for RenderToHtmlRenderer {
         Ok(WasmPassTwoOutput {
             source_path: doc_info.input.clone(),
             payload: Pass2Payload::Html(render_output.html),
+            render_metadata: None,
             diagnostics: render_output.diagnostics,
             source_context: render_output.source_context,
             document_profile: ctx.document_profile,
@@ -1335,6 +1339,7 @@ impl Pass2Renderer for RenderToPreviewAstRenderer {
         Ok(WasmPassTwoOutput {
             source_path: doc_info.input.clone(),
             payload: Pass2Payload::AstJson(preview_output.ast_json),
+            render_metadata: Some(preview_output.render_metadata),
             diagnostics: preview_output.diagnostics,
             source_context: preview_output.source_context,
             document_profile: ctx.document_profile,
