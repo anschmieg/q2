@@ -44,6 +44,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test core document and included-file dependency graph
         run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
+      - name: Test ordered sidebar membership and auto expansion
+        run: cargo test -p quarto-core --lib project::sidebar_membership::tests -- --nocapture
       - name: Test WASM adapter core graph snapshots
         # Host-test the actual pure Rust adapter source, not the wasm32-only
         # client crate (WasmRuntime / async Sass cannot link natively).
