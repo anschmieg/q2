@@ -29,6 +29,7 @@ fn profile(name: &str, includes: usize) -> DocumentProfile {
 fn baseline(label: &str, index: &ProjectIndex, meta: &ConfigValue, expected_inputs: usize) {
     let mut builds = Vec::new();
     let mut queries = Vec::new();
+    let mut single_page_queries = Vec::new();
     let mut estimated_bytes = 0;
     for _ in 0..5 {
         let mut diagnostics = Vec::new();
@@ -41,16 +42,31 @@ fn baseline(label: &str, index: &ProjectIndex, meta: &ConfigValue, expected_inpu
         let inputs = graph.render_inputs_for(Path::new("active.qmd"));
         queries.push(start.elapsed().as_micros());
         assert_eq!(inputs.len(), expected_inputs, "{label}: graph closure");
+
+        let mut lazy_diagnostics = Vec::new();
+        let start = Instant::now();
+        let single_page = ProjectDependencyGraph::render_inputs_for_active(
+            index,
+            meta,
+            &mut lazy_diagnostics,
+            Path::new("active.qmd"),
+        );
+        single_page_queries.push(start.elapsed().as_micros());
+        assert!(lazy_diagnostics.is_empty(), "{label}: incomplete single-page graph");
+        assert_eq!(single_page, inputs, "{label}: materialized vs lazy inputs");
+
         estimated_bytes = inputs.iter().map(|p| p.to_string_lossy().len() + 3).sum();
     }
     builds.sort_unstable();
     queries.sort_unstable();
+    single_page_queries.sort_unstable();
     println!(
-        "q2_m1_perf scenario={label} documents={} inputs={} build_us_p50={} query_us_p50={} estimated_json_bytes={estimated_bytes}",
+        "q2_m1_perf scenario={label} documents={} inputs={} build_us_p50={} query_us_p50={} single_page_us_p50={} estimated_json_bytes={estimated_bytes}",
         index.len(),
         expected_inputs,
         builds[builds.len() / 2],
         queries[queries.len() / 2],
+        single_page_queries[single_page_queries.len() / 2],
     );
 }
 

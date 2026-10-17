@@ -70,7 +70,7 @@ use quarto_pandoc_types::ConfigValue;
 
 use crate::glob::{GlobOptions, PatternSet};
 use crate::project::index::ProjectIndex;
-use crate::project::sidebar_membership::resolve_sidebar_membership;
+use crate::project::sidebar_membership::{ResolvedSidebar, resolve_sidebar_membership};
 
 /// Directed dependency graph plus its reverse index and a set of
 /// always-render pages.
@@ -123,6 +123,19 @@ impl ProjectDependencyGraph {
         meta: &ConfigValue,
         diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
     ) -> Self {
+        Self::build_with_sidebar_mode(index, meta, diagnostics, true).0
+    }
+
+    /// Share all profile, listing, and include edge collection between the
+    /// full project graph and the single-page live-preview query. Only the
+    /// complete sidebar clique is optional; its resolved memberships are
+    /// always available to the caller.
+    fn build_with_sidebar_mode(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        materialize_sidebar_edges: bool,
+    ) -> (Self, Vec<ResolvedSidebar>) {
         let mut edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut reverse_edges: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
         let mut force_render: BTreeSet<PathBuf> = BTreeSet::new();
@@ -148,21 +161,19 @@ impl ProjectDependencyGraph {
 
         // === Sidebar co-membership + prev/next ===
         let sidebars = resolve_sidebar_membership(meta, index, diagnostics);
-        for sidebar in &sidebars {
-            // Co-membership: every member depends on every other.
-            // O(N²) edges per sidebar; sidebars are tens of entries
-            // in practice, so this is fine.
-            for a in &sidebar.members {
-                for b in &sidebar.members {
-                    if a != b {
-                        add_edge(a, b);
+        if materialize_sidebar_edges {
+            // The full graph retains its established Mode-B semantics and
+            // public edge representation. Live invalidation traverses these
+            // same memberships lazily rather than allocating O(N²) edges.
+            for sidebar in &sidebars {
+                for a in &sidebar.members {
+                    for b in &sidebar.members {
+                        if a != b {
+                            add_edge(a, b);
+                        }
                     }
                 }
             }
-            // Prev/next neighbors are already a subset of the
-            // co-membership set above, so they don't add new edges.
-            // Keeping the conceptual channel separate in case we
-            // ever want different behavior (e.g. weighting).
         }
 
         // === Per-profile contributions ===
@@ -266,13 +277,74 @@ impl ProjectDependencyGraph {
             }
         }
 
-        Self {
-            edges,
-            reverse_edges,
-            force_render,
-            include_edges,
-            include_reverse_edges,
+        (
+            Self {
+                edges,
+                reverse_edges,
+                force_render,
+                include_edges,
+                include_reverse_edges,
+            },
+            sidebars,
+        )
+    }
+
+    /// Compute one active page's complete render inputs without allocating
+    /// a complete graph clique for every sidebar. Sidebar co-membership is
+    /// a hyperedge: expanding any member visits all its sidebar members.
+    /// Each sidebar expands at most once, including when sidebars overlap,
+    /// or when navigation/listing edges lead into another sidebar.
+    ///
+    /// Uses the same profile and sidebar resolution as `build`, preserving
+    /// cross-document, transitive include, and diagnostic semantics. Like
+    /// `build`, this accepts only an already-completed Pass-1 snapshot;
+    /// callers must fail open if any relevant profile is incomplete.
+    pub fn render_inputs_for_active(
+        index: &ProjectIndex,
+        meta: &ConfigValue,
+        diagnostics: &mut Vec<quarto_error_reporting::DiagnosticMessage>,
+        active: &Path,
+    ) -> BTreeSet<PathBuf> {
+        let (graph, sidebars) = Self::build_with_sidebar_mode(index, meta, diagnostics, false);
+
+        // Indexed membership lookup is linear in total sidebar entries.
+        // A page may belong to several overlapping sidebars.
+        let mut memberships: HashMap<&Path, Vec<usize>> = HashMap::new();
+        for (sidebar_id, sidebar) in sidebars.iter().enumerate() {
+            for member in &sidebar.members {
+                memberships
+                    .entry(member.as_path())
+                    .or_default()
+                    .push(sidebar_id);
+            }
         }
+
+        let mut expanded = vec![false; sidebars.len()];
+        let mut documents = BTreeSet::from([active.to_path_buf()]);
+        let mut frontier = vec![active.to_path_buf()];
+        while let Some(document) = frontier.pop() {
+            if let Some(dependencies) = graph.edges.get(&document) {
+                for dependency in dependencies {
+                    if documents.insert(dependency.clone()) {
+                        frontier.push(dependency.clone());
+                    }
+                }
+            }
+            if let Some(sidebar_ids) = memberships.get(document.as_path()) {
+                for &sidebar_id in sidebar_ids {
+                    if expanded[sidebar_id] {
+                        continue;
+                    }
+                    expanded[sidebar_id] = true;
+                    for member in &sidebars[sidebar_id].members {
+                        if documents.insert(member.clone()) {
+                            frontier.push(member.clone());
+                        }
+                    }
+                }
+            }
+        }
+        graph.include_inputs_for_documents(documents)
     }
 
     /// Return source documents whose (transitive) include closure contains
@@ -314,7 +386,12 @@ impl ProjectDependencyGraph {
     /// Future element-level renderers can narrow this result to their own
     /// render-unit keys without changing the file-dependency index.
     pub fn render_inputs_for(&self, document: &Path) -> BTreeSet<PathBuf> {
-        let documents = self.forward_closure([document]);
+        self.include_inputs_for_documents(self.forward_closure([document]))
+    }
+
+    /// The common include-file projection shared by materialized and lazy
+    /// document closure queries.
+    fn include_inputs_for_documents(&self, documents: BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
         let mut inputs = documents.clone();
         for doc in documents {
             if let Some(files) = self.include_edges.get(&doc) {

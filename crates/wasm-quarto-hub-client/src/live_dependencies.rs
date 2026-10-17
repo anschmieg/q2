@@ -30,15 +30,18 @@ pub(crate) fn render_input_paths(
         return None;
     }
 
-    // Build the graph only from profiles already computed by this render.
-    // This includes the core's cross-document navigation/listing edges and
-    // the transitive IncludeEntry file edges, which can be non-renderable.
+    // Query core's shared profile/sidebars directly, without materializing
+    // quadratic sidebar cliques. An incomplete graph still fails open.
     let mut diagnostics = Vec::new();
-    let graph = ProjectDependencyGraph::build(index, project_metadata, &mut diagnostics);
+    let inputs = ProjectDependencyGraph::render_inputs_for_active(
+        index,
+        project_metadata,
+        &mut diagnostics,
+        active_relative,
+    );
     if !diagnostics.is_empty() {
         return None; // incomplete sidebar/config resolution: don't filter
     }
-    let inputs = graph.render_inputs_for(active_relative);
 
     let mut paths = inputs
         .into_iter()

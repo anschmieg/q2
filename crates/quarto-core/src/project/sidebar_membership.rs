@@ -22,6 +22,7 @@
 //! so the dependency-graph view of sidebar membership is consistent
 //! with what the rendered sidebar actually displays.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use quarto_config::resolve_website_value;
@@ -88,13 +89,13 @@ pub fn resolve_sidebar_membership(
 /// order. Skips entries that don't reference a page (separators,
 /// pure-text headings, sections with no href).
 fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
-    fn push_unique(out: &mut Vec<PathBuf>, p: PathBuf) {
-        if !out.contains(&p) {
+    fn push_unique(out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, p: PathBuf) {
+        if seen.insert(p.clone()) {
             out.push(p);
         }
     }
 
-    fn walk(entries: &[SidebarEntry], out: &mut Vec<PathBuf>) {
+    fn walk(entries: &[SidebarEntry], out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
         for entry in entries {
             match entry {
                 SidebarEntry::Link { item } => {
@@ -102,7 +103,7 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
                         // External URLs and fragment-only anchors
                         // aren't project pages; skip.
                         if !is_external_or_anchor(href) {
-                            push_unique(out, PathBuf::from(href));
+                            push_unique(out, seen, PathBuf::from(href));
                         }
                     }
                 }
@@ -110,9 +111,9 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
                     if let Some(h) = href.as_deref()
                         && !is_external_or_anchor(h)
                     {
-                        push_unique(out, PathBuf::from(h));
+                        push_unique(out, seen, PathBuf::from(h));
                     }
-                    walk(contents, out);
+                    walk(contents, out, seen);
                 }
                 SidebarEntry::Separator | SidebarEntry::Heading(_) | SidebarEntry::Auto(_) => {}
             }
@@ -120,7 +121,8 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
     }
 
     let mut out = Vec::new();
-    walk(entries, &mut out);
+    let mut seen = HashSet::new();
+    walk(entries, &mut out, &mut seen);
     out
 }
 
