@@ -9,6 +9,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { startPreviewServer, type PreviewServerHandle } from './helpers/previewServer';
 
 const INDEX = '# Root document\n\n{{< include outer.qmd >}}\n';
@@ -146,4 +147,26 @@ test('single-file preview tracks nested included source changes', async ({ page 
   await writeFile(path.join(server.projectDir, 'sibling.qmd'), '# Still unrelated\n');
   await page.waitForTimeout(2500);
   expect(await ticks(page)).toBe(settled);
+});
+
+test('records informational cold-load and warm-edit latency for project preview', async ({ page }) => {
+  // End-to-end sample includes sync, WASM, React, and iframe paint.
+  // Timing is informational: CI machines differ and elapsed-time
+  // thresholds are not regression assertions.
+  const coldStart = performance.now();
+  await page.goto(server.url);
+  await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
+  const coldLoadMs = Math.round(performance.now() - coldStart);
+  const editMs: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const sentinel = `LEAF-SENTINEL-PERF-${i}`;
+    const start = performance.now();
+    await writeFile(path.join(server.projectDir, 'leaf.qmd'), `${sentinel}\n`);
+    await waitForInnerText(page, sentinel);
+    editMs.push(Math.round(performance.now() - start));
+  }
+  editMs.sort((a, b) => a - b);
+  console.log(
+    `q2_m1_browser_perf scenario=project_nested_include cold_load_ms=${coldLoadMs} warm_edit_ms_p50=${editMs[1]} warm_edit_ms_range=${editMs[0]}..${editMs[2]}`,
+  );
 });
