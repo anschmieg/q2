@@ -120,6 +120,10 @@ jobs:
           wasm-bindgen --version
       - name: Build browser WASM from current Rust
         working-directory: hub-client
+        env:
+          # Adds only a test export to the actual -Oz optimized WASM used
+          # by the browser. Production builds never enable this feature.
+          Q2_M1_BENCH: "1"
         run: npm run build:wasm
       - name: Build trace viewer
         working-directory: trace-viewer
@@ -134,7 +138,9 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run real Chromium core-graph live preview and existing regression tests
         working-directory: q2-preview-spa
-        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts --project=chromium --retries=0
+        env:
+          Q2_M1_BENCH: "1"
+        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0
       - name: Archive Chromium test evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -38,6 +38,8 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 mod live_dependencies;
+#[cfg(feature = "m1-benchmark")]
+mod m1_benchmark;
 
 // Global runtime instance for VFS operations.
 // Stored as Arc so it can be shared with the rendering pipeline.
