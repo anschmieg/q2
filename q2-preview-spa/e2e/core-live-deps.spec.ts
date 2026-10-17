@@ -120,3 +120,30 @@ test('changed sidebar member re-renders active page through core document edges'
   );
   expect(await ticks(page)).toBeGreaterThan(before);
 });
+
+test('single-file preview tracks nested included source changes', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    targetFile: 'index.qmd',
+    fixtureFiles: [
+      { path: 'index.qmd', content: INDEX },
+      { path: 'outer.qmd', content: OUTER },
+      { path: 'leaf.qmd', content: LEAF_INITIAL },
+      { path: 'sibling.qmd', content: SIBLING },
+    ],
+  });
+  await page.goto(server.url);
+  await waitForInnerText(page, 'LEAF-SENTINEL-INITIAL');
+  await page.waitForTimeout(200);
+
+  const before = await ticks(page);
+  await writeFile(path.join(server.projectDir, 'leaf.qmd'), LEAF_EDITED);
+  await waitForInnerText(page, 'LEAF-SENTINEL-EDITED');
+  expect(await ticks(page)).toBeGreaterThan(before);
+  await page.waitForTimeout(200);
+
+  const settled = await ticks(page);
+  await writeFile(path.join(server.projectDir, 'sibling.qmd'), '# Still unrelated\n');
+  await page.waitForTimeout(2500);
+  expect(await ticks(page)).toBe(settled);
+});

@@ -794,11 +794,11 @@ export default function PreviewApp() {
           onFilesChange: (files) => {
             if (cancelled) return;
             setState((s) => {
-              const previous = new Set(s.files.map((file) => file.path));
-              const current = new Set(files.map((file) => file.path));
+              const previous = new Map(s.files.map((file) => [file.path, file.docId]));
+              const current = new Map(files.map((file) => [file.path, file.docId]));
               const membershipChanged = previous.size !== current.size ||
-                [...current].some((path) => !previous.has(path));
-              // Creating/deleting a project input can alter nav/listing
+                [...current].some(([path, docId]) => previous.get(path) !== docId);
+              // Creating/deleting/replacing a project input can alter nav/listing
               // edges without a content notification for the active page.
               return membershipChanged
                 ? { ...s, files, deps: null, contentTick: s.contentTick + 1 }
@@ -1130,6 +1130,10 @@ export default function PreviewApp() {
   useEffect(() => {
     if (!state.activeFile) return;
     let cancelled = false;
+    // React can apply queued state updates after an edit or navigation.
+    // Check revision on every result path, including errors.
+    const isCurrentRender = (s: PreviewAppState) =>
+      !cancelled && s.activeFile === state.activeFile && s.contentTick === state.contentTick;
     void (async () => {
       try {
         // Phase C.4: look up the capture for the active page, fetch
@@ -1186,11 +1190,7 @@ export default function PreviewApp() {
           setState((s) => {
             // An edit can arrive after WASM resolved but before React applies
             // this updater. Never resurrect a stale dependency snapshot.
-            if (
-              cancelled ||
-              s.activeFile !== state.activeFile ||
-              s.contentTick !== state.contentTick
-            ) return s;
+            if (!isCurrentRender(s)) return s;
             return {
               ...s,
               astJson: result.ast_json ?? null,
@@ -1215,7 +1215,7 @@ export default function PreviewApp() {
           // logging a generic failure. Same non-terminal `render.failure`
           // slot as a real failure: with no last-good AST the overlay is
           // the whole view; otherwise it sits on top of the last render.
-          setState((s) => ({
+          setState((s) => !isCurrentRender(s) ? s : ({
             ...s,
             deps: null,
             render: {
@@ -1240,7 +1240,7 @@ export default function PreviewApp() {
           // sibling pass-1 failures) on top. Distinct from boot
           // errors, which DO replace the UI (no good render exists
           // to fall back to).
-          setState((s) => ({
+          setState((s) => !isCurrentRender(s) ? s : ({
             ...s,
             deps: null,
             render: {
@@ -1271,7 +1271,7 @@ export default function PreviewApp() {
         // we never got a `RenderResponse` to read them from — only
         // the thrown error's message is available.
         const message = err instanceof Error ? err.message : String(err);
-        setState((s) => ({
+        setState((s) => !isCurrentRender(s) ? s : ({
           ...s,
           deps: null,
           render: {

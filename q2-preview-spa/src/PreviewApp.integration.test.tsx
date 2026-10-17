@@ -1532,6 +1532,81 @@ describe('core WASM render-input snapshots', () => {
     });
   });
 
+
+  it('re-renders when the same path is replaced with another synced document', async () => {
+    runtimeMockState.renderResult = {
+      success: true,
+      ast_json: '{"blocks":[]}',
+      render_inputs: ['index.qmd'],
+    };
+    const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
+    render(<PreviewApp />);
+    await waitFor(() => {
+      expect(capturedIframeProps.at(-1)?.astJson).toBe('{"blocks":[]}');
+    });
+    const callbacks = (setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    const before = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    // No new path, but replacement bytes may change without onFileContent.
+    await act(async () => {
+      callbacks.onFilesChange([{ path: 'index.qmd', docId: 'automerge:replacement' }]);
+    });
+    await waitFor(() => {
+      expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before);
+    });
+  });
+
+  it('does not re-render on inventory reordering with unchanged identities', async () => {
+    runtimeMockState.files = [
+      { path: 'index.qmd', docId: 'automerge:doc-index' },
+      { path: 'unrelated.qmd', docId: 'automerge:unrelated' },
+    ];
+    runtimeMockState.renderResult = {
+      success: true,
+      ast_json: '{"blocks":[]}',
+      render_inputs: ['index.qmd'],
+    };
+    const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
+    render(<PreviewApp />);
+    await waitFor(() => {
+      expect(capturedIframeProps.at(-1)?.astJson).toBe('{"blocks":[]}');
+    });
+    const callbacks = (setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    const before = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => {
+      callbacks.onFilesChange([
+        { path: 'unrelated.qmd', docId: 'automerge:unrelated' },
+        { path: 'index.qmd', docId: 'automerge:doc-index' },
+      ]);
+    });
+    expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
+  });
+
+  it('fails open on render failure and restores filtering on recovery', async () => {
+    const { renderPageForPreview, setSyncHandlers } = await import('@quarto/preview-runtime');
+    let calls = 0;
+    (renderPageForPreview as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      calls++;
+      if (calls === 2) return { success: false, error: 'synthetic error' };
+      return { success: true, ast_json: '{"blocks":[]}', render_inputs: ['index.qmd'] };
+    });
+    render(<PreviewApp />);
+    await waitFor(() => {
+      expect(capturedIframeProps.at(-1)?.astJson).toBe('{"blocks":[]}');
+    });
+    const callbacks = (setSyncHandlers as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    await act(async () => { callbacks.onFileContent('index.qmd'); });
+    await waitFor(() => { expect(screen.queryByText(/^error$/i)).not.toBeNull(); });
+    const failedCalls = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => { callbacks.onFileContent('unrelated.qmd'); });
+    await waitFor(() => {
+      expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(failedCalls);
+      expect(screen.queryByText(/^error$/i)).toBeNull();
+    });
+    const recoveredCalls = (renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => { callbacks.onFileContent('unrelated.qmd'); });
+    expect((renderPageForPreview as ReturnType<typeof vi.fn>).mock.calls.length).toBe(recoveredCalls);
+  });
+
   it('invalidates a previously complete graph when project membership changes', async () => {
     runtimeMockState.renderResult = {
       success: true,
