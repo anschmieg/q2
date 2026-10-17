@@ -8,13 +8,20 @@
  * like `pandoc.utils.stringify()`.
  */
 
-use mlua::{Function, Lua, Result, Table, Value};
+use mlua::{AnyUserData, Error, Function, Lua, Result, Table, Value};
 use sha1::{Digest, Sha1};
 
 use crate::pandoc::{Block, Inline, LineBreak};
+use quarto_pandoc_types::config_value::{ConfigMapEntry, ConfigValue, ConfigValueKind};
 use quarto_source_map::{By, SourceInfo};
 
-use super::types::{LuaBlock, LuaInline, filter_source_info, inlines_to_lua_table};
+use super::config_value::{LuaConfigNull, LuaConfigSpecial, push_config_value};
+use super::constructors::LuaListAttributes;
+use super::metadata::LuaMetaProxy;
+use super::nodes::{LuaNodes, NodesShape};
+use super::types::{
+    LuaAttr, LuaBlock, LuaCitation, LuaInline, filter_source_info, inlines_to_lua_table,
+};
 
 /// Register the pandoc.utils namespace
 pub fn register_pandoc_utils(lua: &Lua, pandoc: &Table) -> Result<()> {
@@ -23,8 +30,8 @@ pub fn register_pandoc_utils(lua: &Lua, pandoc: &Table) -> Result<()> {
     // pandoc.utils.stringify(element)
     utils.set(
         "stringify",
-        lua.create_function(|_lua, value: Value| {
-            let result = stringify_value(&value)?;
+        lua.create_function(|lua, value: Value| {
+            let result = stringify_value(lua, &value)?;
             Ok(result)
         })?,
     )?;
@@ -98,7 +105,7 @@ fn create_blocks_to_inlines(lua: &Lua) -> Result<Function> {
         };
 
         // Extract blocks
-        let block_list = extract_blocks(&blocks)?;
+        let block_list = extract_blocks(lua, &blocks)?;
 
         // Convert blocks to inlines
         let mut result_inlines: Vec<Inline> = Vec::new();
@@ -117,30 +124,31 @@ fn create_blocks_to_inlines(lua: &Lua) -> Result<Function> {
     })
 }
 
-/// Extract blocks from a Lua value (either table of blocks or single block)
-fn extract_blocks(value: &Value) -> Result<Vec<Block>> {
+/// Extract blocks from a Lua value: a table of blocks, a single block, or
+/// a `pandoc.Nodes` (resolved in block context, so an inlines-shaped one
+/// is a single `Plain`). A `Nodes` inside the table splices, as it does
+/// in every other content list. Anything else contributes nothing.
+fn extract_blocks(lua: &Lua, value: &Value) -> Result<Vec<Block>> {
+    fn push_from(lua: &Lua, ud: &AnyUserData, blocks: &mut Vec<Block>) {
+        if let Ok(block) = ud.borrow::<LuaBlock>() {
+            blocks.push(block.clone_block());
+        } else if let Ok(nodes) = ud.borrow::<LuaNodes>() {
+            blocks.extend(nodes.to_blocks(lua));
+        }
+    }
+    let mut blocks = Vec::new();
     match value {
         Value::Table(table) => {
-            let mut blocks = Vec::new();
             for i in 1..=table.raw_len() {
-                let val: Value = table.raw_get(i)?;
-                if let Value::UserData(ud) = val
-                    && let Ok(block) = ud.borrow::<LuaBlock>()
-                {
-                    blocks.push(block.clone_block());
+                if let Value::UserData(ud) = table.raw_get::<Value>(i)? {
+                    push_from(lua, &ud, &mut blocks);
                 }
             }
-            Ok(blocks)
         }
-        Value::UserData(ud) => {
-            if let Ok(block) = ud.borrow::<LuaBlock>() {
-                Ok(vec![block.clone_block()])
-            } else {
-                Ok(vec![])
-            }
-        }
-        _ => Ok(vec![]),
+        Value::UserData(ud) => push_from(lua, ud, &mut blocks),
+        _ => {}
     }
+    Ok(blocks)
 }
 
 /// Convert a block to its inline content
@@ -297,42 +305,7 @@ fn create_type(lua: &Lua) -> Result<Function> {
                 }
             }
             Value::UserData(ud) => {
-                // For our Pandoc userdata types, return the specific element type
-                // Check these first before falling back to generic __name
-                if let Ok(inline) = ud.borrow::<LuaInline>() {
-                    return Ok(get_inline_type_name(&inline.borrow_inline()));
-                }
-                if let Ok(block) = ud.borrow::<LuaBlock>() {
-                    return Ok(get_block_type_name(&block.borrow_block()));
-                }
-                if ud.borrow::<crate::lua::types::LuaCitation>().is_ok() {
-                    return Ok("Citation".to_string());
-                }
-                if ud.borrow::<crate::lua::nodes::LuaNodes>().is_ok() {
-                    return Ok("Nodes".to_string());
-                }
-                if ud.borrow::<crate::lua::metadata::LuaMetaProxy>().is_ok() {
-                    return Ok("Meta".to_string());
-                }
-                if ud
-                    .borrow::<crate::lua::constructors::LuaListAttributes>()
-                    .is_ok()
-                {
-                    return Ok("ListAttributes".to_string());
-                }
-                if let Ok(special) = ud.borrow::<crate::lua::config_value::LuaConfigSpecial>() {
-                    return Ok(special.kind.type_name().to_string());
-                }
-                if ud
-                    .borrow::<crate::lua::config_value::LuaConfigNull>()
-                    .is_ok()
-                {
-                    return Ok("Null".to_string());
-                }
-                // For other userdata, try metatable __name
-                if let Ok(mt) = ud.metatable()
-                    && let Ok(name) = mt.get::<String>("__name")
-                {
+                if let Some(name) = userdata_type_name(ud) {
                     return Ok(name);
                 }
             }
@@ -345,6 +318,39 @@ fn create_type(lua: &Lua) -> Result<Function> {
         lua.globals().set("__utils_type_val", Value::Nil)?;
         Ok(type_name)
     })
+}
+
+/// The `pandoc.utils.type` name of a userdata: the element type for an
+/// Inline or Block, the fixed name for q2's other userdata, else the
+/// metatable's `__name`. `None` when there is no name to give.
+fn userdata_type_name(ud: &AnyUserData) -> Option<String> {
+    if let Ok(inline) = ud.borrow::<LuaInline>() {
+        return Some(get_inline_type_name(&inline.borrow_inline()));
+    }
+    if let Ok(block) = ud.borrow::<LuaBlock>() {
+        return Some(get_block_type_name(&block.borrow_block()));
+    }
+    if ud.is::<LuaCitation>() {
+        return Some("Citation".to_string());
+    }
+    if ud.is::<LuaNodes>() {
+        return Some("Nodes".to_string());
+    }
+    if ud.is::<LuaMetaProxy>() {
+        return Some("Meta".to_string());
+    }
+    if ud.is::<LuaListAttributes>() {
+        return Some("ListAttributes".to_string());
+    }
+    if let Ok(special) = ud.borrow::<LuaConfigSpecial>() {
+        return Some(special.kind.type_name().to_string());
+    }
+    if ud.is::<LuaConfigNull>() {
+        return Some("Null".to_string());
+    }
+    ud.metatable()
+        .ok()
+        .and_then(|mt| mt.get::<String>("__name").ok())
 }
 
 /// Get the type name for an inline element
@@ -782,26 +788,61 @@ fn create_to_roman_numeral(lua: &Lua) -> Result<Function> {
     })
 }
 
-/// Convert a Lua value (block, inline, list of elements) to plain text
-pub(crate) fn stringify_value(value: &Value) -> Result<String> {
+/// Convert a Lua value (block, inline, list of elements) to plain text.
+///
+/// Pandoc's `stringify` takes a Pandoc, Block, Inline, Citation or
+/// MetaValue (booleans, numbers, strings, lists, maps), gives `""` for an
+/// `Attr` or `ListAttributes`, and errors on anything else. This mirrors
+/// that over q2's userdata, with two things pandoc has no counterpart
+/// for: a `pandoc.Nodes` stringifies its contents (blocks or inlines),
+/// and `nil` (and an explicit `quarto.config.null()`) is `""`, because a
+/// missing metadata key or shortcode kwarg reads as `nil` here
+/// (D-stringify-nil).
+pub(crate) fn stringify_value(lua: &Lua, value: &Value) -> Result<String> {
     match value {
         Value::UserData(ud) => {
-            // Try to extract as LuaInline
             if let Ok(inline) = ud.borrow::<LuaInline>() {
                 return Ok(stringify_inline(&inline.borrow_inline()));
             }
-            // Try to extract as LuaBlock
             if let Ok(block) = ud.borrow::<LuaBlock>() {
                 return Ok(stringify_block(&block.borrow_block()));
             }
-            Ok(String::new())
+            if let Ok(nodes) = ud.borrow::<LuaNodes>() {
+                return Ok(match &nodes.shape {
+                    NodesShape::Empty => String::new(),
+                    NodesShape::Inlines(inlines) => stringify_inlines(inlines),
+                    NodesShape::Blocks(blocks) => stringify_blocks(blocks),
+                });
+            }
+            if let Ok(citation) = ud.borrow::<LuaCitation>() {
+                // Pandoc walks a Citation's inlines: prefix then suffix.
+                citation.flush_property_cache(lua)?;
+                let c = citation.cell.borrow();
+                return Ok(stringify_inlines(&c.prefix) + &stringify_inlines(&c.suffix));
+            }
+            if let Ok(proxy) = ud.borrow::<LuaMetaProxy>() {
+                return match proxy.node() {
+                    Some(node) => stringify_config_value(lua, node),
+                    None => Ok(String::new()),
+                };
+            }
+            if let Ok(special) = ud.borrow::<LuaConfigSpecial>() {
+                return Ok(special.value.borrow().clone());
+            }
+            if ud.is::<LuaAttr>() || ud.is::<LuaListAttributes>() || ud.is::<LuaConfigNull>() {
+                return Ok(String::new());
+            }
+            Err(Error::runtime(format!(
+                "Q-11-3: Block, Inline, Nodes, Citation, or Meta value expected, got {}",
+                userdata_type_name(ud).unwrap_or_else(|| "userdata".to_string())
+            )))
         }
         Value::Table(table) => {
             // Handle table of elements
             let mut result = String::new();
             for item in table.clone().sequence_values::<Value>() {
                 let item = item?;
-                result.push_str(&stringify_value(&item)?);
+                result.push_str(&stringify_value(lua, &item)?);
             }
             Ok(result)
         }
@@ -813,6 +854,33 @@ pub(crate) fn stringify_value(value: &Value) -> Result<String> {
         Value::Integer(i) => Ok(i.to_string()),
         Value::Number(n) => Ok(n.to_string()),
         _ => Ok(String::new()),
+    }
+}
+
+/// Plain text of a metadata node, as pandoc's `stringify` renders a
+/// MetaValue: prose through the inline/block walk, a list or map as the
+/// concatenation of its values (a map in key order, pandoc's
+/// `Map.toList`), a scalar as the text of the Lua value it reads as.
+fn stringify_config_value(lua: &Lua, node: &ConfigValue) -> Result<String> {
+    match &node.value {
+        ConfigValueKind::PandocInlines(inlines) => Ok(stringify_inlines(inlines)),
+        ConfigValueKind::PandocBlocks(blocks) => Ok(stringify_blocks(blocks)),
+        ConfigValueKind::Array(items) => items
+            .iter()
+            .map(|item| stringify_config_value(lua, item))
+            .collect(),
+        ConfigValueKind::Map(entries) => {
+            let mut sorted: Vec<&ConfigMapEntry> = entries.iter().collect();
+            sorted.sort_by(|a, b| a.key.cmp(&b.key));
+            sorted
+                .iter()
+                .map(|entry| stringify_config_value(lua, &entry.value))
+                .collect()
+        }
+        ConfigValueKind::Path(s) | ConfigValueKind::Glob(s) | ConfigValueKind::Expr(s) => {
+            Ok(s.clone())
+        }
+        ConfigValueKind::Scalar { .. } => stringify_value(lua, &push_config_value(lua, node)?),
     }
 }
 
@@ -1676,6 +1744,101 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "");
+    }
+
+    fn stringify(lua: &Lua, src: &str) -> String {
+        lua.load(format!("return pandoc.utils.stringify({src})"))
+            .eval()
+            .unwrap()
+    }
+
+    /// bd-lt7rgi90: a `pandoc.Nodes` stringifies its contents, whichever
+    /// shape it holds, on its own and inside a list.
+    #[test]
+    fn test_stringify_nodes() {
+        let lua = create_test_lua();
+        assert_eq!(stringify(&lua, "pandoc.Nodes('42')"), "42");
+        assert_eq!(stringify(&lua, "pandoc.Nodes(42)"), "42");
+        assert_eq!(stringify(&lua, "pandoc.Nodes({'a', 2})"), "a2");
+        assert_eq!(stringify(&lua, "pandoc.Nodes('a b')"), "a b");
+        assert_eq!(stringify(&lua, "pandoc.Nodes(pandoc.Para{'p'})"), "p");
+        assert_eq!(
+            stringify(&lua, "pandoc.Nodes({pandoc.Para{'a'}, pandoc.Para{'b'}})"),
+            "a\nb"
+        );
+        assert_eq!(stringify(&lua, "pandoc.Nodes({})"), "");
+        assert_eq!(
+            stringify(
+                &lua,
+                "{pandoc.Nodes('a'), pandoc.Str('b'), pandoc.Nodes({})}"
+            ),
+            "ab"
+        );
+    }
+
+    /// Pandoc parity: a Citation stringifies to its prefix and suffix text.
+    #[test]
+    fn test_stringify_citation() {
+        let lua = create_test_lua();
+        assert_eq!(
+            stringify(
+                &lua,
+                "pandoc.Citation('key', 'NormalCitation', 'see', 'p. 3')"
+            ),
+            "seep. 3"
+        );
+        assert_eq!(
+            stringify(&lua, "pandoc.Citation('key', 'AuthorInText')"),
+            ""
+        );
+    }
+
+    /// Pandoc parity: `Attr` and `ListAttributes` stringify to `""`;
+    /// q2's own explicit null does too (it reads as `nil`, D-null), and a
+    /// path/glob/expr special is its text, as `tostring` gives.
+    #[test]
+    fn test_stringify_attr_listattributes_null_and_specials() {
+        let lua = create_test_lua();
+        super::super::quarto_api::register_quarto_api(&lua).unwrap();
+        assert_eq!(stringify(&lua, "pandoc.Attr('id', {'c'}, {k = 'v'})"), "");
+        assert_eq!(stringify(&lua, "pandoc.Span('a').attr"), "");
+        assert_eq!(stringify(&lua, "pandoc.ListAttributes()"), "");
+        assert_eq!(stringify(&lua, "quarto.config.null()"), "");
+        assert_eq!(stringify(&lua, "quarto.config.path('a/b.qmd')"), "a/b.qmd");
+    }
+
+    /// Pandoc parity: a value that is not a stringifyable element is an
+    /// error, not `""` (which hid the missing Nodes arm, bd-lt7rgi90).
+    #[test]
+    fn test_stringify_rejects_other_userdata() {
+        let lua = create_test_lua();
+        let err = lua
+            .load("return pandoc.utils.stringify(pandoc.Span('a').attributes)")
+            .eval::<Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Q-11-3") && err.contains("expected, got"),
+            "{err}"
+        );
+    }
+
+    /// bd-lt7rgi90: `blocks_to_inlines` takes a `pandoc.Nodes`, resolved in
+    /// block context, alone or as an element of the list.
+    #[test]
+    fn test_blocks_to_inlines_accepts_nodes() {
+        let lua = create_test_lua();
+        let bti = |src: &str| stringify(&lua, &format!("pandoc.utils.blocks_to_inlines({src})"));
+        assert_eq!(
+            bti("pandoc.Nodes({pandoc.Para{'a'}, pandoc.Para{'b'}})"),
+            "a\nb"
+        );
+        assert_eq!(bti("pandoc.Nodes('x')"), "x");
+        assert_eq!(bti("pandoc.Nodes({})"), "");
+        assert_eq!(
+            bti("{pandoc.Nodes(pandoc.Para{'a'}), pandoc.Para{'b'}, pandoc.Nodes({})}"),
+            "a\nb"
+        );
     }
 
     // ========== get_inline_type_name tests ==========
