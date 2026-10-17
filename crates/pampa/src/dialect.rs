@@ -87,6 +87,7 @@ impl std::fmt::Display for ModuleCompileError {
 
 impl std::error::Error for ModuleCompileError {}
 
+#[cfg(feature = "lua-filter")]
 impl ModuleCompileError {
     /// Find a `ModuleCompileError` in an mlua error, however many callback
     /// and context layers Lua's unwinding wrapped around it.
