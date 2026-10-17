@@ -1580,7 +1580,6 @@ mod tests {
             ("contents", arr(vec![s("b.qmd"), s("c.qmd")])),
         ]);
         let mut meta = ConfigValue::default();
-        add_sidebar(&mut meta, &[]);
         meta.insert_path(&["website", "sidebar"], arr(vec![first, second]));
 
         for source in ["a.qmd", "b.qmd", "c.qmd", "d.qmd", "e.qmd", "unrelated.qmd"] {
