@@ -1,0 +1,31 @@
+name: Verify standalone Q2 dependency graph
+on:
+  push:
+    branches: [verify/q2-core-graph-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Core dependency graph tests
+        run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
