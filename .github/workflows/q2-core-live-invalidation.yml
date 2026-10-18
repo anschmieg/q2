@@ -73,7 +73,7 @@ jobs:
       - name: Test SPA dependency filters, request races, and file membership
         run: npm run test --workspace=q2-preview-spa -- src/shouldRerenderForTextChange.test.ts
       - name: Test component dependency request races (jsdom integration)
-        run: npm run test:integration --workspace=q2-preview-spa -- src/PreviewApp.integration.test.tsx
+        run: npm run test:integration --workspace=q2-preview-spa -- src/PreviewApp.integration.test.tsx src/customComponents.integration.test.tsx
       - name: Typecheck preview SPA
         run: npm run typecheck --workspace=q2-preview-spa
 
