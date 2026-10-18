@@ -1435,7 +1435,10 @@ mod tests {
         std::fs::remove_file(root.join("part.qmd")).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("part.qmd")).unwrap();
         assert!(ctx.sync_file(&root.join("part.qmd")).await.is_err());
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "SENSITIVE OUTSIDE CONTENT");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "SENSITIVE OUTSIDE CONTENT"
+        );
     }
 
     /// Build an automerge text document with the given content.

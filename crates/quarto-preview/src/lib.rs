@@ -383,9 +383,7 @@ where
         .cloned()
         .collect();
     // Keep the refresh handle so shutdown waits for file/index mutations.
-    let refresh_task = Arc::new(std::sync::Mutex::new(
-        None::<tokio::task::JoinHandle<()>>,
-    ));
+    let refresh_task = Arc::new(std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
     let refresh_task_for_ready = refresh_task.clone();
 
     // Phase C.1 hook: once the hub context is ready, spawn the eager
