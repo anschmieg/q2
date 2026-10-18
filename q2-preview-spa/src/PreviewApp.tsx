@@ -1056,6 +1056,47 @@ export default function PreviewApp() {
     };
   }, []);
 
+  // PDF-only previews are compiled by the native PdfPane rather than the
+  // WASM renderer, so they have no core render_inputs response. Preserve the
+  // existing native dependency endpoint only for that format; normal HTML
+  // previews continue to use the authoritative completed WASM snapshot.
+  useEffect(() => {
+    if (pageKind !== 'pdf' || !state.activeFile) return;
+    let cancelled = false;
+    const activePath = state.activeFile;
+    const revision = state.contentTick;
+    // A previous HTML or PDF snapshot must not authorize filtering while a
+    // new PDF dependency request is pending.
+    setState((s) =>
+      s.activeFile === activePath && s.contentTick === revision && s.deps !== null
+        ? { ...s, deps: null }
+        : s,
+    );
+    void (async () => {
+      try {
+        const response = await fetch(`/api/preview/deps?page=${encodeURIComponent(activePath)}`);
+        if (cancelled) return;
+        if (!response.ok) {
+          console.warn(`PDF dependency fetch returned ${response.status} for ${activePath}; filter falls open`);
+          return;
+        }
+        const body = (await response.json()) as { deps?: unknown };
+        if (cancelled) return;
+        const deps = Array.isArray(body.deps) && body.deps.every((item) => typeof item === 'string')
+          ? new Set<string>([activePath, ...body.deps])
+          : null;
+        setState((s) =>
+          s.activeFile === activePath && s.contentTick === revision
+            ? { ...s, deps }
+            : s,
+        );
+      } catch (error) {
+        console.warn(`PDF dependency fetch failed for ${activePath}: ${String(error)}`);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pageKind, state.activeFile, state.contentTick]);
+
   // The authoritative input set is attached to the completed WASM
   // render (below). Do not independently fetch a disk-based closure:
   // it can disagree with the synced VFS, particularly during edits.

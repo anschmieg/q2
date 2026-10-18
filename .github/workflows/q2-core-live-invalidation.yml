@@ -145,6 +145,20 @@ jobs:
         env:
           Q2_M1_BENCH: "1"
         run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0
+      - name: Verify production WASM excludes the benchmark export
+        working-directory: hub-client
+        env:
+          Q2_M1_BENCH: "0"
+        shell: bash
+        run: |
+          benchmark_bytes=$(stat -c%s ../crates/wasm-quarto-hub-client/pkg/wasm_quarto_hub_client_bg.wasm)
+          npm run build:wasm
+          if grep -q "benchmark_live_sidebar_query" ../crates/wasm-quarto-hub-client/pkg/wasm_quarto_hub_client.js; then
+            echo "CI-only benchmark leaked into production WASM bindings"
+            exit 1
+          fi
+          production_bytes=$(stat -c%s ../crates/wasm-quarto-hub-client/pkg/wasm_quarto_hub_client_bg.wasm)
+          echo "M1 optimized WASM sizes (bytes): benchmark=$benchmark_bytes production=$production_bytes"
       - name: Archive Chromium test evidence
         if: always()
         uses: actions/upload-artifact@v4
