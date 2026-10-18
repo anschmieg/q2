@@ -13,6 +13,7 @@
 //! ordinary known-dependency edits promptly. Future event-driven refresh can
 //! replace polling without changing the trusted enrollment boundary.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +26,10 @@ pub(crate) async fn run(
     ctx: Arc<HubContext>,
     root: PathBuf,
     deck: PathBuf,
+    initial_dependencies: Vec<PathBuf>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut tracked: BTreeSet<PathBuf> = initial_dependencies.into_iter().collect();
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Initial closure is already discovered and synced at server boot.
@@ -55,6 +58,19 @@ pub(crate) async fn run(
                     tracing::warn!(%error, "single-file dependency enrollment failed");
                     continue;
                 }
+                let current: BTreeSet<PathBuf> = deps.qmd_files.iter()
+                    .chain(deps.binary_files.iter()).cloned().collect();
+                // Do not prune on partial scans: malformed edits and broken
+                // includes must not silently discard still-existing inputs.
+                // A genuinely disappeared file can be retired even when
+                // include expansion fails, allowing a missing-include render
+                // error to reach the browser via index membership changes.
+                let retired: Vec<PathBuf> = tracked.difference(&current)
+                    .filter(|path| deps.complete || matches!(
+                        std::fs::canonicalize(root.join(path)),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                    ))
+                    .cloned().collect();
                 // Existing dependencies still use the low-latency native watcher.
                 // This sync fallback covers *newly enrolled* files as well as
                 // newly edited transitive dependencies that weren't in its
@@ -69,6 +85,14 @@ pub(crate) async fn run(
                         );
                     }
                 }
+                if !retired.is_empty() {
+                    if let Err(error) = ctx.retire_preview_dependencies(&retired, &deck).await {
+                        tracing::warn!(%error, "single-file dependency retirement failed");
+                        continue;
+                    }
+                }
+                tracked.extend(current);
+                for path in retired { tracked.remove(&path); }
             }
             event = shutdown.changed() => {
                 if event.is_err() || *shutdown.borrow() {

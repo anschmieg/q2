@@ -7,7 +7,7 @@
  * events. Visible iframe content and __renderTicks are the oracle.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { startPreviewServer, type PreviewServerHandle } from './helpers/previewServer';
@@ -300,4 +300,51 @@ test('single-file preview recovers when a missing include is created later', asy
   );
   await writeFile(path.join(server.projectDir, 'later.qmd'), 'DYNAMIC-MISSING-RECOVERED\n');
   await waitForInnerText(page, 'DYNAMIC-MISSING-RECOVERED');
+});
+
+// Index retirement must invalidate even if the deleted file never emits a
+// content event from the boot-time watcher.
+test('single-file preview invalidates a deleted include and recovers on re-creation', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    targetFile: 'index.qmd',
+    fixtureFiles: [
+      { path: 'index.qmd', content: '# Deletion test\n\n{{< include part.qmd >}}\n' },
+      { path: 'part.qmd', content: 'INCLUDED-BEFORE-DELETION\n' },
+    ],
+  });
+  await page.goto(observedUrl(server.url));
+  await waitForInnerText(page, 'INCLUDED-BEFORE-DELETION');
+  const before = await ticks(page);
+  await unlink(path.join(server.projectDir, 'part.qmd'));
+  await page.waitForFunction(
+    (oldTicks) => ((window as unknown as { __renderTicks?: number }).__renderTicks ?? 0) > oldTicks,
+    before,
+    { timeout: 30_000 },
+  );
+  await writeFile(path.join(server.projectDir, 'part.qmd'), 'INCLUDED-AFTER-RECREATION\n');
+  await waitForInnerText(page, 'INCLUDED-AFTER-RECREATION');
+});
+
+test('single-file preview retires an include removed from the document', async ({ page }) => {
+  await server.stop();
+  server = await startPreviewServer({
+    targetFile: 'index.qmd',
+    fixtureFiles: [
+      { path: 'index.qmd', content: '# Retirement test\n\n{{< include old.qmd >}}\n' },
+      { path: 'old.qmd', content: 'OLD-DEPENDENCY-VISIBLE\n' },
+    ],
+  });
+  await page.goto(observedUrl(server.url));
+  await waitForInnerText(page, 'OLD-DEPENDENCY-VISIBLE');
+  await writeFile(path.join(server.projectDir, 'index.qmd'), '# Retirement test\n\nNo more include\n');
+  await waitForInnerText(page, 'No more include');
+  await page.waitForFunction(() =>
+    ((window as unknown as { __q2SyncEvents?: Record<string, number> }).__q2SyncEvents?.['old.qmd'] ?? 0) >= 0,
+  );
+  await page.waitForTimeout(3000); // At least one refresh interval before asserting retirement.
+  const oldCount = await observedUpdates(page, 'old.qmd');
+  await writeFile(path.join(server.projectDir, 'old.qmd'), 'OLD-DEPENDENCY-CHANGED\n');
+  await page.waitForTimeout(3000);
+  expect(await observedUpdates(page, 'old.qmd')).toBe(oldCount);
 });

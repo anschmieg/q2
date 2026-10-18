@@ -376,6 +376,11 @@ where
 
     let storage = build_storage(&config).context("building storage manager")?;
     let hub_config = build_hub_config(&config);
+    let initially_tracked: Vec<PathBuf> = hub_config.single_file_text_deps.iter()
+        .chain(hub_config.single_file_assets.iter()).cloned().collect();
+    // Keep the refresh handle so shutdown waits for file/index mutations.
+    let refresh_task = Arc::new(std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
+    let refresh_task_for_ready = refresh_task.clone();
 
     // Phase C.1 hook: once the hub context is ready, spawn the eager
     // capture driver on a blocking worker so the multi-threaded tokio
@@ -431,12 +436,14 @@ where
             }
         });
         if let Some((root, deck)) = single_file_refresh {
-            tokio::spawn(single_file_dep_refresh::run(
+            let handle = tokio::spawn(single_file_dep_refresh::run(
                 ctx.clone(),
                 root,
                 deck,
+                initially_tracked,
                 dependency_refresh_stop_rx,
             ));
+            *refresh_task_for_ready.lock().expect("preview refresh task lock") = Some(handle);
         }
         // Fire the extra hook after the driver is enqueued so callers
         // can rely on it being either in-flight or already done.
@@ -528,6 +535,16 @@ where
     // The refresh loop owns a HubContext clone. Stop it explicitly so no
     // polling survives a preview server's graceful shutdown.
     let _ = dependency_refresh_stop_tx.send(true);
+    let refresh_handle = refresh_task.lock().expect("preview refresh task lock").take();
+    if let Some(mut handle) = refresh_handle {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle)
+            .await.is_err()
+        {
+            tracing::warn!("single-file dependency refresh did not stop promptly; aborting");
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
 
     // bd-jhvkwosw: tunnel teardown joins the graceful-shutdown path —
     // after the server (and its final filesystem sync) exits, before

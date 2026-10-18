@@ -592,6 +592,34 @@ impl HubContext {
         reconcile_files_with_index(&self.repo, &self.index, &files, project_root).await
     }
 
+    /// Remove only explicitly retired, project-relative single-file
+    /// dependencies. Index removals notify the SPA and invalidate a stale
+    /// snapshot; no unrelated sibling files are discovered or removed.
+    pub async fn retire_preview_dependencies(
+        &self,
+        retired: &[PathBuf],
+        active_file: &Path,
+    ) -> Result<usize> {
+        let Some(ref sync_state_mutex) = self.sync_state else {
+            return Ok(0);
+        };
+        let _sync_guard = sync_state_mutex.lock().await;
+        let mut removed = 0;
+        for path in retired {
+            if path.as_path() == active_file || path.as_os_str().is_empty()
+                || !path.components().all(|part| matches!(part, Component::Normal(_)))
+            {
+                continue;
+            }
+            let Some(path_str) = path.to_str() else { continue };
+            if self.index.has_file(path_str) {
+                self.index.remove_file(path_str)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Get the auth configuration, if auth is enabled.
     pub fn auth_config(&self) -> Option<&AuthConfig> {
         self.auth_config.as_ref()
@@ -1045,6 +1073,8 @@ async fn reconcile_files_with_index(
     project_root: &Path,
 ) -> Result<usize> {
     let mut added = 0;
+    let canonical_root = project_root.canonicalize()
+        .map_err(|e| Error::Sync(format!("cannot resolve project root: {e}")))?;
 
     // Reconcile text files (config + qmd)
     for file_path in project_files.text_files() {
@@ -1056,9 +1086,14 @@ async fn reconcile_files_with_index(
             continue;
         }
 
-        // Read file content from disk
+        // Resolve containment immediately before reading. In particular,
+        // never reuse an earlier enrollment-time symlink validation.
         let full_path = project_root.join(file_path);
-        let file_content = match std::fs::read_to_string(&full_path) {
+        let canonical = match full_path.canonicalize() {
+            Ok(path) if path.starts_with(&canonical_root) && path.is_file() => path,
+            _ => { warn!(path = %path_str, "Skipping unsafe or missing text dependency"); continue; }
+        };
+        let file_content = match std::fs::read_to_string(&canonical) {
             Ok(content) => content,
             Err(e) => {
                 warn!(path = %path_str, error = %e, "Failed to read text file, skipping");
@@ -1103,9 +1138,13 @@ async fn reconcile_files_with_index(
             continue;
         }
 
-        // Read file content from disk as bytes
+        // Revalidate containment at the read site after asynchronous work.
         let full_path = project_root.join(file_path);
-        let file_content = match std::fs::read(&full_path) {
+        let canonical = match full_path.canonicalize() {
+            Ok(path) if path.starts_with(&canonical_root) && path.is_file() => path,
+            _ => { warn!(path = %path_str, "Skipping unsafe or missing binary dependency"); continue; }
+        };
+        let file_content = match std::fs::read(&canonical) {
             Ok(content) => content,
             Err(e) => {
                 warn!(path = %path_str, error = %e, "Failed to read binary file, skipping");
