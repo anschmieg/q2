@@ -51,3 +51,29 @@ cache or M2 checkpoint reuse is introduced.
 **Acceptance:** full CI green, benchmark equality and measured scaling
 reported. No default-branch edits, other repositories, agent delegation,
 or upstream PR.
+
+## Single-file recovery: explicit lifetime and trust limits
+
+- Dependency retirement removes obsolete paths from the **live index** and
+  therefore from future VFS membership/sync events. It does not delete the
+  underlying samod/Automerge document; samod currently has no per-document
+  garbage-collection API. The native `q2 preview` hub uses an ephemeral
+  per-session data directory. Content already delivered to a collaborating
+  peer is not revocable by removing its index entry. Durable document GC and
+  peer revocation are outside M1.
+- Native dependency enrollment verifies a canonical in-project path and
+  rechecks containment at the read/sync site. Canonicalization followed by a
+  file open is **not an atomic filesystem operation**. A malicious local actor
+  simultaneously replacing symlinks/directories could exploit a TOCTOU window.
+  The supported security boundary for M1 is a local project directory without
+  adversarial concurrent filesystem writers; network peers cannot directly
+  alter host symlinks unless the host separately grants that capability.
+  Closing this OS-level race requires descriptor-relative contained opens
+  and corresponding descriptor-based sync/write plumbing across platforms,
+  not an unrelated patch to Quarto's global sync algorithm.
+- A partial discovery failure must never retire still-existing dependencies.
+  Missing dependencies that genuinely disappear may be retired so the browser
+  receives a missing-include error and can recover after file re-creation.
+
+The first two bullets are **accepted limitations**, not claims of complete
+storage reclamation or race-free filesystem confinement.
