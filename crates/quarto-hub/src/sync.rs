@@ -552,8 +552,23 @@ pub async fn sync_file_by_path(
         }
     };
 
+    // Path enrollment may have happened before a symlink replacement.
+    // Resolve again after awaits and pass the in-tree canonical path to the
+    // synchronous reader; never sync bytes from an out-of-root target.
+    let real_root = project_root
+        .canonicalize()
+        .map_err(|e| Error::Sync(format!("cannot resolve sync root: {e}")))?;
+    let real_file = file_path
+        .canonicalize()
+        .map_err(|e| Error::Sync(format!("cannot resolve synced file: {e}")))?;
+    if !real_file.starts_with(&real_root) || !real_file.is_file() {
+        return Err(Error::Sync(format!(
+            "sync path escapes root: {}",
+            file_path.display()
+        )));
+    }
     // Sync the document (auto-detects text vs binary)
-    let result = sync_document_auto(&doc_handle, file_path, sync_state, policy)?;
+    let result = sync_document_auto(&doc_handle, &real_file, sync_state, policy)?;
 
     // Save sync state
     sync_state.save()?;

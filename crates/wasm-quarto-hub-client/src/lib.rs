@@ -38,6 +38,10 @@ use quarto_system_runtime::{SystemRuntime, WasmRuntime};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+mod live_dependencies;
+#[cfg(feature = "m1-benchmark")]
+mod m1_benchmark;
+
 // Global runtime instance for VFS operations.
 // Stored as Arc so it can be shared with the rendering pipeline.
 static RUNTIME: OnceLock<Arc<WasmRuntime>> = OnceLock::new();
@@ -710,6 +714,14 @@ struct RenderResponse {
     /// responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     comments: Option<Vec<quarto_core::document_profile::JsonComment>>,
+    /// Complete input-file paths affecting the active *document* render,
+    /// derived from the authoritative core ProjectDependencyGraph snapshot.
+    /// Paths are project-relative and match sync-client file events.
+    /// Absent on failures/incomplete profiles; absence means unknown and
+    /// must disable selective filtering. Future finer-grained render units
+    /// can use the same file identity contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render_inputs: Option<Vec<String>>,
 }
 
 /// Build the `RenderResponse.comments` summary from a document
@@ -2579,7 +2591,7 @@ async fn render_single_doc_to_response(
     // (RenderContext + resolver) and tail (VFS artifact flush +
     // RenderResponse construction with `skip_serializing_if = None`
     // on the unused payload field).
-    let (html, ast_json, untransformed_ast_json, diagnostics, source_context) = match format
+    let (html, ast_json, untransformed_ast_json, diagnostics, source_context, render_metadata) = match format
         .pipeline_kind
     {
         Some("preview") => {
@@ -2599,6 +2611,7 @@ async fn render_single_doc_to_response(
                     out.untransformed_ast_json,
                     out.diagnostics,
                     out.source_context,
+                    Some(out.render_metadata),
                 ),
                 Err(e) => return render_error_response(e),
             }
@@ -2615,6 +2628,7 @@ async fn render_single_doc_to_response(
                     None,
                     out.diagnostics,
                     out.source_context,
+                    None,
                 ),
                 Err(e) => return render_error_response(e),
             }
@@ -2645,6 +2659,22 @@ async fn render_single_doc_to_response(
     // bd-0rsk07il: the profile was bridged onto the RenderContext by
     // `run_pipeline` (via the `UnwrapProfileStage` stash).
     let comments = comments_to_json(ctx.document_profile.as_ref(), &source_context);
+    // Single-file preview uses the same core graph interface, but only
+    // the active document has a profile. An unavailable profile is unknown.
+    let render_inputs = ctx.document_profile.as_ref().and_then(|profile| {
+        // Discovery canonicalizes project.dir, but the single-file caller may
+        // supply only a relative source name. Compare equivalent identities.
+        // If the active path cannot be resolved, fail open rather than filter.
+        let active_canonical = runtime.canonicalize(path).ok()?;
+        let index = quarto_core::project::index::ProjectIndex::new(vec![profile.clone()]);
+        live_dependencies::render_input_paths(
+            &index,
+            render_metadata.as_ref()?,
+            &project.dir,
+            &active_canonical,
+            Some(&source_context),
+        )
+    });
     serde_json::to_string(&RenderResponse {
         success: true,
         error: None,
@@ -2662,6 +2692,7 @@ async fn render_single_doc_to_response(
         pass1_failures: None,
         theme_fingerprint,
         comments,
+        render_inputs,
     })
     .unwrap()
 }
@@ -2778,7 +2809,7 @@ async fn render_project_active_page_to_response(
     // Likewise captured before the move: reported on the response so hosts
     // can tell which format the render actually ran with (bd-kltzdhle).
     let resolved_format = format.target_format.clone();
-    let summary = match kind {
+    let (summary, pass1_index) = match kind {
         Some("preview") => {
             let mut renderer = RenderToPreviewAstRenderer::new("/.quarto/project-artifacts");
             // bd-lucp / bd-5yff4: when captures are present, attach the
@@ -2800,8 +2831,9 @@ async fn render_project_active_page_to_response(
                 renderer,
             )
             .with_mode(RenderMode::ActivePage(active_canonical.clone()));
-            match pipeline.run().await {
-                Ok(s) => s,
+            let finished = pipeline.run().await;
+            match finished {
+                Ok(summary) => (summary, pipeline.last_project_index()),
                 Err(e) => return render_error_response(e),
             }
         }
@@ -2822,8 +2854,9 @@ async fn render_project_active_page_to_response(
                 renderer,
             )
             .with_mode(RenderMode::ActivePage(active_canonical.clone()));
-            match pipeline.run().await {
-                Ok(s) => s,
+            let finished = pipeline.run().await;
+            match finished {
+                Ok(summary) => (summary, pipeline.last_project_index()),
                 Err(e) => return render_error_response(e),
             }
         }
@@ -2862,6 +2895,24 @@ async fn render_project_active_page_to_response(
             }
             return error_response("Project render produced no output for the active page");
         }
+    };
+
+    // Compute the complete dependency snapshot using the SAME Pass-1 index
+    // and the active Pass-2 AST metadata/source context. This is crucial:
+    // project defaults alone miss page-local sidebars and source-relative
+    // authored links. Unknown metadata or failed sibling profiles fail open.
+    let render_inputs = if summary.pass1_failures.is_empty() {
+        pass1_index.as_ref().and_then(|index| {
+            live_dependencies::render_input_paths(
+                index,
+                active_output.render_metadata.as_ref()?,
+                &project.dir,
+                &active_canonical,
+                Some(&active_output.source_context),
+            )
+        })
+    } else {
+        None
     };
 
     // Populate VFS with the active page's Page-scoped artifacts.
@@ -2970,6 +3021,7 @@ async fn render_project_active_page_to_response(
         },
         theme_fingerprint: theme_fingerprint_from_output,
         comments,
+        render_inputs,
     })
     .unwrap()
 }
@@ -3014,6 +3066,7 @@ fn error_response(msg: impl Into<String>) -> String {
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }
@@ -3041,6 +3094,7 @@ fn render_error_response(e: QuartoError) -> String {
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }
@@ -3081,6 +3135,7 @@ fn pass_failure_response(
         pass1_failures: None,
         theme_fingerprint: None,
         comments: None,
+        render_inputs: None,
     })
     .unwrap()
 }

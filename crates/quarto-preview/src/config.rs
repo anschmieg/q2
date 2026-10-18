@@ -331,6 +331,9 @@ pub struct SingleFileDeps {
     pub qmd_files: Vec<std::path::PathBuf>,
     /// Referenced image assets (project-root-relative). Synced as **binary**.
     pub binary_files: Vec<std::path::PathBuf>,
+    /// False when parsing or include expansion failed. A partial discovery
+    /// must never authorize retirement of still-existing dependencies.
+    pub complete: bool,
 }
 
 /// Resolve a single-file deck's full transitive static dependency closure
@@ -409,7 +412,7 @@ pub fn resolve_single_file_deps(
     // never re-triggers a render. `expand_document_includes` populates
     // `recorded_includes` for every file the walk touched either way, so
     // the failure is deliberately ignored.
-    let _ = expand_document_includes(&mut doc, &mut ctx);
+    let mut includes_complete = expand_document_includes(&mut doc, &mut ctx).is_ok();
 
     // Spelled through the shared function: `expand_patterns` below checks
     // containment against runtime-canonical matches.
@@ -510,6 +513,10 @@ pub fn resolve_single_file_deps(
                         binary_files.push(rel);
                     }
                 }
+            } else {
+                // An invalid resource pattern cannot justify dropping
+                // dependencies from the previous complete closure.
+                includes_complete = false;
             }
         }
     }
@@ -564,6 +571,7 @@ pub fn resolve_single_file_deps(
     SingleFileDeps {
         qmd_files,
         binary_files,
+        complete: includes_complete,
     }
 }
 
@@ -613,6 +621,7 @@ mod tests {
             SingleFileDeps {
                 qmd_files: vec![std::path::PathBuf::from("part.qmd")],
                 binary_files: vec![std::path::PathBuf::from("inc.png")],
+                complete: true,
             }
         );
     }
@@ -689,6 +698,7 @@ mod tests {
                     std::path::PathBuf::from("b.qmd"),
                 ],
                 binary_files: vec![std::path::PathBuf::from("c.png")],
+                complete: true,
             }
         );
     }
@@ -876,6 +886,7 @@ mod tests {
             SingleFileDeps {
                 qmd_files: vec![],
                 binary_files: vec![std::path::PathBuf::from("logo.png")],
+                complete: true,
             }
         );
     }

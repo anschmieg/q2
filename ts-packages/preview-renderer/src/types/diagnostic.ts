@@ -119,6 +119,17 @@ export interface RenderResponse {
   /** Sibling-page Pass-1 failures (bd-rqba). */
   pass1_failures?: Pass1Failure[];
   /**
+   * Complete input-file snapshot for this document render, generated from
+   * quarto-core's ProjectDependencyGraph using its actual Pass-1 profiles.
+   * Paths are project-relative and match live sync file-change events.
+   * Omitted on errors or when dependency coverage is unknown: consumers
+   * MUST fail open (re-render rather than suppress the change).
+   *
+   * The wire surface is document-level today; finer-grained render-unit
+   * dependencies may be added without changing these file identities.
+   */
+  render_inputs?: string[];
+  /**
    * Compiled theme CSS fingerprint (Plan 2A item 11). Recovered
    * from the `css:theme:<fingerprint>` artifact key. The hub-client
    * iframe wrapper dedupes blob-URL re-mints when this hasn't

@@ -38,6 +38,7 @@ pub mod render_download;
 pub mod render_flags;
 pub mod render_helper;
 pub mod share;
+mod single_file_dep_refresh;
 pub mod static_mode;
 
 pub use render_flags::RenderFlags;
@@ -408,6 +409,15 @@ where
         });
     }
     let hub_config = build_hub_config(&config);
+    let initially_tracked: Vec<PathBuf> = hub_config
+        .single_file_text_deps
+        .iter()
+        .chain(hub_config.single_file_assets.iter())
+        .cloned()
+        .collect();
+    // Keep the refresh handle so shutdown waits for file/index mutations.
+    let refresh_task = Arc::new(std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
+    let refresh_task_for_ready = refresh_task.clone();
 
     // Phase C.1 hook: once the hub context is ready, spawn the eager
     // capture driver on a blocking worker so the multi-threaded tokio
@@ -426,6 +436,11 @@ where
     // preset's relay wait never delays the host's own preview, and the
     // join banner prints after the boot URL in every UI mode.
     let (share_ready_tx, share_ready_rx) = tokio::sync::watch::channel(false);
+    // The existing single-file watcher observes only the initial closure.
+    // Refresh render-derived dependencies without widening its watch scope.
+    let (dependency_refresh_stop_tx, dependency_refresh_stop_rx) =
+        tokio::sync::watch::channel(false);
+    let single_file_refresh = config.project_root.clone().zip(config.single_file.clone());
 
     let registry_for_on_ready = engine_registry.clone();
     let cache_dir_for_on_ready = cache_dir.clone();
@@ -457,6 +472,18 @@ where
                 tracing::warn!(error = %e, "eager capture driver failed");
             }
         });
+        if let Some((root, deck)) = single_file_refresh {
+            let handle = tokio::spawn(single_file_dep_refresh::run(
+                ctx.clone(),
+                root,
+                deck,
+                initially_tracked,
+                dependency_refresh_stop_rx,
+            ));
+            *refresh_task_for_ready
+                .lock()
+                .expect("preview refresh task lock") = Some(handle);
+        }
         // Fire the extra hook after the driver is enqueued so callers
         // can rely on it being either in-flight or already done.
         extra_on_ready(ctx);
@@ -544,6 +571,23 @@ where
         Some(on_file_changed),
     )
     .await;
+    // The refresh loop owns a HubContext clone. Stop it explicitly so no
+    // polling survives a preview server's graceful shutdown.
+    let _ = dependency_refresh_stop_tx.send(true);
+    let refresh_handle = refresh_task
+        .lock()
+        .expect("preview refresh task lock")
+        .take();
+    if let Some(mut handle) = refresh_handle {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("single-file dependency refresh did not stop promptly; aborting");
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
 
     // bd-jhvkwosw: tunnel teardown joins the graceful-shutdown path —
     // after the server (and its final filesystem sync) exits, before

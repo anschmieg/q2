@@ -216,6 +216,9 @@ pub struct AstOutput {
 /// is no longer interesting to callers; only the serialized form is.
 #[derive(Debug)]
 pub struct PreviewAstOutput {
+    /// Metadata actually consumed by the active Pass-2 preview render,
+    /// including frontmatter and inherited/project config.
+    pub render_metadata: quarto_pandoc_types::ConfigValue,
     /// The transformed Pandoc AST, serialized as JSON via
     /// `pampa::writers::json::write_with_config` with
     /// `include_inline_locations: true`. Ready to ship to the
@@ -2070,6 +2073,7 @@ pub async fn render_qmd_to_preview_ast(
     // into per-cell locations. Byte-identical to the previous single-file
     // context for plain .qmd.
     let source_context = ast.source_context;
+    let render_metadata = ast.ast.meta.clone();
 
     // Build an `ASTContext` from the source context — the JSON
     // writer needs this to emit `[file_id, start, end]` source-
@@ -2114,6 +2118,7 @@ pub async fn render_qmd_to_preview_ast(
         untransformed_ast_json,
         diagnostics,
         source_context,
+        render_metadata,
     })
 }
 

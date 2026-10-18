@@ -1,0 +1,157 @@
+name: Q2 core-driven live preview invalidation
+on:
+  push:
+    branches: [research/q2-core-live-invalidation, review/q2-m1-core-live-invalidation, contrib/q2-m1-core-live-invalidation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: q2-core-live-invalidation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify checkout
+        run: |
+          git rev-parse HEAD
+          cat rust-toolchain.toml
+      - uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: q2-core-live-invalidation
+          cache-on-failure: true
+      - name: Verify Rust source formatting
+        run: cargo fmt --all -- --check
+      - name: Test core document and included-file dependency graph
+        run: cargo test -p quarto-core --lib project::dependency_graph::tests -- --nocapture
+      - name: Test ordered sidebar membership and auto expansion
+        run: cargo test -p quarto-core --lib project::sidebar_membership::tests -- --nocapture
+      - name: Verify optional WASM microbenchmark Rust formatting
+        run: rustfmt --edition 2021 --check crates/wasm-quarto-hub-client/src/m1_benchmark.rs
+      - name: Test WASM adapter core graph snapshots
+        # Host-test the actual pure Rust adapter source, not the wasm32-only
+        # client crate (WasmRuntime / async Sass cannot link natively).
+        run: cargo test -p quarto-core --test wasm_live_dependencies -- --nocapture
+      - name: Verify narrow single-file dependency enrollment on the native hub
+        run: cargo test -p quarto-hub --lib preview_dependency -- --nocapture
+      - name: Record informational M1.1 graph performance baseline
+        run: cargo test -p quarto-core --test live_invalidation_perf -- --nocapture
+
+  spa-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked workspace dependencies
+        run: npm ci
+      - name: Test SPA dependency filters, request races, and file membership
+        run: npm run test --workspace=q2-preview-spa -- src/shouldRerenderForTextChange.test.ts
+      - name: Test component dependency request races (jsdom integration)
+        run: npm run test:integration --workspace=q2-preview-spa -- src/PreviewApp.integration.test.tsx
+      - name: Typecheck preview SPA
+        run: npm run typecheck --workspace=q2-preview-spa
+
+  browser-transitive-e2e:
+    name: Chromium real-preview core graph E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Free ephemeral runner disk
+        uses: endersonmenezes/free-disk-space@7901478139cff6e9d44df5972fd8ab8fcade4db1
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - name: Install native and WASM prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libc6-dev gcc-multilib minisign
+          curl --fail --location --retry 3 -o tree-sitter.gz https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.8/tree-sitter-linux-x86.gz
+          gunzip tree-sitter.gz
+          sudo install -m 0755 tree-sitter /usr/local/bin/tree-sitter
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-04-28
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: q2-m1-preview-browser
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked workspace dependencies
+        run: npm ci
+      - name: Install WASM tools
+        shell: bash
+        run: |
+          # wasm-bindgen 0.2.108 must resolve compatible walrus (no --locked).
+          cargo install --version 0.2.108 wasm-bindgen-cli
+          npm install -g binaryen@132.0.0
+          wasm-bindgen --version
+      - name: Build browser WASM from current Rust
+        working-directory: hub-client
+        env:
+          # Adds only a test export to the actual -Oz optimized WASM used
+          # by the browser. Production builds never enable this feature.
+          Q2_M1_BENCH: "1"
+        run: npm run build:wasm
+      - name: Build trace viewer
+        working-directory: trace-viewer
+        run: npm run build
+      - name: Build current preview SPA
+        working-directory: q2-preview-spa
+        run: npm run build
+      - name: Build native q2 with freshly embedded SPA and WASM
+        run: cargo build --bin q2
+      - name: Install Chromium
+        working-directory: q2-preview-spa
+        run: npx playwright install --with-deps chromium
+      - name: Run real Chromium core-graph live preview and existing regression tests
+        working-directory: q2-preview-spa
+        env:
+          Q2_M1_BENCH: "1"
+        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0
+      - name: Archive Chromium test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q2-m1-preview-browser-evidence
+          path: |
+            q2-preview-spa/test-results/
+            q2-preview-spa/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14

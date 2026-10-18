@@ -22,12 +22,16 @@
 //! so the dependency-graph view of sidebar membership is consistent
 //! with what the rendered sidebar actually displays.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use quarto_config::resolve_website_value;
 use quarto_error_reporting::DiagnosticMessage;
 use quarto_navigation::{Sidebar, SidebarEntry};
 use quarto_pandoc_types::ConfigValue;
+use quarto_source_map::SourceContext;
+
+use crate::transforms::resolve_hrefs;
 
 use crate::project::index::ProjectIndex;
 use crate::transforms::sidebar_auto::expand_auto;
@@ -66,14 +70,43 @@ pub fn resolve_sidebar_membership(
     index: &ProjectIndex,
     diagnostics: &mut Vec<DiagnosticMessage>,
 ) -> Vec<ResolvedSidebar> {
+    resolve_sidebar_membership_inner(meta, index, diagnostics, None)
+}
+
+/// Live-preview variant: resolve authored hrefs against the declaring
+/// document's SourceContext, exactly as SidebarGenerateTransform does.
+/// The project-level graph builder continues to use its existing API.
+pub fn resolve_sidebar_membership_for_render(
+    meta: &ConfigValue,
+    index: &ProjectIndex,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+    source_context: &SourceContext,
+    project_root: &std::path::Path,
+) -> Vec<ResolvedSidebar> {
+    resolve_sidebar_membership_inner(
+        meta,
+        index,
+        diagnostics,
+        Some((source_context, project_root)),
+    )
+}
+
+fn resolve_sidebar_membership_inner(
+    meta: &ConfigValue,
+    index: &ProjectIndex,
+    diagnostics: &mut Vec<DiagnosticMessage>,
+    source: Option<(&SourceContext, &std::path::Path)>,
+) -> Vec<ResolvedSidebar> {
     let Some(sidebar_cv) = resolve_website_value(meta, "sidebar") else {
         return Vec::new();
     };
 
-    let sidebars = Sidebar::parse_list_from_config(&sidebar_cv);
-    sidebars
+    Sidebar::parse_list_from_config(&sidebar_cv)
         .into_iter()
         .map(|mut sidebar| {
+            if let Some((context, root)) = source {
+                resolve_hrefs(&mut sidebar.contents, context, root);
+            }
             expand_auto(&mut sidebar, index, diagnostics);
             ResolvedSidebar {
                 id: sidebar.id.clone(),
@@ -88,13 +121,13 @@ pub fn resolve_sidebar_membership(
 /// order. Skips entries that don't reference a page (separators,
 /// pure-text headings, sections with no href).
 fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
-    fn push_unique(out: &mut Vec<PathBuf>, p: PathBuf) {
-        if !out.contains(&p) {
+    fn push_unique(out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, p: PathBuf) {
+        if seen.insert(p.clone()) {
             out.push(p);
         }
     }
 
-    fn walk(entries: &[SidebarEntry], out: &mut Vec<PathBuf>) {
+    fn walk(entries: &[SidebarEntry], out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
         for entry in entries {
             match entry {
                 SidebarEntry::Link { item } => {
@@ -102,7 +135,9 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
                         // External URLs and fragment-only anchors
                         // aren't project pages; skip.
                         if !is_external_or_anchor(href) {
-                            push_unique(out, PathBuf::from(href));
+                            if let Some(source) = source_path_from_href(href) {
+                                push_unique(out, seen, source);
+                            }
                         }
                     }
                 }
@@ -110,9 +145,11 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
                     if let Some(h) = href.as_deref()
                         && !is_external_or_anchor(h)
                     {
-                        push_unique(out, PathBuf::from(h));
+                        if let Some(source) = source_path_from_href(h) {
+                            push_unique(out, seen, source);
+                        }
                     }
-                    walk(contents, out);
+                    walk(contents, out, seen);
                 }
                 SidebarEntry::Separator | SidebarEntry::Heading(_) | SidebarEntry::Auto(_) => {}
             }
@@ -120,8 +157,22 @@ fn collect_member_paths(entries: &[SidebarEntry]) -> Vec<PathBuf> {
     }
 
     let mut out = Vec::new();
-    walk(entries, &mut out);
+    let mut seen = HashSet::new();
+    walk(entries, &mut out, &mut seen);
     out
+}
+
+/// Match the same document source key as navigation's HTML href resolver:
+/// split the query/fragment and strip a site-root slash before indexing.
+/// Do not silently normalize .. aliases — the WASM boundary must fail open
+/// when a path cannot be expressed as a trustworthy sync identity.
+fn source_path_from_href(href: &str) -> Option<PathBuf> {
+    if is_external_or_anchor(href) {
+        return None;
+    }
+    let path = href.split(['?', '#']).next().unwrap_or("");
+    let path = path.strip_prefix('/').unwrap_or(path);
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// Cheap classifier: a sidebar entry's `href` that *isn't* a
@@ -200,6 +251,48 @@ mod tests {
             vec![PathBuf::from("a.qmd"), PathBuf::from("b.qmd")]
         );
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn repeated_nested_members_keep_first_appearance_order() {
+        let nested = config_map(vec![
+            ("section", s("Nested")),
+            ("contents", arr(vec![s("a.qmd"), s("c.qmd"), s("a.qmd")])),
+        ]);
+        let sidebar = config_map(vec![(
+            "contents",
+            arr(vec![s("a.qmd"), nested, s("b.qmd"), s("a.qmd")]),
+        )]);
+        let mut meta = ConfigValue::default();
+        meta.insert_path(&["website", "sidebar"], sidebar);
+        let index = make_index_with(&["a.qmd", "b.qmd", "c.qmd"]);
+        let mut diagnostics = Vec::new();
+        let sidebars = resolve_sidebar_membership(&meta, &index, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            sidebars[0].members,
+            vec![
+                PathBuf::from("a.qmd"),
+                PathBuf::from("c.qmd"),
+                PathBuf::from("b.qmd"),
+            ],
+        );
+    }
+
+    #[test]
+    fn sidebar_source_links_match_rendered_href_keys() {
+        assert_eq!(
+            source_path_from_href("/docs/about.qmd#intro?ref=sidebar"),
+            Some(PathBuf::from("docs/about.qmd"))
+        );
+        assert_eq!(
+            source_path_from_href("docs/about.qmd?ref=x#intro"),
+            Some(PathBuf::from("docs/about.qmd"))
+        );
+        assert_eq!(source_path_from_href("#intro"), None);
+        assert_eq!(source_path_from_href("https://example.com/a.qmd"), None);
+        assert_eq!(source_path_from_href("//example.com/a.qmd"), None);
+        assert_eq!(source_path_from_href("?ref=x"), None);
     }
 
     #[test]

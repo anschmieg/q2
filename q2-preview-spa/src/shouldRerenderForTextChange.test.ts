@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { shouldRerenderForTextChange } from './PreviewApp';
+import { decodeRenderInputs, shouldRerenderForTextChange } from './PreviewApp';
 
 describe('shouldRerenderForTextChange', () => {
   const deps = new Set(['included.qmd', 'snippets/part.md']);
@@ -44,8 +44,7 @@ describe('shouldRerenderForTextChange', () => {
   });
 
   it('re-renders when the active .md page itself is edited', () => {
-    // The deps fetch always seeds the set with the active page itself
-    // (PreviewApp's "edit my own page" convention) — mirror that shape.
+    // The core graph snapshot always includes the active source page.
     const mdDeps = new Set(['admin/index.md', 'snippets/part.md']);
     expect(
       shouldRerenderForTextChange('admin/index.md', 'admin/index.md', mdDeps),
@@ -55,5 +54,32 @@ describe('shouldRerenderForTextChange', () => {
   it('is case-insensitive on the extension', () => {
     expect(shouldRerenderForTextChange('NOTES.MD', 'index.qmd', deps)).toBe(false);
     expect(shouldRerenderForTextChange('OTHER.QMD', 'index.qmd', deps)).toBe(false);
+  });
+});
+
+describe('core render-input snapshot validation', () => {
+  it('accepts a complete snapshot and filters unrelated QMD edits', () => {
+    const deps = decodeRenderInputs(
+      ['index.qmd', 'partials/outer.qmd', 'partials/leaf.qmd'],
+      'index.qmd',
+    );
+    expect(deps).not.toBeNull();
+    expect(shouldRerenderForTextChange('partials/leaf.qmd', 'index.qmd', deps)).toBe(true);
+    expect(shouldRerenderForTextChange('unrelated.qmd', 'index.qmd', deps)).toBe(false);
+  });
+
+  it('fails open on absent, malformed, or wrong-document snapshots', () => {
+    for (const invalid of [
+      undefined, null, [], ['other.qmd'], ['index.qmd', 1],
+      ['index.qmd', '/project/outside.qmd'],
+      ['index.qmd', 'a/../b.qmd'],
+      ['index.qmd', './partials/leaf.qmd'],
+      ['index.qmd', 'partials//leaf.qmd'],
+      ['index.qmd', 'sub\\\\alias.qmd'],
+    ]) {
+      const deps = decodeRenderInputs(invalid, 'index.qmd');
+      expect(deps).toBeNull();
+      expect(shouldRerenderForTextChange('other.qmd', 'index.qmd', deps)).toBe(true);
+    }
   });
 });
