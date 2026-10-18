@@ -9,6 +9,10 @@ description = "WASM client for quarto-hub web frontend"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# CI-only microbenchmark export; absent from ordinary production WASM builds.
+m1-benchmark = []
+
 [dependencies]
 pampa = { path = "../pampa", default-features = false, features = ["lua-filter"] }
 wasm-c-shim = { path = "../wasm-c-shim" }
@@ -61,6 +65,9 @@ wasm-bindgen-futures = { path = "../wasm-bindgen-futures-patch" }
 # c_shim.rs is the single source of truth for C stdlib symbols. See
 # ../../claude-notes/plans/2026-04-20-wasm-shim-merge.md.
 tree-sitter-language = { path = "../tree-sitter-language-wasm-shim" }
+# Mirror root workspace Jupyter fork patches.
+runtimelib = { git = "https://github.com/cscheid/runtimed", rev = "fc58eb48139a30cc559ac5973cb6debb00375b88" }
+jupyter-protocol = { git = "https://github.com/cscheid/runtimed", rev = "fc58eb48139a30cc559ac5973cb6debb00375b88" }
 
 # Size-tuned for the live-share join payload (plan
 # `claude-notes/plans/2026-08-13-live-share-local-spa-assets.md`, Phase 1;

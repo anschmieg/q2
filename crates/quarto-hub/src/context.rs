@@ -3,7 +3,7 @@
 //! Contains the automerge repo and storage manager.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use automerge::{Automerge, ObjType, ROOT, transaction::Transactable};
@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use crate::access_policy::AuditAccessPolicy;
 use crate::auth::{self, AuthConfig, AuthState, OidcClaims};
 use crate::discovery::ProjectFiles;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::index::{IndexDocument, load_or_create_index};
 use crate::peer::spawn_peer_connection;
 use crate::resource::{create_binary_document, detect_mime_type};
@@ -539,6 +539,57 @@ impl HubContext {
             self.disk_write_policy,
         )
         .await
+    }
+
+    /// Enroll newly discovered single-file preview dependencies into the
+    /// existing Automerge index. Only render-derived closure files are eligible:
+    /// no directory discovery, no unrelated siblings, no path escape.
+    ///
+    /// Reuses startup reconciliation. The sync-state lock serializes this with
+    /// filesystem sync, preventing duplicate file enrollment under concurrent
+    /// refreshes. Existing Automerge documents remain unchanged.
+    pub async fn enroll_preview_dependencies(
+        &self,
+        text_files: &[PathBuf],
+        binary_files: &[PathBuf],
+    ) -> Result<usize> {
+        let Some(project_root) = self.storage.project_root() else {
+            return Ok(0);
+        };
+        let Some(ref sync_state_mutex) = self.sync_state else {
+            return Ok(0);
+        };
+        let canonical_root = project_root
+            .canonicalize()
+            .map_err(|e| Error::Sync(format!("cannot resolve preview project root: {e}")))?;
+        let permitted = |relative: &PathBuf| {
+            !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
+                && project_root
+                    .join(relative)
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|p| p.starts_with(&canonical_root) && p.is_file())
+        };
+        let files = ProjectFiles::default()
+            .with_text_deps(
+                text_files
+                    .iter()
+                    .filter(|p| permitted(p))
+                    .cloned()
+                    .collect(),
+            )
+            .with_binary_files(
+                binary_files
+                    .iter()
+                    .filter(|p| permitted(p))
+                    .cloned()
+                    .collect(),
+            );
+        let _sync_guard = sync_state_mutex.lock().await;
+        reconcile_files_with_index(&self.repo, &self.index, &files, project_root).await
     }
 
     /// Get the auth configuration, if auth is enabled.
@@ -1181,6 +1232,91 @@ mod tests {
         assert!(
             files.iter().any(|(f, _)| f.as_str() == "part.qmd"),
             "included text dep missing from index: {files:?}"
+        );
+    }
+
+    /// An added include may only enroll files whose resolved canonical path
+    /// is inside the single-file project's root. A stale or malicious path
+    /// must never cause an unrelated sibling or an out-of-tree file to sync.
+    #[tokio::test]
+    async fn preview_dependency_enrollment_is_narrow_and_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join("nested")).unwrap();
+        std::fs::write(project.join("main.qmd"), "# Main").unwrap();
+        std::fs::write(project.join("later.qmd"), "Later include").unwrap();
+        std::fs::write(project.join("nested/second.qmd"), "Nested include").unwrap();
+        std::fs::write(project.join("image.png"), b"binary").unwrap();
+        std::fs::write(project.join("unrelated.qmd"), "Unrelated").unwrap();
+        let outside = temp.path().join("private.qmd");
+        std::fs::write(&outside, "not a project file").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, project.join("symlink.qmd")).unwrap();
+
+        let ctx = HubContext::new(
+            StorageManager::new(&project).unwrap(),
+            HubConfig {
+                single_file: Some(PathBuf::from("main.qmd")),
+                ..HubConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.index().get_all_files().len(), 1);
+
+        let added = ctx
+            .enroll_preview_dependencies(
+                &[
+                    PathBuf::from("later.qmd"),
+                    PathBuf::from("nested/second.qmd"),
+                    PathBuf::from("later.qmd"), // duplicate
+                    PathBuf::from("../private.qmd"),
+                    PathBuf::from("missing.qmd"),
+                    PathBuf::from("unrelated/../unrelated.qmd"),
+                    PathBuf::from("symlink.qmd"),
+                ],
+                &[PathBuf::from("image.png")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(added, 3);
+        let files = ctx.index().get_all_files();
+        assert_eq!(
+            files.len(),
+            4,
+            "only the deck and three resolved dependencies"
+        );
+        for expected in ["main.qmd", "later.qmd", "nested/second.qmd", "image.png"] {
+            assert!(files.contains_key(expected), "missing {expected}");
+        }
+        for rejected in [
+            "unrelated.qmd",
+            "private.qmd",
+            "../private.qmd",
+            "symlink.qmd",
+        ] {
+            assert!(!files.contains_key(rejected), "enrolled {rejected}");
+        }
+
+        assert_eq!(
+            ctx.enroll_preview_dependencies(
+                &[
+                    PathBuf::from("later.qmd"),
+                    PathBuf::from("nested/second.qmd")
+                ],
+                &[PathBuf::from("image.png")],
+            )
+            .await
+            .unwrap(),
+            0,
+            "re-running discovery must reuse existing Automerge identities",
+        );
+        assert!(
+            ctx.sync_file(&project.join("later.qmd"))
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 

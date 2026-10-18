@@ -977,6 +977,11 @@ pub struct ProjectPipeline<'a, R: Pass2Renderer> {
     /// Explicit Pass-2 worker-count override (`with_jobs`). `None`
     /// ⇒ use the `QUARTO_JOBS`/auto default via [`worker_count`].
     jobs: Option<usize>,
+    /// The Pass-1 profile index from the most recent run, retained as a
+    /// cheap Arc clone for live-render invalidation planning. Consumers
+    /// build dependency snapshots from already-profiled inputs rather
+    /// than reparsing documents or rediscovering project files.
+    last_index: Option<Arc<ProjectIndex>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1408,6 +1413,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
             renderer,
             fail_fast: false,
             jobs: None,
+            last_index: None,
         }
     }
 
@@ -1442,6 +1448,15 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         &self.project_artifacts
     }
 
+    /// Last complete Pass-1 project index, if the pipeline reached the
+    /// profiling barrier. The caller must inspect render failures before
+    /// using it to filter events; an incomplete index is not authoritative.
+    ///
+    /// This is a read-only snapshot. Re-running the pipeline refreshes it.
+    pub fn last_project_index(&self) -> Option<Arc<ProjectIndex>> {
+        self.last_index.clone()
+    }
+
     /// Run Pass 1 → `pre_render` → Pass 2 → `post_render`.
     ///
     /// Cross-platform since Phase 9 sub-phase 9.2: every step
@@ -1458,6 +1473,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         // explicit `registry.shutdown_all()` (not Drop) to reap TS-engine Node
         // subprocesses at end-of-render. Best-effort: log at WARN and continue;
         // the host's own Drop is the backstop if this errs.
+        self.last_index = None;
         let result = self.run_inner().await;
         if let Err(e) = self.project.registry.shutdown_all() {
             tracing::warn!("engine registry shutdown_all failed at end of project render: {e}");
@@ -1563,6 +1579,7 @@ impl<'a, R: Pass2Renderer> ProjectPipeline<'a, R> {
         }
 
         let index = Arc::new(ProjectIndex::new(profiles));
+        self.last_index = Some(Arc::clone(&index));
 
         // Fail-fast barrier: if Pass-1 surfaced any error, stop before
         // running the `pre_render` hook, Pass-2, `post_render`, resource
