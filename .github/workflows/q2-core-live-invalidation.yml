@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Verify checkout
@@ -61,10 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 110
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Free ephemeral runner disk
@@ -109,7 +109,7 @@ jobs:
         with:
           shared-key: q2-m1-preview-browser
           cache-on-failure: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -144,7 +144,8 @@ jobs:
         working-directory: q2-preview-spa
         env:
           Q2_M1_BENCH: "1"
-        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: test-results/m1-results.xml
+        run: npx playwright test e2e/core-live-deps.spec.ts e2e/dep-graph-filter.spec.ts e2e/include-shortcode.spec.ts e2e/wasm-sidebar-perf.spec.ts --project=chromium --retries=0 --reporter=dot,junit
       - name: Verify production WASM excludes the benchmark export
         working-directory: hub-client
         env:
@@ -161,11 +162,11 @@ jobs:
           echo "M1 optimized WASM sizes (bytes): benchmark=$benchmark_bytes production=$production_bytes"
       - name: Archive Chromium test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: q2-m1-preview-browser-evidence
           path: |
             q2-preview-spa/test-results/
             q2-preview-spa/playwright-report/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
