@@ -606,12 +606,17 @@ impl HubContext {
         let _sync_guard = sync_state_mutex.lock().await;
         let mut removed = 0;
         for path in retired {
-            if path.as_path() == active_file || path.as_os_str().is_empty()
-                || !path.components().all(|part| matches!(part, Component::Normal(_)))
+            if path.as_path() == active_file
+                || path.as_os_str().is_empty()
+                || !path
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
             {
                 continue;
             }
-            let Some(path_str) = path.to_str() else { continue };
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
             if self.index.has_file(path_str) {
                 self.index.remove_file(path_str)?;
                 removed += 1;
@@ -1073,7 +1078,8 @@ async fn reconcile_files_with_index(
     project_root: &Path,
 ) -> Result<usize> {
     let mut added = 0;
-    let canonical_root = project_root.canonicalize()
+    let canonical_root = project_root
+        .canonicalize()
         .map_err(|e| Error::Sync(format!("cannot resolve project root: {e}")))?;
 
     // Reconcile text files (config + qmd)
@@ -1091,7 +1097,10 @@ async fn reconcile_files_with_index(
         let full_path = project_root.join(file_path);
         let canonical = match full_path.canonicalize() {
             Ok(path) if path.starts_with(&canonical_root) && path.is_file() => path,
-            _ => { warn!(path = %path_str, "Skipping unsafe or missing text dependency"); continue; }
+            _ => {
+                warn!(path = %path_str, "Skipping unsafe or missing text dependency");
+                continue;
+            }
         };
         let file_content = match std::fs::read_to_string(&canonical) {
             Ok(content) => content,
@@ -1142,7 +1151,10 @@ async fn reconcile_files_with_index(
         let full_path = project_root.join(file_path);
         let canonical = match full_path.canonicalize() {
             Ok(path) if path.starts_with(&canonical_root) && path.is_file() => path,
-            _ => { warn!(path = %path_str, "Skipping unsafe or missing binary dependency"); continue; }
+            _ => {
+                warn!(path = %path_str, "Skipping unsafe or missing binary dependency");
+                continue;
+            }
         };
         let file_content = match std::fs::read(&canonical) {
             Ok(content) => content,
@@ -1357,6 +1369,73 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn preview_dependency_retirement_is_narrow_and_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("main.qmd"), "{{< include part.qmd >}}").unwrap();
+        std::fs::write(root.join("part.qmd"), "included").unwrap();
+        let ctx = HubContext::new(
+            StorageManager::new(root).unwrap(),
+            HubConfig {
+                single_file: Some(PathBuf::from("main.qmd")),
+                ..HubConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        ctx.enroll_preview_dependencies(&[PathBuf::from("part.qmd")], &[])
+            .await
+            .unwrap();
+        let requested = [
+            PathBuf::from("part.qmd"),
+            PathBuf::from("main.qmd"),
+            PathBuf::from("../outside.qmd"),
+        ];
+        assert_eq!(
+            ctx.retire_preview_dependencies(&requested, Path::new("main.qmd"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(ctx.index().has_file("main.qmd"));
+        assert!(!ctx.index().has_file("part.qmd"));
+        assert_eq!(
+            ctx.retire_preview_dependencies(&requested, Path::new("main.qmd"))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_dependency_sync_rejects_symlink_retargeting() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("private.qmd");
+        std::fs::write(&outside, "SENSITIVE OUTSIDE CONTENT").unwrap();
+        std::fs::write(root.join("main.qmd"), "# Main").unwrap();
+        std::fs::write(root.join("part.qmd"), "safe content").unwrap();
+        let ctx = HubContext::new(
+            StorageManager::new(&root).unwrap(),
+            HubConfig {
+                single_file: Some(PathBuf::from("main.qmd")),
+                ..HubConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        ctx.enroll_preview_dependencies(&[PathBuf::from("part.qmd")], &[])
+            .await
+            .unwrap();
+        std::fs::remove_file(root.join("part.qmd")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("part.qmd")).unwrap();
+        assert!(ctx.sync_file(&root.join("part.qmd")).await.is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "SENSITIVE OUTSIDE CONTENT");
     }
 
     /// Build an automerge text document with the given content.

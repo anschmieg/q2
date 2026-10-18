@@ -58,19 +58,28 @@ pub(crate) async fn run(
                     tracing::warn!(%error, "single-file dependency enrollment failed");
                     continue;
                 }
-                let current: BTreeSet<PathBuf> = deps.qmd_files.iter()
-                    .chain(deps.binary_files.iter()).cloned().collect();
+                let current: BTreeSet<PathBuf> = deps
+                    .qmd_files
+                    .iter()
+                    .chain(deps.binary_files.iter())
+                    .cloned()
+                    .collect();
                 // Do not prune on partial scans: malformed edits and broken
                 // includes must not silently discard still-existing inputs.
                 // A genuinely disappeared file can be retired even when
                 // include expansion fails, allowing a missing-include render
                 // error to reach the browser via index membership changes.
-                let retired: Vec<PathBuf> = tracked.difference(&current)
-                    .filter(|path| deps.complete || matches!(
-                        std::fs::canonicalize(root.join(path)),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-                    ))
-                    .cloned().collect();
+                let retired: Vec<PathBuf> = tracked
+                    .difference(&current)
+                    .filter(|path| {
+                        deps.complete
+                            || matches!(
+                                std::fs::canonicalize(root.join(path)),
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                            )
+                    })
+                    .cloned()
+                    .collect();
                 // Existing dependencies still use the low-latency native watcher.
                 // This sync fallback covers *newly enrolled* files as well as
                 // newly edited transitive dependencies that weren't in its
@@ -92,7 +101,9 @@ pub(crate) async fn run(
                     }
                 }
                 tracked.extend(current);
-                for path in retired { tracked.remove(&path); }
+                for path in retired {
+                    tracked.remove(&path);
+                }
             }
             event = shutdown.changed() => {
                 if event.is_err() || *shutdown.borrow() {

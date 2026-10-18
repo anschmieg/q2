@@ -339,9 +339,6 @@ test('single-file preview retires an include removed from the document', async (
   await waitForInnerText(page, 'OLD-DEPENDENCY-VISIBLE');
   await writeFile(path.join(server.projectDir, 'index.qmd'), '# Retirement test\n\nNo more include\n');
   await waitForInnerText(page, 'No more include');
-  await page.waitForFunction(() =>
-    ((window as unknown as { __q2SyncEvents?: Record<string, number> }).__q2SyncEvents?.['old.qmd'] ?? 0) >= 0,
-  );
   await page.waitForTimeout(3000); // At least one refresh interval before asserting retirement.
   const oldCount = await observedUpdates(page, 'old.qmd');
   await writeFile(path.join(server.projectDir, 'old.qmd'), 'OLD-DEPENDENCY-CHANGED\n');

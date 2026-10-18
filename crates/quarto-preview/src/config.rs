@@ -400,7 +400,7 @@ pub fn resolve_single_file_deps(
     // never re-triggers a render. `expand_document_includes` populates
     // `recorded_includes` for every file the walk touched either way, so
     // the failure is deliberately ignored.
-    let includes_complete = expand_document_includes(&mut doc, &mut ctx).is_ok();
+    let mut includes_complete = expand_document_includes(&mut doc, &mut ctx).is_ok();
 
     // Spelled through the shared function: `expand_patterns` below checks
     // containment against runtime-canonical matches.
@@ -501,6 +501,10 @@ pub fn resolve_single_file_deps(
                         binary_files.push(rel);
                     }
                 }
+            } else {
+                // An invalid resource pattern cannot justify dropping
+                // dependencies from the previous complete closure.
+                includes_complete = false;
             }
         }
     }
