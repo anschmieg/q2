@@ -322,8 +322,14 @@ test('single-file preview invalidates a deleted include and recovers on re-creat
     before,
     { timeout: 30_000 },
   );
+  // A render attempt alone is not proof of correct invalidation: it must
+  // actually report the broken include before we repair the source.
+  await expect(page.locator('.preview-error-overlay--error')).toBeVisible();
+  await page.locator('.preview-error-expand-btn').click();
+  await expect(page.locator('.preview-error-message')).toContainText(/part\\.qmd|include/i);
   await writeFile(path.join(server.projectDir, 'part.qmd'), 'INCLUDED-AFTER-RECREATION\n');
   await waitForInnerText(page, 'INCLUDED-AFTER-RECREATION');
+  await expect(page.locator('.preview-error-overlay--error')).toHaveCount(0);
 });
 
 test('single-file preview retires an include removed from the document', async ({ page }) => {

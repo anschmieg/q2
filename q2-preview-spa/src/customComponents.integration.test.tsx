@@ -168,6 +168,53 @@ describe('PreviewApp render-components wiring', () => {
     expect(lastCapturedCode()).toBe(codeBefore);
   });
 
+  it('removes stale compiled code when a referenced .tsx disappears from the index', async () => {
+    await bootAndWaitForComponents();
+    const handlers = await lastSyncHandlers();
+    // The real sync client removes the file from VFS before onFilesChange.
+    runtimeMockState.textContents.delete('overrides.tsx');
+    await act(async () => {
+      handlers.onFilesChange([{ path: 'index.qmd', docId: 'automerge:doc-index' }]);
+    });
+    await waitFor(() => {
+      expect(lastCapturedCode()).toEqual({});
+    });
+    // No replacement code was compiled; the missing-file warning replaces
+    // the old component instead of leaving JS from a deleted source.
+    expect(transpileSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recompiles when a .tsx document ID is replaced without a content event', async () => {
+    await bootAndWaitForComponents();
+    const handlers = await lastSyncHandlers();
+    runtimeMockState.textContents.set('overrides.tsx', 'export const Para = 3;');
+    await act(async () => {
+      handlers.onFilesChange([
+        { path: 'index.qmd', docId: 'automerge:doc-index' },
+        { path: 'overrides.tsx', docId: 'automerge:new-tsx' },
+      ]);
+    });
+    await waitFor(() => {
+      expect(lastCapturedCode()).toEqual({
+        'overrides.tsx': 'JS:export const Para = 3;',
+      });
+    });
+    expect(transpileSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not recompile components on unrelated inventory membership changes', async () => {
+    await bootAndWaitForComponents();
+    const handlers = await lastSyncHandlers();
+    await act(async () => {
+      handlers.onFilesChange([
+        { path: 'index.qmd', docId: 'automerge:doc-index' },
+        { path: 'overrides.tsx', docId: 'automerge:doc-tsx' },
+        { path: 'unrelated.qmd', docId: 'automerge:unrelated' },
+      ]);
+    });
+    expect(transpileSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('re-transpiles when a .tsx file is touched', async () => {
     await bootAndWaitForComponents();
     runtimeMockState.textContents.set(

@@ -820,10 +820,22 @@ export default function PreviewApp() {
               const current = new Map(files.map((file) => [file.path, file.docId]));
               const membershipChanged = previous.size !== current.size ||
                 [...current].some(([path, docId]) => previous.get(path) !== docId);
-              // Creating/deleting/replacing a project input can alter nav/listing
-              // edges without a content notification for the active page.
+              // A .tsx may be deleted or replaced without an onFileContent
+              // callback. Invalidate compiled components as well as the core
+              // render snapshot when its index identity changes.
+              const tsxMembershipChanged = membershipChanged &&
+                [...new Set([...previous.keys(), ...current.keys()])].some((path) =>
+                  path.toLowerCase().endsWith('.tsx') &&
+                  previous.get(path) !== current.get(path)
+                );
               return membershipChanged
-                ? { ...s, files, deps: null, contentTick: s.contentTick + 1 }
+                ? {
+                    ...s,
+                    files,
+                    deps: null,
+                    contentTick: s.contentTick + 1,
+                    tsxTick: s.tsxTick + (tsxMembershipChanged ? 1 : 0),
+                  }
                 : { ...s, files };
             });
           },
