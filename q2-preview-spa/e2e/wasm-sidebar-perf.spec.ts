@@ -53,8 +53,23 @@ test('optimized browser WASM sidebar query scales without clique materialization
       response.writeHead(404).end();
       return;
     }
-    const absolute = path.resolve(pkgDir, relative);
-    if (path.relative(pkgDir, absolute).startsWith('..')) {
+    // wasm-bindgen preserves quarto-system-runtime's raw_module imports as
+    // /src/wasm-js-bridge/*.js. Vite aliases them in production, but this
+    // standalone benchmark server must resolve them to the *same real*
+    // workspace modules instead of incorrectly looking under pkg/.
+    const bridgePrefix = 'src/wasm-js-bridge/';
+    const bridgeModules = new Set(['cache.js', 'fetch.js', 'rasterize.js', 'sass.js']);
+    const isBridgeModule = relative.startsWith(bridgePrefix)
+      && bridgeModules.has(relative.slice(bridgePrefix.length));
+    if (relative.startsWith(bridgePrefix) && !isBridgeModule) {
+      response.writeHead(404).end();
+      return;
+    }
+    const root = isBridgeModule
+      ? path.resolve(process.cwd(), '..', 'ts-packages', 'wasm-js-bridge')
+      : pkgDir;
+    const absolute = path.resolve(root, relative);
+    if (path.relative(root, absolute).startsWith('..')) {
       response.writeHead(403).end();
       return;
     }
