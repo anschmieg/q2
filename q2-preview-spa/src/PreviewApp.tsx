@@ -870,6 +870,13 @@ export default function PreviewApp() {
               };
             });
           },
+          // Reconciliation can publish onFilesChange before its asynchronous
+          // VFS removal completes. Retry TSX compilation after the VFS has
+          // actually dropped the removed bytes, not only on membership update.
+          onFileRemoved: (path: string) => {
+            if (cancelled || !path.toLowerCase().endsWith('.tsx')) return;
+            setState((s) => ({ ...s, tsxTick: s.tsxTick + 1 }));
+          },
           // Phase D.3 (bd-kw93.9): binary docs (images, SVGs,
           // anything not text-shaped) sync through samod on a
           // separate channel from text. Without this handler an

@@ -184,6 +184,24 @@ describe('PreviewApp render-components wiring', () => {
     expect(transpileSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('evicts stale components when VFS removal follows the index update asynchronously', async () => {
+    await bootAndWaitForComponents();
+    const handlers = await lastSyncHandlers();
+    // The index callback can precede the awaited syncWithFiles removal.
+    await act(async () => {
+      handlers.onFilesChange([{ path: 'index.qmd', docId: 'automerge:doc-index' }]);
+    });
+    // At this point the old VFS bytes may still exist; only the subsequent
+    // onFileRemoved callback proves the underlying VFS eviction completed.
+    runtimeMockState.textContents.delete('overrides.tsx');
+    await act(async () => {
+      handlers.onFileRemoved('overrides.tsx');
+    });
+    await waitFor(() => {
+      expect(lastCapturedCode()).toEqual({});
+    });
+  });
+
   it('recompiles when a .tsx document ID is replaced without a content event', async () => {
     await bootAndWaitForComponents();
     const handlers = await lastSyncHandlers();

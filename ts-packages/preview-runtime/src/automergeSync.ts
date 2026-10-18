@@ -48,6 +48,7 @@ let onIdentitiesChange: IdentitiesChangeHandler | null = null;
 let onCapturesChange: CapturesChangeHandler | null = null;
 let onFoldersChange: FoldersChangeHandler | null = null;
 let onFileContent: FileContentHandler | null = null;
+let onFileRemoved: ((path: string) => void) | null = null;
 let onBinaryContent: BinaryContentHandler | null = null;
 let onConnectionChange: ConnectionHandler | null = null;
 let onError: ErrorHandler | null = null;
@@ -75,6 +76,7 @@ export function setSyncHandlers(handlers: {
   onCapturesChange?: CapturesChangeHandler;
   onFoldersChange?: FoldersChangeHandler;
   onFileContent?: FileContentHandler;
+  onFileRemoved?: (path: string) => void;
   onBinaryContent?: BinaryContentHandler;
   onConnectionChange?: ConnectionHandler;
   onError?: ErrorHandler;
@@ -84,6 +86,7 @@ export function setSyncHandlers(handlers: {
   if (handlers.onCapturesChange) onCapturesChange = handlers.onCapturesChange;
   if (handlers.onFoldersChange) onFoldersChange = handlers.onFoldersChange;
   if (handlers.onFileContent) onFileContent = handlers.onFileContent;
+  if (handlers.onFileRemoved) onFileRemoved = handlers.onFileRemoved;
   if (handlers.onBinaryContent) onBinaryContent = handlers.onBinaryContent;
   if (handlers.onConnectionChange) onConnectionChange = handlers.onConnectionChange;
   if (handlers.onError) onError = handlers.onError;
@@ -115,6 +118,9 @@ function createInternalCallbacks(): SyncClientCallbacks {
     },
     onFileRemoved: (path: string) => {
       vfsRemoveFile(path);
+      // The async index reconciliation may announce membership before it
+      // finishes removing this file. Notify the UI only after VFS eviction.
+      onFileRemoved?.(path);
     },
     onFilesChange: (files: FileEntry[]) => {
       onFilesChange?.(files);
@@ -466,6 +472,7 @@ export function _resetForTesting(): void {
   onFilesChange = null;
   onIdentitiesChange = null;
   onFileContent = null;
+  onFileRemoved = null;
   onBinaryContent = null;
   onConnectionChange = null;
   onError = null;
