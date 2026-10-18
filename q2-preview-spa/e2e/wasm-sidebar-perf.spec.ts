@@ -66,9 +66,12 @@ test('optimized browser WASM sidebar query scales without clique materialization
       return;
     }
     const root = isBridgeModule
-      ? path.resolve(process.cwd(), '..', 'ts-packages', 'wasm-js-bridge')
+      ? path.resolve(process.cwd(), '..', 'ts-packages', 'wasm-js-bridge', 'src')
       : pkgDir;
-    const absolute = path.resolve(root, relative);
+    const absolute = path.resolve(
+      root,
+      isBridgeModule ? relative.slice(bridgePrefix.length) : relative,
+    );
     if (path.relative(root, absolute).startsWith('..')) {
       response.writeHead(403).end();
       return;
